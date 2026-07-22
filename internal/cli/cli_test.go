@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,12 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
+)
+
+const (
+	cliTestBuildID       = "11111111-1111-4111-8111-111111111111"
+	cliTestJobID         = "22222222-2222-4222-8222-222222222222"
+	cliTestProducerJobID = "33333333-3333-4333-8333-333333333333"
 )
 
 func TestRunHelpAndVersion(t *testing.T) {
@@ -214,14 +221,47 @@ type cliCommand struct {
 }
 
 type cliCaptureRunner struct {
-	commands []cliCommand
-	failAt   int
+	commands      []cliCommand
+	failAt        int
+	failMetadata  bool
+	jobByStep     map[string]string
+	dataByPath    map[string][]byte
+	uploaded      map[string][]byte
+	contextErrors []error
 }
 
-func (r *cliCaptureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
 	r.commands = append(r.commands, cliCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: bytes.Clone(stdin)})
+	r.contextErrors = append(r.contextErrors, ctx.Err())
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
+	}
+	if len(args) >= 2 && args[0] == "artifact" && args[1] == "search" {
+		return []byte(r.jobByStep[args[4]] + "\n"), nil
+	}
+	if len(args) >= 2 && args[0] == "artifact" && args[1] == "download" {
+		contents, ok := r.dataByPath[args[2]]
+		if !ok {
+			return nil, errors.New("missing fixture artifact")
+		}
+		path := filepath.Join(args[3], filepath.FromSlash(args[2]))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, err
+		}
+		return nil, os.WriteFile(path, contents, 0o600)
+	}
+	if len(args) >= 3 && args[0] == "artifact" && args[1] == "upload" {
+		contents, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(args[2])))
+		if err != nil {
+			return nil, err
+		}
+		if r.uploaded == nil {
+			r.uploaded = map[string][]byte{}
+		}
+		r.uploaded[args[2]] = contents
+	}
+	if r.failMetadata && len(args) >= 2 && args[0] == "meta-data" && args[1] == "set" {
+		return nil, errors.New("metadata unavailable")
 	}
 	return nil, nil
 }
@@ -285,6 +325,8 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	planDigest := sha256.Sum256(encoded)
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
 	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_ID", cliTestBuildID)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
 	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
 	oldDirectory, err := os.Getwd()
@@ -297,7 +339,8 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
 
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev"); code != 0 {
+	runner := &cliCaptureRunner{}
+	if code := run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
 	result, err := os.ReadFile(resultPath)
@@ -310,7 +353,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
-	if code := Run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev"); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
 		t.Fatalf("Run() code = %d, stderr = %q, want digest mismatch", code, stderr.String())
 	}
 	job.Compiler.Version = "0.0.0-other"
@@ -325,8 +368,199 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev"); code != 1 || !strings.Contains(stderr.String(), "does not match runtime version") {
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not match runtime version") {
 		t.Fatalf("Run() code = %d, stderr = %q, want version mismatch", code, stderr.String())
+	}
+}
+
+func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
+	producerStep := "gha-producer"
+	producerPlanDigest := transport.Digest([]byte("producer-plan"))
+	job := cliRunJobPlan()
+	job.Dependencies = []string{producerStep}
+	job.NeedSources = map[string][]plan.NeedSource{
+		"producer": {{StepKey: producerStep, PlanDigest: producerPlanDigest}},
+	}
+	job.Env = map[string]string{"RESULT": "${{ needs.producer.outputs.result }}"}
+	job.Steps = []plan.Step{{ID: "consume", Kind: "run", Command: `test "$RESULT" = "hydrated"`}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+
+	producerManifest, err := transport.MarshalResultManifest(transport.ResultManifest{
+		PlanDigest: producerPlanDigest,
+		Producer:   transport.Producer{BuildID: cliTestBuildID, JobID: cliTestProducerJobID, StepKey: producerStep},
+		Result:     "success",
+		Outputs:    []transport.Output{{Name: "result", Value: "hydrated"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	producerPath := transport.ResultPath(producerStep, producerPlanDigest)
+	runner := &cliCaptureRunner{
+		failMetadata: true,
+		jobByStep:    map[string]string{producerStep: cliTestProducerJobID},
+		dataByPath:   map[string][]byte{producerPath: producerManifest},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: result metadata mirror") {
+		t.Fatalf("stderr = %q, want non-fatal metadata warning", stderr.String())
+	}
+	if len(runner.commands) < 3 || strings.Join(runner.commands[0].args, " ") != strings.Join([]string{"artifact", "search", producerPath, "--step", producerStep, "--format", "%j"}, " ") {
+		t.Fatalf("commands = %#v, want exact producer search first", runner.commands)
+	}
+	if got := runner.commands[1].args[len(runner.commands[1].args)-1]; got != cliTestProducerJobID {
+		t.Fatalf("download producer = %q, want exact job UUID", got)
+	}
+	manifest := publishedCLIManifest(t, runner, job, planDigest)
+	if manifest.Result != "success" {
+		t.Fatalf("published result = %q, want success", manifest.Result)
+	}
+	for _, command := range runner.commands {
+		if command.dir != "" {
+			if _, err := os.Stat(command.dir); !os.IsNotExist(err) {
+				t.Fatalf("temporary artifact root %q still exists: %v", command.dir, err)
+			}
+		}
+	}
+}
+
+func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
+	tests := []struct {
+		name       string
+		condition  string
+		command    string
+		cancel     bool
+		wantResult string
+		wantCode   int
+	}{
+		{name: "failure", command: "exit 7", wantResult: "failure", wantCode: 1},
+		{name: "skipped", condition: "${{ false }}", command: "true", wantResult: "skipped", wantCode: 0},
+		{name: "cancelled", command: "sleep 1", cancel: true, wantResult: "cancelled", wantCode: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Condition = test.condition
+			job.Steps[0].Command = test.command
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			runner := &cliCaptureRunner{}
+			ctx := context.Background()
+			if test.cancel {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != test.wantCode {
+				t.Fatalf("runJobContext() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
+			}
+			manifest := publishedCLIManifest(t, runner, job, planDigest)
+			if manifest.Result != test.wantResult {
+				t.Fatalf("published result = %q, want %q", manifest.Result, test.wantResult)
+			}
+			for i, contextErr := range runner.contextErrors {
+				if contextErr != nil {
+					t.Fatalf("publication command %d inherited cancelled context: %v", i, contextErr)
+				}
+			}
+		})
+	}
+}
+
+func TestRunJobPublishesHydrationFailureAndRejectsMissingIdentity(t *testing.T) {
+	producerStep := "gha-producer"
+	producerPlanDigest := transport.Digest([]byte("producer-plan"))
+	job := cliRunJobPlan()
+	job.Dependencies = []string{producerStep}
+	job.NeedSources = map[string][]plan.NeedSource{
+		"producer": {{StepKey: producerStep, PlanDigest: producerPlanDigest}},
+	}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+
+	t.Run("needs require Buildkite", func(t *testing.T) {
+		t.Setenv("BUILDKITE", "")
+		t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prerequisites require Buildkite result identity") {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("commands = %#v, want no unauthenticated agent calls", runner.commands)
+		}
+	})
+
+	t.Run("hydration failure is published", func(t *testing.T) {
+		setCLIJobIdentity(t, job, planDigest)
+		runner := &cliCaptureRunner{jobByStep: map[string]string{producerStep: cliTestProducerJobID}}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "hydrate prerequisite results") {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		manifest := publishedCLIManifest(t, runner, job, planDigest)
+		if manifest.Result != "failure" {
+			t.Fatalf("published result = %q, want failure", manifest.Result)
+		}
+	})
+
+	t.Run("partial identity fails before execution", func(t *testing.T) {
+		setCLIJobIdentity(t, job, planDigest)
+		t.Setenv("BUILDKITE_JOB_ID", "")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "requires valid BUILDKITE_BUILD_ID") {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("commands = %#v, want identity failure before side effects", runner.commands)
+		}
+	})
+
+	t.Run("missing plan digest fails before execution", func(t *testing.T) {
+		setCLIJobIdentity(t, job, planDigest)
+		t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "requires BUILDKITE_GHA_PLAN_DIGEST") {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("commands = %#v, want digest failure before side effects", runner.commands)
+		}
+	})
+}
+
+func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
+	job := cliRunJobPlan()
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	runner := &cliCaptureRunner{failAt: 1}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "publish terminal result") {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+}
+
+func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Outputs = make(map[string]string, transport.MaxResultOutputs+1)
+	for i := 0; i <= transport.MaxResultOutputs; i++ {
+		job.Outputs[fmt.Sprintf("output_%02d", i)] = "value"
+	}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "validate terminal result") {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	manifest := publishedCLIManifest(t, runner, job, planDigest)
+	if manifest.Result != "failure" || len(manifest.Outputs) != 0 {
+		t.Fatalf("published result = %#v, want bounded failure without outputs", manifest)
 	}
 }
 
@@ -406,4 +640,61 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	if err != nil || !bytes.Contains(result, []byte(`"conclusion": "success"`)) {
 		t.Fatalf("result = %q, error = %v", result, err)
 	}
+}
+
+func cliRunJobPlan() plan.Job {
+	return plan.Job{
+		Schema: plan.Schema,
+		Compiler: plan.Compiler{
+			Version:            "dev",
+			DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+		},
+		Workflow: plan.Workflow{
+			Path:         "workflow.yml",
+			Digest:       "sha256:" + strings.Repeat("1", 64),
+			LogicalJobID: "cli",
+		},
+		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:               plan.Target{StepKey: "gha-cli", Queue: "gha-runtime"},
+		RequiredCapabilities: []string{},
+		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
+	}
+}
+
+func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
+	t.Helper()
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "plan.json")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, transport.Digest(encoded)
+}
+
+func setCLIJobIdentity(t *testing.T, job plan.Job, planDigest string) {
+	t.Helper()
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_ID", cliTestBuildID)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", planDigest)
+}
+
+func publishedCLIManifest(t *testing.T, runner *cliCaptureRunner, job plan.Job, planDigest string) transport.ResultManifest {
+	t.Helper()
+	path := transport.ResultPath(job.Target.StepKey, planDigest)
+	data, ok := runner.uploaded[path]
+	if !ok {
+		t.Fatalf("authoritative result %q was not uploaded; uploads = %#v", path, runner.uploaded)
+	}
+	producer := transport.Producer{BuildID: cliTestBuildID, JobID: cliTestJobID, StepKey: job.Target.StepKey}
+	manifest, err := transport.VerifyResultManifest(data, planDigest, producer)
+	if err != nil {
+		t.Fatalf("verify published result: %v\n%s", err, data)
+	}
+	return manifest
 }

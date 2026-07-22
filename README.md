@@ -52,8 +52,12 @@ resolve only through the explicit `BUILDKITE_GHA_SECRET_` namespace and are
 registered with the Buildkite Agent redactor before execution. Remote action
 resolution, services, job containers, and concurrent steps remain outside the
 executable subset; local Node 24, composite, and Docker action spikes still
-require an explicitly materialized and source-bound workspace. Use `buildkite-gha help`,
-`buildkite-gha help <command>`, or `buildkite-gha --version` for exact usage.
+require an explicitly materialized and source-bound workspace. In Buildkite,
+`run-job` verifies the exact build, job, step, and plan digest before resolving
+each prerequisite from its attributed producer artifact, then publishes the
+terminal result under a bounded cleanup context; metadata is only a best-effort
+mirror. Use `buildkite-gha help`, `buildkite-gha help <command>`, or
+`buildkite-gha --version` for exact usage.
 
 ## Development
 

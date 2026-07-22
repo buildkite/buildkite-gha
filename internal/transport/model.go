@@ -160,6 +160,15 @@ type Producer struct {
 	StepKey string `json:"step_key"`
 }
 
+// Validate rejects incomplete or malformed Buildkite producer identity before
+// a job runs and becomes responsible for publishing a terminal result.
+func (p Producer) Validate() error {
+	if !uuidPattern.MatchString(p.BuildID) || !uuidPattern.MatchString(p.JobID) || !keyPattern.MatchString(p.StepKey) {
+		return errors.New("invalid result producer identity")
+	}
+	return nil
+}
+
 // ResultManifest is authoritative; metadata only mirrors its bounded values.
 type ResultManifest struct {
 	Schema     string   `json:"schema"`
@@ -176,7 +185,7 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	if manifest.Outputs == nil {
 		manifest.Outputs = []Output{}
 	}
-	if !digestPattern.MatchString(manifest.PlanDigest) || !keyPattern.MatchString(manifest.Producer.StepKey) || !uuidPattern.MatchString(manifest.Producer.BuildID) || !uuidPattern.MatchString(manifest.Producer.JobID) {
+	if !digestPattern.MatchString(manifest.PlanDigest) || manifest.Producer.Validate() != nil {
 		return nil, errors.New("invalid result manifest identity")
 	}
 	switch manifest.Result {

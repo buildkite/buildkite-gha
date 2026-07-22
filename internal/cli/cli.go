@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
@@ -39,6 +41,8 @@ var commandUsage = map[string]string{
 	"upload":   "Usage: buildkite-gha upload --event-path <path> [--runtime-queue <queue>] <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
+
+const resultPublicationTimeout = 10 * time.Second
 
 // Run executes the command and returns its process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
@@ -83,7 +87,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 			case "upload":
 				return upload(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "run-job":
-				return runJob(args[1:], stdout, stderr, version)
+				return runJob(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			default:
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
 				return 1
@@ -118,7 +122,13 @@ func help(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runJob(args []string, stdout, stderr io.Writer, version string) int {
+func runJob(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runJobContext(ctx, args, stdout, stderr, version, agent)
+}
+
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
 	planPath, resultPath, err := runJobArgs(args)
 	if err != nil {
 		return usageError(stderr, "run-job: %v", err)
@@ -128,10 +138,10 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
+	planDigest := transport.Digest(source)
 	if expected := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST"); expected != "" {
-		actual := transport.Digest(source)
-		if actual != expected {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", actual, expected)
+		if planDigest != expected {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", planDigest, expected)
 			return 1
 		}
 	}
@@ -148,6 +158,20 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
+	producer, publish, err := resultProducer(job, planDigest)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	var artifactRoot string
+	if publish {
+		artifactRoot, err = os.MkdirTemp("", "buildkite-gha-results-")
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create result artifact root: %v\n", err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(artifactRoot) }()
+	}
 	runner := gharuntime.Runner{
 		Stdout:          stdout,
 		Stderr:          stderr,
@@ -157,26 +181,94 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 		Secrets:         gharuntime.EnvironmentSecrets{},
 		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	result, err := runner.RunJob(ctx, job, "")
-	if resultPath != "" && result.Conclusion != "" {
-		encoded, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: encode result: %v\n", err)
-			return 1
-		}
-		encoded = append(encoded, '\n')
-		if err := os.WriteFile(resultPath, encoded, 0o600); err != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: write result: %v\n", err)
-			return 1
+	var result gharuntime.JobResult
+	var runErr error
+	if len(job.NeedSources) != 0 {
+		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources)
+		if runErr != nil {
+			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+	if runErr == nil {
+		result, runErr = runner.RunJob(ctx, job, "")
+	}
+	if result.Conclusion == "" {
+		result.Conclusion = terminalErrorConclusion(ctx)
+	}
+	if resultPath != "" && result.Conclusion != "" {
+		if err := writeJobResult(resultPath, result); err != nil {
+			runErr = errors.Join(runErr, err)
+			result.Conclusion = terminalErrorConclusion(ctx)
+		}
+	}
+	if publish {
+		publication, err := publishTerminalResult(agent, artifactRoot, job, planDigest, producer, result)
+		if publication.MetadataMirrorError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
+		}
+		if err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("publish terminal result: %w", err))
+		}
+	}
+	if runErr != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", runErr)
 		return 1
 	}
 	return 0
+}
+
+func resultProducer(job plan.Job, planDigest string) (transport.Producer, bool, error) {
+	if os.Getenv("BUILDKITE") == "" {
+		if len(job.NeedSources) != 0 {
+			return transport.Producer{}, false, fmt.Errorf("plans with prerequisites require Buildkite result identity")
+		}
+		return transport.Producer{}, false, nil
+	}
+	expectedDigest := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST")
+	if expectedDigest == "" {
+		return transport.Producer{}, false, fmt.Errorf("result publication in Buildkite requires BUILDKITE_GHA_PLAN_DIGEST")
+	}
+	if expectedDigest != planDigest {
+		return transport.Producer{}, false, fmt.Errorf("plan digest %q does not match expected digest %q", planDigest, expectedDigest)
+	}
+	producer := transport.Producer{
+		BuildID: os.Getenv("BUILDKITE_BUILD_ID"),
+		JobID:   os.Getenv("BUILDKITE_JOB_ID"),
+		StepKey: os.Getenv("BUILDKITE_STEP_KEY"),
+	}
+	if err := producer.Validate(); err != nil {
+		return transport.Producer{}, false, fmt.Errorf("result publication in Buildkite requires valid BUILDKITE_BUILD_ID, BUILDKITE_JOB_ID, and BUILDKITE_STEP_KEY: %w", err)
+	}
+	if producer.StepKey != job.Target.StepKey {
+		return transport.Producer{}, false, fmt.Errorf("result producer step %q does not match plan target %q", producer.StepKey, job.Target.StepKey)
+	}
+	return producer, true, nil
+}
+
+func writeJobResult(path string, result gharuntime.JobResult) error {
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode result: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		return fmt.Errorf("write result: %w", err)
+	}
+	return nil
+}
+
+func terminalErrorConclusion(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "cancelled"
+	}
+	return "failure"
+}
+
+func publishTerminalResult(agent transport.Agent, root string, job plan.Job, planDigest string, producer transport.Producer, result gharuntime.JobResult) (transport.Publication, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), resultPublicationTimeout)
+	defer cancel()
+	workflow := strings.TrimPrefix(job.Workflow.Digest, "sha256:")
+	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
 }
 
 func runJobArgs(args []string) (planPath, resultPath string, err error) {

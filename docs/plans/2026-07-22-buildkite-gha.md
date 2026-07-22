@@ -1096,15 +1096,17 @@ Explicitly defer from beta unless implementation evidence changes the order:
   runtime output is bounded without pipe deadlocks, inherited environment is
   allowlisted, and transport artifacts are materialized from verified bytes in
   a confined root before upload.
-- Phase 2 result transport is implemented as an integration-ready slice. Job
-  plans map every logical `needs.<job>` to one or more exact producer step keys
-  and immutable plan digests, consumers resolve the corresponding Buildkite job
-  UUID before downloading, and canonical bounded manifests supply verified
-  logical results and outputs to the runtime context. Artifacts are
-  authoritative; namespaced metadata remains a best-effort UI/query mirror.
-  Matrix fan-in with conflicting output values currently fails closed because
-  the public artifact contract does not expose an authoritative completion
-  order.
+- Phase 2 result transport is wired into `run-job`. Job plans map every logical
+  `needs.<job>` to one or more exact producer step keys and immutable plan
+  digests; consumers resolve each corresponding Buildkite job UUID before
+  downloading its canonical bounded manifest and supplying verified logical
+  results and outputs to the runtime context. Every Buildkite run verifies its
+  exact build, job, step, and plan digest, then publishes success, failure,
+  cancellation, or skipped state under a bounded background context before
+  exiting. Artifacts are authoritative; namespaced metadata remains a
+  best-effort UI/query mirror. Matrix fan-in with conflicting output values
+  currently fails closed because the public artifact contract does not expose
+  an authoritative completion order.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all three smoke compiler outputs pass the current

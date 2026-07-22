@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
@@ -37,10 +39,24 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 	for name, value := range result.Outputs {
 		outputs = append(outputs, transport.Output{Name: name, Value: value})
 	}
-	return transport.PublishResult(ctx, agent, root, workflow, instance, transport.ResultManifest{
+	manifest := transport.ResultManifest{
 		PlanDigest: planDigest,
 		Producer:   producer,
 		Result:     result.Conclusion,
 		Outputs:    outputs,
-	})
+	}
+	if _, err := transport.MarshalResultManifest(manifest); err != nil {
+		fallback := manifest
+		fallback.Result = "failure"
+		if result.Conclusion == "cancelled" {
+			fallback.Result = "cancelled"
+		}
+		fallback.Outputs = nil
+		publication, publishErr := transport.PublishResult(ctx, agent, root, workflow, instance, fallback)
+		if publishErr != nil {
+			return publication, errors.Join(fmt.Errorf("validate terminal result: %w", err), fmt.Errorf("publish bounded terminal result: %w", publishErr))
+		}
+		return publication, fmt.Errorf("validate terminal result: %w", err)
+	}
+	return transport.PublishResult(ctx, agent, root, workflow, instance, manifest)
 }
