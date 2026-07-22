@@ -38,8 +38,7 @@ func newCommandFiles() (commandFiles, error) {
 	}
 	for _, path := range []string{files.output, files.env, files.state, files.summary} {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			os.RemoveAll(dir)
-			return commandFiles{}, fmt.Errorf("create file-command file: %w", err)
+			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), os.RemoveAll(dir))
 		}
 	}
 	return files, nil
@@ -104,7 +103,7 @@ func readBoundedFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
 	if err != nil {
 		return nil, err
@@ -120,7 +119,7 @@ func parseCommandFile(path string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)

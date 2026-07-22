@@ -196,6 +196,9 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	}
 	planDigest := sha256.Sum256(encoded)
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
 	oldDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)

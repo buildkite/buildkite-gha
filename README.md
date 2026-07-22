@@ -44,18 +44,23 @@ services and job containers, conditions, timeouts, cancellation, and
 
 ## Development
 
-Go 1.26.5 or later in the Go 1.26 release line is recommended. The Go tool can
-select the pinned toolchain automatically when `GOTOOLCHAIN=auto` is enabled.
+The repository pins Go and its lint tools with mise. Trust the configuration
+once, then install the toolchain:
+
+```sh
+mise trust mise.toml
+mise install
+```
 
 Run the repository checks with:
 
 ```sh
-make check
+mise run check
 ```
 
-The command verifies formatting, runs the unit tests and `go vet`, and checks
-the signed plan-envelope fixtures. Run `go test -race ./...` separately for the
-race-enabled suite.
+The command verifies formatting, builds the commands, runs the standard and
+race-enabled tests, runs `go vet`, golangci-lint, and shellcheck, and checks the
+signed plan-envelope fixtures. `make check` remains as a convenience alias.
 
 ## License
 

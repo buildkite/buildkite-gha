@@ -97,7 +97,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	if err != nil {
 		return result, err
 	}
-	defer os.RemoveAll(files.dir)
+	defer func() { _ = os.RemoveAll(files.dir) }()
 	args := []string{"run", "--rm", "--volume", files.dir + ":/github/file_commands"}
 	if action.Workspace != "" {
 		args = append(args, "--volume", action.Workspace+":/github/workspace")
@@ -141,7 +141,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(files.dir)
+	defer func() { _ = os.RemoveAll(files.dir) }()
 	env = mergeStringMaps(env, map[string]string{
 		"GITHUB_OUTPUT":       files.output,
 		"GITHUB_ENV":          files.env,
@@ -262,7 +262,7 @@ func DiscoverNode24(explicit, managedRoot string) (string, error) {
 			filepath.Join(managedRoot, "bin", name),
 		)
 	} else {
-		return "", errors.New("Node 24 is not configured: set Runner.Node24 or Runner.ManagedNodeRoot")
+		return "", errors.New("node 24 is not configured: set Runner.Node24 or Runner.ManagedNodeRoot")
 	}
 
 	var failures []string
@@ -280,7 +280,7 @@ func DiscoverNode24(explicit, managedRoot string) (string, error) {
 		}
 		failures = append(failures, fmt.Sprintf("%s: reported %q", candidate, version))
 	}
-	return "", fmt.Errorf("Node 24 discovery failed: %s", strings.Join(failures, "; "))
+	return "", fmt.Errorf("node 24 discovery failed: %s", strings.Join(failures, "; "))
 }
 
 func newResult() Result {
@@ -378,7 +378,7 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 	for _, mask := range p.masks {
 		line = strings.ReplaceAll(line, mask, "***")
 	}
-	fmt.Fprintln(target, line)
+	_, _ = fmt.Fprintln(target, line)
 }
 
 func (p *commandProcessor) suppress() {

@@ -62,24 +62,24 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
-		fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
-		fmt.Fprintf(&out, "    command: %s\n", yamlScalar("buildkite-gha run-job --plan "+planPath))
+		_, _ = fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
+		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
+		_, _ = fmt.Fprintf(&out, "    command: %s\n", yamlScalar("buildkite-gha run-job --plan "+planPath))
 		out.WriteString("    agents:\n")
-		fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
+		_, _ = fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
 		out.WriteString("    checkout:\n      skip: true\n")
 		out.WriteString("    env:\n")
-		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlScalar(job.PlanDigest))
-		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PATH: %s\n", yamlScalar(planPath))
-		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlScalar(job.PlanDigest))
+		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PATH: %s\n", yamlScalar(planPath))
+		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
 		if job.Concurrency != 0 {
-			fmt.Fprintf(&out, "    concurrency: %d\n", job.Concurrency)
-			fmt.Fprintf(&out, "    concurrency_group: %s\n", yamlScalar(job.ConcurrencyGroup))
+			_, _ = fmt.Fprintf(&out, "    concurrency: %d\n", job.Concurrency)
+			_, _ = fmt.Fprintf(&out, "    concurrency_group: %s\n", yamlScalar(job.ConcurrencyGroup))
 		}
 		out.WriteString("    depends_on:\n")
-		fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlScalar(pipeline.CompilerStep))
 		for _, dependency := range job.Dependencies {
-			fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlScalar(dependency))
+			_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlScalar(dependency))
 		}
 	}
 	return out.Bytes(), nil

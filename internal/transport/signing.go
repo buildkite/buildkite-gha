@@ -269,7 +269,7 @@ func normalizeIntent(intent UploadIntent) (UploadIntent, error) {
 	}
 	intent.Jobs = append([]UploadJob(nil), intent.Jobs...)
 	if len(intent.Jobs) != 2 {
-		return UploadIntent{}, fmt.Errorf("Phase 0 upload intent requires exactly two jobs, got %d", len(intent.Jobs))
+		return UploadIntent{}, fmt.Errorf("phase 0 upload intent requires exactly two jobs, got %d", len(intent.Jobs))
 	}
 	sort.Slice(intent.Jobs, func(i, j int) bool { return intent.Jobs[i].Key < intent.Jobs[j].Key })
 	for i, job := range intent.Jobs {

@@ -86,7 +86,7 @@ func EmitTwoJobPipeline(compilerStep string, jobs []Job) ([]byte, error) {
 		return nil, fmt.Errorf("invalid compiler step key %q", compilerStep)
 	}
 	if len(jobs) != 2 {
-		return nil, fmt.Errorf("Phase 0 transport requires exactly two generated jobs, got %d", len(jobs))
+		return nil, fmt.Errorf("phase 0 transport requires exactly two generated jobs, got %d", len(jobs))
 	}
 	seen := map[string]bool{}
 	var out bytes.Buffer
@@ -96,20 +96,20 @@ func EmitTwoJobPipeline(compilerStep string, jobs []Job) ([]byte, error) {
 			return nil, err
 		}
 		seen[job.Key] = true
-		fmt.Fprintf(&out, "  - label: %s\n", yamlString(job.Label))
-		fmt.Fprintf(&out, "    key: %s\n", yamlString(job.Key))
-		fmt.Fprintf(&out, "    command: %s\n", yamlString(job.Command))
-		fmt.Fprintf(&out, "    agents:\n      queue: %s\n", yamlString(job.Queue))
+		_, _ = fmt.Fprintf(&out, "  - label: %s\n", yamlString(job.Label))
+		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlString(job.Key))
+		_, _ = fmt.Fprintf(&out, "    command: %s\n", yamlString(job.Command))
+		_, _ = fmt.Fprintf(&out, "    agents:\n      queue: %s\n", yamlString(job.Queue))
 		out.WriteString("    checkout:\n      skip: true\n")
 		out.WriteString("    env:\n")
-		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlString(job.Plan.Digest))
-		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlString(compilerStep))
+		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlString(job.Plan.Digest))
+		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlString(compilerStep))
 		out.WriteString("    depends_on:\n")
-		fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlString(compilerStep))
+		_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlString(compilerStep))
 		dependencies := append([]Dependency(nil), job.Dependencies...)
 		sort.Slice(dependencies, func(i, j int) bool { return dependencies[i].StepKey < dependencies[j].StepKey })
 		for _, dependency := range dependencies {
-			fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlString(dependency.StepKey))
+			_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlString(dependency.StepKey))
 		}
 	}
 	return out.Bytes(), nil
