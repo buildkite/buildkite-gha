@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
@@ -63,16 +64,21 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key          string          `json:"key"`
-	LogicalJobID string          `json:"logical_job_id"`
-	Label        string          `json:"label"`
-	Needs        []string        `json:"needs,omitempty"`
-	RunsOn       []string        `json:"runs_on"`
-	Matrix       map[string]any  `json:"matrix,omitempty"`
-	FailFast     *bool           `json:"fail_fast,omitempty"`
-	MaxParallel  *int            `json:"max_parallel,omitempty"`
-	Steps        []workflow.Step `json:"steps"`
-	Source       workflow.Span   `json:"source"`
+	Key                     string            `json:"key"`
+	LogicalJobID            string            `json:"logical_job_id"`
+	Label                   string            `json:"label"`
+	Needs                   []string          `json:"needs,omitempty"`
+	LogicalNeeds            []string          `json:"logical_needs,omitempty"`
+	RunsOn                  []string          `json:"runs_on"`
+	Matrix                  map[string]any    `json:"matrix,omitempty"`
+	FailFast                *bool             `json:"fail_fast,omitempty"`
+	MaxParallel             *int              `json:"max_parallel,omitempty"`
+	Steps                   []workflow.Step   `json:"steps"`
+	Env                     map[string]string `json:"env,omitempty"`
+	DefaultShell            string            `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string `json:"outputs,omitempty"`
+	Source                  workflow.Span     `json:"source"`
 }
 
 // Report summarizes successful workflow validation.
@@ -106,33 +112,9 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // Compile parses a workflow and event, expands its static graph, and returns
 // stable JSON bytes terminated by a newline.
 func Compile(path string, source, eventSource []byte) ([]byte, error) {
-	parsed, err := workflow.Parse(path, source)
+	ir, err := compile(path, source, eventSource)
 	if err != nil {
 		return nil, err
-	}
-	event, err := parseEvent(eventSource)
-	if err != nil {
-		return nil, err
-	}
-	jobs, err := expand(path, parsed)
-	if err != nil {
-		return nil, err
-	}
-
-	digest := sha256.Sum256(source)
-	ir := IR{
-		Schema: schema,
-		Workflow: WorkflowSource{
-			Path:   path,
-			Name:   parsed.Name,
-			Digest: "sha256:" + hex.EncodeToString(digest[:]),
-		},
-		Event: event,
-		Execution: ExecutionBoundary{
-			Supported: false,
-			Reason:    "Phase 0 emits static compiler IR; run-job execution is not implemented",
-		},
-		Jobs: jobs,
 	}
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)
@@ -142,6 +124,121 @@ func Compile(path string, source, eventSource []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode compiler IR: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// CompilePlans connects the owned compiler IR to one versioned plan per job instance.
+func CompilePlans(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, targetQueue string) ([]plan.Job, error) {
+	if compilerVersion == "" {
+		return nil, fmt.Errorf("compiler version is required")
+	}
+	if targetQueue == "" {
+		return nil, fmt.Errorf("target queue is required")
+	}
+	if !strings.HasPrefix(compilerDistributionDigest, "sha256:") {
+		return nil, fmt.Errorf("compiler distribution digest is required")
+	}
+	ir, err := compile(path, source, eventSource)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(ir.Event.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode event payload: %w", err)
+	}
+	eventDigest := sha256.Sum256(payload)
+	plans := make([]plan.Job, 0, len(ir.Jobs))
+	for _, instance := range ir.Jobs {
+		steps := make([]plan.Step, len(instance.Steps))
+		usedIDs := make(map[string]struct{}, len(instance.Steps))
+		for _, step := range instance.Steps {
+			if step.ID != "" {
+				usedIDs[strings.ToLower(step.ID)] = struct{}{}
+			}
+		}
+		for i, step := range instance.Steps {
+			id := step.ID
+			if id == "" {
+				id = fmt.Sprintf("step-%d", i+1)
+				for suffix := 2; ; suffix++ {
+					if _, exists := usedIDs[strings.ToLower(id)]; !exists {
+						break
+					}
+					id = fmt.Sprintf("step-%d-%d", i+1, suffix)
+				}
+				usedIDs[strings.ToLower(id)] = struct{}{}
+			}
+			span := planSpan(step.Span)
+			steps[i] = plan.Step{
+				ID: id, Name: step.Name, Kind: step.Kind, Command: step.Run, Uses: step.Uses,
+				Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
+				Env: cloneMap(step.Env), With: cloneMap(step.With), Source: &span,
+			}
+		}
+		needs := make(map[string]plan.Need, len(instance.LogicalNeeds))
+		for _, need := range instance.LogicalNeeds {
+			needs[need] = plan.Need{}
+		}
+		job := plan.Job{
+			Schema: plan.Schema,
+			Compiler: plan.Compiler{
+				Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
+			},
+			Workflow: plan.Workflow{
+				Path:         ir.Workflow.Path,
+				Digest:       ir.Workflow.Digest,
+				LogicalJobID: instance.LogicalJobID,
+			},
+			Event: plan.Event{
+				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
+			},
+			Target:                  plan.Target{StepKey: instance.Key, Queue: targetQueue},
+			Matrix:                  instance.Matrix,
+			Needs:                   needs,
+			Env:                     instance.Env,
+			DefaultShell:            instance.DefaultShell,
+			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
+			Outputs:                 instance.Outputs,
+			Steps:                   steps,
+		}
+		if err := job.Validate(); err != nil {
+			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		}
+		plans = append(plans, job)
+	}
+	return plans, nil
+}
+
+func planSpan(span workflow.Span) plan.Span {
+	return plan.Span{
+		Start: plan.Position{Line: span.Start.Line, Column: span.Start.Column},
+		End:   plan.Position{Line: span.End.Line, Column: span.End.Column},
+	}
+}
+
+func compile(path string, source, eventSource []byte) (IR, error) {
+	parsed, err := workflow.Parse(path, source)
+	if err != nil {
+		return IR{}, err
+	}
+	event, err := parseEvent(eventSource)
+	if err != nil {
+		return IR{}, err
+	}
+	jobs, err := expand(path, parsed)
+	if err != nil {
+		return IR{}, err
+	}
+	digest := sha256.Sum256(source)
+	return IR{
+		Schema:   schema,
+		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:])},
+		Event:    event,
+		Execution: ExecutionBoundary{
+			Supported: true,
+			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
+		},
+		Jobs: jobs,
+	}, nil
 }
 
 func parseEvent(source []byte) (Event, error) {
@@ -191,15 +288,20 @@ func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
 		}
 		for _, matrix := range matrices {
 			instance := JobInstance{
-				Key:          instanceKey(job.ID, matrix),
-				LogicalJobID: job.ID,
-				Label:        instanceLabel(job, matrix),
-				RunsOn:       append([]string(nil), job.RunsOn...),
-				Matrix:       matrix,
-				FailFast:     job.FailFast,
-				MaxParallel:  job.MaxParallel,
-				Steps:        append([]workflow.Step(nil), job.Steps...),
-				Source:       job.Span,
+				Key:                     instanceKey(job.ID, matrix),
+				LogicalJobID:            job.ID,
+				Label:                   instanceLabel(job, matrix),
+				RunsOn:                  append([]string(nil), job.RunsOn...),
+				LogicalNeeds:            append([]string(nil), job.Needs...),
+				Matrix:                  matrix,
+				FailFast:                job.FailFast,
+				MaxParallel:             job.MaxParallel,
+				Steps:                   append([]workflow.Step(nil), job.Steps...),
+				Env:                     cloneMap(job.Env),
+				DefaultShell:            job.DefaultShell,
+				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
+				Outputs:                 cloneMap(job.Outputs),
+				Source:                  job.Span,
 			}
 			for _, need := range job.Needs {
 				for _, prerequisite := range byLogicalID[need] {
@@ -228,6 +330,25 @@ func supported(path string, job workflow.Job) error {
 	if len(job.RunsOn) == 0 {
 		return jobError(path, job, "runs-on must resolve statically")
 	}
+	ids := make(map[string]struct{}, len(job.Steps))
+	for _, step := range job.Steps {
+		if step.ID != "" {
+			id := strings.ToLower(step.ID)
+			if _, exists := ids[id]; exists {
+				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
+			}
+			ids[id] = struct{}{}
+		}
+		if step.If != "" {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step conditions are unsupported in the Phase 0 runtime")
+		}
+		if step.ContinueOnError {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error is unsupported in the Phase 0 runtime")
+		}
+		if step.TimeoutMinutes != 0 {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step timeouts are unsupported in the Phase 0 runtime")
+		}
+	}
 	if job.Matrix == nil {
 		return nil
 	}
@@ -243,6 +364,17 @@ func supported(path string, job workflow.Job) error {
 		}
 	}
 	return nil
+}
+
+func cloneMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {

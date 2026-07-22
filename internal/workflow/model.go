@@ -17,23 +17,30 @@ type Span struct {
 
 // Workflow is the actionlint-independent syntax needed by the Phase 0 compiler.
 type Workflow struct {
-	Name string `json:"name,omitempty"`
-	Jobs []Job  `json:"jobs"`
+	Name                    string            `json:"name,omitempty"`
+	Env                     map[string]string `json:"env,omitempty"`
+	DefaultShell            string            `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
+	Jobs                    []Job             `json:"jobs"`
 }
 
 // Job is one logical GitHub Actions job.
 type Job struct {
-	ID          string                 `json:"id"`
-	Name        string                 `json:"name,omitempty"`
-	Needs       []string               `json:"needs,omitempty"`
-	RunsOn      []string               `json:"runs_on,omitempty"`
-	RunsOnExpr  *expression.Expression `json:"runs_on_expression,omitempty"`
-	Matrix      *Matrix                `json:"matrix,omitempty"`
-	FailFast    *bool                  `json:"fail_fast,omitempty"`
-	MaxParallel *int                   `json:"max_parallel,omitempty"`
-	Reusable    bool                   `json:"reusable_workflow,omitempty"`
-	Steps       []Step                 `json:"steps"`
-	Span        Span                   `json:"span"`
+	ID                      string                 `json:"id"`
+	Name                    string                 `json:"name,omitempty"`
+	Needs                   []string               `json:"needs,omitempty"`
+	RunsOn                  []string               `json:"runs_on,omitempty"`
+	RunsOnExpr              *expression.Expression `json:"runs_on_expression,omitempty"`
+	Matrix                  *Matrix                `json:"matrix,omitempty"`
+	FailFast                *bool                  `json:"fail_fast,omitempty"`
+	MaxParallel             *int                   `json:"max_parallel,omitempty"`
+	Reusable                bool                   `json:"reusable_workflow,omitempty"`
+	Env                     map[string]string      `json:"env,omitempty"`
+	Outputs                 map[string]string      `json:"outputs,omitempty"`
+	DefaultShell            string                 `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
+	Steps                   []Step                 `json:"steps"`
+	Span                    Span                   `json:"span"`
 }
 
 // Matrix retains either static rows or a deferred expression.
@@ -61,10 +68,17 @@ type Value struct {
 
 // Step is the execution data retained in the Phase 0 IR.
 type Step struct {
-	ID   string `json:"id,omitempty"`
-	Name string `json:"name,omitempty"`
-	Kind string `json:"kind"`
-	Run  string `json:"run,omitempty"`
-	Uses string `json:"uses,omitempty"`
-	Span Span   `json:"span"`
+	ID               string            `json:"id,omitempty"`
+	Name             string            `json:"name,omitempty"`
+	Kind             string            `json:"kind"`
+	Run              string            `json:"run,omitempty"`
+	Uses             string            `json:"uses,omitempty"`
+	Shell            string            `json:"shell,omitempty"`
+	WorkingDirectory string            `json:"working_directory,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	With             map[string]string `json:"with,omitempty"`
+	If               string            `json:"if,omitempty"`
+	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
+	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
+	Span             Span              `json:"span"`
 }

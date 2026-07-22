@@ -3,6 +3,8 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestJavaScriptLifecycleAndCompositeAction(t *testing.T) {
@@ -237,6 +241,78 @@ func TestDockerAction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "masked docker probe: ***") {
 		t.Errorf("Docker logs = %q, want masked probe", logs.String())
+	}
+}
+
+func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
+	node := requireNode24(t)
+	workspace := fixturePath(t, "smoke")
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{
+		{ID: "shell", Kind: "run", Shell: "bash", Command: `echo "result=smoke" >> "$GITHUB_OUTPUT"`},
+		{ID: "javascript", Name: "JavaScript", Kind: "uses", Uses: "./.github/actions/javascript", With: map[string]string{"message": "${{ steps.shell.outputs.result }}"}},
+		{ID: "composite", Name: "Composite", Kind: "uses", Uses: "./.github/actions/composite", With: map[string]string{"message": "${{ steps.javascript.outputs.result }}"}},
+		{ID: "verify", Kind: "run", Shell: "bash", Command: `test "$SMOKE_COMPOSITE_SEEN" = true`},
+	})
+	job.Outputs = map[string]string{"result": "${{ steps.composite.outputs.result }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Node24: node}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs:\n%s", err, logs.String())
+	}
+	if result.Outputs["result"] != "smoke-javascript-composite" || result.Env["SMOKE_COMPOSITE_SEEN"] != "true" || result.State["phase"] != "main" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+	if strings.Contains(logs.String(), "smoke-mask-value") || !strings.Contains(logs.String(), "masked probe: ***") {
+		t.Fatalf("RunJob() logs were not masked: %q", logs.String())
+	}
+	if post, verify := strings.Index(logs.String(), "JavaScript post phase completed"), strings.Index(logs.String(), "masked probe: ***"); post < verify {
+		t.Fatalf("post action did not run after main steps: %q", logs.String())
+	}
+	if !strings.Contains(result.Summary, "main phase") || !strings.Contains(result.Summary, "post phase") {
+		t.Fatalf("RunJob() summary = %q", result.Summary)
+	}
+}
+
+func TestRunJobDockerUsesSharedMasking(t *testing.T) {
+	docker := requireDocker(t)
+	workspace := fixturePath(t)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
+	job.RequiredCapabilities = []string{"docker"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Env["DOCKER_RUNTIME_SEEN"] != "true" || strings.Contains(logs.String(), "docker-secret-value") || !strings.Contains(logs.String(), "masked docker probe: ***") {
+		t.Fatalf("RunJob() result = %#v, logs = %q", result, logs.String())
+	}
+}
+
+func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
+	workspace := fixturePath(t, "smoke")
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
+	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
+		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)
+	}
+	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
+		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
+	}
+}
+
+func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step) plan.Job {
+	t.Helper()
+	source, err := os.ReadFile(filepath.Join(workspace, workflowPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(source)
+	return plan.Job{
+		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow: plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
+		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:   plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"}, Steps: steps,
 	}
 }
 

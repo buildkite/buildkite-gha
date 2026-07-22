@@ -2,12 +2,16 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/plan"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 )
 
 const usage = `Usage:
@@ -27,7 +31,7 @@ var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> <workflow>\n",
 	"upload":   "Usage: buildkite-gha upload <workflow>\n",
-	"run-job":  "Usage: buildkite-gha run-job --plan <path>\n",
+	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
 // Run executes the command and returns its process exit code.
@@ -53,7 +57,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 		if commandHelp, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 				fmt.Fprint(stdout, commandHelp)
-				if args[0] == "upload" || args[0] == "run-job" {
+				if args[0] == "upload" {
 					fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 				}
 				return 0
@@ -63,6 +67,8 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 				return validate(args[1:], stdout, stderr)
 			case "compile":
 				return compile(args[1:], stdout, stderr)
+			case "run-job":
+				return runJob(args[1:], stdout, stderr, version)
 			default:
 				fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
 				return 1
@@ -88,10 +94,104 @@ func help(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprint(stdout, commandHelp)
-	if args[0] == "upload" || args[0] == "run-job" {
+	if args[0] == "upload" {
 		fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 	}
 	return 0
+}
+
+func runJob(args []string, stdout, stderr io.Writer, version string) int {
+	planPath, resultPath, err := runJobArgs(args)
+	if err != nil {
+		return usageError(stderr, "run-job: %v", err)
+	}
+	source, err := os.ReadFile(planPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	job, err := plan.Decode(source)
+	if err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	if job.Compiler.Version != version {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
+		return 1
+	}
+	if err := verifyBuildkiteTarget(job); err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	workspace, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve workspace: %v\n", err)
+		return 1
+	}
+	runner := gharuntime.Runner{
+		Stdout:          stdout,
+		Stderr:          stderr,
+		Node24:          os.Getenv("BUILDKITE_GHA_NODE24"),
+		ManagedNodeRoot: os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT"),
+		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
+	}
+	result, err := runner.RunJob(context.Background(), job, workspace)
+	if resultPath != "" {
+		encoded, err := json.MarshalIndent(result, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "buildkite-gha: run-job: encode result: %v\n", err)
+			return 1
+		}
+		encoded = append(encoded, '\n')
+		if err := os.WriteFile(resultPath, encoded, 0o600); err != nil {
+			fmt.Fprintf(stderr, "buildkite-gha: run-job: write result: %v\n", err)
+			return 1
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runJobArgs(args []string) (planPath, resultPath string, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--plan", "--result":
+			option := args[i]
+			i++
+			if i == len(args) {
+				return "", "", fmt.Errorf("%s requires a path", option)
+			}
+			if option == "--plan" {
+				planPath = args[i]
+			} else {
+				resultPath = args[i]
+			}
+		default:
+			return "", "", fmt.Errorf("unknown option %q", args[i])
+		}
+	}
+	if planPath == "" {
+		return "", "", fmt.Errorf("--plan is required")
+	}
+	return planPath, resultPath, nil
+}
+
+func verifyBuildkiteTarget(job plan.Job) error {
+	stepKey := os.Getenv("BUILDKITE_STEP_KEY")
+	queue := os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE")
+	if os.Getenv("BUILDKITE") != "" && (stepKey == "" || queue == "") {
+		return fmt.Errorf("Buildkite execution requires BUILDKITE_STEP_KEY and BUILDKITE_AGENT_META_DATA_QUEUE")
+	}
+	if stepKey != "" && stepKey != job.Target.StepKey {
+		return fmt.Errorf("plan targets step %q, executing step is %q", job.Target.StepKey, stepKey)
+	}
+	if queue != "" && queue != job.Target.Queue {
+		return fmt.Errorf("plan targets queue %q, executing queue is %q", job.Target.Queue, queue)
+	}
+	return nil
 }
 
 func validate(args []string, stdout, stderr io.Writer) int {
@@ -120,7 +220,7 @@ func validate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s: valid for static compilation (%d logical jobs, %d instances); runtime execution is not supported\n", workflowPath, report.LogicalJobs, report.Instances)
+	fmt.Fprintf(stdout, "%s: valid for static compilation (%d logical jobs, %d instances); run-job validates the Phase 0 execution subset\n", workflowPath, report.LogicalJobs, report.Instances)
 	return 0
 }
 

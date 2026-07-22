@@ -50,6 +50,10 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 		if strings.EqualFold(name, "NODE_OPTIONS") {
 			return errors.New("GITHUB_ENV may not set NODE_OPTIONS")
 		}
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
+			return fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
+		}
 	}
 	for name, value := range outputs {
 		result.Outputs[name] = value

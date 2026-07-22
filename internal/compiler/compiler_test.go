@@ -84,6 +84,45 @@ jobs:
 	}
 }
 
+func TestCompilePlansOwnsDeterministicRuntimeInputs(t *testing.T) {
+	path := smokePath(".github", "workflows", "ci.yml")
+	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(plans))
+	}
+	producer := plans[0]
+	if producer.Target.StepKey != "gha-producer" || producer.Workflow.LogicalJobID != "producer" {
+		t.Fatalf("producer target = %#v, workflow = %#v", producer.Target, producer.Workflow)
+	}
+	if producer.Steps[0].ID != "step-1" || producer.Steps[1].ID != "shell" {
+		t.Fatalf("deterministic step ids = %q, %q", producer.Steps[0].ID, producer.Steps[1].ID)
+	}
+	if producer.Steps[2].With["message"] != "${{ steps.shell.outputs.result }}" {
+		t.Fatalf("JavaScript inputs = %#v", producer.Steps[2].With)
+	}
+	if producer.Outputs["result"] != "${{ steps.composite.outputs.result }}" {
+		t.Fatalf("job outputs = %#v", producer.Outputs)
+	}
+	second, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstJSON, err := json.Marshal(plans)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstJSON, secondJSON) {
+		t.Fatal("repeated plan compilation was not byte-identical")
+	}
+}
+
 func smokePath(parts ...string) string {
 	return filepath.Join(append([]string{"..", "..", "testdata", "smoke"}, parts...)...)
 }

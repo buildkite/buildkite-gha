@@ -62,6 +62,7 @@ type DockerAction struct {
 	Name       string
 	Path       string
 	Dockerfile string
+	Workspace  string
 	Env        map[string]string
 }
 
@@ -153,6 +154,10 @@ func (r Runner) RunComposite(ctx context.Context, action CompositeAction) (Resul
 
 // RunDocker builds and executes an explicitly resolved local Docker action.
 func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
+	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
+}
+
+func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action DockerAction) (result Result, err error) {
 	result = newResult()
 	docker := r.Docker
 	if docker == "" {
@@ -184,6 +189,9 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 	}
 	defer os.RemoveAll(files.dir)
 	args := []string{"run", "--rm", "--volume", files.dir + ":/github/file_commands"}
+	if action.Workspace != "" {
+		args = append(args, "--volume", action.Workspace+":/github/workspace", "--env", "GITHUB_WORKSPACE=/github/workspace")
+	}
 	for _, name := range sortedKeys(action.Env) {
 		args = append(args, "--env", name+"="+action.Env[name])
 	}
@@ -194,7 +202,6 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
 		image,
 	)
-	processor := newCommandProcessor(r.stdout(), r.stderr())
 	if err := runStreaming(ctx, processor, "", nil, docker, args...); err != nil {
 		return result, fmt.Errorf("run Docker action %q: %w", action.Name, err)
 	}
@@ -205,7 +212,7 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 }
 
 func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
-	env := mergeMaps(actionInputEnv(action.Inputs), result.Env, action.Env)
+	env := mergeMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	env["GITHUB_ACTION_PATH"] = action.Path
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value

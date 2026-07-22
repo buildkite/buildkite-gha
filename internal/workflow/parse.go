@@ -21,6 +21,18 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
 	}
+	if parsed.Env != nil && parsed.Env.Expression != nil {
+		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
+	}
+	owned.Env = adaptEnv(parsed.Env)
+	if parsed.Defaults != nil && parsed.Defaults.Run != nil {
+		if parsed.Defaults.Run.Shell != nil {
+			owned.DefaultShell = parsed.Defaults.Run.Shell.Value
+		}
+		if parsed.Defaults.Run.WorkingDirectory != nil {
+			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
+		}
+	}
 
 	ids := make([]string, 0, len(parsed.Jobs))
 	for id := range parsed.Jobs {
@@ -32,6 +44,13 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		if err != nil {
 			return nil, err
 		}
+		job.Env = mergeEnv(owned.Env, job.Env)
+		if job.DefaultShell == "" {
+			job.DefaultShell = owned.DefaultShell
+		}
+		if job.DefaultWorkingDirectory == "" {
+			job.DefaultWorkingDirectory = owned.DefaultWorkingDirectory
+		}
 		owned.Jobs = append(owned.Jobs, job)
 	}
 	return owned, nil
@@ -39,8 +58,35 @@ func Parse(path string, source []byte) (*Workflow, error) {
 
 func adaptJob(path string, in *actionlint.Job) (Job, error) {
 	out := Job{ID: in.ID.Value, Reusable: in.WorkflowCall != nil, Span: pointSpan(in.Pos)}
+	if in.If != nil {
+		return Job{}, locatedError(path, in.If.Pos, in.ID.Value, "job conditions are unsupported in the Phase 0 runtime")
+	}
+	if in.Container != nil || in.Services != nil {
+		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job and service containers are unsupported in the Phase 0 runtime")
+	}
+	if in.TimeoutMinutes != nil || in.ContinueOnError != nil {
+		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job timeout and continue-on-error are unsupported in the Phase 0 runtime")
+	}
+	if in.Env != nil && in.Env.Expression != nil {
+		return Job{}, locatedError(path, in.Env.Expression.Pos, in.ID.Value, "expression-valued job env is unsupported")
+	}
 	if in.Name != nil {
 		out.Name = in.Name.Value
+	}
+	out.Env = adaptEnv(in.Env)
+	if in.Defaults != nil && in.Defaults.Run != nil {
+		if in.Defaults.Run.Shell != nil {
+			out.DefaultShell = in.Defaults.Run.Shell.Value
+		}
+		if in.Defaults.Run.WorkingDirectory != nil {
+			out.DefaultWorkingDirectory = in.Defaults.Run.WorkingDirectory.Value
+		}
+	}
+	if len(in.Outputs) != 0 {
+		out.Outputs = make(map[string]string, len(in.Outputs))
+		for name, output := range in.Outputs {
+			out.Outputs[name] = output.Value.Value
+		}
 	}
 	for _, need := range in.Needs {
 		if need.ContainsExpression() {
@@ -89,14 +135,42 @@ func adaptJob(path string, in *actionlint.Job) (Job, error) {
 		if step.Name != nil {
 			owned.Name = step.Name.Value
 		}
+		if step.If != nil {
+			owned.If = step.If.Value
+		}
+		if step.ContinueOnError != nil {
+			owned.ContinueOnError = step.ContinueOnError.Value
+		}
+		if step.TimeoutMinutes != nil {
+			owned.TimeoutMinutes = step.TimeoutMinutes.Value
+		}
+		if step.Env != nil && step.Env.Expression != nil {
+			return Job{}, locatedError(path, step.Env.Expression.Pos, in.ID.Value, "expression-valued step env is unsupported")
+		}
+		owned.Env = adaptEnv(step.Env)
 		switch exec := step.Exec.(type) {
 		case *actionlint.ExecRun:
 			owned.Kind = "run"
 			owned.Run = exec.Run.Value
+			if exec.Shell != nil {
+				owned.Shell = exec.Shell.Value
+			}
+			if exec.WorkingDirectory != nil {
+				owned.WorkingDirectory = exec.WorkingDirectory.Value
+			}
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
+			if exec.Entrypoint != nil || exec.Args != nil {
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the Phase 0 runtime")
+			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value
+			if len(exec.Inputs) != 0 {
+				owned.With = make(map[string]string, len(exec.Inputs))
+				for name, input := range exec.Inputs {
+					owned.With[name] = input.Value.Value
+				}
+			}
 			owned.Span = spanFrom(step.Pos, exec.Uses.Value)
 		default:
 			return Job{}, locatedError(path, step.Pos, in.ID.Value, "unsupported step execution kind")
@@ -105,6 +179,31 @@ func adaptJob(path string, in *actionlint.Job) (Job, error) {
 		out.Span.End = owned.Span.End
 	}
 	return out, nil
+}
+
+func adaptEnv(in *actionlint.Env) map[string]string {
+	if in == nil || len(in.Vars) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in.Vars))
+	for name, variable := range in.Vars {
+		out[name] = variable.Value.Value
+	}
+	return out
+}
+
+func mergeEnv(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(base)+len(override))
+	for name, value := range base {
+		out[name] = value
+	}
+	for name, value := range override {
+		out[name] = value
+	}
+	return out
 }
 
 func adaptMatrix(path, jobID string, in *actionlint.Matrix) (*Matrix, error) {
