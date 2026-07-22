@@ -14,7 +14,7 @@ steps:
       mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
-        --runtime-queue elastic-runners \
+        --runtime-queue hosted \
         testdata/smoke/.github/workflows/shell.yml
 
   - label: ":white_check_mark: Phase 2 native dependency extension"

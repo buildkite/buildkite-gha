@@ -77,8 +77,10 @@ signed plan-envelope fixtures. `make check` remains as a convenience alias.
 
 The gated live development proof uses the same pinned mise plugin as repository
 checks. Start an exact-commit build with `PHASE2_PROBE=upload` and
-`PHASE2_COMMIT=<full commit>` to load `.buildkite/phase-2-upload.yml` on the
-proven `elastic-runners` queue.
+`PHASE2_COMMIT=<full commit>` to load `.buildkite/phase-2-upload.yml`. The
+trusted importer runs on `elastic-runners`; generated checkout-free jobs run on
+the ephemeral `hosted` queue, whose Agent version supports native checkout
+suppression.
 
 ## License
 

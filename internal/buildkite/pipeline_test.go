@@ -178,7 +178,7 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue elastic-runners`,
+		`--runtime-queue hosted`,
 		`testdata/smoke/.github/workflows/shell.yml`,
 	} {
 		if !strings.Contains(text, required) {
