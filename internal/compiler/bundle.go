@@ -79,7 +79,11 @@ func CompileBundleWithOptions(path string, source, eventSource []byte, compilerV
 			jobs[i].ConcurrencyGroup = "buildkite-gha/" + strings.TrimPrefix(ir.Workflow.Digest, "sha256:") + "/" + ir.Jobs[i].LogicalJobID
 		}
 	}
-	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: compilerStep, Jobs: jobs})
+	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
+		CompilerStep:       compilerStep,
+		DistributionDigest: compilerDistributionDigest,
+		Jobs:               jobs,
+	})
 	if err != nil {
 		return Bundle{}, fmt.Errorf("emit Buildkite pipeline: %w", err)
 	}

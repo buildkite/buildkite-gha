@@ -12,6 +12,7 @@ import (
 )
 
 const planDirectory = ".buildkite-gha/plans"
+const distributionDirectory = ".buildkite-gha/distributions"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -19,8 +20,18 @@ var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 // Pipeline is the trusted input required to emit generated compatibility jobs.
 type Pipeline struct {
-	CompilerStep string
-	Jobs         []Job
+	CompilerStep       string
+	DistributionDigest string
+	Jobs               []Job
+}
+
+// DistributionPath returns the fixed local path for a content-addressed
+// buildkite-gha executable.
+func DistributionPath(digest string) (string, error) {
+	if !digestPattern.MatchString(digest) {
+		return "", fmt.Errorf("invalid distribution digest %q", digest)
+	}
+	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -54,6 +65,10 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	distributionPath, err := DistributionPath(pipeline.DistributionDigest)
+	if err != nil {
+		return nil, err
+	}
 
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
@@ -64,7 +79,20 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		_, _ = fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
-		_, _ = fmt.Fprintf(&out, "    command: %s\n", yamlScalar("buildkite-gha run-job --plan "+planPath))
+		command := strings.Join([]string{
+			"set -euo pipefail",
+			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
+			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
+			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
+			"buildkite-agent artifact download " + shellQuote(planPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
+			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
+			"plan=\"$bootstrap_dir/" + planPath + `"`,
+			`actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"`,
+			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
+			`chmod 0500 "$distribution"`,
+			`"$distribution" run-job --plan "$plan"`,
+		}, "\n")
+		_, _ = fmt.Fprintf(&out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    agents:\n")
 		_, _ = fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
 		out.WriteString("    checkout:\n      skip: true\n")
@@ -83,6 +111,10 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 	}
 	return out.Bytes(), nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func orderJobs(compilerStep string, input []Job) ([]Job, error) {

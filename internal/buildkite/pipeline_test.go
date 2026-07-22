@@ -16,7 +16,8 @@ func TestEmitGolden(t *testing.T) {
 	consumerOneDigest := testDigest("consumer one plan")
 	consumerTwoDigest := testDigest("consumer two plan")
 	pipeline := Pipeline{
-		CompilerStep: "gha-importer",
+		CompilerStep:       "gha-importer",
+		DistributionDigest: testDigest("buildkite-gha executable"),
 		Jobs: []Job{
 			{Key: "gha-consumer-two", Label: `Consumer ($VALUE, variant="two")`, Queue: "gha-linux", PlanDigest: consumerTwoDigest, Dependencies: []string{"gha-producer"}, ConcurrencyGroup: "buildkite-gha/shell/consumer", Concurrency: 2},
 			{Key: "gha-producer", Label: "Producer", Queue: "gha-linux", PlanDigest: producerDigest},
@@ -44,6 +45,7 @@ func TestEmitGolden(t *testing.T) {
 	var document struct {
 		Steps []struct {
 			Key      string `yaml:"key"`
+			Command  string `yaml:"command"`
 			Checkout struct {
 				Skip bool `yaml:"skip"`
 			} `yaml:"checkout"`
@@ -71,6 +73,20 @@ func TestEmitGolden(t *testing.T) {
 				t.Fatalf("step %q logical dependency is strict: %#v", step.Key, dependency)
 			}
 		}
+		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`) ||
+			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
+			!strings.Contains(step.Command, `test "$actual_distribution_digest" = `+shellQuote(pipeline.DistributionDigest)) ||
+			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
+			t.Fatalf("step %q does not bootstrap and verify its exact distribution:\n%s", step.Key, step.Command)
+		}
+	}
+	if !strings.Contains(string(first), `artifact download '.buildkite-gha/distributions/`) ||
+		!strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		strings.Contains(string(first), "go run") {
+		t.Fatalf("generated jobs are not self-contained:\n%s", first)
+	}
+	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
+		t.Fatalf("generated artifact downloads are not constrained to the exact importer:\n%s", first)
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
@@ -84,7 +100,8 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		in   Pipeline
 		want string
 	}{
-		{name: "empty", in: Pipeline{CompilerStep: "compiler"}, want: "at least one generated job"},
+		{name: "empty", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest}, want: "at least one generated job"},
+		{name: "bad distribution digest", in: Pipeline{CompilerStep: "compiler", DistributionDigest: "sha256:nope", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid distribution digest"},
 		{name: "unknown dependency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Dependencies: []string{"missing"}}}}, want: "unknown dependency"},
 		{name: "cycle", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("one"), Dependencies: []string{"two"}}, {Key: "two", Label: "Two", Queue: "queue", PlanDigest: testDigest("two"), Dependencies: []string{"one"}}}}, want: "contains a cycle"},
 		{name: "duplicate key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("one")}, {Key: "one", Label: "Other", Queue: "queue", PlanDigest: testDigest("other")}}}, want: "duplicate generated step key"},
@@ -123,8 +140,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 3 {
-		t.Fatalf("default pipeline = %#v, want two gated probe loaders and repository checks", document.Steps)
+	if len(document.Steps) != 4 {
+		t.Fatalf("default pipeline = %#v, want three gated probe loaders and repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -144,6 +161,44 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["phase-0-transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml" || got.condition != `build.env("PHASE0_PROBE") == "transport"` {
 		t.Fatalf("transport probe loader = %#v", got)
+	}
+	if got := steps["phase-2-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml" || got.condition != `build.env("PHASE2_PROBE") == "upload"` {
+		t.Fatalf("Phase 2 upload loader = %#v", got)
+	}
+}
+
+func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-2-upload.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		`scripts/phase-0-shell-oracle-checkout "$$PHASE2_COMMIT"`,
+		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
+		`mise exec -- go build -trimpath -buildvcs=false`,
+		`--event-path testdata/smoke/events/push.json`,
+		`--runtime-queue elastic-runners`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)
+		}
+	}
+	var document struct {
+		Steps []struct {
+			Key       string `yaml:"key"`
+			Command   string `yaml:"command"`
+			DependsOn string `yaml:"depends_on"`
+			Agents    struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" || document.Steps[1].DependsOn != "phase-2-upload-importer" {
+		t.Fatalf("Phase 2 upload proof = %#v", document.Steps)
 	}
 }
 

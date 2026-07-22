@@ -175,10 +175,69 @@ func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
 	}
 	want := []capturedCommand{
 		{name: "buildkite-agent", args: []string{"artifact", "download", "result.json", ".", "--step", "gha-producer"}},
-		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets", "--reject-parse-warnings"}, stdin: "steps: []\n"},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+}
+
+func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
+	root := t.TempDir()
+	plan := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan\n")}
+	plan.Digest = Digest(plan.Contents)
+	distribution := Artifact{Path: ".buildkite-gha/distributions/bin/buildkite-gha", Contents: []byte("binary")}
+	distribution.Digest = Digest(distribution.Contents)
+	runner := &captureRunner{}
+	if err := UploadArtifacts(context.Background(), Agent{Runner: runner}, root, []Artifact{plan, distribution}, []byte("steps: []\n")); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands = %#v, want two artifacts then pipeline", runner.commands)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []capturedCommand{
+		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", distribution.Path}},
+		{dir: resolvedRoot, name: "buildkite-agent", args: []string{"artifact", "upload", plan.Path}},
+		{name: "buildkite-agent", args: []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, stdin: "steps: []\n"},
+	}
+	if !reflect.DeepEqual(runner.commands, want) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+	for _, artifact := range []Artifact{plan, distribution} {
+		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(artifact.Path)))
+		if err != nil || !bytes.Equal(contents, artifact.Contents) {
+			t.Fatalf("materialized %q = %q, %v", artifact.Path, contents, err)
+		}
+	}
+}
+
+func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Digest: Digest([]byte("plan")), Contents: []byte("plan")}
+	tests := []struct {
+		name      string
+		artifacts []Artifact
+		failAt    int
+		wantRuns  int
+	}{
+		{name: "invalid digest", artifacts: []Artifact{{Path: artifact.Path, Digest: artifact.Digest, Contents: []byte("tampered")}}},
+		{name: "duplicate path", artifacts: []Artifact{artifact, artifact}},
+		{name: "artifact upload failure", artifacts: []Artifact{artifact}, failAt: 1, wantRuns: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &captureRunner{failAt: test.failAt}
+			err := UploadArtifacts(context.Background(), Agent{Runner: runner}, t.TempDir(), test.artifacts, []byte("steps: []\n"))
+			if err == nil {
+				t.Fatal("UploadArtifacts() succeeded")
+			}
+			if len(runner.commands) != test.wantRuns {
+				t.Fatalf("commands = %#v, want %d and no pipeline upload", runner.commands, test.wantRuns)
+			}
+		})
 	}
 }
 

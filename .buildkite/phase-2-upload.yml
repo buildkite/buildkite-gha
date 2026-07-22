@@ -1,0 +1,25 @@
+steps:
+  - label: ":pipeline: Phase 2 unprivileged importer"
+    key: "phase-2-upload-importer"
+    agents:
+      queue: "elastic-runners"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      scripts/phase-0-shell-oracle-checkout "$$PHASE2_COMMIT"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase2.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runtime-queue elastic-runners \
+        testdata/smoke/.github/workflows/upload.yml
+
+  - label: ":white_check_mark: Phase 2 native dependency extension"
+    key: "phase-2-native-after-import"
+    depends_on: "phase-2-upload-importer"
+    agents:
+      queue: "elastic-runners"
+    command: "echo 'Phase 2 imported job settled before native continuation'"

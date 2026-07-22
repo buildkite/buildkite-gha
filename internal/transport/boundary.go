@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -18,6 +20,24 @@ type Runner interface {
 // Agent invokes public buildkite-agent commands. Tests use a capture Runner.
 type Agent struct {
 	Runner Runner
+}
+
+// CommandRunner executes the Buildkite Agent without a shell.
+type CommandRunner struct {
+	Stderr io.Writer
+}
+
+func (r CommandRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Dir = dir
+	command.Stdin = bytes.NewReader(stdin)
+	var stdout bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = r.Stderr
+	if err := command.Run(); err != nil {
+		return stdout.Bytes(), err
+	}
+	return stdout.Bytes(), nil
 }
 
 func (a Agent) UploadArtifact(ctx context.Context, path string) error {
@@ -48,8 +68,106 @@ func (a Agent) GetMetadata(ctx context.Context, key string) ([]byte, error) {
 }
 
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
-	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets", "--reject-parse-warnings"}, pipeline)
+	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, pipeline)
 	return err
+}
+
+// Artifact is one immutable, content-addressed upload input.
+type Artifact struct {
+	Path     string
+	Digest   string
+	Contents []byte
+}
+
+// UploadArtifacts materializes and verifies every artifact before uploading
+// them from one root, then uploads the pipeline only after all artifacts pass.
+func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []Artifact, pipeline []byte) error {
+	artifacts = cloneArtifacts(artifacts)
+	if len(artifacts) == 0 {
+		return fmt.Errorf("at least one artifact is required")
+	}
+	if len(pipeline) == 0 {
+		return fmt.Errorf("pipeline is required")
+	}
+	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
+	seen := make(map[string]bool, len(artifacts))
+	for _, artifact := range artifacts {
+		if err := validateArtifact(artifact); err != nil {
+			return err
+		}
+		if seen[artifact.Path] {
+			return fmt.Errorf("duplicate artifact path %q", artifact.Path)
+		}
+		seen[artifact.Path] = true
+	}
+
+	absoluteRoot, err := artifactRoot(root)
+	if err != nil {
+		return err
+	}
+	rootFS, err := os.OpenRoot(absoluteRoot)
+	if err != nil {
+		return fmt.Errorf("open artifact root: %w", err)
+	}
+	defer func() { _ = rootFS.Close() }()
+	materialized := make(map[string]string, len(artifacts))
+	for _, artifact := range artifacts {
+		path, err := writeMaterialized(rootFS, absoluteRoot, artifact.Path, artifact.Contents)
+		if err != nil {
+			return fmt.Errorf("materialize artifact %q: %w", artifact.Path, err)
+		}
+		if err := verifyMaterialized(path, artifact.Contents, artifact.Digest); err != nil {
+			return fmt.Errorf("verify artifact %q before upload: %w", artifact.Path, err)
+		}
+		materialized[artifact.Path] = path
+	}
+	for _, artifact := range artifacts {
+		if err := verifyMaterialized(materialized[artifact.Path], artifact.Contents, artifact.Digest); err != nil {
+			return fmt.Errorf("verify artifact %q at upload: %w", artifact.Path, err)
+		}
+		if err := agent.uploadArtifactFrom(ctx, absoluteRoot, artifact.Path); err != nil {
+			return fmt.Errorf("upload artifact %q: %w", artifact.Path, err)
+		}
+	}
+	if err := agent.UploadPipeline(ctx, pipeline); err != nil {
+		return fmt.Errorf("upload pipeline: %w", err)
+	}
+	return nil
+}
+
+func cloneArtifacts(artifacts []Artifact) []Artifact {
+	cloned := make([]Artifact, len(artifacts))
+	for i, artifact := range artifacts {
+		cloned[i] = artifact
+		cloned[i].Contents = bytes.Clone(artifact.Contents)
+	}
+	return cloned
+}
+
+func validateArtifact(artifact Artifact) error {
+	path := filepath.FromSlash(artifact.Path)
+	if artifact.Path == "" || !filepath.IsLocal(path) || filepath.ToSlash(filepath.Clean(path)) != artifact.Path {
+		return fmt.Errorf("invalid artifact path %q", artifact.Path)
+	}
+	if !digestPattern.MatchString(artifact.Digest) || Digest(artifact.Contents) != artifact.Digest {
+		return fmt.Errorf("artifact %q digest does not match contents", artifact.Path)
+	}
+	return nil
+}
+
+func artifactRoot(root string) (string, error) {
+	if root == "" {
+		return "", fmt.Errorf("artifact root is required")
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact root: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact root: %w", err)
+	}
+	return resolved, nil
 }
 
 func (a Agent) run(ctx context.Context, args []string, stdin []byte) ([]byte, error) {

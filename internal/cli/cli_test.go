@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
 
@@ -40,24 +43,6 @@ func TestRunHelpAndVersion(t *testing.T) {
 			}
 			if stderr.Len() != 0 {
 				t.Errorf("Run() stderr = %q, want empty", stderr.String())
-			}
-		})
-	}
-}
-
-func TestRunCommandsAreNotImplemented(t *testing.T) {
-	for _, command := range []string{"upload"} {
-		t.Run(command, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			if code := Run([]string{command}, &stdout, &stderr, "dev"); code != 1 {
-				t.Fatalf("Run() code = %d, want 1", code)
-			}
-			if stdout.Len() != 0 {
-				t.Errorf("Run() stdout = %q, want empty", stdout.String())
-			}
-			want := "buildkite-gha: " + command + ": not implemented\n"
-			if stderr.String() != want {
-				t.Errorf("Run() stderr = %q, want %q", stderr.String(), want)
 			}
 		})
 	}
@@ -141,6 +126,108 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
+func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "elastic-runners", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	if len(runner.commands) != 5 {
+		t.Fatalf("commands = %#v, want distribution, three plans, and pipeline", runner.commands)
+	}
+	root := runner.commands[0].dir
+	for i, command := range runner.commands[:4] {
+		if command.dir != root || command.name != "buildkite-agent" || len(command.args) != 3 || command.args[0] != "artifact" || command.args[1] != "upload" {
+			t.Fatalf("artifact command %d = %#v", i, command)
+		}
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("temporary artifact root still exists: %v", err)
+	}
+	pipelineCommand := runner.commands[4]
+	wantPipelineArgs := []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}
+	if strings.Join(pipelineCommand.args, " ") != strings.Join(wantPipelineArgs, " ") {
+		t.Fatalf("pipeline args = %#v, want %#v", pipelineCommand.args, wantPipelineArgs)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key     string `yaml:"key"`
+			Command string `yaml:"command"`
+			Agents  struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatalf("uploaded pipeline YAML: %v", err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
+	}
+	for _, step := range pipeline.Steps {
+		if !step.Checkout.Skip || step.Agents.Queue != "elastic-runners" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
+			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
+		}
+		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
+			!strings.Contains(step.Command, `--step 'phase-2-importer'`) ||
+			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
+			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
+			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
+		}
+	}
+}
+
+func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
+	runner := &cliCaptureRunner{failAt: 2}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", workflowPath, "--event-path", eventPath}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, want 1", code)
+	}
+	if len(runner.commands) != 2 || !strings.Contains(stderr.String(), "upload artifact") {
+		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+	}
+}
+
+type cliCommand struct {
+	dir   string
+	name  string
+	args  []string
+	stdin []byte
+}
+
+type cliCaptureRunner struct {
+	commands []cliCommand
+	failAt   int
+}
+
+func (r *cliCaptureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+	r.commands = append(r.commands, cliCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: bytes.Clone(stdin)})
+	if r.failAt != 0 && len(r.commands) == r.failAt {
+		return nil, errors.New("injected failure")
+	}
+	return nil, nil
+}
+
+var _ transport.Runner = (*cliCaptureRunner)(nil)
+
 func TestRunUsageErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -151,6 +238,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{name: "unknown command", args: []string{"nope"}, want: `unknown command "nope"`},
 		{name: "unknown help command", args: []string{"help", "nope"}, want: `unknown command "nope"`},
 		{name: "version arguments", args: []string{"--version", "extra"}, want: "does not accept arguments"},
+		{name: "upload missing event", args: []string{"upload", "workflow.yml"}, want: "--event-path is required"},
 	}
 
 	for _, test := range tests {
@@ -268,6 +356,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)
+	}
+	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
 }
 
