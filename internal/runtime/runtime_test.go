@@ -340,7 +340,7 @@ func TestDockerAction(t *testing.T) {
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs, Docker: docker}
 	result, err := runner.RunDocker(context.Background(), DockerAction{
-		Name: "local Docker", Path: fixturePath(t, "actions", "docker"),
+		Name: "local Docker", Path: fixturePath(t, "actions", "docker"), Workspace: fixturePath(t),
 	})
 	if err != nil {
 		t.Fatalf("RunDocker() error = %v", err)

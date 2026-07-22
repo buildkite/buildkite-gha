@@ -157,10 +157,13 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	defer os.RemoveAll(files.dir)
 	args := []string{"run", "--rm", "--volume", files.dir + ":/github/file_commands"}
 	if action.Workspace != "" {
-		args = append(args, "--volume", action.Workspace+":/github/workspace", "--env", "GITHUB_WORKSPACE=/github/workspace")
+		args = append(args, "--volume", action.Workspace+":/github/workspace")
 	}
 	for _, name := range sortedKeys(action.Env) {
 		args = append(args, "--env", name+"="+action.Env[name])
+	}
+	if action.Workspace != "" {
+		args = append(args, "--env", "GITHUB_WORKSPACE=/github/workspace")
 	}
 	args = append(args,
 		"--env", "GITHUB_OUTPUT=/github/file_commands/output",
