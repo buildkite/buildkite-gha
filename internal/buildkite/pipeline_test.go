@@ -179,6 +179,7 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
 		`--runtime-queue elastic-runners`,
+		`testdata/smoke/.github/workflows/shell.yml`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)

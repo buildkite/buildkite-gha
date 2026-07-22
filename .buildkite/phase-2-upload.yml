@@ -15,7 +15,7 @@ steps:
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
         --runtime-queue elastic-runners \
-        testdata/smoke/.github/workflows/upload.yml
+        testdata/smoke/.github/workflows/shell.yml
 
   - label: ":white_check_mark: Phase 2 native dependency extension"
     key: "phase-2-native-after-import"
