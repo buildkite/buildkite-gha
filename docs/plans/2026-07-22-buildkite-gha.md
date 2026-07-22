@@ -1063,11 +1063,18 @@ Explicitly defer from beta unless implementation evidence changes the order:
   repositories and compares normalized observations, and the local action
   runtime proves JavaScript, composite, and Docker lifecycle behavior with
   masked output and post-actions.
-- The third work wave is integrated: compiler-selected v1 job plans execute
-  through `run-job`, the shell differential oracle has checked-in GitHub
+- The third work wave is integrated: compiler-selected, needs-free v1 job plans
+  execute through `run-job`, the shell differential oracle has checked-in GitHub
   Actions and Buildkite definitions, and the transport/trust package plus
   dormant probe cover immutable artifacts, dependency policy, producer
-  attribution, signed bindings and markers, and fail-closed upload recovery.
+  attribution, bounded canonical signed bindings and markers, and fail-closed
+  upload recovery.
+- The end-of-phase Deep Analysis pass is integrated: compiler output validates
+  against the owned plan schema, every job with `needs` now fails closed until
+  result-manifest injection exists, expression substitution is single-pass,
+  runtime output is bounded without pipe deadlocks, inherited environment is
+  allowlisted, and transport artifacts are materialized from verified bytes in
+  a confined root before upload.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. Phase 0 is not complete: the managed internal
   GitHub repository and Buildkite pipeline do not exist yet, so neither hosted
@@ -1078,11 +1085,11 @@ Phase 0 spike support snapshot:
 
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
-| Compile | Actionlint-backed owned model, deterministic static graph and matrix expansion, source spans, stable keys, versioned owned job plans | Dynamic graph expressions, matrix `include`/`exclude`, reusable-workflow jobs, and expression-derived `runs-on` or `needs` fail closed |
-| Execute | Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, conditions, services/job containers, timeouts, cancellation, `continue-on-error`, and non-success dependency semantics fail closed |
+| Compile | Actionlint-backed owned model, deterministic static graph and matrix expansion, source spans, stable keys, schema-valid versioned owned job plans | Dynamic graph expressions, every job with `needs`, matrix `include`/`exclude`, reusable-workflow jobs, and expression-derived `runs-on` fail closed |
+| Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, and offline-validated GitHub Actions and Buildkite definitions | Neither hosted provider definition has run against the same committed revision |
-| Transport | Content-addressed plans and bindings, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |
-| Trust | Eight signed-envelope conformance cases plus signature-first runtime binding checks for build, step, queue, event, plan, and capabilities | KMS-backed signing, queue verification roots, hook/plugin isolation, and signed-pipeline rejection require the intended live queues |
+| Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |
+| Trust | Eight signed-envelope conformance cases plus bounded RFC 8785 runtime bindings with issuer, identifier, lifetime, and signature-first checks for build, step, queue, event, plan, and capabilities | KMS-backed signing, queue verification roots, hook/plugin isolation, and signed-pipeline rejection require the intended live queues |
 | Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed | Current Buildkite APIs expose signature material but no authoritative verification verdict, so the supported behavior is operator cancel/rebuild until a live oracle proves a narrower recovery path |
 
 ### Phase 0 — Prove the semantic foundation
