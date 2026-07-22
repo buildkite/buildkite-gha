@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"unicode"
@@ -372,9 +373,6 @@ func supported(path string, job workflow.Job) error {
 	if job.Matrix.Expression != nil {
 		return locatedJobError(path, job, job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column, "runtime-dependent matrix expressions are unsupported")
 	}
-	if job.Matrix.HasInclude || job.Matrix.HasExclude {
-		return locatedJobError(path, job, job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column, "matrix include/exclude are unsupported in the Phase 0 compiler")
-	}
 	for _, row := range job.Matrix.Rows {
 		if row.Expression != nil {
 			return locatedJobError(path, job, row.Expression.Span.Start.Line, row.Expression.Span.Start.Column, fmt.Sprintf("runtime-dependent matrix expression for %q is unsupported", row.Name))
@@ -399,6 +397,9 @@ func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
 		return []map[string]any{nil}, nil
 	}
 	matrices := []map[string]any{{}}
+	if len(job.Matrix.Rows) == 0 {
+		matrices = nil
+	}
 	for _, row := range job.Matrix.Rows {
 		if len(row.Values) == 0 {
 			return nil, jobError(path, job, fmt.Sprintf("matrix dimension %q has no values", row.Name))
@@ -419,7 +420,97 @@ func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
 		}
 		matrices = next
 	}
+
+	matrices = excludeMatrixCombinations(matrices, job.Matrix.Exclude)
+	// Includes may overwrite values added by earlier includes, but not original
+	// dimensions. Standalone combinations are never candidates for later entries.
+	type includedMatrix struct {
+		values   map[string]any
+		original map[string]any
+	}
+	included := make([]includedMatrix, len(matrices))
+	for i, matrix := range matrices {
+		included[i] = includedMatrix{values: matrix, original: cloneAnyMap(matrix)}
+	}
+	for _, combination := range job.Matrix.Include {
+		values := matrixCombinationValues(combination)
+		matched := false
+		for i := range included {
+			if included[i].original == nil || !includeCompatible(included[i].original, values) {
+				continue
+			}
+			for key, value := range values {
+				included[i].values[key] = value
+			}
+			matched = true
+		}
+		if !matched {
+			included = append(included, includedMatrix{values: cloneAnyMap(values)})
+		}
+		if len(included) > maxMatrixInstances {
+			return nil, jobError(path, job, fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances))
+		}
+	}
+	matrices = matrices[:0]
+	for _, matrix := range included {
+		matrices = append(matrices, matrix.values)
+	}
 	return matrices, nil
+}
+
+func excludeMatrixCombinations(matrices []map[string]any, exclusions []workflow.MatrixCombination) []map[string]any {
+	if len(exclusions) == 0 {
+		return matrices
+	}
+	out := matrices[:0]
+	for _, matrix := range matrices {
+		excluded := false
+		for _, exclusion := range exclusions {
+			if matrixMatches(matrix, matrixCombinationValues(exclusion)) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			out = append(out, matrix)
+		}
+	}
+	return out
+}
+
+func matrixMatches(matrix, pattern map[string]any) bool {
+	for key, expected := range pattern {
+		actual, ok := matrix[key]
+		if !ok || !reflect.DeepEqual(actual, expected) {
+			return false
+		}
+	}
+	return true
+}
+
+func includeCompatible(original, values map[string]any) bool {
+	for key, value := range values {
+		if originalValue, exists := original[key]; exists && !reflect.DeepEqual(originalValue, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func matrixCombinationValues(combination workflow.MatrixCombination) map[string]any {
+	out := make(map[string]any, len(combination.Values))
+	for key, value := range combination.Values {
+		out[key] = value.Data
+	}
+	return out
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, error) {

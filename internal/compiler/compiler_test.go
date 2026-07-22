@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -64,6 +66,169 @@ func TestCompileIsByteIdenticalAndCoversSmokeCorpus(t *testing.T) {
 				t.Fatal("repeated compilation was not byte-identical")
 			}
 		})
+	}
+}
+
+func TestCompileExpandsMatrixIncludeExcludeAndDependencies(t *testing.T) {
+	source := []byte(`name: matrix conformance
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fruit: [apple, pear]
+        animal: [cat, dog]
+        exclude:
+          - fruit: pear
+            animal: dog
+        include:
+          - color: green
+          - color: pink
+            animal: cat
+          - fruit: banana
+          - fruit: banana
+            animal: cat
+    steps:
+      - run: true
+  report:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	got, err := Compile("matrix.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(got, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 6 {
+		t.Fatalf("jobs = %d, want five matrix instances and one dependent", len(ir.Jobs))
+	}
+	wantMatrices := []map[string]any{
+		{"animal": "cat", "color": "pink", "fruit": "apple"},
+		{"animal": "dog", "color": "green", "fruit": "apple"},
+		{"animal": "cat", "color": "pink", "fruit": "pear"},
+		{"fruit": "banana"},
+		{"animal": "cat", "fruit": "banana"},
+	}
+	for i, want := range wantMatrices {
+		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want) {
+			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want)
+		}
+	}
+	report := ir.Jobs[5]
+	if report.LogicalJobID != "report" || len(report.Needs) != len(wantMatrices) {
+		t.Fatalf("dependent job = %#v, want dependency on all matrix instances", report)
+	}
+	wantNeeds := make([]string, len(wantMatrices))
+	for i := range wantMatrices {
+		wantNeeds[i] = ir.Jobs[i].Key
+	}
+	sort.Strings(wantNeeds)
+	for i, need := range report.Needs {
+		if need != wantNeeds[i] {
+			t.Fatalf("dependency %d = %q, want %q", i, need, wantNeeds[i])
+		}
+	}
+}
+
+func TestCompileRejectsRuntimeDependentMatrixInclude(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        include: ${{ fromJSON(vars.INCLUDE) }}
+    steps:
+      - run: true
+`)
+	_, err := Compile("dynamic-include.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix include expressions are unsupported") {
+		t.Fatalf("Compile() error = %v, want explicit include expression error", err)
+	}
+	if !strings.Contains(err.Error(), "dynamic-include.yml:8:18") {
+		t.Fatalf("Compile() error = %v, want source location", err)
+	}
+}
+
+func TestCompileExpandsIncludeOnlyMatrixAsDistinctJobs(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - fruit: banana
+          - fruit: apple
+            color: green
+    steps:
+      - run: true
+`)
+	got, err := Compile("include-only.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(got, &ir); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{{"fruit": "banana"}, {"color": "green", "fruit": "apple"}}
+	if len(ir.Jobs) != len(want) {
+		t.Fatalf("jobs = %d, want %d", len(ir.Jobs), len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
+			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
+		}
+	}
+}
+
+func TestCompilePreservesStaticMatrixScalarTypes(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+        experimental: [true, false]
+        exclude:
+          - version: 12
+            experimental: false
+        include:
+          - version: 16
+            experimental: false
+    steps:
+      - run: true
+`)
+	got, err := Compile("typed-matrix.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(got, &ir); err != nil {
+		t.Fatal(err)
+	}
+	want := []map[string]any{
+		{"experimental": true, "version": float64(12)},
+		{"experimental": true, "version": "14"},
+		{"experimental": false, "version": "14"},
+		{"experimental": false, "version": float64(16)},
+	}
+	if len(ir.Jobs) != len(want) {
+		t.Fatalf("jobs = %d, want %d", len(ir.Jobs), len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
+			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
+		}
 	}
 }
 

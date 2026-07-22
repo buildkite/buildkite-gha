@@ -1053,7 +1053,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 - The repository baseline, reviewed architecture plan, and staged
   `testdata/smoke` corpus are committed on `main`.
-- Phase 0 implementation is active on `lox/phase-0`.
+- The Phase 0 implementation is merged on `main`. Its remaining live oracles
+  are operational gates rather than unmerged foundation work.
+- Phase 1 implementation has started. Its first slice implements static matrix
+  `include`/`exclude`, typed values, source-order expansion, and exact
+  dependency fan-out; Buildkite pipeline emission is the next slice.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1076,16 +1080,18 @@ Explicitly defer from beta unless implementation evidence changes the order:
   allowlisted, and transport artifacts are materialized from verified bytes in
   a confined root before upload.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
-  pipeline validation pass. Phase 0 is not complete: the managed internal
-  GitHub repository and Buildkite pipeline do not exist yet, so neither hosted
-  differential execution nor the real transport, signing, interruption, and
-  dependency-extension oracles have run.
+  pipeline validation pass. The managed GitHub repository and Buildkite
+  pipeline now exist, but the first builds stopped at the managed bootstrap's
+  default `buildkite-agent pipeline upload` because the repository has no
+  `.buildkite/pipeline.yml`. Hosted differential execution and the real
+  transport, signing, interruption, and dependency-extension oracles have not
+  run yet.
 
 Phase 0 spike support snapshot:
 
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
-| Compile | Actionlint-backed owned model, deterministic static graph and matrix expansion, source spans, stable keys, schema-valid versioned owned job plans | Dynamic graph expressions, every job with `needs`, matrix `include`/`exclude`, reusable-workflow jobs, and expression-derived `runs-on` fail closed |
+| Compile | Actionlint-backed owned model, deterministic static graph and matrix expansion, source spans, stable keys, schema-valid versioned owned job plans; the first Phase 1 slice adds source-ordered matrix `include`/`exclude`, typed scalar values, and exact dependency fan-out | Dynamic graph expressions, every versioned job plan with `needs`, reusable-workflow jobs, and expression-derived `runs-on` fail closed |
 | Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, and offline-validated GitHub Actions and Buildkite definitions | Neither hosted provider definition has run against the same committed revision |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |

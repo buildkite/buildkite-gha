@@ -5,10 +5,10 @@ Actions workflows as native Buildkite builds. It will compile workflow jobs
 into Buildkite pipeline jobs and execute each job's Actions steps inside a
 compatibility runtime, without creating a GitHub Actions run.
 
-The project is in Phase 0. Local validation, static compilation, and the
-needs-free job runtime are implemented as semantic spikes. Pipeline upload and
-the hosted GitHub Actions/Buildkite differential and transport proofs remain
-unimplemented or blocked on the managed test infrastructure.
+The Phase 0 semantic foundation is merged, and Phase 1 static compiler work is
+underway. Local validation, source-ordered static matrix expansion, and the
+needs-free job runtime are implemented. Pipeline upload and the hosted GitHub
+Actions/Buildkite differential and transport proofs remain incomplete.
 
 ## Commands
 
@@ -23,9 +23,10 @@ buildkite-gha run-job --plan <path> [--result <path>]
 
 `compile` writes deterministic Phase 0 JSON IR, not Buildkite pipeline YAML.
 The event file must contain the provider, event name, repository owner and
-name, ref, SHA, actor, and payload snapshot. The compiler rejects dynamic graph
-expressions, matrix `include`/`exclude`, reusable workflows, unsupported runtime
-features, and deterministic key collisions.
+name, ref, SHA, actor, and payload snapshot. Static matrices support
+source-ordered products, `include`, `exclude`, typed scalar values, and exact
+dependency fan-out. The compiler rejects dynamic graph expressions, reusable
+workflows, unsupported runtime features, and deterministic key collisions.
 
 `run-job` consumes a versioned job plan and supports the current Linux shell
 and local Node 24 JavaScript, composite, and Docker action spikes. Compiled job

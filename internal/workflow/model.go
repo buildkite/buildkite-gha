@@ -47,9 +47,15 @@ type Job struct {
 type Matrix struct {
 	Rows       []MatrixRow            `json:"rows,omitempty"`
 	Expression *expression.Expression `json:"expression,omitempty"`
-	HasInclude bool                   `json:"has_include,omitempty"`
-	HasExclude bool                   `json:"has_exclude,omitempty"`
+	Include    []MatrixCombination    `json:"include,omitempty"`
+	Exclude    []MatrixCombination    `json:"exclude,omitempty"`
 	Span       Span                   `json:"span"`
+}
+
+// MatrixCombination is one include or exclude entry with source-located values.
+type MatrixCombination struct {
+	Values map[string]Value `json:"values"`
+	Span   Span             `json:"span"`
 }
 
 // MatrixRow is one named matrix dimension.
