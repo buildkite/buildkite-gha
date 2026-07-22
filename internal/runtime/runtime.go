@@ -17,7 +17,10 @@ import (
 	"time"
 )
 
-const defaultCleanupTimeout = 10 * time.Second
+const (
+	defaultCleanupTimeout = 10 * time.Second
+	maxStreamLineBytes    = 1024 * 1024
+)
 
 // Runner executes local actions using explicitly configured host tools.
 type Runner struct {
@@ -25,7 +28,6 @@ type Runner struct {
 	Stderr          io.Writer
 	Node24          string
 	ManagedNodeRoot string
-	Shell           string
 	Docker          string
 	CleanupTimeout  time.Duration
 }
@@ -39,22 +41,6 @@ type JavaScriptAction struct {
 	Post   string
 	Inputs map[string]string
 	Env    map[string]string
-}
-
-// ShellStep is an already-resolved shell step inside a local composite action.
-type ShellStep struct {
-	ID     string
-	Script string
-	Shell  string
-	Env    map[string]string
-}
-
-// CompositeAction is an already-resolved local composite action.
-type CompositeAction struct {
-	Name   string
-	Path   string
-	Inputs map[string]string
-	Steps  []ShellStep
 }
 
 // DockerAction is an already-resolved local Docker action.
@@ -131,27 +117,6 @@ func (r Runner) RunJavaScriptLifecycle(ctx context.Context, actions []JavaScript
 	return result, err
 }
 
-// RunComposite executes the shell steps of an explicitly resolved local
-// composite action and applies each step's environment-file effects in order.
-func (r Runner) RunComposite(ctx context.Context, action CompositeAction) (Result, error) {
-	result := newResult()
-	processor := newCommandProcessor(r.stdout(), r.stderr())
-	for _, step := range action.Steps {
-		shell := step.Shell
-		if shell == "" {
-			shell = r.Shell
-		}
-		if shell == "" {
-			shell = "bash"
-		}
-		env := mergeMaps(actionInputEnv(action.Inputs), result.Env, step.Env, map[string]string{"GITHUB_ACTION_PATH": action.Path})
-		if err := r.runProcess(ctx, processor, action.Path, env, &result, nil, shell, "-e", "-o", "pipefail", "-c", step.Script); err != nil {
-			return result, fmt.Errorf("composite action %q step %q: %w", action.Name, step.ID, err)
-		}
-	}
-	return result, nil
-}
-
 // RunDocker builds and executes an explicitly resolved local Docker action.
 func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
 	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
@@ -172,12 +137,14 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	}
 	image := fmt.Sprintf("buildkite-gha-runtime-%d-%d", os.Getpid(), time.Now().UnixNano())
 	build := exec.CommandContext(ctx, docker, "build", "--quiet", "--tag", image, "--file", filepath.Join(action.Path, dockerfile), action.Path)
+	build.Env = processEnv(nil)
 	imageOutput, err := build.CombinedOutput()
 	if err != nil {
 		return result, fmt.Errorf("build Docker action %q: %w: %s", action.Name, err, strings.TrimSpace(string(imageOutput)))
 	}
 	defer func() {
 		remove := exec.Command(docker, "image", "rm", image)
+		remove.Env = processEnv(nil)
 		if output, removeErr := remove.CombinedOutput(); removeErr != nil {
 			err = errors.Join(err, fmt.Errorf("remove Docker action image: %w: %s", removeErr, strings.TrimSpace(string(output))))
 		}
@@ -212,7 +179,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 }
 
 func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
-	env := mergeMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
+	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	env["GITHUB_ACTION_PATH"] = action.Path
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
@@ -229,7 +196,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		return err
 	}
 	defer os.RemoveAll(files.dir)
-	env = mergeMaps(env, map[string]string{
+	env = mergeStringMaps(env, map[string]string{
 		"GITHUB_OUTPUT":       files.output,
 		"GITHUB_ENV":          files.env,
 		"GITHUB_STATE":        files.state,
@@ -257,23 +224,19 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 	}
 
 	var wg sync.WaitGroup
-	var scanErr error
-	var scanMu sync.Mutex
-	stream := func(reader io.Reader, target io.Writer) {
+	streamErrs := make([]error, 2)
+	stream := func(index int, label string, reader io.Reader, target io.Writer) {
 		defer wg.Done()
-		scanner := bufio.NewScanner(reader)
-		for scanner.Scan() {
-			processor.process(target, scanner.Text())
-		}
-		if err := scanner.Err(); err != nil {
-			scanMu.Lock()
-			scanErr = errors.Join(scanErr, err)
-			scanMu.Unlock()
+		streamErrs[index] = streamLines(reader, func(line string) {
+			processor.process(target, line)
+		}, processor.suppress)
+		if streamErrs[index] != nil {
+			streamErrs[index] = fmt.Errorf("%s stream: %w", label, streamErrs[index])
 		}
 	}
 	wg.Add(2)
-	go stream(stdout, processor.stdout)
-	go stream(stderr, processor.stderr)
+	go stream(0, "stdout", stdout, processor.stdout)
+	go stream(1, "stderr", stderr, processor.stderr)
 	wg.Wait()
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
@@ -282,7 +245,58 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 	if waitErr != nil {
 		waitErr = fmt.Errorf("process %s: %w", name, waitErr)
 	}
-	return errors.Join(waitErr, scanErr)
+	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
+}
+
+func streamLines(reader io.Reader, process func(string), suppress func()) error {
+	buffered := bufio.NewReader(reader)
+	line := make([]byte, 0, buffered.Size())
+	oversized := false
+	sawOversized := false
+	for {
+		fragment, err := buffered.ReadSlice('\n')
+		if !oversized {
+			contentBytes := len(line) + len(fragment)
+			if err == nil {
+				contentBytes--
+			}
+			if contentBytes > maxStreamLineBytes {
+				line = line[:0]
+				oversized = true
+				sawOversized = true
+				suppress()
+			} else {
+				line = append(line, fragment...)
+			}
+		}
+
+		if err == nil {
+			if oversized {
+			} else {
+				process(strings.TrimSuffix(string(line), "\n"))
+			}
+			line = line[:0]
+			oversized = false
+			continue
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if oversized {
+			} else if len(line) != 0 {
+				process(string(line))
+			}
+			if sawOversized {
+				return fmt.Errorf("line exceeds %d-byte limit and was discarded", maxStreamLineBytes)
+			}
+			return nil
+		}
+		if sawOversized {
+			return errors.Join(fmt.Errorf("line exceeds %d-byte limit and was discarded", maxStreamLineBytes), err)
+		}
+		return err
+	}
 }
 
 // DiscoverNode24 resolves an explicit Node binary or a binary in the managed
@@ -307,7 +321,9 @@ func DiscoverNode24(explicit, managedRoot string) (string, error) {
 
 	var failures []string
 	for _, candidate := range candidates {
-		output, err := exec.Command(candidate, "--version").CombinedOutput()
+		command := exec.Command(candidate, "--version")
+		command.Env = processEnv(nil)
+		output, err := command.CombinedOutput()
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
 			continue
@@ -348,16 +364,6 @@ func actionInputEnv(inputs map[string]string) map[string]string {
 	return env
 }
 
-func mergeMaps(maps ...map[string]string) map[string]string {
-	merged := make(map[string]string)
-	for _, values := range maps {
-		for name, value := range values {
-			merged[name] = value
-		}
-	}
-	return merged
-}
-
 func mapEnv(values map[string]string) []string {
 	env := make([]string, 0, len(values))
 	for _, name := range sortedKeys(values) {
@@ -367,12 +373,22 @@ func mapEnv(values map[string]string) []string {
 }
 
 func processEnv(overrides map[string]string) []string {
-	values := make(map[string]string)
-	for _, entry := range os.Environ() {
-		name, value, ok := strings.Cut(entry, "=")
-		if ok {
+	values := make(map[string]string, 6+len(overrides))
+	for _, name := range []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"} {
+		if value, ok := os.LookupEnv(name); ok {
 			values[name] = value
 		}
+	}
+	if _, ok := values["PATH"]; !ok {
+		values["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+	}
+	if _, ok := values["HOME"]; !ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			values["HOME"] = home
+		}
+	}
+	if _, ok := values["TMPDIR"]; !ok {
+		values["TMPDIR"] = os.TempDir()
 	}
 	for name, value := range overrides {
 		values[name] = value
@@ -380,7 +396,7 @@ func processEnv(overrides map[string]string) []string {
 	return mapEnv(values)
 }
 
-func sortedKeys(values map[string]string) []string {
+func sortedKeys[V any](values map[string]V) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)
@@ -390,10 +406,11 @@ func sortedKeys(values map[string]string) []string {
 }
 
 type commandProcessor struct {
-	mu     sync.Mutex
-	stdout io.Writer
-	stderr io.Writer
-	masks  []string
+	mu      sync.Mutex
+	stdout  io.Writer
+	stderr  io.Writer
+	masks   []string
+	discard bool
 }
 
 func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
@@ -403,6 +420,9 @@ func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
 func (p *commandProcessor) process(target io.Writer, line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.discard {
+		return
+	}
 	if value, ok := workflowCommand(line, "add-mask"); ok {
 		if value != "" {
 			p.masks = append(p.masks, value)
@@ -413,6 +433,12 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 		line = strings.ReplaceAll(line, mask, "***")
 	}
 	fmt.Fprintln(target, line)
+}
+
+func (p *commandProcessor) suppress() {
+	p.mu.Lock()
+	p.discard = true
+	p.mu.Unlock()
 }
 
 func workflowCommand(line, command string) (string, bool) {

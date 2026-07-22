@@ -132,7 +132,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: jobEnv, State: map[string]string{}}
 	jobResult.Env["GITHUB_WORKSPACE"] = workspace
-	for name, need := range job.Needs {
+	for _, name := range sortedKeys(job.Needs) {
+		need := job.Needs[name]
 		if need.Result == "" {
 			return jobResult, fmt.Errorf("prerequisite result %q is missing from the job plan", name)
 		}
@@ -174,7 +175,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	}
 
 	if runErr == nil {
-		for name, expression := range job.Outputs {
+		for _, name := range sortedKeys(job.Outputs) {
+			expression := job.Outputs[name]
 			value, err := evaluate(expression, eval)
 			if err != nil {
 				return jobResult, fmt.Errorf("job output %q: %w", name, err)
@@ -333,12 +335,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		if err := r.runProcess(ctx, processor, dir, runEnv, &stepResult, nil, args[0], args[1:]...); err != nil {
 			return result, err
 		}
-		mergeResult(&result, stepResult)
+		mergeInto(result.Env, stepResult.Env)
+		mergeInto(result.State, stepResult.State)
+		result.Summary += stepResult.Summary
 		if step.ID != "" {
 			nested[strings.ToLower(step.ID)] = stepResult
 		}
 	}
-	for name, output := range metadata.Outputs {
+	for _, name := range sortedKeys(metadata.Outputs) {
+		output := metadata.Outputs[name]
 		value, err := evaluate(output.Value, eval)
 		if err != nil {
 			return result, fmt.Errorf("composite output %q: %w", name, err)
@@ -380,40 +385,60 @@ func readActionMetadata(path string) (actionMetadata, error) {
 	if metadata.Runs.Using == "" {
 		return actionMetadata{}, fmt.Errorf("action metadata %q has no runs.using", metadataPath)
 	}
-	metadata.Inputs = lowerActionInputs(metadata.Inputs)
-	metadata.Outputs = lowerActionOutputs(metadata.Outputs)
+	inputs, err := lowerActionInputs(metadata.Inputs)
+	if err != nil {
+		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	metadata.Inputs = inputs
+	outputs, err := lowerActionOutputs(metadata.Outputs)
+	if err != nil {
+		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	metadata.Outputs = outputs
 	return metadata, nil
 }
 
-func lowerActionInputs(values map[string]actionInput) map[string]actionInput {
+func lowerActionInputs(values map[string]actionInput) (map[string]actionInput, error) {
 	out := make(map[string]actionInput, len(values))
-	for name, value := range values {
-		out[strings.ToLower(name)] = value
+	for _, name := range sortedKeys(values) {
+		lower := strings.ToLower(name)
+		if _, exists := out[lower]; exists {
+			return nil, fmt.Errorf("action inputs contain duplicate case-insensitive name %q", lower)
+		}
+		out[lower] = values[name]
 	}
-	return out
+	return out, nil
 }
 
-func lowerActionOutputs(values map[string]actionOutput) map[string]actionOutput {
+func lowerActionOutputs(values map[string]actionOutput) (map[string]actionOutput, error) {
 	out := make(map[string]actionOutput, len(values))
-	for name, value := range values {
-		out[strings.ToLower(name)] = value
+	for _, name := range sortedKeys(values) {
+		lower := strings.ToLower(name)
+		if _, exists := out[lower]; exists {
+			return nil, fmt.Errorf("action outputs contain duplicate case-insensitive name %q", lower)
+		}
+		out[lower] = values[name]
 	}
-	return out
+	return out, nil
 }
 
 func evaluate(value string, context evaluationContext) (string, error) {
 	const open, close = "${{", "}}"
+	var evaluated strings.Builder
+	remaining := value
 	for {
-		start := strings.Index(value, open)
+		start := strings.Index(remaining, open)
 		if start < 0 {
-			return value, nil
+			evaluated.WriteString(remaining)
+			return evaluated.String(), nil
 		}
-		end := strings.Index(value[start+len(open):], close)
+		evaluated.WriteString(remaining[:start])
+		end := strings.Index(remaining[start+len(open):], close)
 		if end < 0 {
 			return "", fmt.Errorf("unterminated expression in %q", value)
 		}
 		end += start + len(open)
-		expression := strings.TrimSpace(value[start+len(open) : end])
+		expression := strings.TrimSpace(remaining[start+len(open) : end])
 		parts := strings.Split(expression, ".")
 		var replacement string
 		switch {
@@ -436,13 +461,15 @@ func evaluate(value string, context evaluationContext) (string, error) {
 		default:
 			return "", fmt.Errorf("unsupported expression %q", expression)
 		}
-		value = value[:start] + replacement + value[end+len(close):]
+		evaluated.WriteString(replacement)
+		remaining = remaining[end+len(close):]
 	}
 }
 
 func evaluateMap(values map[string]string, context evaluationContext) (map[string]string, error) {
 	out := make(map[string]string, len(values))
-	for name, value := range values {
+	for _, name := range sortedKeys(values) {
+		value := values[name]
 		resolved, err := evaluate(value, context)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate %q: %w", name, err)
@@ -454,8 +481,12 @@ func evaluateMap(values map[string]string, context evaluationContext) (map[strin
 
 func resolveActionInputs(metadata actionMetadata, supplied map[string]string, context evaluationContext) (map[string]string, error) {
 	inputs := make(map[string]string, len(supplied))
-	for name, value := range supplied {
-		inputs[strings.ToLower(name)] = value
+	for _, name := range sortedKeys(supplied) {
+		lower := strings.ToLower(name)
+		if _, exists := inputs[lower]; exists {
+			return nil, fmt.Errorf("action inputs contain duplicate case-insensitive name %q", lower)
+		}
+		inputs[lower] = supplied[name]
 	}
 	names := make([]string, 0, len(metadata.Inputs))
 	for name := range metadata.Inputs {
@@ -578,11 +609,4 @@ func mergeStringMaps(values ...map[string]string) map[string]string {
 		mergeInto(out, value)
 	}
 	return out
-}
-
-func mergeResult(target *Result, source Result) {
-	mergeInto(target.Outputs, source.Outputs)
-	mergeInto(target.Env, source.Env)
-	mergeInto(target.State, source.State)
-	target.Summary += source.Summary
 }

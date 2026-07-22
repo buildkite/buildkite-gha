@@ -85,7 +85,8 @@ func parseCommandFile(path string) (map[string]string, error) {
 		if line == "" {
 			continue
 		}
-		if separator := strings.Index(line, "<<"); separator >= 0 {
+		equals := strings.Index(line, "=")
+		if separator := strings.Index(line, "<<"); separator >= 0 && (equals < 0 || separator < equals) {
 			name, delimiter := line[:separator], line[separator+2:]
 			if name == "" || delimiter == "" {
 				return nil, fmt.Errorf("invalid multiline file command %q", line)

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,7 +19,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-func TestJavaScriptLifecycleAndCompositeAction(t *testing.T) {
+func TestJavaScriptLifecycle(t *testing.T) {
 	node := requireNode24(t)
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
@@ -45,29 +46,6 @@ func TestJavaScriptLifecycleAndCompositeAction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "masked probe: ***") {
 		t.Errorf("forwarded logs = %q, want masked probe", logs.String())
-	}
-
-	compositePath := fixturePath(t, "smoke", ".github", "actions", "composite")
-	composite, err := runner.RunComposite(context.Background(), CompositeAction{
-		Name:   "smoke composite",
-		Path:   compositePath,
-		Inputs: map[string]string{"message": javascript.Outputs["result"]},
-		Steps: []ShellStep{{
-			ID:    "transform",
-			Shell: "bash",
-			Env:   map[string]string{"MESSAGE": javascript.Outputs["result"]},
-			Script: "echo \"result=$MESSAGE-composite\" >> \"$GITHUB_OUTPUT\"\n" +
-				"echo \"SMOKE_COMPOSITE_SEEN=true\" >> \"$GITHUB_ENV\"",
-		}},
-	})
-	if err != nil {
-		t.Fatalf("RunComposite() error = %v", err)
-	}
-	if got := composite.Outputs["result"]; got != "smoke-javascript-composite" {
-		t.Errorf("composite output = %q, want %q", got, "smoke-javascript-composite")
-	}
-	if got := composite.Env["SMOKE_COMPOSITE_SEEN"]; got != "true" {
-		t.Errorf("composite environment = %q, want true", got)
 	}
 }
 
@@ -158,33 +136,153 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	}
 }
 
-func TestFileCommandsSupportMultilineCRLFAndRejectNodeOptions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "commands")
-	if err := os.WriteFile(path, []byte("single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n"), 0o600); err != nil {
-		t.Fatal(err)
+func TestFileCommandParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		want     map[string]string
+		wantErr  string
+	}{
+		{name: "LF", contents: "single=value\nmulti<<END\nfirst\nsecond\nEND\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
+		{name: "CRLF", contents: "single=value\r\nmulti<<END\r\nfirst\r\nsecond\r\nEND\r\n", want: map[string]string{"single": "value", "multi": "first\nsecond"}},
+		{name: "equals before heredoc", contents: "single=value<<literal\n", want: map[string]string{"single": "value<<literal"}},
+		{name: "heredoc before equals", contents: "multi<<END=value\npayload\nEND=value\n", want: map[string]string{"multi": "payload"}},
+		{name: "missing name", contents: "=value\n", wantErr: "invalid file command"},
+		{name: "missing delimiter", contents: "multi<<\n", wantErr: "invalid multiline file command"},
+		{name: "unterminated LF", contents: "multi<<END\nunterminated\n", wantErr: `missing delimiter "END"`},
+		{name: "unterminated CRLF", contents: "multi<<END\r\nunterminated\r\n", wantErr: `missing delimiter "END"`},
 	}
-	values, err := parseCommandFile(path)
-	if err != nil {
-		t.Fatalf("parseCommandFile() error = %v", err)
-	}
-	if values["single"] != "value" || values["multi"] != "first\nsecond" {
-		t.Errorf("parseCommandFile() = %#v", values)
-	}
-	if err := os.WriteFile(path, []byte("multi<<END\nunterminated\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parseCommandFile(path); err == nil || !strings.Contains(err.Error(), `missing delimiter "END"`) {
-		t.Fatalf("parseCommandFile() error = %v, want missing delimiter", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "commands")
+			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseCommandFile(path)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("parseCommandFile() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseCommandFile() error = %v", err)
+			}
+			if !maps.Equal(got, test.want) {
+				t.Fatalf("parseCommandFile() = %#v, want %#v", got, test.want)
+			}
+		})
 	}
 
+	files, err := newCommandFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(files.dir)
+	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := newResult()
+	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
+		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
+	}
+}
+
+func TestExpressionEvaluationIsSinglePass(t *testing.T) {
+	literal := "literal ${{ matrix.secret }} and ${{"
+	context := evaluationContext{
+		inputs: map[string]string{"value": literal},
+		matrix: map[string]any{"value": literal, "secret": "reevaluated"},
+		steps:  map[string]Result{"producer": {Outputs: map[string]string{"value": literal}}},
+		needs:  map[string]plan.Need{"producer": {Outputs: map[string]string{"value": literal}}},
+	}
+	tests := map[string]string{
+		"${{ inputs.value }}":                 literal,
+		"${{ matrix.value }}":                 literal,
+		"${{ steps.producer.outputs.value }}": literal,
+		"${{ needs.producer.outputs.value }}": literal,
+		"before ${{ inputs.value }} after":    "before " + literal + " after",
+	}
+	for expression, want := range tests {
+		got, err := evaluate(expression, context)
+		if err != nil {
+			t.Fatalf("evaluate(%q) error = %v", expression, err)
+		}
+		if got != want {
+			t.Errorf("evaluate(%q) = %q, want %q", expression, got, want)
+		}
+	}
+	got, err := evaluate("${{ inputs.value }}:${{ matrix.secret }}", context)
+	if err != nil || got != literal+":reevaluated" {
+		t.Fatalf("evaluate() = %q, %v, want both original expressions evaluated once", got, err)
+	}
+}
+
+func TestRunStreamingDrainsOversizedLineAndPreservesMasking(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var logs bytes.Buffer
-	runner := Runner{Stdout: &logs, Stderr: &logs}
-	_, err = runner.RunComposite(context.Background(), CompositeAction{
-		Name: "protected environment", Path: t.TempDir(),
-		Steps: []ShellStep{{ID: "write", Script: `echo "NODE_OPTIONS=--require bad" >> "$GITHUB_ENV"`}},
+	processor := newCommandProcessor(&logs, &logs)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = runStreaming(ctx, processor, "", map[string]string{"GO_WANT_RUNTIME_LONG_LINE": "1"}, executable, "-test.run=^TestLongLineChildProcess$")
+	if err == nil || !strings.Contains(err.Error(), "stdout stream: line exceeds 1048576-byte limit and was discarded") {
+		t.Fatalf("runStreaming() error = %v, want oversized-line diagnostic", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runStreaming() deadlocked: %v", err)
+	}
+	if strings.Contains(logs.String(), "runtime-stream-secret") {
+		t.Fatalf("runStreaming() leaked masked content: %q", logs.String())
+	}
+	if strings.Contains(logs.String(), "after long line") {
+		t.Fatalf("runStreaming() forwarded output after masking became uncertain: %q", logs.String())
+	}
+}
+
+func TestStreamLineLimitIncludesContentNotNewline(t *testing.T) {
+	want := strings.Repeat("x", maxStreamLineBytes)
+	var lines []string
+	suppressed := false
+	err := streamLines(strings.NewReader(want+"\nnext\n"), func(line string) {
+		lines = append(lines, line)
+	}, func() {
+		suppressed = true
 	})
-	if err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
-		t.Fatalf("RunComposite() error = %v, want NODE_OPTIONS rejection", err)
+	if err != nil || suppressed {
+		t.Fatalf("streamLines() = %v, suppressed = %v", err, suppressed)
+	}
+	if len(lines) != 2 || lines[0] != want || lines[1] != "next" {
+		t.Fatalf("streamLines() returned %d lines with unexpected content", len(lines))
+	}
+}
+
+func TestLongLineChildProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_RUNTIME_LONG_LINE") != "1" {
+		return
+	}
+	fmt.Fprintln(os.Stdout, "::add-mask::runtime-stream-secret")
+	fmt.Fprintln(os.Stdout, strings.Repeat("x", maxStreamLineBytes+1)+"runtime-stream-secret")
+	fmt.Fprintln(os.Stdout, "after long line: runtime-stream-secret")
+}
+
+func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "must-not-leak")
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	command := `test -n "$PATH" && test -n "$HOME" && test -n "$TMPDIR" && test "$DECLARED" = visible && test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}" && printf '%s\n' environment-ok`
+	if err := runStreaming(context.Background(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
+		t.Fatalf("runStreaming() error = %v", err)
+	}
+	if logs.String() != "environment-ok\n" {
+		t.Fatalf("runStreaming() logs = %q", logs.String())
+	}
+	for _, entry := range processEnv(nil) {
+		if strings.HasPrefix(entry, "BUILDKITE_") {
+			t.Fatalf("processEnv() inherited agent variable %q", entry)
+		}
 	}
 }
 
@@ -194,6 +292,23 @@ func TestWorkflowCommandParsingIsCaseInsensitiveAndExact(t *testing.T) {
 	}
 	if _, ok := workflowCommand("::add-mask-extra::secret", "add-mask"); ok {
 		t.Fatal("workflowCommand() accepted a different command name")
+	}
+}
+
+func TestActionMetadataRejectsCaseInsensitiveOutputCollisions(t *testing.T) {
+	actionPath := t.TempDir()
+	writeFixtureFile(t, actionPath, "action.yml", `name: Conflicting outputs
+outputs:
+  Result:
+    value: first
+  result:
+    value: second
+runs:
+  using: composite
+  steps: []
+`)
+	if _, err := readActionMetadata(actionPath); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
+		t.Fatalf("readActionMetadata() error = %v, want duplicate output rejection", err)
 	}
 }
 
@@ -273,6 +388,70 @@ func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
 	}
 }
 
+func TestCompositeExposesOnlyDeclaredOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	actionPath := ".github/actions/composite/action.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, actionPath, `name: Output-scoped composite
+outputs:
+  public:
+    value: ${{ steps.inner.outputs.public }}
+runs:
+  using: composite
+  steps:
+    - id: inner
+      shell: sh
+      run: |
+        printf '%s\n' 'public=visible' >> "$GITHUB_OUTPUT"
+        printf '%s\n' 'private=hidden' >> "$GITHUB_OUTPUT"
+        printf '%s\n' 'COMPOSITE_ENV=propagated' >> "$GITHUB_ENV"
+        printf '%s\n' 'composite summary' >> "$GITHUB_STEP_SUMMARY"
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	job.Outputs = map[string]string{
+		"private": "${{ steps.composite.outputs.private }}",
+		"public":  "${{ steps.composite.outputs.public }}",
+	}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Outputs["public"] != "visible" || result.Outputs["private"] != "" {
+		t.Fatalf("RunJob() outputs = %#v, want only declared composite output", result.Outputs)
+	}
+	if result.Env["COMPOSITE_ENV"] != "propagated" || result.Summary != "composite summary\n" {
+		t.Fatalf("RunJob() effects = %#v, summary = %q", result.Env, result.Summary)
+	}
+}
+
+func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
+	_, err := evaluateMap(map[string]string{
+		"z-last":  "${{ unsupported.z }}",
+		"a-first": "${{ unsupported.a }}",
+	}, evaluationContext{})
+	if err == nil || !strings.Contains(err.Error(), `evaluate "a-first"`) {
+		t.Fatalf("evaluateMap() error = %v, want alphabetically first key", err)
+	}
+
+	workspace := fixturePath(t, "smoke")
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
+	job.Needs = map[string]plan.Need{"z-last": {}, "a-first": {}}
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `prerequisite result "a-first"`) {
+		t.Fatalf("RunJob() prerequisite error = %v, want alphabetically first key", err)
+	}
+
+	job.Needs = nil
+	job.Outputs = map[string]string{"z-valid": "partial", "a-invalid": "${{ unsupported.a }}"}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "a-invalid"`) {
+		t.Fatalf("RunJob() output error = %v, want alphabetically first key", err)
+	}
+	if len(result.Outputs) != 0 {
+		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
+	}
+}
+
 func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	docker := requireDocker(t)
 	workspace := fixturePath(t)
@@ -313,6 +492,17 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 		Workflow: plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
 		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:   plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"}, Steps: steps,
+	}
+}
+
+func writeFixtureFile(t *testing.T, root, path, contents string) {
+	t.Helper()
+	path = filepath.Join(root, filepath.FromSlash(path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
