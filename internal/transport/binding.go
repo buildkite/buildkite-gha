@@ -6,13 +6,23 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 )
 
-const bindingType = "buildkite-gha-runtime-binding+jws"
+const (
+	bindingType = "buildkite-gha-runtime-binding+jws"
+	// RuntimeBindingIssuer is the Phase 0 issuer shared with plan envelopes.
+	RuntimeBindingIssuer = "buildkite-gha-plan-envelope"
+	maxBindingLifetime   = int64((24 * time.Hour) / time.Second)
+)
 
 // RuntimeBinding is signed by the trusted compiler and is inert until its
 // signature has been verified.
 type RuntimeBinding struct {
+	Issuer            string       `json:"iss"`
+	ID                string       `json:"jti"`
+	IssuedAt          int64        `json:"iat"`
+	ExpiresAt         int64        `json:"exp"`
 	Build             BuildBinding `json:"build"`
 	StepKey           string       `json:"step_key"`
 	Queue             string       `json:"queue"`
@@ -39,6 +49,8 @@ type EventBinding struct {
 }
 
 type ObservedRuntime struct {
+	Now                    time.Time
+	BindingID              string
 	Build                  BuildBinding
 	StepKey                string
 	Queue                  string
@@ -55,6 +67,9 @@ type VerificationError struct {
 func (e VerificationError) Error() string { return e.Code }
 
 func normalizeBinding(binding RuntimeBinding) (RuntimeBinding, error) {
+	if binding.Issuer != RuntimeBindingIssuer || !uuidPattern.MatchString(binding.ID) || binding.IssuedAt < 0 || binding.ExpiresAt <= binding.IssuedAt || binding.ExpiresAt-binding.IssuedAt > maxBindingLifetime {
+		return RuntimeBinding{}, fmt.Errorf("invalid binding lifetime or replay identity")
+	}
 	if !uuidPattern.MatchString(binding.Build.OrganizationID) || !uuidPattern.MatchString(binding.Build.PipelineID) || !uuidPattern.MatchString(binding.Build.BuildID) {
 		return RuntimeBinding{}, fmt.Errorf("missing build binding")
 	}
@@ -81,7 +96,10 @@ func SignRuntimeBinding(key ES256Key, binding RuntimeBinding) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	payload, _ := json.Marshal(binding)
+	payload, err := canonicalJSON(binding)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize runtime binding: %w", err)
+	}
 	return key.sign(bindingType, payload)
 }
 
@@ -105,9 +123,18 @@ func VerifyRuntimeBinding(key ES256Key, encoded string, observed ObservedRuntime
 	if err != nil {
 		return RuntimeBinding{}, VerificationError{Code: "E_SCHEMA"}
 	}
-	canonical, _ := json.Marshal(binding)
+	canonical, err := canonicalJSON(binding)
+	if err != nil {
+		return RuntimeBinding{}, VerificationError{Code: "E_SCHEMA"}
+	}
 	if !bytes.Equal(canonical, payload) {
 		return RuntimeBinding{}, VerificationError{Code: "E_SCHEMA"}
+	}
+	if observed.Now.IsZero() || binding.IssuedAt > observed.Now.Unix() || observed.Now.Unix() >= binding.ExpiresAt {
+		return RuntimeBinding{}, VerificationError{Code: "E_EXPIRED"}
+	}
+	if binding.ID != observed.BindingID {
+		return RuntimeBinding{}, VerificationError{Code: "E_REPLAY_BINDING"}
 	}
 	if binding.Build != observed.Build {
 		return RuntimeBinding{}, VerificationError{Code: "E_BUILD_BINDING"}

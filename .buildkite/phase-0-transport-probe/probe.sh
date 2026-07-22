@@ -6,6 +6,9 @@ readonly producer_key="phase0-transport-producer"
 readonly consumer_key="phase0-transport-consumer"
 readonly marker_prefix="buildkite-gha/v1/uploads/${importer_key}"
 readonly probe_path="/opt/buildkite-gha/phase-0-transport-probe/probe.sh"
+readonly binding_issuer="buildkite-gha-plan-envelope"
+readonly binding_lifetime_seconds=3600
+readonly binding_max_lifetime_seconds=86400
 
 require_env() {
   local name
@@ -59,9 +62,23 @@ require_commit() {
   fi
 }
 
+deterministic_uuid() {
+  local digest
+  digest="$(printf '%s' "$1" | sha256sum | awk '{print $1}')"
+  printf '%s-%s-4%s-8%s-%s\n' "${digest:0:8}" "${digest:8:4}" "${digest:13:3}" "${digest:17:3}" "${digest:20:12}"
+}
+
+canonicalize() {
+  jq -S -c .
+}
+
 write_claims() {
-  local path="$1" step_key="$2" plan_digest="$3" capabilities="$4"
-  jq -cn \
+  local path="$1" step_key="$2" plan_digest="$3" capabilities="$4" jti="$5" issued_at="$6" expires_at="$7"
+  jq -Scn \
+    --arg iss "${binding_issuer}" \
+    --arg jti "${jti}" \
+    --argjson iat "${issued_at}" \
+    --argjson exp "${expires_at}" \
     --arg organization_id "${BUILDKITE_ORGANIZATION_ID}" \
     --arg pipeline_id "${BUILDKITE_PIPELINE_ID}" \
     --arg build_id "${BUILDKITE_BUILD_ID}" \
@@ -74,7 +91,8 @@ write_claims() {
     --arg event_digest "${PHASE0_EVENT_DIGEST}" \
     --arg plan_digest "${plan_digest}" \
     --argjson capabilities "${capabilities}" \
-    '{build:{organization_id:$organization_id,pipeline_id:$pipeline_id,build_id:$build_id},step_key:$step_key,queue:$queue,event:{provider:"github",name:$event_name,repository:$repository,ref:$ref,commit:$commit,digest:$event_digest,trust:"untrusted",attestation:"buildkite-webhook"},plan_digest:$plan_digest,capability_ceiling:$capabilities}' > "$path"
+    '{iss:$iss,jti:$jti,iat:$iat,exp:$exp,build:{organization_id:$organization_id,pipeline_id:$pipeline_id,build_id:$build_id},step_key:$step_key,queue:$queue,event:{provider:"github",name:$event_name,repository:$repository,ref:$ref,commit:$commit,digest:$event_digest,trust:"untrusted",attestation:"buildkite-webhook"},plan_digest:$plan_digest,capability_ceiling:$capabilities}' > "$path"
+  truncate -s -1 "$path"
 }
 
 bootstrap() {
@@ -90,14 +108,19 @@ bootstrap() {
   trap 'rm -rf "${work}"' EXIT
 
   mkdir -p "${work}/buildkite-gha/v1/plans/${producer_key}" "${work}/buildkite-gha/v1/plans/${consumer_key}"
-  printf '%s\n' '{"logical_job":"producer","required_capabilities":["network"],"schema":"phase0-probe-plan/v1"}' > "${work}/producer.plan.json"
-  printf '%s\n' '{"logical_job":"consumer","needs":["producer"],"required_capabilities":[],"schema":"phase0-probe-plan/v1"}' > "${work}/consumer.plan.json"
+  printf '%s' '{"logical_job":"producer","required_capabilities":["network"],"schema":"phase0-probe-plan/v1"}' > "${work}/producer.plan.json"
+  printf '%s' '{"logical_job":"consumer","needs":["producer"],"required_capabilities":[],"schema":"phase0-probe-plan/v1"}' > "${work}/consumer.plan.json"
   local producer_digest consumer_digest
   producer_digest="$(sha256_file "${work}/producer.plan.json")"
   consumer_digest="$(sha256_file "${work}/consumer.plan.json")"
 
-  write_claims "${work}/producer.claims.json" "${producer_key}" "${producer_digest}" '["network"]'
-  write_claims "${work}/consumer.claims.json" "${consumer_key}" "${consumer_digest}" '[]'
+  local issued_at expires_at producer_jti consumer_jti
+  issued_at="$(date +%s)"
+  expires_at="$((issued_at + binding_lifetime_seconds))"
+  producer_jti="$(deterministic_uuid "${BUILDKITE_BUILD_ID}:${producer_key}:${producer_digest}")"
+  consumer_jti="$(deterministic_uuid "${BUILDKITE_BUILD_ID}:${consumer_key}:${consumer_digest}")"
+  write_claims "${work}/producer.claims.json" "${producer_key}" "${producer_digest}" '["network"]' "${producer_jti}" "${issued_at}" "${expires_at}"
+  write_claims "${work}/consumer.claims.json" "${consumer_key}" "${consumer_digest}" '[]' "${consumer_jti}" "${issued_at}" "${expires_at}"
   sign_json "${work}/producer.claims.json" > "${work}/producer.binding.jws"
   sign_json "${work}/consumer.claims.json" > "${work}/consumer.binding.jws"
 
@@ -128,6 +151,7 @@ steps:
     env:
       PHASE0_PLAN_DIGEST: "${producer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
+      PHASE0_BINDING_JTI: "${producer_jti}"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -141,6 +165,8 @@ steps:
     env:
       PHASE0_PLAN_DIGEST: "${consumer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
+      PHASE0_BINDING_JTI: "${consumer_jti}"
+      PHASE0_PRODUCER_PLAN_DIGEST: "${producer_digest}"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -148,15 +174,16 @@ steps:
         allow_failure: true
 YAML
 
-  local pipeline_digest intent expected completed existing
+  local pipeline_digest expected completed existing
   pipeline_digest="$(sha256_file "${pipeline}")"
-  jq -cn \
+  jq -Scn \
     --arg build_id "${BUILDKITE_BUILD_ID}" \
     --arg importer_key "${importer_key}" \
     --arg pipeline_digest "${pipeline_digest}" \
     --arg producer_digest "${producer_digest}" \
     --arg consumer_digest "${consumer_digest}" \
     '{phase:"expected",intent:{build_id:$build_id,importer_key:$importer_key,pipeline_digest:$pipeline_digest,jobs:[{key:"phase0-transport-consumer",plan_digest:$consumer_digest},{key:"phase0-transport-producer",plan_digest:$producer_digest}]}}' > "${work}/expected.json"
+  truncate -s -1 "${work}/expected.json"
   expected="$(sign_json "${work}/expected.json")"
   existing="$(buildkite-agent meta-data get "${marker_prefix}/expected" 2>/dev/null || true)"
   completed="$(buildkite-agent meta-data get "${marker_prefix}/completed" 2>/dev/null || true)"
@@ -176,7 +203,7 @@ YAML
     if [[ -n "${completed}" ]]; then
       printf '%s' "${completed}" > "${work}/completed.jws"
       verify_json "${work}/completed.jws" > "${work}/completed.actual.json"
-      jq '.phase = "completed"' "${work}/expected.json" | jq -S -c . > "${work}/completed.expected.json"
+      jq -S -c '.phase = "completed"' "${work}/expected.json" > "${work}/completed.expected.json"
       jq -S -c . "${work}/completed.actual.json" > "${work}/completed.actual.canonical.json"
       if ! cmp -s "${work}/completed.expected.json" "${work}/completed.actual.canonical.json"; then
         echo "signed completed marker conflicts with expected upload" >&2
@@ -196,14 +223,15 @@ YAML
     fi
   fi
 
-  jq '.phase = "completed"' "${work}/expected.json" > "${work}/completed.json"
+  jq -S -c '.phase = "completed"' "${work}/expected.json" > "${work}/completed.json"
+  truncate -s -1 "${work}/completed.json"
   completed="$(sign_json "${work}/completed.json")"
   buildkite-agent meta-data set "${marker_prefix}/completed" "${completed}"
 }
 
 load_and_verify_plan() {
   local step_key="$1" work="$2"
-  require_env BUILDKITE_BUILD_ID BUILDKITE_ORGANIZATION_ID BUILDKITE_PIPELINE_ID BUILDKITE_STEP_KEY BUILDKITE_AGENT_META_DATA_QUEUE PHASE0_PLAN_DIGEST PHASE0_PLAN_PRODUCER PHASE0_EVENT_NAME PHASE0_REPOSITORY PHASE0_REF PHASE0_COMMIT PHASE0_EVENT_DIGEST PHASE0_LOCAL_CAPABILITIES
+  require_env BUILDKITE_BUILD_ID BUILDKITE_ORGANIZATION_ID BUILDKITE_PIPELINE_ID BUILDKITE_STEP_KEY BUILDKITE_AGENT_META_DATA_QUEUE PHASE0_PLAN_DIGEST PHASE0_PLAN_PRODUCER PHASE0_BINDING_JTI PHASE0_EVENT_NAME PHASE0_REPOSITORY PHASE0_REF PHASE0_COMMIT PHASE0_EVENT_DIGEST PHASE0_LOCAL_CAPABILITIES
   require_name BUILDKITE_STEP_KEY "${BUILDKITE_STEP_KEY}"
   require_name BUILDKITE_AGENT_META_DATA_QUEUE "${BUILDKITE_AGENT_META_DATA_QUEUE}"
   require_digest PHASE0_PLAN_DIGEST "${PHASE0_PLAN_DIGEST}"
@@ -211,13 +239,22 @@ load_and_verify_plan() {
   require_uuid BUILDKITE_BUILD_ID "${BUILDKITE_BUILD_ID}"
   require_uuid BUILDKITE_ORGANIZATION_ID "${BUILDKITE_ORGANIZATION_ID}"
   require_uuid BUILDKITE_PIPELINE_ID "${BUILDKITE_PIPELINE_ID}"
+  require_uuid PHASE0_BINDING_JTI "${PHASE0_BINDING_JTI}"
   require_commit PHASE0_COMMIT "${PHASE0_COMMIT}"
   [[ "${PHASE0_PLAN_PRODUCER}" == "${importer_key}" ]]
-  jq -e 'type == "array" and all(.[]; type == "string")' <<<"${PHASE0_LOCAL_CAPABILITIES}" >/dev/null
+  jq -e 'type == "array" and . == (sort | unique) and all(.[]; . == "network" or . == "docker" or . == "privileged-container" or . == "secrets" or . == "provider-token-read" or . == "provider-token-write")' <<<"${PHASE0_LOCAL_CAPABILITIES}" >/dev/null
   local prefix="buildkite-gha/v1/plans/${step_key}/${PHASE0_PLAN_DIGEST#sha256:}"
   buildkite-agent artifact download "${prefix}/*" "${work}" --step "${PHASE0_PLAN_PRODUCER}"
   [[ "$(sha256_file "${work}/${prefix}/plan.json")" == "${PHASE0_PLAN_DIGEST}" ]]
+  jq -S -c . "${work}/${prefix}/plan.json" > "${work}/plan.canonical.json"
+  truncate -s -1 "${work}/plan.canonical.json"
+  cmp -s "${work}/plan.canonical.json" "${work}/${prefix}/plan.json"
   verify_json "${work}/${prefix}/binding.jws" > "${work}/claims.json"
+  jq -S -c . "${work}/claims.json" > "${work}/claims.canonical.json"
+  truncate -s -1 "${work}/claims.canonical.json"
+  cmp -s "${work}/claims.canonical.json" "${work}/claims.json"
+  local now
+  now="$(date +%s)"
   jq -e \
     --arg organization_id "${BUILDKITE_ORGANIZATION_ID}" \
     --arg pipeline_id "${BUILDKITE_PIPELINE_ID}" \
@@ -230,7 +267,11 @@ load_and_verify_plan() {
     --arg commit "${PHASE0_COMMIT}" \
     --arg event_digest "${PHASE0_EVENT_DIGEST}" \
     --arg plan_digest "${PHASE0_PLAN_DIGEST}" \
-    '.build.organization_id == $organization_id and .build.pipeline_id == $pipeline_id and .build.build_id == $build_id and .step_key == $step_key and .queue == $queue and .event.name == $event_name and .event.repository == $repository and .event.ref == $ref and .event.commit == $commit and .event.digest == $event_digest and .plan_digest == $plan_digest' \
+    --arg iss "${binding_issuer}" \
+    --arg jti "${PHASE0_BINDING_JTI}" \
+    --argjson now "${now}" \
+    --argjson max_lifetime "${binding_max_lifetime_seconds}" \
+    '(keys == ["build","capability_ceiling","event","exp","iat","iss","jti","plan_digest","queue","step_key"]) and (.build | keys == ["build_id","organization_id","pipeline_id"]) and (.event | keys == ["attestation","commit","digest","name","provider","ref","repository","trust"]) and .iss == $iss and .jti == $jti and (.iat | type == "number") and (.exp | type == "number") and .iat == (.iat | floor) and .exp == (.exp | floor) and .iat >= 0 and .iat <= $now and $now < .exp and .exp > .iat and (.exp - .iat) <= $max_lifetime and .build.organization_id == $organization_id and .build.pipeline_id == $pipeline_id and .build.build_id == $build_id and .step_key == $step_key and .queue == $queue and .event.provider == "github" and .event.name == $event_name and .event.repository == $repository and .event.ref == $ref and .event.commit == $commit and .event.digest == $event_digest and .event.trust == "untrusted" and .event.attestation == "buildkite-webhook" and .plan_digest == $plan_digest and (.capability_ceiling | type == "array") and .capability_ceiling == (.capability_ceiling | sort | unique) and all(.capability_ceiling[]; . == "network" or . == "docker" or . == "privileged-container" or . == "secrets" or . == "provider-token-read" or . == "provider-token-write")' \
     "${work}/claims.json" >/dev/null
   jq -e --slurpfile claims "${work}/claims.json" --argjson local "${PHASE0_LOCAL_CAPABILITIES}" \
     'all(.required_capabilities[]; . as $cap | ($claims[0].capability_ceiling | index($cap)) != null and ($local | index($cap)) != null) and all($claims[0].capability_ceiling[]; . as $cap | ($local | index($cap)) != null)' \
@@ -245,7 +286,7 @@ producer() {
   mkdir -p "${work}/buildkite-gha/v1/results/${producer_key}"
   local result="success"
   [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && result="failure"
-  jq -cn --arg build_id "${BUILDKITE_BUILD_ID}" --arg job_id "${BUILDKITE_JOB_ID}" --arg step_key "${producer_key}" --arg plan_digest "${PHASE0_PLAN_DIGEST}" --arg result "${result}" \
+  jq -Scn --arg build_id "${BUILDKITE_BUILD_ID}" --arg job_id "${BUILDKITE_JOB_ID}" --arg step_key "${producer_key}" --arg plan_digest "${PHASE0_PLAN_DIGEST}" --arg result "${result}" \
     '{schema:"buildkite-gha/result-manifest/v1",plan_digest:$plan_digest,producer:{build_id:$build_id,job_id:$job_id,step_key:$step_key},result:$result,outputs:[{name:"message",value:"phase0-producer"}]}' \
     > "${work}/buildkite-gha/v1/results/${producer_key}/manifest.json"
   truncate -s -1 "${work}/buildkite-gha/v1/results/${producer_key}/manifest.json"
@@ -262,17 +303,29 @@ consumer() {
   work="$(mktemp -d)"
   trap 'rm -rf "${work}"' EXIT
   load_and_verify_plan "${consumer_key}" "${work}"
-  buildkite-agent artifact download "buildkite-gha/v1/results/${producer_key}/manifest.json" "${work}" --step "${producer_key}"
-  jq -e --arg build_id "${BUILDKITE_BUILD_ID}" --arg step_key "${producer_key}" '.schema == "buildkite-gha/result-manifest/v1" and .producer.build_id == $build_id and .producer.step_key == $step_key' "${work}/buildkite-gha/v1/results/${producer_key}/manifest.json" >/dev/null
-  buildkite-agent meta-data set "buildkite-gha/v1/results/${consumer_key}" "consumed"
+  require_env PHASE0_PRODUCER_PLAN_DIGEST
+  require_digest PHASE0_PRODUCER_PLAN_DIGEST "${PHASE0_PRODUCER_PLAN_DIGEST}"
+  local manifest="${work}/buildkite-gha/v1/results/${producer_key}/manifest.json" canonical="${work}/manifest.canonical.json" producer_job_id expected_result="success"
+  producer_job_id="$(buildkite-agent artifact search "buildkite-gha/v1/results/${producer_key}/manifest.json" --step "${producer_key}" --format '%j')"
+  require_uuid producer_job_id "${producer_job_id}"
+  buildkite-agent artifact download "buildkite-gha/v1/results/${producer_key}/manifest.json" "${work}" --step "${producer_job_id}"
+  jq -S -c . "${manifest}" > "${canonical}"
+  truncate -s -1 "${canonical}"
+  cmp -s "${canonical}" "${manifest}"
+  [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && expected_result="failure"
+  jq -e --arg build_id "${BUILDKITE_BUILD_ID}" --arg job_id "${producer_job_id}" --arg step_key "${producer_key}" --arg plan_digest "${PHASE0_PRODUCER_PLAN_DIGEST}" --arg result "${expected_result}" \
+    '.schema == "buildkite-gha/result-manifest/v1" and .plan_digest == $plan_digest and .producer.build_id == $build_id and .producer.job_id == $job_id and .producer.step_key == $step_key and .result == $result and .outputs == [{"name":"message","value":"phase0-producer"}]' "${manifest}" >/dev/null
+  buildkite-agent meta-data set "buildkite-gha/v1/results/${consumer_key}" "consumed:${expected_result}"
 }
 
 native() {
-  [[ "$(buildkite-agent meta-data get "buildkite-gha/v1/results/${consumer_key}")" == "consumed" ]]
+  local expected_result="success"
+  [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && expected_result="failure"
+  [[ "$(buildkite-agent meta-data get "buildkite-gha/v1/results/${consumer_key}")" == "consumed:${expected_result}" ]]
   echo "native step observed dynamically uploaded consumer completion"
 }
 
 case "${1:-}" in
-  bootstrap|producer|consumer|native) "$1" ;;
-  *) echo "usage: $0 bootstrap|producer|consumer|native" >&2; exit 64 ;;
+  bootstrap|producer|consumer|native|canonicalize) "$1" ;;
+  *) echo "usage: $0 bootstrap|producer|consumer|native|canonicalize" >&2; exit 64 ;;
 esac

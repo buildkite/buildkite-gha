@@ -4,7 +4,7 @@ This probe is intentionally dormant: local tests capture commands and never call
 
 ## What the local repository proves
 
-`internal/transport` proves deterministic two-job YAML, immutable content-addressed plan paths, strict compiler dependencies, failure-settling logical `needs`, exact producer-constrained artifact downloads, canonical producer-attributed result manifests, visibility-only metadata, ES256-signed expected/completed markers, fail-closed retry classification, and signature-first verification of build, step, queue, event, plan, and capability bindings. The probe script uses the same ordering and field names, but a passing local test is not evidence about Buildkite scheduling, artifact attribution, upload atomicity, or signature rejection.
+`internal/transport` proves deterministic two-job YAML, caller-root materialization and immediate on-disk verification of immutable content-addressed plan bytes, strict compiler dependencies, failure-settling logical `needs`, exact producer-constrained artifact downloads, canonical producer-attributed result manifests, visibility-only metadata, ES256-signed expected/completed markers, fail-closed retry classification, and signature-first verification of build, step, queue, event, plan, capability, replay identity, and bounded validity claims. The Go signer and probe share an RFC 8785 fixture under `fixtures/`; a passing local test is still not evidence about Buildkite scheduling, artifact attribution, upload atomicity, or signature rejection.
 
 ## Signed-pipeline answer
 
@@ -16,8 +16,8 @@ The live probe also requires:
 
 - Buildkite Agent v3.130.0 or newer on compiler and runtime queues for `checkout.skip`;
 - `jq`, `sha256sum`, and a pinned probe distribution installed at `/opt/buildkite-gha/phase-0-transport-probe/probe.sh` on both queues;
-- `PHASE0_SIGN_JSON`, a trusted compiler-queue command that accepts canonical JSON on stdin and emits its detached ES256 envelope on stdout;
-- `PHASE0_VERIFY_JSON`, a runtime-queue command using verification-only roots that accepts that envelope on stdin and emits verified canonical claims on stdout;
+- `PHASE0_SIGN_JSON`, a trusted compiler-queue command that accepts RFC 8785 canonical JSON on stdin and emits its detached ES256 envelope on stdout;
+- `PHASE0_VERIFY_JSON`, a runtime-queue command using verification-only roots that accepts that envelope on stdin, enforces the protected-header profile, and emits the verified RFC 8785 claims on stdout;
 - `PHASE0_RUNTIME_QUEUE`, `PHASE0_EVENT_NAME`, `PHASE0_REPOSITORY`, `PHASE0_REF`, 40-character `PHASE0_COMMIT`, canonical `PHASE0_EVENT_DIGEST`, and runtime-owned JSON `PHASE0_LOCAL_CAPABILITIES` (for example `["network"]`); and
 - immutable organization and pipeline UUIDs exposed as `BUILDKITE_ORGANIZATION_ID` and `BUILDKITE_PIPELINE_ID` by the probe installation until the live environment-variable oracle confirms their source.
 
@@ -25,7 +25,7 @@ Before enabling the pipeline, verify the probe release checksum and signature ou
 
 ## Run and inspect
 
-Install `pipeline.yml` as the pipeline definition, sign that bootstrap definition, and run once normally. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`, while removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
+Install `pipeline.yml` as the pipeline definition, sign that bootstrap definition, and run once normally. Each binding carries the Phase 0 issuer, a deterministic build/step/plan replay identity, and a one-hour validity window; runtime rejects a future, expired, longer-than-24-hour, or wrong-identity binding before consuming the plan. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`. It obtains the producer job UUID from the exact step-constrained artifact search, constrains the download by that UUID, verifies the manifest's canonical bytes, plan digest, build/job/step identity, exact result and bounded outputs, and records that it consumed the expected failure. Removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
 
 To inspect exact generated jobs and their pipeline signatures with a read-only REST token:
 

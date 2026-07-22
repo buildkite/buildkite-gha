@@ -12,7 +12,13 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"reflect"
+	"slices"
 	"sort"
+	"strconv"
+	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const markerType = "buildkite-gha-upload-marker+jws"
@@ -49,7 +55,10 @@ func (k ES256Key) sign(typ string, payload []byte) (string, error) {
 	if k.Private == nil || k.ID == "" {
 		return "", errors.New("ES256 private key and key ID are required")
 	}
-	header, _ := json.Marshal(protectedHeader{Algorithm: "ES256", KeyID: k.ID, Type: typ})
+	header, err := canonicalJSON(protectedHeader{Algorithm: "ES256", KeyID: k.ID, Type: typ})
+	if err != nil {
+		return "", fmt.Errorf("canonicalize protected header: %w", err)
+	}
 	protected := base64.RawURLEncoding.EncodeToString(header)
 	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
 	hash := sha256.Sum256([]byte(protected + "." + encodedPayload))
@@ -58,7 +67,10 @@ func (k ES256Key) sign(typ string, payload []byte) (string, error) {
 		return "", err
 	}
 	signature := append(padded(r, 32), padded(s, 32)...)
-	value, _ := json.Marshal(signedValue{Payload: encodedPayload, Protected: protected, Signature: base64.RawURLEncoding.EncodeToString(signature)})
+	value, err := canonicalJSON(signedValue{Payload: encodedPayload, Protected: protected, Signature: base64.RawURLEncoding.EncodeToString(signature)})
+	if err != nil {
+		return "", fmt.Errorf("canonicalize signed value: %w", err)
+	}
 	return string(value), nil
 }
 
@@ -75,7 +87,10 @@ func (k ES256Key) verify(typ, encoded string) ([]byte, error) {
 	if err := requireJSONEOF(decoder); err != nil {
 		return nil, err
 	}
-	canonicalValue, _ := json.Marshal(value)
+	canonicalValue, err := canonicalJSON(value)
+	if err != nil {
+		return nil, errors.New("non-canonical signed value")
+	}
 	if canonicalValue == nil || !bytes.Equal(canonicalValue, []byte(encoded)) {
 		return nil, errors.New("non-canonical signed value")
 	}
@@ -92,7 +107,10 @@ func (k ES256Key) verify(typ, encoded string) ([]byte, error) {
 	if err := requireJSONEOF(headerDecoder); err != nil {
 		return nil, errors.New("untrusted protected header")
 	}
-	canonicalHeader, _ := json.Marshal(header)
+	canonicalHeader, err := canonicalJSON(header)
+	if err != nil {
+		return nil, errors.New("non-canonical protected header")
+	}
 	if !bytes.Equal(canonicalHeader, headerBytes) {
 		return nil, errors.New("non-canonical protected header")
 	}
@@ -115,6 +133,101 @@ func padded(value *big.Int, size int) []byte {
 	out := make([]byte, size)
 	value.FillBytes(out)
 	return out
+}
+
+// canonicalJSON encodes the bounded, integer-only Phase 0 signing models using
+// RFC 8785 object ordering and string escaping. The signed models deliberately
+// exclude floating-point values, maps, and interface fields so their complete
+// JCS domain remains small and auditable.
+func canonicalJSON(value any) ([]byte, error) {
+	var out bytes.Buffer
+	if err := appendCanonical(&out, reflect.ValueOf(value)); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func appendCanonical(out *bytes.Buffer, value reflect.Value) error {
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return errors.New("nil value is outside the signed JSON domain")
+		}
+		return appendCanonical(out, value.Elem())
+	}
+	switch value.Kind() {
+	case reflect.Struct:
+		type field struct {
+			name  string
+			value reflect.Value
+		}
+		fields := make([]field, 0, value.NumField())
+		model := value.Type()
+		for i := range value.NumField() {
+			definition := model.Field(i)
+			name := definition.Tag.Get("json")
+			if comma := strings.IndexByte(name, ','); comma >= 0 {
+				name = name[:comma]
+			}
+			if name == "" || name == "-" || definition.PkgPath != "" {
+				return fmt.Errorf("field %s has no signed JSON name", definition.Name)
+			}
+			fields = append(fields, field{name: name, value: value.Field(i)})
+		}
+		sort.Slice(fields, func(i, j int) bool { return lessUTF16(fields[i].name, fields[j].name) })
+		out.WriteByte('{')
+		for i, field := range fields {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			if err := appendCanonicalString(out, field.name); err != nil {
+				return err
+			}
+			out.WriteByte(':')
+			if err := appendCanonical(out, field.value); err != nil {
+				return err
+			}
+		}
+		out.WriteByte('}')
+	case reflect.Slice, reflect.Array:
+		out.WriteByte('[')
+		for i := range value.Len() {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			if err := appendCanonical(out, value.Index(i)); err != nil {
+				return err
+			}
+		}
+		out.WriteByte(']')
+	case reflect.String:
+		return appendCanonicalString(out, value.String())
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		out.WriteString(strconv.FormatInt(value.Int(), 10))
+	default:
+		return fmt.Errorf("%s is outside the signed JSON domain", value.Kind())
+	}
+	return nil
+}
+
+func appendCanonicalString(out *bytes.Buffer, value string) error {
+	if !utf8.ValidString(value) {
+		return errors.New("invalid UTF-8 string in signed JSON")
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u003c`), []byte("<"))
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u003e`), []byte(">"))
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u0026`), []byte("&"))
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u2028`), []byte("\u2028"))
+	encoded = bytes.ReplaceAll(encoded, []byte(`\u2029`), []byte("\u2029"))
+	out.Write(encoded)
+	return nil
+}
+
+func lessUTF16(left, right string) bool {
+	return slices.Compare(utf16.Encode([]rune(left)), utf16.Encode([]rune(right))) < 0
 }
 
 // UploadJob binds each deterministic key to the signed plan digest embedded in
@@ -179,7 +292,10 @@ func SignMarker(key ES256Key, intent UploadIntent, phase string) (MarkerValue, e
 	if err != nil {
 		return MarkerValue{}, err
 	}
-	payload, _ := json.Marshal(uploadMarker{Phase: phase, Intent: intent})
+	payload, err := canonicalJSON(uploadMarker{Phase: phase, Intent: intent})
+	if err != nil {
+		return MarkerValue{}, fmt.Errorf("canonicalize upload marker: %w", err)
+	}
 	value, err := key.sign(markerType, payload)
 	if err != nil {
 		return MarkerValue{}, err
@@ -212,7 +328,10 @@ func verifyMarker(key ES256Key, encoded, phase string) (UploadIntent, error) {
 	if err != nil {
 		return UploadIntent{}, err
 	}
-	canonical, _ := json.Marshal(uploadMarker{Phase: phase, Intent: normalized})
+	canonical, err := canonicalJSON(uploadMarker{Phase: phase, Intent: normalized})
+	if err != nil {
+		return UploadIntent{}, errors.New("invalid signed marker payload")
+	}
 	if !bytes.Equal(canonical, payload) {
 		return UploadIntent{}, errors.New("non-canonical signed marker payload")
 	}
