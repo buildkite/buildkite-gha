@@ -1,6 +1,6 @@
 # `buildkite-gha`: GitHub Actions compatibility for Buildkite
 
-Status: **Draft**
+Status: **Active**
 Date: 2026-07-22
 Last reviewed: 2026-07-22
 Target repository: `buildkite/buildkite-gha`
@@ -1048,6 +1048,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - a first-class Buildkite pipeline import schema.
 
 ## Delivery plan
+
+### Current progress
+
+- The repository baseline, reviewed architecture plan, and staged
+  `testdata/smoke` corpus are committed on `main`.
+- Phase 0 implementation is active on `lox/phase-0`.
+- The first work wave covers the Go/CLI foundation, the `act` reuse decision,
+  and the plan-envelope trust contract in separate worktrees before integration
+  and executable spikes begin.
 
 ### Phase 0 — Prove the semantic foundation
 
