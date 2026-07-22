@@ -18,6 +18,11 @@ func TestParseUsesExpressionSyntaxFrontend(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "invalid expression") {
 		t.Fatalf("Parse() error = %v, want syntax error", err)
 	}
+
+	_, err = Parse("${{ vars.RUNNER }} }}", 1, 1)
+	if err == nil || !strings.Contains(err.Error(), "embedded closing delimiter") {
+		t.Fatalf("Parse() error = %v, want embedded delimiter rejection", err)
+	}
 }
 
 func TestEvaluateIsSinglePass(t *testing.T) {
@@ -68,6 +73,75 @@ func TestEvaluateFailsClosed(t *testing.T) {
 			_, err := Evaluate(test.template, Context{})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Evaluate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
+	context := CompileContext{
+		GitHub: map[string]any{"event_name": "push", "event": map[string]any{"action": "opened"}},
+		Event:  map[string]any{"action": "opened"},
+		Vars:   map[string]string{"RUNNERS": `["ubuntu-24.04","ubuntu-22.04"]`},
+		Matrix: map[string]any{"os": "ubuntu-24.04"},
+	}
+	tests := []struct {
+		expression string
+		want       any
+	}{
+		{expression: "${{ github.event_name }}", want: "push"},
+		{expression: "${{ github.event.action }}", want: "opened"},
+		{expression: "${{ event.action }}", want: "opened"},
+		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
+	}
+	for _, test := range tests {
+		expr, err := Parse(test.expression, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := EvaluateCompile(expr, context)
+		if err != nil {
+			t.Fatalf("EvaluateCompile(%q) error = %v", test.expression, err)
+		}
+		if got != test.want {
+			t.Fatalf("EvaluateCompile(%q) = %#v, want %#v", test.expression, got, test.want)
+		}
+	}
+
+	expr, err := Parse("${{ fromJSON(vars.RUNNERS) }}", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := EvaluateCompile(expr, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runners, ok := got.([]any)
+	if !ok || len(runners) != 2 || runners[0] != "ubuntu-24.04" {
+		t.Fatalf("fromJSON runners = %#v", got)
+	}
+}
+
+func TestEvaluateCompileFailsClosed(t *testing.T) {
+	tests := []struct {
+		expression string
+		want       string
+	}{
+		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
+		{expression: "${{ vars.MISSING }}", want: `unavailable value "vars.missing"`},
+		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
+		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
+		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
+	}
+	for _, test := range tests {
+		t.Run(test.expression, func(t *testing.T) {
+			expr, err := Parse(test.expression, 1, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = EvaluateCompile(expr, CompileContext{Vars: map[string]string{"BAD": "["}, Event: map[string]any{"ref": "one", "REF": "two"}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("EvaluateCompile() error = %v, want %q", err, test.want)
 			}
 		})
 	}

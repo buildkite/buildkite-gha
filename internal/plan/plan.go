@@ -75,6 +75,7 @@ type Job struct {
 	Target                  Target            `json:"target"`
 	RequiredCapabilities    []string          `json:"required_capabilities"`
 	Matrix                  map[string]any    `json:"matrix,omitempty"`
+	Vars                    map[string]string `json:"vars,omitempty"`
 	Needs                   map[string]Need   `json:"needs,omitempty"`
 	Env                     map[string]string `json:"env,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`

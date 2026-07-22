@@ -232,6 +232,63 @@ jobs:
 	}
 }
 
+func TestCompileMatchesStaticIncludeExcludeAgainstExpressionNumbers(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ${{ fromJSON(vars.VERSIONS) }}
+        exclude:
+          - version: 12
+        include:
+          - version: 14.0
+            experimental: true
+    steps:
+      - run: true
+`)
+	compiled, err := CompileWithOptions("numeric-matrix.yml", source, readFile(t, smokePath("events", "push.json")), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"VERSIONS": `[12,14]`}},
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(compiled, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Matrix["version"] != float64(14) || ir.Jobs[0].Matrix["experimental"] != true {
+		t.Fatalf("numeric matrix jobs = %#v, want one included version 14 job", ir.Jobs)
+	}
+}
+
+func TestCompileRejectsMatrixThatExcludesEveryCombination(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12]
+        exclude:
+          - version: 12
+    steps:
+      - run: true
+  report:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	_, err := Compile("empty-matrix.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), "matrix excludes every combination") {
+		t.Fatalf("Compile() error = %v, want empty matrix rejection", err)
+	}
+}
+
 func TestCompileRejectsRuntimeDependentGraphExpression(t *testing.T) {
 	source := []byte(`name: dynamic
 on: push
@@ -274,7 +331,7 @@ jobs:
         with:
           message: ${{ steps.javascript.outputs.result }}
 `)
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +354,7 @@ jobs:
 	if producer.RequiredCapabilities == nil || len(producer.RequiredCapabilities) != 0 {
 		t.Fatalf("required capabilities = %#v, want concrete empty array", producer.RequiredCapabilities)
 	}
-	second, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	second, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +373,7 @@ jobs:
 
 func TestCompilePlansRejectsNeedsWithoutRuntimeManifestInjection(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
-	_, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	_, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), "jobs with needs are unsupported until producer result manifests can be injected at runtime") {
 		t.Fatalf("CompilePlans() error = %v, want needs boundary", err)
 	}
@@ -333,7 +390,7 @@ func TestCompilePlansDerivesDockerCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  docker:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/docker\n")
-	plans, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	plans, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +410,7 @@ func TestCompilePlansRejectsNode20LocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  node20:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/node20\n")
-	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), `uses unsupported runtime "node20"`) {
 		t.Fatalf("CompilePlans() error = %v, want node20 fail-closed boundary", err)
 	}
@@ -370,7 +427,7 @@ func TestCompilePlansRejectsRuntimeInvalidActionMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  invalid:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/invalid\n")
-	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
 		t.Fatalf("CompilePlans() error = %v, want strict action metadata rejection", err)
 	}
@@ -419,7 +476,7 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 	path := smokePath(".github", "workflows", "schema-fixture.yml")
 	source := []byte("on: push\njobs:\n  schema:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,6 +533,7 @@ func TestCompileRejectsInvalidEventSnapshots(t *testing.T) {
 		wanted string
 	}{
 		{name: "unknown field", event: strings.Replace(valid, `"actor":`, `"unexpected":true,"actor":`, 1), wanted: "unknown field"},
+		{name: "self-asserted trust", event: strings.Replace(valid, `"actor":`, `"trust":"trusted","actor":`, 1), wanted: `unknown field "trust"`},
 		{name: "trailing value", event: valid + `{}`, wanted: "multiple JSON values"},
 		{name: "missing ref", event: strings.Replace(valid, `"ref": "refs/heads/main"`, `"ref": ""`, 1), wanted: "ref, sha, and actor"},
 		{name: "missing actor", event: strings.Replace(valid, `"actor": "buildkite-gha-smoke"`, `"actor": ""`, 1), wanted: "ref, sha, and actor"},

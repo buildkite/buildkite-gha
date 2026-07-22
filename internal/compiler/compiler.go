@@ -8,13 +8,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -28,6 +31,7 @@ const (
 type Event struct {
 	Provider   string         `json:"provider"`
 	Event      string         `json:"event"`
+	Trust      EventTrust     `json:"trust"`
 	Repository Repository     `json:"repository"`
 	Ref        string         `json:"ref"`
 	SHA        string         `json:"sha"`
@@ -48,6 +52,7 @@ type IR struct {
 	Schema    string            `json:"schema"`
 	Workflow  WorkflowSource    `json:"workflow"`
 	Event     Event             `json:"event"`
+	Vars      map[string]string `json:"vars,omitempty"`
 	Execution ExecutionBoundary `json:"execution"`
 	Jobs      []JobInstance     `json:"jobs"`
 }
@@ -73,6 +78,7 @@ type JobInstance struct {
 	Needs                   []string          `json:"needs,omitempty"`
 	LogicalNeeds            []string          `json:"logical_needs,omitempty"`
 	RunsOn                  []string          `json:"runs_on"`
+	Queue                   string            `json:"queue"`
 	Matrix                  map[string]any    `json:"matrix,omitempty"`
 	FailFast                *bool             `json:"fail_fast,omitempty"`
 	MaxParallel             *int              `json:"max_parallel,omitempty"`
@@ -97,7 +103,9 @@ func Validate(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	instances, err := expand(path, parsed)
+	options := defaultOptions()
+	event := Event{Trust: options.EventTrust, Payload: map[string]any{}}
+	instances, err := expand(path, parsed, compileContext(event, nil), options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -106,16 +114,41 @@ func Validate(path string, source []byte) (Report, error) {
 
 // ValidateEvent validates both the supported static graph and its event input.
 func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
-	if _, err := parseEvent(eventSource); err != nil {
+	return ValidateEventWithOptions(path, source, eventSource, defaultOptions())
+}
+
+// ValidateEventWithOptions validates the graph against explicit variables and
+// runner policy without producing compiler output.
+func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
+	if err := options.validate(); err != nil {
 		return Report{}, err
 	}
-	return Validate(path, source)
+	parsed, err := workflow.Parse(path, source)
+	if err != nil {
+		return Report{}, err
+	}
+	event, err := parseEvent(eventSource)
+	if err != nil {
+		return Report{}, err
+	}
+	event.Trust = options.EventTrust
+	instances, err := expand(path, parsed, compileContext(event, options.Vars.snapshot()), options)
+	if err != nil {
+		return Report{}, err
+	}
+	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances)}, nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
 // stable JSON bytes terminated by a newline.
 func Compile(path string, source, eventSource []byte) ([]byte, error) {
-	ir, err := compile(path, source, eventSource)
+	return CompileWithOptions(path, source, eventSource, defaultOptions())
+}
+
+// CompileWithOptions compiles using an explicit non-secret variable snapshot,
+// event trust classification, and runner policy.
+func CompileWithOptions(path string, source, eventSource []byte, options Options) ([]byte, error) {
+	ir, err := compile(path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -131,16 +164,23 @@ func Compile(path string, source, eventSource []byte) ([]byte, error) {
 
 // CompilePlans connects the owned compiler IR to one versioned plan per job instance.
 func CompilePlans(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, targetQueue string) ([]plan.Job, error) {
+	if targetQueue != "gha-untrusted" {
+		return nil, fmt.Errorf("unattested event snapshots may only target queue %q; use CompilePlansWithOptions for authenticated events", "gha-untrusted")
+	}
+	options := defaultOptions()
+	return CompilePlansWithOptions(path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
+}
+
+// CompilePlansWithOptions creates one plan per job using compiler-selected
+// queues and the same snapshotted vars used for graph construction.
+func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	if compilerVersion == "" {
 		return nil, fmt.Errorf("compiler version is required")
-	}
-	if targetQueue == "" {
-		return nil, fmt.Errorf("target queue is required")
 	}
 	if !strings.HasPrefix(compilerDistributionDigest, "sha256:") {
 		return nil, fmt.Errorf("compiler distribution digest is required")
 	}
-	ir, err := compile(path, source, eventSource)
+	ir, err := compile(path, source, eventSource, options)
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +239,10 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 			Event: plan.Event{
 				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
 			},
-			Target:                  plan.Target{StepKey: instance.Key, Queue: targetQueue},
+			Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 			RequiredCapabilities:    capabilities,
 			Matrix:                  instance.Matrix,
+			Vars:                    cloneMap(ir.Vars),
 			Env:                     instance.Env,
 			DefaultShell:            instance.DefaultShell,
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
@@ -223,7 +264,10 @@ func planSpan(span workflow.Span) plan.Span {
 	}
 }
 
-func compile(path string, source, eventSource []byte) (IR, error) {
+func compile(path string, source, eventSource []byte, options Options) (IR, error) {
+	if err := options.validate(); err != nil {
+		return IR{}, err
+	}
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
 		return IR{}, err
@@ -232,7 +276,9 @@ func compile(path string, source, eventSource []byte) (IR, error) {
 	if err != nil {
 		return IR{}, err
 	}
-	jobs, err := expand(path, parsed)
+	event.Trust = options.EventTrust
+	vars := options.Vars.snapshot()
+	jobs, err := expand(path, parsed, compileContext(event, vars), options)
 	if err != nil {
 		return IR{}, err
 	}
@@ -241,6 +287,7 @@ func compile(path string, source, eventSource []byte) (IR, error) {
 		Schema:   schema,
 		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:])},
 		Event:    event,
+		Vars:     vars,
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
@@ -253,11 +300,19 @@ func parseEvent(source []byte) (Event, error) {
 	if len(bytes.TrimSpace(source)) == 0 {
 		return Event{}, fmt.Errorf("event snapshot is required")
 	}
-	var event Event
+	var input struct {
+		Provider   string         `json:"provider"`
+		Event      string         `json:"event"`
+		Repository Repository     `json:"repository"`
+		Ref        string         `json:"ref"`
+		SHA        string         `json:"sha"`
+		Actor      string         `json:"actor"`
+		Payload    map[string]any `json:"payload"`
+	}
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&event); err != nil {
+	if err := decoder.Decode(&input); err != nil {
 		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
@@ -266,16 +321,36 @@ func parseEvent(source []byte) (Event, error) {
 		}
 		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
 	}
-	if strings.TrimSpace(event.Provider) == "" || strings.TrimSpace(event.Event) == "" || strings.TrimSpace(event.Repository.Owner) == "" || strings.TrimSpace(event.Repository.Name) == "" || strings.TrimSpace(event.Ref) == "" || strings.TrimSpace(event.SHA) == "" || strings.TrimSpace(event.Actor) == "" {
+	if strings.TrimSpace(input.Provider) == "" || strings.TrimSpace(input.Event) == "" || strings.TrimSpace(input.Repository.Owner) == "" || strings.TrimSpace(input.Repository.Name) == "" || strings.TrimSpace(input.Ref) == "" || strings.TrimSpace(input.SHA) == "" || strings.TrimSpace(input.Actor) == "" {
 		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, ref, sha, and actor")
 	}
-	if event.Payload == nil {
-		event.Payload = map[string]any{}
+	if input.Payload == nil {
+		input.Payload = map[string]any{}
 	}
-	return event, nil
+	return Event{
+		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
+		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
+	}, nil
 }
 
-func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
+func compileContext(event Event, vars map[string]string) expression.CompileContext {
+	repository := event.Repository.Owner + "/" + event.Repository.Name
+	return expression.CompileContext{
+		GitHub: map[string]any{
+			"event_name":       event.Event,
+			"event":            event.Payload,
+			"repository":       repository,
+			"repository_owner": event.Repository.Owner,
+			"ref":              event.Ref,
+			"sha":              event.SHA,
+			"actor":            event.Actor,
+		},
+		Event: event.Payload,
+		Vars:  vars,
+	}
+}
+
+func expand(path string, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -292,11 +367,19 @@ func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
 	instanceKeys := make(map[string]string)
 	for _, id := range order {
 		job := jobs[id]
-		matrices, err := expandMatrix(path, job)
+		matrices, err := expandMatrix(path, job, context)
 		if err != nil {
 			return nil, err
 		}
 		for _, matrix := range matrices {
+			labels, err := resolveRunsOn(job, context, matrix)
+			if err != nil {
+				return nil, locatedJobError(path, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+			}
+			queue, err := options.Runners.resolve(labels, options.EventTrust)
+			if err != nil {
+				return nil, locatedJobError(path, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
 				return nil, jobError(path, job, fmt.Sprintf("create deterministic instance key: %v", err))
@@ -309,7 +392,8 @@ func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
 				Key:                     key,
 				LogicalJobID:            job.ID,
 				Label:                   instanceLabel(job, matrix),
-				RunsOn:                  append([]string(nil), job.RunsOn...),
+				RunsOn:                  labels,
+				Queue:                   queue,
 				LogicalNeeds:            append([]string(nil), job.Needs...),
 				Matrix:                  matrix,
 				FailFast:                job.FailFast,
@@ -342,10 +426,7 @@ func supported(path string, job workflow.Job) error {
 	if job.Reusable {
 		return jobError(path, job, "reusable-workflow jobs are unsupported in the Phase 0 compiler")
 	}
-	if job.RunsOnExpr != nil {
-		return locatedJobError(path, job, job.RunsOnExpr.Span.Start.Line, job.RunsOnExpr.Span.Start.Column, "runtime-dependent runs-on expressions are unsupported")
-	}
-	if len(job.RunsOn) == 0 {
+	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
 		return jobError(path, job, "runs-on must resolve statically")
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
@@ -367,17 +448,6 @@ func supported(path string, job workflow.Job) error {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step timeouts are unsupported in the Phase 0 runtime")
 		}
 	}
-	if job.Matrix == nil {
-		return nil
-	}
-	if job.Matrix.Expression != nil {
-		return locatedJobError(path, job, job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column, "runtime-dependent matrix expressions are unsupported")
-	}
-	for _, row := range job.Matrix.Rows {
-		if row.Expression != nil {
-			return locatedJobError(path, job, row.Expression.Span.Start.Line, row.Expression.Span.Start.Column, fmt.Sprintf("runtime-dependent matrix expression for %q is unsupported", row.Name))
-		}
-	}
 	return nil
 }
 
@@ -392,15 +462,23 @@ func cloneMap(in map[string]string) map[string]string {
 	return out
 }
 
-func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
+func expandMatrix(path string, job workflow.Job, context expression.CompileContext) ([]map[string]any, error) {
 	if job.Matrix == nil {
 		return []map[string]any{nil}, nil
 	}
+	matrix, err := resolveMatrix(job.Matrix, context)
+	if err != nil {
+		position := job.Matrix.Span.Start
+		if job.Matrix.Expression != nil {
+			position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
+		}
+		return nil, locatedJobError(path, job, position.Line, position.Column, err.Error())
+	}
 	matrices := []map[string]any{{}}
-	if len(job.Matrix.Rows) == 0 {
+	if len(matrix.Rows) == 0 {
 		matrices = nil
 	}
-	for _, row := range job.Matrix.Rows {
+	for _, row := range matrix.Rows {
 		if len(row.Values) == 0 {
 			return nil, jobError(path, job, fmt.Sprintf("matrix dimension %q has no values", row.Name))
 		}
@@ -421,7 +499,7 @@ func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
 		matrices = next
 	}
 
-	matrices = excludeMatrixCombinations(matrices, job.Matrix.Exclude)
+	matrices = excludeMatrixCombinations(matrices, matrix.Exclude)
 	// Includes may overwrite values added by earlier includes, but not original
 	// dimensions. Standalone combinations are never candidates for later entries.
 	type includedMatrix struct {
@@ -432,7 +510,7 @@ func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
 	for i, matrix := range matrices {
 		included[i] = includedMatrix{values: matrix, original: cloneAnyMap(matrix)}
 	}
-	for _, combination := range job.Matrix.Include {
+	for _, combination := range matrix.Include {
 		values := matrixCombinationValues(combination)
 		matched := false
 		for i := range included {
@@ -455,7 +533,149 @@ func expandMatrix(path string, job workflow.Job) ([]map[string]any, error) {
 	for _, matrix := range included {
 		matrices = append(matrices, matrix.values)
 	}
+	if len(matrices) == 0 {
+		return nil, jobError(path, job, "matrix excludes every combination")
+	}
 	return matrices, nil
+}
+
+func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (*workflow.Matrix, error) {
+	if matrix.Expression != nil {
+		value, err := expression.EvaluateCompile(*matrix.Expression, context)
+		if err != nil {
+			return nil, matrixExpressionError(err)
+		}
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("matrix expression resolved to %T, want object", value)
+		}
+		return matrixFromObject(object)
+	}
+	resolved := *matrix
+	resolved.Rows = make([]workflow.MatrixRow, len(matrix.Rows))
+	for i, row := range matrix.Rows {
+		resolved.Rows[i] = row
+		if row.Expression == nil {
+			resolved.Rows[i].Values = append([]workflow.Value(nil), row.Values...)
+			continue
+		}
+		value, err := expression.EvaluateCompile(*row.Expression, context)
+		if err != nil {
+			return nil, fmt.Errorf("matrix dimension %q: %w", row.Name, matrixExpressionError(err))
+		}
+		values, ok := value.([]any)
+		if !ok {
+			return nil, fmt.Errorf("matrix dimension %q resolved to %T, want array", row.Name, value)
+		}
+		resolved.Rows[i].Expression = nil
+		resolved.Rows[i].Values = make([]workflow.Value, len(values))
+		for j, value := range values {
+			resolved.Rows[i].Values[j] = workflow.Value{Data: value, Span: row.Span}
+		}
+	}
+	return &resolved, nil
+}
+
+func matrixExpressionError(err error) error {
+	if strings.Contains(err.Error(), `compile-time context "needs"`) || strings.Contains(err.Error(), `compile-time context "steps"`) {
+		return fmt.Errorf("runtime-dependent matrix expressions are unsupported: %w", err)
+	}
+	return fmt.Errorf("matrix expression cannot be resolved at compile time: %w", err)
+}
+
+func matrixFromObject(object map[string]any) (*workflow.Matrix, error) {
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		if key != "include" && key != "exclude" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	matrix := &workflow.Matrix{}
+	for _, key := range keys {
+		values, ok := object[key].([]any)
+		if !ok {
+			return nil, fmt.Errorf("matrix dimension %q resolved to %T, want array", key, object[key])
+		}
+		row := workflow.MatrixRow{Name: key, Values: make([]workflow.Value, len(values))}
+		for i, value := range values {
+			row.Values[i] = workflow.Value{Data: value}
+		}
+		matrix.Rows = append(matrix.Rows, row)
+	}
+	var err error
+	if matrix.Include, err = matrixCombinationsFromValue("include", object["include"]); err != nil {
+		return nil, err
+	}
+	if matrix.Exclude, err = matrixCombinationsFromValue("exclude", object["exclude"]); err != nil {
+		return nil, err
+	}
+	return matrix, nil
+}
+
+func matrixCombinationsFromValue(name string, value any) ([]workflow.MatrixCombination, error) {
+	if value == nil {
+		return nil, nil
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("matrix %s resolved to %T, want array", name, value)
+	}
+	combinations := make([]workflow.MatrixCombination, len(items))
+	for i, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("matrix %s entry %d resolved to %T, want object", name, i, item)
+		}
+		values := make(map[string]workflow.Value, len(object))
+		for key, value := range object {
+			values[key] = workflow.Value{Data: value}
+		}
+		combinations[i] = workflow.MatrixCombination{Values: values}
+	}
+	return combinations, nil
+}
+
+func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix map[string]any) ([]string, error) {
+	context.Matrix = matrix
+	if job.RunsOnExpr != nil {
+		value, err := expression.EvaluateCompile(*job.RunsOnExpr, context)
+		if err != nil {
+			return nil, fmt.Errorf("runs-on expression cannot be resolved at compile time: %w", err)
+		}
+		switch value := value.(type) {
+		case string:
+			return []string{value}, nil
+		case []any:
+			labels := make([]string, len(value))
+			for i, item := range value {
+				label, ok := item.(string)
+				if !ok {
+					return nil, fmt.Errorf("runs-on expression item %d resolved to %T, want string", i, item)
+				}
+				labels[i] = label
+			}
+			return labels, nil
+		default:
+			return nil, fmt.Errorf("runs-on expression resolved to %T, want string or array", value)
+		}
+	}
+	labels := make([]string, len(job.RunsOn))
+	for i, label := range job.RunsOn {
+		resolved, err := expression.EvaluateCompileTemplate(label, context)
+		if err != nil {
+			return nil, fmt.Errorf("runs-on label %q cannot be resolved at compile time: %w", label, err)
+		}
+		labels[i] = resolved
+	}
+	return labels, nil
+}
+
+func runsOnPosition(job workflow.Job) workflow.Position {
+	if job.RunsOnExpr != nil {
+		return workflow.Position{Line: job.RunsOnExpr.Span.Start.Line, Column: job.RunsOnExpr.Span.Start.Column}
+	}
+	return job.Span.Start
 }
 
 func excludeMatrixCombinations(matrices []map[string]any, exclusions []workflow.MatrixCombination) []map[string]any {
@@ -481,7 +701,7 @@ func excludeMatrixCombinations(matrices []map[string]any, exclusions []workflow.
 func matrixMatches(matrix, pattern map[string]any) bool {
 	for key, expected := range pattern {
 		actual, ok := matrix[key]
-		if !ok || !reflect.DeepEqual(actual, expected) {
+		if !ok || !matrixValuesEqual(actual, expected) {
 			return false
 		}
 	}
@@ -490,11 +710,67 @@ func matrixMatches(matrix, pattern map[string]any) bool {
 
 func includeCompatible(original, values map[string]any) bool {
 	for key, value := range values {
-		if originalValue, exists := original[key]; exists && !reflect.DeepEqual(originalValue, value) {
+		if originalValue, exists := original[key]; exists && !matrixValuesEqual(originalValue, value) {
 			return false
 		}
 	}
 	return true
+}
+
+func matrixValuesEqual(left, right any) bool {
+	if leftNumber, ok := matrixNumber(left); ok {
+		rightNumber, rightOK := matrixNumber(right)
+		return rightOK && leftNumber.Cmp(rightNumber) == 0
+	}
+	switch left := left.(type) {
+	case []any:
+		right, ok := right.([]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for i := range left {
+			if !matrixValuesEqual(left[i], right[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		right, ok := right.(map[string]any)
+		if !ok || len(left) != len(right) {
+			return false
+		}
+		for key, value := range left {
+			other, ok := right[key]
+			if !ok || !matrixValuesEqual(value, other) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(left, right)
+	}
+}
+
+func matrixNumber(value any) (*big.Rat, bool) {
+	var text string
+	switch value := value.(type) {
+	case json.Number:
+		text = value.String()
+	default:
+		reflected := reflect.ValueOf(value)
+		switch reflected.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			text = strconv.FormatInt(reflected.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			text = strconv.FormatUint(reflected.Uint(), 10)
+		case reflect.Float32, reflect.Float64:
+			text = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
+		default:
+			return nil, false
+		}
+	}
+	number, ok := new(big.Rat).SetString(text)
+	return number, ok
 }
 
 func matrixCombinationValues(combination workflow.MatrixCombination) map[string]any {

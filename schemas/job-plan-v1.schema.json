@@ -60,6 +60,7 @@
       "maxItems": 16
     },
     "matrix": {"type": "object"},
+    "vars": {"$ref": "#/$defs/stringMap"},
     "needs": {
       "type": "object",
       "additionalProperties": {
