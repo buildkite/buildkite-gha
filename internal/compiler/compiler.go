@@ -87,6 +87,8 @@ type JobInstance struct {
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
+	SourcePath              string            `json:"source_path"`
+	SourceDigest            string            `json:"source_digest"`
 	Source                  workflow.Span     `json:"source"`
 }
 
@@ -105,7 +107,7 @@ func Validate(path string, source []byte) (Report, error) {
 	}
 	options := defaultOptions()
 	event := Event{Trust: options.EventTrust, Payload: map[string]any{}}
-	instances, err := expand(path, parsed, compileContext(event, nil), options)
+	instances, err := expand(path, source, parsed, compileContext(event, nil), options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -132,7 +134,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 		return Report{}, err
 	}
 	event.Trust = options.EventTrust
-	instances, err := expand(path, parsed, compileContext(event, options.Vars.snapshot()), options)
+	instances, err := expand(path, source, parsed, compileContext(event, options.Vars.snapshot()), options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -232,8 +234,8 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 				Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 			},
 			Workflow: plan.Workflow{
-				Path:         ir.Workflow.Path,
-				Digest:       ir.Workflow.Digest,
+				Path:         instance.SourcePath,
+				Digest:       instance.SourceDigest,
 				LogicalJobID: instance.LogicalJobID,
 			},
 			Event: plan.Event{
@@ -278,7 +280,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	}
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
-	jobs, err := expand(path, parsed, compileContext(event, vars), options)
+	jobs, err := expand(path, source, parsed, compileContext(event, vars), options)
 	if err != nil {
 		return IR{}, err
 	}
@@ -350,11 +352,23 @@ func compileContext(event Event, vars map[string]string) expression.CompileConte
 	}
 }
 
-func expand(path string, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
-	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
-	for _, job := range parsed.Jobs {
+func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
+	resolved, err := resolveReusableWorkflows(path, source, parsed)
+	if err != nil {
+		return nil, err
+	}
+	jobs := make(map[string]workflow.Job, len(resolved))
+	sourcePaths := make(map[string]string, len(resolved))
+	sourceDigests := make(map[string]string, len(resolved))
+	for _, sourced := range resolved {
+		job := sourced.Job
+		if _, exists := jobs[job.ID]; exists {
+			return nil, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))
+		}
 		jobs[job.ID] = job
-		if err := supported(path, job); err != nil {
+		sourcePaths[job.ID] = sourced.path
+		sourceDigests[job.ID] = sourced.digest
+		if err := supported(sourced.path, job); err != nil {
 			return nil, err
 		}
 	}
@@ -367,25 +381,26 @@ func expand(path string, parsed *workflow.Workflow, context expression.CompileCo
 	instanceKeys := make(map[string]string)
 	for _, id := range order {
 		job := jobs[id]
-		matrices, err := expandMatrix(path, job, context)
+		jobPath := sourcePaths[id]
+		matrices, err := expandMatrix(jobPath, job, context)
 		if err != nil {
 			return nil, err
 		}
 		for _, matrix := range matrices {
 			labels, err := resolveRunsOn(job, context, matrix)
 			if err != nil {
-				return nil, locatedJobError(path, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
 			}
 			queue, err := options.Runners.resolve(labels, options.EventTrust)
 			if err != nil {
-				return nil, locatedJobError(path, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
 			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
-				return nil, jobError(path, job, fmt.Sprintf("create deterministic instance key: %v", err))
+				return nil, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))
 			}
 			if existingJob, exists := instanceKeys[key]; exists {
-				return nil, jobError(path, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))
+				return nil, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))
 			}
 			instanceKeys[key] = job.ID
 			instance := JobInstance{
@@ -403,6 +418,8 @@ func expand(path string, parsed *workflow.Workflow, context expression.CompileCo
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 				Outputs:                 cloneMap(job.Outputs),
+				SourcePath:              jobPath,
+				SourceDigest:            sourceDigests[id],
 				Source:                  job.Span,
 			}
 			for _, need := range job.Needs {
@@ -423,8 +440,8 @@ func expand(path string, parsed *workflow.Workflow, context expression.CompileCo
 }
 
 func supported(path string, job workflow.Job) error {
-	if job.Reusable {
-		return jobError(path, job, "reusable-workflow jobs are unsupported in the Phase 0 compiler")
+	if job.Reusable != nil {
+		return jobError(path, job, "internal error: unresolved reusable-workflow job")
 	}
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
 		return jobError(path, job, "runs-on must resolve statically")

@@ -1,0 +1,661 @@
+package compiler
+
+import (
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
+)
+
+const (
+	maxReusableWorkflowDepth = 4
+	maxFlattenedJobs         = 1024
+)
+
+var staticInputExpression = regexp.MustCompile(`\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
+
+type sourcedJob struct {
+	workflow.Job
+	path   string
+	digest string
+}
+
+type reusableResolver struct {
+	root     string
+	stack    []string
+	expanded int
+}
+
+func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow) ([]sourcedJob, error) {
+	digest := "sha256:" + sha256Sum(source)
+	if !hasReusableCall(parsed) {
+		jobs := make([]sourcedJob, len(parsed.Jobs))
+		for i, job := range parsed.Jobs {
+			jobs[i] = sourcedJob{Job: job, path: path, digest: digest}
+		}
+		return jobs, nil
+	}
+
+	root, canonicalPath, err := workflowRepository(path)
+	if err != nil {
+		return nil, err
+	}
+	resolver := reusableResolver{root: root, stack: []string{canonicalPath}}
+	return resolver.resolve(path, digest, parsed, "", "", nil, nil, 0)
+}
+
+func hasReusableCall(parsed *workflow.Workflow) bool {
+	for _, job := range parsed.Jobs {
+		if job.Reusable != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds []string, depth int) ([]sourcedJob, error) {
+	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
+	for _, job := range parsed.Jobs {
+		jobs[job.ID] = job
+	}
+	order, err := topologicalOrder(path, jobs)
+	if err != nil {
+		return nil, err
+	}
+
+	replacements := make(map[string][]string, len(jobs))
+	var resolved []sourcedJob
+	for _, id := range order {
+		job := jobs[id]
+		job = applyStaticInputs(job, inputs)
+		if parsed.Callable {
+			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
+				return nil, err
+			}
+		}
+		if job.Reusable != nil {
+			if err := rejectCallMatrixExpressions(path, job); err != nil {
+				return nil, err
+			}
+		}
+		needs := replacementNeeds(job.Needs, replacements)
+		if len(job.Needs) == 0 {
+			needs = append(needs, externalNeeds...)
+			sort.Strings(needs)
+		}
+		if job.Reusable == nil {
+			job.ID = namespacedJobID(namespace, job.ID)
+			job.Needs = needs
+			if labelPrefix != "" {
+				name := job.Name
+				if name == "" {
+					name = id
+				}
+				job.Name = labelPrefix + " / " + name
+			}
+			resolver.expanded++
+			if resolver.expanded > maxFlattenedJobs {
+				return nil, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
+			}
+			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest})
+			replacements[id] = []string{job.ID}
+			continue
+		}
+
+		call := job.Reusable
+		if call.Secrets || call.InheritSecrets {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secrets are runtime-dependent and unsupported")
+		}
+		if depth >= maxReusableWorkflowDepth {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", maxReusableWorkflowDepth))
+		}
+		calleePath, err := resolver.localWorkflowPath(call.Uses)
+		if err != nil {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, err.Error())
+		}
+		if cycle := resolver.cycle(calleePath); cycle != "" {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
+		}
+		source, err := os.ReadFile(calleePath)
+		if err != nil {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("read local reusable workflow %q: %v", call.Uses, err))
+		}
+		callee, err := workflow.Parse(calleePath, source)
+		if err != nil {
+			return nil, err
+		}
+		if !callee.Callable {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q does not declare on.workflow_call", call.Uses))
+		}
+		if len(callee.RequiredCallSecrets) != 0 {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
+		}
+		calleeSourcePath, err := filepath.Rel(resolver.root, calleePath)
+		if err != nil {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("locate local reusable workflow %q: %v", call.Uses, err))
+		}
+		calleeSourcePath = "./" + filepath.ToSlash(calleeSourcePath)
+		calleeDigest := "sha256:" + sha256Sum(source)
+
+		matrices, err := expandMatrix(path, job, expression.CompileContext{})
+		if err != nil {
+			return nil, err
+		}
+		var terminals []string
+		callNamespaces := make(map[string]struct{}, len(matrices))
+		for _, matrix := range matrices {
+			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix)
+			if err != nil {
+				return nil, err
+			}
+			component := job.ID
+			if len(matrices) > 1 {
+				suffix, err := matrixDigest(matrix)
+				if err != nil {
+					return nil, jobError(path, job, fmt.Sprintf("namespace reusable-workflow matrix: %v", err))
+				}
+				component += "-" + suffix
+			}
+			callNamespace := namespacedJobID(namespace, component)
+			if _, exists := callNamespaces[callNamespace]; exists {
+				return nil, jobError(path, job, fmt.Sprintf("reusable-workflow matrix produces duplicate namespace %q", callNamespace))
+			}
+			callNamespaces[callNamespace] = struct{}{}
+			callLabel := job.Name
+			if callLabel == "" {
+				callLabel = job.ID
+			}
+			if len(matrix) != 0 {
+				callLabel = instanceLabel(job, matrix)
+			}
+			if labelPrefix != "" {
+				callLabel = labelPrefix + " / " + callLabel
+			}
+
+			resolver.stack = append(resolver.stack, calleePath)
+			calleeJobs, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needs, depth+1)
+			resolver.stack = resolver.stack[:len(resolver.stack)-1]
+			if err != nil {
+				return nil, err
+			}
+			resolved = append(resolved, calleeJobs...)
+			terminals = append(terminals, terminalJobIDs(calleeJobs)...)
+		}
+		sort.Strings(terminals)
+		replacements[id] = terminals
+	}
+	return resolved, nil
+}
+
+func replacementNeeds(needs []string, replacements map[string][]string) []string {
+	var out []string
+	for _, need := range needs {
+		out = append(out, replacements[need]...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func terminalJobIDs(jobs []sourcedJob) []string {
+	needed := make(map[string]struct{})
+	for _, job := range jobs {
+		for _, need := range job.Needs {
+			needed[need] = struct{}{}
+		}
+	}
+	var terminals []string
+	for _, job := range jobs {
+		if _, ok := needed[job.ID]; !ok {
+			terminals = append(terminals, job.ID)
+		}
+	}
+	sort.Strings(terminals)
+	return terminals
+}
+
+func namespacedJobID(namespace, id string) string {
+	if namespace == "" {
+		return id
+	}
+	return namespace + "." + id
+}
+
+func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs, matrix map[string]any) (map[string]any, error) {
+	values := make(map[string]any, len(call.Inputs))
+	for _, name := range sortedValueKeys(call.Inputs) {
+		value := call.Inputs[name]
+		if _, ok := callee.CallInputs[name]; !ok {
+			return nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("input %q is not declared by reusable workflow %q", name, call.Uses))
+		}
+		resolved := value.Data
+		if text, ok := resolved.(string); ok && strings.Contains(text, "${{") {
+			var err error
+			resolved, err = evaluateStaticCallValue(text, parentInputs, matrix)
+			if err != nil {
+				return nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable: %v", name, err))
+			}
+		}
+		values[name] = resolved
+	}
+
+	resolved := make(map[string]any, len(callee.CallInputs))
+	for _, name := range sortedValueKeys(callee.CallInputs) {
+		declaration := callee.CallInputs[name]
+		value, supplied := values[name]
+		ok := supplied
+		if !ok && declaration.Default != nil {
+			value, ok = declaration.Default.Data, true
+			if text, isString := value.(string); isString && strings.Contains(text, "${{") {
+				return nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, fmt.Sprintf("default for reusable-workflow input %q is not statically resolvable", name))
+			}
+		}
+		if !ok {
+			if declaration.Required {
+				return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("required reusable-workflow input %q is missing", name))
+			}
+			value = zeroInputValue(declaration.Type)
+		}
+		if !inputTypeMatches(declaration.Type, value) {
+			locationPath := path
+			span := call.Span
+			if supplied {
+				span = call.Inputs[name].Span
+			} else if declaration.Default != nil {
+				locationPath = call.Uses
+				span = declaration.Default.Span
+			}
+			return nil, locatedJobError(locationPath, job, span.Start.Line, span.Start.Column, fmt.Sprintf("reusable-workflow input %q must be %s", name, declaration.Type))
+		}
+		if containsExpression(value) {
+			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable", name))
+		}
+		resolved[name] = value
+	}
+	return resolved, nil
+}
+
+func evaluateStaticCallValue(value string, inputs, matrix map[string]any) (any, error) {
+	if match := staticValueExpression.FindStringSubmatch(value); match != nil {
+		values := inputs
+		if match[1] == "matrix" {
+			values = matrix
+		}
+		for name, value := range values {
+			if strings.EqualFold(name, match[2]) {
+				if containsExpression(value) {
+					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], match[2])
+				}
+				return value, nil
+			}
+		}
+		return nil, fmt.Errorf("expression references unavailable %s value %q", match[1], match[2])
+	}
+	resolved := replaceStaticInputs(value, inputs)
+	if hasInputExpression(resolved) {
+		return nil, fmt.Errorf("expression references an unavailable or unsupported input")
+	}
+	return expression.Evaluate(resolved, expression.Context{Matrix: matrix})
+}
+
+func containsExpression(value any) bool {
+	switch value := value.(type) {
+	case string:
+		return strings.Contains(value, "${{")
+	case []any:
+		for _, element := range value {
+			if containsExpression(element) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, element := range value {
+			if containsExpression(element) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sortedValueKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func zeroInputValue(inputType string) any {
+	if inputType == "boolean" {
+		return false
+	}
+	if inputType == "number" {
+		return 0
+	}
+	return ""
+}
+
+func inputTypeMatches(inputType string, value any) bool {
+	switch inputType {
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
+	case "number":
+		switch value.(type) {
+		case int, int64, uint64, float64, json.Number:
+			return true
+		default:
+			return false
+		}
+	case "string":
+		_, ok := value.(string)
+		return ok
+	default:
+		return false
+	}
+}
+
+func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
+	if len(inputs) == 0 {
+		return job
+	}
+	job.Name = replaceStaticInputs(job.Name, inputs)
+	job.DefaultShell = replaceStaticInputs(job.DefaultShell, inputs)
+	job.DefaultWorkingDirectory = replaceStaticInputs(job.DefaultWorkingDirectory, inputs)
+	job.Env = replaceMapInputs(job.Env, inputs)
+	job.Outputs = replaceMapInputs(job.Outputs, inputs)
+	job.RunsOn = append([]string(nil), job.RunsOn...)
+	for i := range job.RunsOn {
+		job.RunsOn[i] = replaceStaticInputs(job.RunsOn[i], inputs)
+	}
+	if job.RunsOnExpr != nil {
+		resolved := replaceStaticInputs(job.RunsOnExpr.Text, inputs)
+		if !strings.Contains(resolved, "${{") {
+			job.RunsOn = []string{resolved}
+			job.RunsOnExpr = nil
+		} else {
+			expr := *job.RunsOnExpr
+			expr.Text = resolved
+			job.RunsOnExpr = &expr
+		}
+	}
+	if job.Matrix != nil {
+		job.Matrix = cloneMatrixWithInputs(job.Matrix, inputs)
+	}
+	job.Steps = append([]workflow.Step(nil), job.Steps...)
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		step.Name = replaceStaticInputs(step.Name, inputs)
+		step.Run = replaceStaticInputs(step.Run, inputs)
+		step.Uses = replaceStaticInputs(step.Uses, inputs)
+		step.Shell = replaceStaticInputs(step.Shell, inputs)
+		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
+		step.Env = replaceMapInputs(step.Env, inputs)
+		step.With = replaceMapInputs(step.With, inputs)
+	}
+	return job
+}
+
+func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
+	jobValues := []string{job.Name, job.DefaultShell, job.DefaultWorkingDirectory}
+	jobValues = append(jobValues, job.RunsOn...)
+	jobValues = appendMapValues(jobValues, job.Env)
+	jobValues = appendMapValues(jobValues, job.Outputs)
+	if job.RunsOnExpr != nil {
+		jobValues = append(jobValues, job.RunsOnExpr.Text)
+	}
+	if job.Matrix != nil {
+		if job.Matrix.Expression != nil {
+			jobValues = append(jobValues, job.Matrix.Expression.Text)
+		}
+		for _, row := range job.Matrix.Rows {
+			if row.Expression != nil {
+				jobValues = append(jobValues, row.Expression.Text)
+			}
+			for _, value := range row.Values {
+				if containsInputExpression(value.Data) {
+					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+				}
+			}
+		}
+		for _, combinations := range [][]workflow.MatrixCombination{job.Matrix.Include, job.Matrix.Exclude} {
+			for _, combination := range combinations {
+				for _, value := range combination.Values {
+					if containsInputExpression(value.Data) {
+						return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+					}
+				}
+			}
+		}
+	}
+	for _, value := range jobValues {
+		if hasInputExpression(value) {
+			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+		}
+	}
+	for _, step := range job.Steps {
+		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.If}
+		stepValues = appendMapValues(stepValues, step.Env)
+		stepValues = appendMapValues(stepValues, step.With)
+		for _, value := range stepValues {
+			if hasInputExpression(value) {
+				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+			}
+		}
+	}
+	return nil
+}
+
+func rejectCallMatrixExpressions(path string, job workflow.Job) error {
+	if job.Matrix == nil {
+		return nil
+	}
+	for _, row := range job.Matrix.Rows {
+		for _, value := range row.Values {
+			if containsExpression(value.Data) {
+				return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+			}
+		}
+	}
+	for _, combinations := range [][]workflow.MatrixCombination{job.Matrix.Include, job.Matrix.Exclude} {
+		for _, combination := range combinations {
+			for _, value := range combination.Values {
+				if containsExpression(value.Data) {
+					return locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, "runtime-dependent reusable-workflow matrix value is unsupported")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func appendMapValues(out []string, values map[string]string) []string {
+	for _, value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+func containsInputExpression(value any) bool {
+	switch value := value.(type) {
+	case string:
+		return hasInputExpression(value)
+	case []any:
+		for _, element := range value {
+			if containsInputExpression(element) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, element := range value {
+			if containsInputExpression(element) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasInputExpression(value string) bool {
+	for {
+		start := strings.Index(value, "${{")
+		if start < 0 {
+			return false
+		}
+		value = value[start+3:]
+		end := strings.Index(value, "}}")
+		if end < 0 {
+			return false
+		}
+		if strings.Contains(strings.ToLower(value[:end]), "inputs.") {
+			return true
+		}
+		value = value[end+2:]
+	}
+}
+
+func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {
+	out := *matrix
+	out.Rows = append([]workflow.MatrixRow(nil), matrix.Rows...)
+	for i := range out.Rows {
+		out.Rows[i].Values = append([]workflow.Value(nil), out.Rows[i].Values...)
+		for j := range out.Rows[i].Values {
+			if text, ok := out.Rows[i].Values[j].Data.(string); ok {
+				out.Rows[i].Values[j].Data = replaceStaticInputs(text, inputs)
+			}
+		}
+	}
+	out.Include = cloneMatrixCombinations(matrix.Include, inputs)
+	out.Exclude = cloneMatrixCombinations(matrix.Exclude, inputs)
+	return &out
+}
+
+func cloneMatrixCombinations(combinations []workflow.MatrixCombination, inputs map[string]any) []workflow.MatrixCombination {
+	out := make([]workflow.MatrixCombination, len(combinations))
+	for i, combination := range combinations {
+		out[i] = combination
+		out[i].Values = make(map[string]workflow.Value, len(combination.Values))
+		for name, value := range combination.Values {
+			if text, ok := value.Data.(string); ok {
+				value.Data = replaceStaticInputs(text, inputs)
+			}
+			out[i].Values[name] = value
+		}
+	}
+	return out
+}
+
+func replaceMapInputs(values map[string]string, inputs map[string]any) map[string]string {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for name, value := range values {
+		out[name] = replaceStaticInputs(value, inputs)
+	}
+	return out
+}
+
+func replaceStaticInputs(value string, inputs map[string]any) string {
+	return staticInputExpression.ReplaceAllStringFunc(value, func(match string) string {
+		parts := staticInputExpression.FindStringSubmatch(match)
+		for name, value := range inputs {
+			if strings.EqualFold(name, parts[1]) {
+				return fmt.Sprint(value)
+			}
+		}
+		return match
+	})
+}
+
+func workflowRepository(path string) (string, string, error) {
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve workflow path: %w", err)
+	}
+	workflowDir := filepath.Dir(absPath)
+	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
+		return "", "", fmt.Errorf("%s: local reusable workflows require the caller under .github/workflows", path)
+	}
+	root, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(workflowDir)))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve repository root for %q: %w", path, err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve workflow path %q: %w", path, err)
+	}
+	if err := requireWithinRepository(root, canonicalPath); err != nil {
+		return "", "", fmt.Errorf("resolve workflow path %q: %w", path, err)
+	}
+	return root, canonicalPath, nil
+}
+
+func (resolver *reusableResolver) localWorkflowPath(uses string) (string, error) {
+	if !strings.HasPrefix(uses, "./") {
+		return "", fmt.Errorf("reusable workflow %q is remote or runtime-dependent; only repository-local ./ paths are supported", uses)
+	}
+	relative := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
+	if filepath.Dir(relative) != filepath.Join(".github", "workflows") {
+		return "", fmt.Errorf("local reusable workflow %q must name a file directly under .github/workflows", uses)
+	}
+	candidate := filepath.Join(resolver.root, relative)
+	if err := requireWithinRepository(resolver.root, candidate); err != nil {
+		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	if err := requireWithinRepository(resolver.root, resolved); err != nil {
+		return "", fmt.Errorf("resolve local reusable workflow %q: %w", uses, err)
+	}
+	return resolved, nil
+}
+
+func requireWithinRepository(root, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("resolved path %q escapes repository root %q", path, root)
+	}
+	return nil
+}
+
+func (resolver *reusableResolver) cycle(path string) string {
+	for i, existing := range resolver.stack {
+		if existing == path {
+			chain := append(append([]string(nil), resolver.stack[i:]...), path)
+			for j := range chain {
+				chain[j] = filepath.ToSlash(strings.TrimPrefix(chain[j], resolver.root+string(filepath.Separator)))
+			}
+			return strings.Join(chain, " -> ")
+		}
+	}
+	return ""
+}
+
+func matrixDigest(matrix map[string]any) (string, error) {
+	canonical, err := json.Marshal(matrix)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256Sum(canonical)
+	return digest[:12], nil
+}
+
+func sha256Sum(value []byte) string {
+	digest := sha256.Sum256(value)
+	return fmt.Sprintf("%x", digest[:])
+}

@@ -2,7 +2,10 @@ package compiler
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -287,6 +290,407 @@ jobs:
 	if err == nil || !strings.Contains(err.Error(), "matrix excludes every combination") {
 		t.Fatalf("Compile() error = %v, want empty matrix rejection", err)
 	}
+}
+
+func TestCompileExpandsLocalReusableWorkflowWithNamespacesAndDependencies(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - run: prepare
+  delegated:
+    name: delegated tests
+    needs: prepare
+    uses: ./.github/workflows/reusable.yml
+    with:
+      message: hello
+      enabled: true
+  finish:
+    needs: delegated
+    runs-on: ubuntu-latest
+    steps:
+      - run: finish
+`)
+	calleePath := writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      message:
+        type: string
+        required: true
+      enabled:
+        type: boolean
+        required: true
+jobs:
+  first:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ inputs.message }} ${{ inputs.enabled }}"
+  second:
+    needs: first
+    runs-on: ubuntu-latest
+    steps:
+      - run: second
+`)
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 4 {
+		t.Fatalf("jobs = %d, want 4", len(ir.Jobs))
+	}
+	byID := make(map[string]JobInstance, len(ir.Jobs))
+	for _, job := range ir.Jobs {
+		byID[job.LogicalJobID] = job
+	}
+	prepare := byID["prepare"]
+	first := byID["delegated.first"]
+	second := byID["delegated.second"]
+	finish := byID["finish"]
+	if !reflect.DeepEqual(first.Needs, []string{prepare.Key}) || !reflect.DeepEqual(first.LogicalNeeds, []string{"prepare"}) {
+		t.Fatalf("callee root needs = %#v / %#v, want caller prerequisite", first.Needs, first.LogicalNeeds)
+	}
+	if !reflect.DeepEqual(second.Needs, []string{first.Key}) || !reflect.DeepEqual(finish.Needs, []string{second.Key}) {
+		t.Fatalf("callee/caller dependencies = %#v / %#v", second.Needs, finish.Needs)
+	}
+	if first.Key != "gha-delegated-first" || first.Label != "delegated tests / first" {
+		t.Fatalf("callee identity = key %q label %q", first.Key, first.Label)
+	}
+	calleeDigest := sha256.Sum256(readFile(t, calleePath))
+	wantCalleeDigest := "sha256:" + hex.EncodeToString(calleeDigest[:])
+	if first.SourcePath != "./.github/workflows/reusable.yml" || first.SourceDigest != wantCalleeDigest || first.Steps[0].Run != `echo "hello true"` {
+		t.Fatalf("callee provenance/input = %q / %q / %q, want repository-relative path, digest, and statically substituted input", first.SourcePath, first.SourceDigest, first.Steps[0].Run)
+	}
+	if prepare.SourcePath != callerPath || finish.SourcePath != callerPath {
+		t.Fatalf("caller source provenance = %q / %q", prepare.SourcePath, finish.SourcePath)
+	}
+}
+
+func TestCompileExpandsMatrixReusableCallsDeterministically(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    strategy:
+      matrix:
+        target: [ubuntu-22.04, ubuntu-24.04]
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+jobs:
+  test:
+    name: test ${{ inputs.target }}
+    runs-on: ${{ inputs.target }}
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+
+	first, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("reusable-workflow matrix compilation was not byte-identical")
+	}
+	var ir IR
+	if err := json.Unmarshal(first, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 2 || ir.Jobs[0].LogicalJobID == ir.Jobs[1].LogicalJobID || ir.Jobs[0].Key == ir.Jobs[1].Key {
+		t.Fatalf("matrix reusable jobs = %#v, want two namespaced identities", ir.Jobs)
+	}
+	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
+	sort.Strings(runs)
+	if !reflect.DeepEqual(runs, []string{"echo ubuntu-22.04", "echo ubuntu-24.04"}) {
+		t.Fatalf("statically resolved matrix inputs = %#v", runs)
+	}
+	runners := []string{ir.Jobs[0].RunsOn[0], ir.Jobs[1].RunsOn[0]}
+	sort.Strings(runners)
+	if !reflect.DeepEqual(runners, []string{"ubuntu-22.04", "ubuntu-24.04"}) {
+		t.Fatalf("statically resolved runs-on inputs = %#v", runners)
+	}
+	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" || plans[0].Workflow.Digest != ir.Jobs[0].SourceDigest {
+		t.Fatalf("callee plan provenance = %#v, want callee path and digest", plans)
+	}
+}
+
+func TestCompileRejectsUnsafeOrDynamicReusableWorkflowCalls(t *testing.T) {
+	t.Run("remote", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/repository/.github/workflows/reusable.yml@main\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "only repository-local ./ paths are supported") || !strings.Contains(err.Error(), path+":4:11") {
+			t.Fatalf("Compile() error = %v, want source-located remote rejection", err)
+		}
+	})
+
+	t.Run("runtime input", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ needs.prepare.outputs.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `input "target" is not statically resolvable`) || !strings.Contains(err.Error(), path+":6:15") {
+			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
+		}
+	})
+
+	t.Run("symlink escape", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/escaped.yml\n")
+		outside := filepath.Join(t.TempDir(), "outside.yml")
+		if err := os.WriteFile(outside, []byte("on: workflow_call\njobs: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(repository, ".github", "workflows", "escaped.yml")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+			t.Fatalf("Compile() error = %v, want symlink confinement rejection", err)
+		}
+	})
+}
+
+func TestCompileRejectsReusableWorkflowCyclesAndDepthOverflow(t *testing.T) {
+	t.Run("cycle", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "a.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/b.yml\n")
+		writeWorkflow(t, repository, "b.yml", "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/a.yml\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "reusable-workflow cycle detected") || !strings.Contains(err.Error(), "a.yml -> .github/workflows/b.yml -> .github/workflows/a.yml") {
+			t.Fatalf("Compile() error = %v, want explicit cycle", err)
+		}
+	})
+
+	t.Run("depth", func(t *testing.T) {
+		repository := t.TempDir()
+		for i := 0; i <= maxReusableWorkflowDepth; i++ {
+			on := "workflow_call"
+			if i == 0 {
+				on = "push"
+			}
+			writeWorkflow(t, repository, fmt.Sprintf("%d.yml", i), fmt.Sprintf("on: %s\njobs:\n  call:\n    uses: ./.github/workflows/%d.yml\n", on, i+1))
+		}
+		path := filepath.Join(repository, ".github", "workflows", "0.yml")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", maxReusableWorkflowDepth)) {
+			t.Fatalf("Compile() error = %v, want explicit depth limit", err)
+		}
+	})
+}
+
+func TestCompileResolvesInputsBeforeNestedReusableCallMatrices(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: linux
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+jobs:
+  leaf:
+    name: leaf ${{ inputs.target }}
+    strategy:
+      matrix:
+        target: ["${{ inputs.target }}", arm]
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 2 {
+		t.Fatalf("jobs = %d, want 2 nested matrix instances", len(ir.Jobs))
+	}
+	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
+	sort.Strings(runs)
+	if !reflect.DeepEqual(runs, []string{"echo arm", "echo linux"}) {
+		t.Fatalf("nested static inputs = %#v", runs)
+	}
+	for _, job := range ir.Jobs {
+		if !strings.HasPrefix(job.Label, "middle / leaf linux") {
+			t.Fatalf("nested label = %q, want substituted caller input", job.Label)
+		}
+	}
+}
+
+func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testing.T) {
+	t.Run("matrix value", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: ["${{ github.ref_name }}"]
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: ${{ matrix.target }}
+`)
+		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ${{ inputs.target }}\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "runtime-dependent reusable-workflow matrix value is unsupported") {
+			t.Fatalf("Compile() error = %v, want matrix expression rejection", err)
+		}
+	})
+
+	t.Run("callee body", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      enabled: true\n")
+		writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled:
+        type: boolean
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.enabled && 'yes' || 'no' }}
+`)
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "reusable-workflow input expression is not statically resolvable") {
+			t.Fatalf("Compile() error = %v, want complex input rejection", err)
+		}
+	})
+}
+
+func TestCompileRejectsFlattenedReusableJobIDCollisions(t *testing.T) {
+	repository := t.TempDir()
+	suffix, err := matrixDigest(map[string]any{"target": "linux"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeWorkflow(t, repository, "caller.yml", fmt.Sprintf(`on: push
+jobs:
+  call:
+    strategy:
+      matrix:
+        target: [linux, arm]
+    uses: ./.github/workflows/reusable.yml
+  call-%s:
+    uses: ./.github/workflows/reusable.yml
+`, suffix))
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	_, err = Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), "flattened job id") || !strings.Contains(err.Error(), "collides with another job") {
+		t.Fatalf("Compile() error = %v, want fail-closed flattened ID collision", err)
+	}
+}
+
+func TestCompileBoundsReusableWorkflowGraphExpansion(t *testing.T) {
+	repository := t.TempDir()
+	values := make([]string, maxMatrixInstances)
+	for i := range values {
+		values[i] = fmt.Sprint(i)
+	}
+	path := writeWorkflow(t, repository, "caller.yml", fmt.Sprintf("on: push\njobs:\n  call:\n    strategy:\n      matrix:\n        value: [%s]\n    uses: ./.github/workflows/reusable.yml\n", strings.Join(values, ", ")))
+	var callee strings.Builder
+	callee.WriteString("on: workflow_call\njobs:\n")
+	for i := 0; i < 5; i++ {
+		fmt.Fprintf(&callee, "  job%d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", i)
+	}
+	writeWorkflow(t, repository, "reusable.yml", callee.String())
+	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("graph expands beyond %d jobs", maxFlattenedJobs)) {
+		t.Fatalf("Compile() error = %v, want bounded graph rejection", err)
+	}
+}
+
+func TestCompileRejectsRequiredReusableWorkflowSecrets(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    secrets:
+      token:
+        required: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), `requires unsupported secret "token"`) {
+		t.Fatalf("Compile() error = %v, want required secret rejection", err)
+	}
+}
+
+func TestCompileReusableInputDiagnosticsAreDeterministic(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n    with:\n      zed: z\n      alpha: a\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	for i := 0; i < 20; i++ {
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), `input "alpha" is not declared`) {
+			t.Fatalf("Compile() error = %v, want alphabetically first input diagnostic", err)
+		}
+	}
+}
+
+func writeWorkflow(t *testing.T, repository, name, source string) string {
+	t.Helper()
+	path := filepath.Join(repository, ".github", "workflows", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestCompileRejectsRuntimeDependentGraphExpression(t *testing.T) {

@@ -3,6 +3,7 @@ package workflow
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +69,63 @@ jobs:
 	}
 	if matrix.Span.End.Line != 14 {
 		t.Fatalf("matrix span end = %#v, want final exclude value on line 14", matrix.Span.End)
+	}
+}
+
+func TestParseOwnsReusableWorkflowCallsAndInputDeclarations(t *testing.T) {
+	source := []byte(`on:
+  workflow_call:
+    inputs:
+      enabled:
+        type: boolean
+        default: true
+      target:
+        type: string
+        required: true
+jobs:
+  nested:
+    uses: ./.github/workflows/nested.yml
+    with:
+      enabled: false
+      target: linux
+`)
+	parsed, err := Parse(".github/workflows/reusable.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Callable || len(parsed.CallInputs) != 2 {
+		t.Fatalf("workflow_call = %#v, want two owned inputs", parsed.CallInputs)
+	}
+	if got := parsed.CallInputs["enabled"].Default.Data; got != true {
+		t.Fatalf("enabled default = %#v, want typed true", got)
+	}
+	call := parsed.Jobs[0].Reusable
+	if call == nil || call.Uses != "./.github/workflows/nested.yml" {
+		t.Fatalf("reusable call = %#v", call)
+	}
+	if got := call.Inputs["enabled"].Data; got != false {
+		t.Fatalf("enabled call input = %#v, want typed false", got)
+	}
+}
+
+func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
+	tests := []struct {
+		name    string
+		snippet string
+		want    string
+	}{
+		{name: "fail fast", snippet: "    strategy:\n      fail-fast: ${{ inputs.flag }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix fail-fast is unsupported"},
+		{name: "max parallel", snippet: "    strategy:\n      max-parallel: ${{ inputs.count }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix max-parallel is unsupported"},
+		{name: "continue on error", snippet: "    steps:\n      - run: true\n        continue-on-error: ${{ matrix.experimental }}\n", want: "expression-valued step continue-on-error is unsupported"},
+		{name: "timeout", snippet: "    steps:\n      - run: true\n        timeout-minutes: ${{ inputs.timeout }}\n", want: "expression-valued step timeout-minutes is unsupported"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n" + test.snippet
+			_, err := Parse("expressions.yml", []byte(source))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

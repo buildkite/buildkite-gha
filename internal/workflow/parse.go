@@ -38,6 +38,29 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
 		}
 	}
+	if call, ok := parsed.FindWorkflowCallEvent(); ok {
+		owned.Callable = true
+		if len(call.Inputs) != 0 {
+			owned.CallInputs = make(map[string]CallInput, len(call.Inputs))
+		}
+		for _, input := range call.Inputs {
+			ownedInput := CallInput{Type: workflowCallInputType(input.Type), Required: input.IsRequired()}
+			if input.Default != nil {
+				value := Value{Data: scalarAt(input.Default, scalars), Span: spanFrom(input.Default.Pos, input.Default.Value)}
+				ownedInput.Default = &value
+			}
+			owned.CallInputs[input.ID] = ownedInput
+		}
+		for name, secret := range call.Secrets {
+			if secret.Required != nil && secret.Required.Expression != nil {
+				return nil, locatedError(path, secret.Required.Expression.Pos, "workflow", fmt.Sprintf("expression-valued required flag for workflow_call secret %q is unsupported", name))
+			}
+			if secret.Required != nil && secret.Required.Value {
+				owned.RequiredCallSecrets = append(owned.RequiredCallSecrets, name)
+			}
+		}
+		sort.Strings(owned.RequiredCallSecrets)
+	}
 
 	ids := make([]string, 0, len(parsed.Jobs))
 	for id := range parsed.Jobs {
@@ -62,7 +85,25 @@ func Parse(path string, source []byte) (*Workflow, error) {
 }
 
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, error) {
-	out := Job{ID: in.ID.Value, Reusable: in.WorkflowCall != nil, Span: pointSpan(in.Pos)}
+	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
+	if in.WorkflowCall != nil {
+		call := in.WorkflowCall
+		out.Reusable = &ReusableWorkflowCall{
+			Uses:           call.Uses.Value,
+			Secrets:        len(call.Secrets) != 0,
+			InheritSecrets: call.InheritSecrets,
+			Span:           spanFrom(call.Uses.Pos, call.Uses.Value),
+		}
+		if len(call.Inputs) != 0 {
+			out.Reusable.Inputs = make(map[string]Value, len(call.Inputs))
+			for name, input := range call.Inputs {
+				out.Reusable.Inputs[name] = Value{
+					Data: scalarAt(input.Value, scalars),
+					Span: spanFrom(input.Value.Pos, input.Value.Value),
+				}
+			}
+		}
+	}
 	if in.If != nil {
 		return Job{}, locatedError(path, in.If.Pos, in.ID.Value, "job conditions are unsupported in the Phase 0 runtime")
 	}
@@ -116,10 +157,16 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 
 	if in.Strategy != nil {
 		if in.Strategy.FailFast != nil {
+			if in.Strategy.FailFast.Expression != nil {
+				return Job{}, locatedError(path, in.Strategy.FailFast.Expression.Pos, in.ID.Value, "expression-valued matrix fail-fast is unsupported")
+			}
 			v := in.Strategy.FailFast.Value
 			out.FailFast = &v
 		}
 		if in.Strategy.MaxParallel != nil {
+			if in.Strategy.MaxParallel.Expression != nil {
+				return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported")
+			}
 			v := in.Strategy.MaxParallel.Value
 			out.MaxParallel = &v
 		}
@@ -144,9 +191,15 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 			owned.If = step.If.Value
 		}
 		if step.ContinueOnError != nil {
+			if step.ContinueOnError.Expression != nil {
+				return Job{}, locatedError(path, step.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued step continue-on-error is unsupported")
+			}
 			owned.ContinueOnError = step.ContinueOnError.Value
 		}
 		if step.TimeoutMinutes != nil {
+			if step.TimeoutMinutes.Expression != nil {
+				return Job{}, locatedError(path, step.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued step timeout-minutes is unsupported")
+			}
 			owned.TimeoutMinutes = step.TimeoutMinutes.Value
 		}
 		if step.Env != nil && step.Env.Expression != nil {
@@ -184,6 +237,26 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 		out.Span.End = owned.Span.End
 	}
 	return out, nil
+}
+
+func workflowCallInputType(inputType actionlint.WorkflowCallEventInputType) string {
+	switch inputType {
+	case actionlint.WorkflowCallEventInputTypeBoolean:
+		return "boolean"
+	case actionlint.WorkflowCallEventInputTypeNumber:
+		return "number"
+	case actionlint.WorkflowCallEventInputTypeString:
+		return "string"
+	default:
+		return ""
+	}
+}
+
+func scalarAt(value *actionlint.String, scalars map[Position]any) any {
+	if scalar, ok := scalars[Position{Line: value.Pos.Line, Column: value.Pos.Col}]; ok {
+		return scalar
+	}
+	return value.Value
 }
 
 func adaptEnv(in *actionlint.Env) map[string]string {

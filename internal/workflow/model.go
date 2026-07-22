@@ -17,11 +17,21 @@ type Span struct {
 
 // Workflow is the actionlint-independent syntax needed by the Phase 0 compiler.
 type Workflow struct {
-	Name                    string            `json:"name,omitempty"`
-	Env                     map[string]string `json:"env,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Jobs                    []Job             `json:"jobs"`
+	Name                    string               `json:"name,omitempty"`
+	Env                     map[string]string    `json:"env,omitempty"`
+	DefaultShell            string               `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string               `json:"default_working_directory,omitempty"`
+	CallInputs              map[string]CallInput `json:"call_inputs,omitempty"`
+	RequiredCallSecrets     []string             `json:"required_call_secrets,omitempty"`
+	Callable                bool                 `json:"callable,omitempty"`
+	Jobs                    []Job                `json:"jobs"`
+}
+
+// CallInput declares one statically resolvable workflow_call input.
+type CallInput struct {
+	Type     string `json:"type"`
+	Required bool   `json:"required,omitempty"`
+	Default  *Value `json:"default,omitempty"`
 }
 
 // Job is one logical GitHub Actions job.
@@ -34,13 +44,22 @@ type Job struct {
 	Matrix                  *Matrix                `json:"matrix,omitempty"`
 	FailFast                *bool                  `json:"fail_fast,omitempty"`
 	MaxParallel             *int                   `json:"max_parallel,omitempty"`
-	Reusable                bool                   `json:"reusable_workflow,omitempty"`
+	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                     map[string]string      `json:"env,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	DefaultShell            string                 `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
 	Steps                   []Step                 `json:"steps"`
 	Span                    Span                   `json:"span"`
+}
+
+// ReusableWorkflowCall is a job-level invocation of another workflow.
+type ReusableWorkflowCall struct {
+	Uses           string           `json:"uses"`
+	Inputs         map[string]Value `json:"inputs,omitempty"`
+	Secrets        bool             `json:"secrets,omitempty"`
+	InheritSecrets bool             `json:"inherit_secrets,omitempty"`
+	Span           Span             `json:"span"`
 }
 
 // Matrix retains either static rows or a deferred expression.
