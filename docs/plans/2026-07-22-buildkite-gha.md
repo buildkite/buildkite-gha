@@ -1054,9 +1054,12 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - The repository baseline, reviewed architecture plan, and staged
   `testdata/smoke` corpus are committed on `main`.
 - Phase 0 implementation is active on `lox/phase-0`.
-- The first work wave covers the Go/CLI foundation, the `act` reuse decision,
-  and the plan-envelope trust contract in separate worktrees before integration
-  and executable spikes begin.
+- The first work wave is integrated: the Go/CLI foundation is runnable,
+  ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
+  and eight conformance cases define the signed plan-envelope trust contract.
+- The next work wave implements the parser/compiler spike, differential smoke
+  harness, and the narrow action-runtime lifecycle needed for the Phase 0
+  product fixture before exercising live Buildkite transport.
 
 ### Phase 0 — Prove the semantic foundation
 
@@ -1612,40 +1615,41 @@ unknown plan.
 6. Static local reusable workflows are compiled in Phase 1. Phase 7 adds dynamic
    matrices and remote reusable workflows without reimplementing the local
    compiler path.
+7. Import actionlint v1.7.12 unchanged as the syntax frontend and immediately
+   adapt it into owned models. Keep act v0.2.89 and Actions runner v2.336.0 as
+   pinned behavioral oracles; do not import or fork act for production.
+8. Plan envelopes use detached ES256 JWS over RFC 8785 canonical claims with a
+   dedicated non-exportable AWS KMS P-256 signer and verification-only JWKS on
+   runtime queues. This trust domain remains separate from Buildkite pipeline
+   signing.
 
 ## Decisions required during Phase 0
 
-1. Which `act` packages can be imported unchanged, which require a maintained
-   fork, and which should only inform a new implementation?
-2. What event payload can Buildkite expose today for GitHub push and pull
+1. What event payload can Buildkite expose today for GitHub push and pull
    request builds, and what minimal platform API is missing?
-3. Should supported GHA jobs run directly on the Hosted Agent VM by default, or
+2. Should supported GHA jobs run directly on the Hosted Agent VM by default, or
    inside a compatibility image? Which choice best matches expected tool-cache
    and Docker behavior?
-4. How will the runtime distribution provide Node 20/24 consistently across
+3. How will the runtime distribution provide Node 20/24 consistently across
    hosted and self-hosted agents?
-5. Can common cache and artifact actions be supported by a job-local protocol
+4. Can common cache and artifact actions be supported by a job-local protocol
    adapter, or should the runtime recognize those actions explicitly?
-6. How should a runtime-skipped imported job appear in the Buildkite UI before
+5. How should a runtime-skipped imported job appear in the Buildkite UI before
    a scheduler-visible skip API exists?
-7. Which GitHub Actions event and expression subset defines the first customer
+6. Which GitHub Actions event and expression subset defines the first customer
    beta rather than only the technical alpha?
-8. What is the initial Cursor Origin provider contract for checkout, event
+7. What is the initial Cursor Origin provider contract for checkout, event
    payloads, pull requests, and short-lived tokens?
-9. Which queue capabilities and trust properties are required before the
+8. Which queue capabilities and trust properties are required before the
    compiler may schedule Docker or privileged workloads?
-10. What is the initial source and permission model for `github.token` and
+9. What is the initial source and permission model for `github.token` and
     `GITHUB_TOKEN`: a customer-supplied secret, a short-lived GitHub App token,
     or an explicitly tokenless workflow?
-11. What is the source and precedence model for repository, organization, and
+10. What is the source and precedence model for repository, organization, and
     environment values exposed through the non-secret `vars` context?
-12. Which documented Buildkite query can verify the exact key and plan-digest
+11. Which documented Buildkite query can verify the exact key and plan-digest
     set after an upload is interrupted between pipeline creation and completion
     marker publication?
-13. Which signed-envelope format, algorithm, and non-exportable signing backend
-    will be supported first, and how will installers distribute verification
-    roots and perform key rotation and revocation across compiler and runtime
-    queues?
 
 ## Recommended first product milestone
 
