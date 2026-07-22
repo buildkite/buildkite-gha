@@ -131,7 +131,7 @@ func materializePlans(root string, plans []PlanArtifact) (map[string]materialize
 	if err != nil {
 		return nil, fmt.Errorf("open plan artifact root: %w", err)
 	}
-	defer rootFS.Close()
+	defer func() { _ = rootFS.Close() }()
 
 	materialized := make(map[string]materializedPlan, len(plans))
 	for _, plan := range plans {

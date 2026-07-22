@@ -232,13 +232,13 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		return composite, nil, err
 	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
-			return result, nil, fmt.Errorf("Docker action %q requires the plan's docker capability", step.Uses)
+			return result, nil, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
 		if action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" || len(action.Runs.Args) != 0 {
-			return result, nil, fmt.Errorf("Docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
+			return result, nil, fmt.Errorf("docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
 		}
 		if action.Runs.Image != "Dockerfile" {
-			return result, nil, fmt.Errorf("Docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
+			return result, nil, fmt.Errorf("docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
 		}
 		dockerEnv, err := evaluateMap(action.Runs.Env, actionEval)
 		if err != nil {

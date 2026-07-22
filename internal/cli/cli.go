@@ -42,13 +42,13 @@ var commandUsage = map[string]string{
 // Run executes the command and returns its process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
 	if len(args) == 0 {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
 
 	switch args[0] {
 	case "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return 0
 	case "help":
 		return help(args[1:], stdout, stderr)
@@ -56,17 +56,17 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 		if len(args) != 1 {
 			return usageError(stderr, "%s does not accept arguments", args[0])
 		}
-		fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
+		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
 		return 0
 	default:
 		if commandHelp, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-				fmt.Fprint(stdout, commandHelp)
+				_, _ = fmt.Fprint(stdout, commandHelp)
 				if args[0] == "compile" {
-					fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+					_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 				}
 				if args[0] == "upload" {
-					fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
+					_, _ = fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 				}
 				return 0
 			}
@@ -78,7 +78,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version)
 			default:
-				fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
 				return 1
 			}
 		}
@@ -89,7 +89,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 
 func help(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprint(stdout, usage)
+		_, _ = fmt.Fprint(stdout, usage)
 		return 0
 	}
 	if len(args) != 1 {
@@ -101,12 +101,12 @@ func help(args []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, "unknown command %q", args[0])
 	}
 
-	fmt.Fprint(stdout, commandHelp)
+	_, _ = fmt.Fprint(stdout, commandHelp)
 	if args[0] == "compile" {
-		fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	}
 	if args[0] == "upload" {
-		fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
+		_, _ = fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 	}
 	return 0
 }
@@ -118,32 +118,32 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 	}
 	source, err := os.ReadFile(planPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
 	if expected := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST"); expected != "" {
 		actual := transport.Digest(source)
 		if actual != expected {
-			fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", actual, expected)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", actual, expected)
 			return 1
 		}
 	}
 	job, err := plan.Decode(source)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
 	if job.Compiler.Version != version {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
 		return 1
 	}
 	if err := verifyBuildkiteTarget(job); err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
 	workspace, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve workspace: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve workspace: %v\n", err)
 		return 1
 	}
 	runner := gharuntime.Runner{
@@ -159,17 +159,17 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 	if resultPath != "" && result.Conclusion != "" {
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			fmt.Fprintf(stderr, "buildkite-gha: run-job: encode result: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: encode result: %v\n", err)
 			return 1
 		}
 		encoded = append(encoded, '\n')
 		if err := os.WriteFile(resultPath, encoded, 0o600); err != nil {
-			fmt.Fprintf(stderr, "buildkite-gha: run-job: write result: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: write result: %v\n", err)
 			return 1
 		}
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
 	return 0
@@ -208,7 +208,7 @@ func verifyBuildkiteTarget(job plan.Job) error {
 	stepKey := os.Getenv("BUILDKITE_STEP_KEY")
 	queue := os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE")
 	if os.Getenv("BUILDKITE") != "" && (stepKey == "" || queue == "") {
-		return fmt.Errorf("Buildkite execution requires BUILDKITE_STEP_KEY and BUILDKITE_AGENT_META_DATA_QUEUE")
+		return fmt.Errorf("buildkite execution requires BUILDKITE_STEP_KEY and BUILDKITE_AGENT_META_DATA_QUEUE")
 	}
 	if stepKey != "" && stepKey != job.Target.StepKey {
 		return fmt.Errorf("plan targets step %q, executing step is %q", job.Target.StepKey, stepKey)
@@ -226,7 +226,7 @@ func validate(args []string, stdout, stderr io.Writer) int {
 	}
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 		return 1
 	}
 
@@ -236,19 +236,19 @@ func validate(args []string, stdout, stderr io.Writer) int {
 	} else {
 		event, readErr := os.ReadFile(eventPath)
 		if readErr != nil {
-			fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", readErr)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", readErr)
 			return 1
 		}
 		report, err = compiler.ValidateEvent(workflowPath, source, event)
 	}
 	if err != nil {
 		if writeErr := compatibility.Write(stdout, format, compatibility.Blocked(workflowPath, err)); writeErr != nil {
-			fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
 		}
 		return 1
 	}
 	if err := compatibility.Write(stdout, format, compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)); err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
 		return 1
 	}
 	return 0
@@ -290,12 +290,12 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	}
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
 	event, err := os.ReadFile(eventPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
 	var result []byte
@@ -304,7 +304,7 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	} else {
 		digest, digestErr := executableDigest()
 		if digestErr != nil {
-			fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", digestErr)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", digestErr)
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
@@ -312,11 +312,11 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		result = bundle.Pipeline
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
 	if _, err := stdout.Write(result); err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
 		return 1
 	}
 	return 0
@@ -394,7 +394,7 @@ func workflowArgs(args []string) (workflowPath, eventPath string, err error) {
 }
 
 func usageError(stderr io.Writer, format string, args ...any) int {
-	fmt.Fprintf(stderr, "buildkite-gha: "+format+"\n\n", args...)
-	fmt.Fprint(stderr, usage)
+	_, _ = fmt.Fprintf(stderr, "buildkite-gha: "+format+"\n\n", args...)
+	_, _ = fmt.Fprint(stderr, usage)
 	return 2
 }

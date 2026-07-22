@@ -157,7 +157,7 @@ func TestFileCommandParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(files.dir)
+	defer func() { _ = os.RemoveAll(files.dir) }()
 	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(files.dir)
+	defer func() { _ = os.RemoveAll(files.dir) }()
 
 	many := strings.Repeat("value=x\n", maxCommandEntries+1)
 	if err := os.WriteFile(files.output, []byte(many), 0o600); err != nil {
@@ -282,9 +282,9 @@ func TestLongLineChildProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_RUNTIME_LONG_LINE") != "1" {
 		return
 	}
-	fmt.Fprintln(os.Stdout, "::add-mask::runtime-stream-secret")
-	fmt.Fprintln(os.Stdout, strings.Repeat("x", maxStreamLineBytes+1)+"runtime-stream-secret")
-	fmt.Fprintln(os.Stdout, "after long line: runtime-stream-secret")
+	_, _ = fmt.Fprintln(os.Stdout, "::add-mask::runtime-stream-secret")
+	_, _ = fmt.Fprintln(os.Stdout, strings.Repeat("x", maxStreamLineBytes+1)+"runtime-stream-secret")
+	_, _ = fmt.Fprintln(os.Stdout, "after long line: runtime-stream-secret")
 }
 
 func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {

@@ -1,9 +1,16 @@
 steps:
   - label: ":go: Repository checks"
     key: "checks"
-    command: >-
-      docker run --rm
-      --volume "$$PWD:/work"
-      --workdir /work
-      golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
-      bash -ceu 'apt-get update >/dev/null && apt-get install -y --no-install-recommends jq >/dev/null && make check'
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise run check"
+    cache:
+      paths:
+        - "~/.local/share/mise"
+        - "~/.cache/mise"
+        - "~/.local/state/mise"
+      size: "20g"
+      name: "mise-cache"
+    agents:
+      queue: "hosted"

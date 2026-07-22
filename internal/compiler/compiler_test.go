@@ -690,7 +690,7 @@ func TestCompileBoundsReusableWorkflowGraphExpansion(t *testing.T) {
 	var callee strings.Builder
 	callee.WriteString("on: workflow_call\njobs:\n")
 	for i := 0; i < 5; i++ {
-		fmt.Fprintf(&callee, "  job%d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", i)
+		_, _ = fmt.Fprintf(&callee, "  job%d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n", i)
 	}
 	writeWorkflow(t, repository, "reusable.yml", callee.String())
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))

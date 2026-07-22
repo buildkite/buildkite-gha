@@ -1,0 +1,48 @@
+[tools]
+go = "1.26.5"
+golangci-lint = "2.12.2"
+jq = "1.8.2"
+shellcheck = "0.11.0"
+
+[env]
+GOTOOLCHAIN = "local"
+
+[tasks.format]
+description = "Check Go formatting"
+run = '''
+unformatted="$(gofmt -l .)"
+test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+'''
+
+[tasks.test]
+description = "Run the Go test suite"
+run = "go test ./..."
+
+[tasks."test:race"]
+description = "Run the race-enabled Go test suite"
+run = "go test -race ./..."
+
+[tasks."lint:go"]
+description = "Lint Go code"
+run = "golangci-lint run"
+
+[tasks."lint:shell"]
+description = "Lint shell scripts"
+run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh testdata/actions/docker/entrypoint.sh"
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.build]
+description = "Build all Go commands"
+run = "go build ./..."
+
+[tasks.plan-fixtures]
+description = "Validate signed plan-envelope fixtures"
+run = "python3 testdata/plans/validate.py"
+
+[tasks.check]
+description = "Run formatting, build, tests, lint, vet, and fixture checks"
+depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures"]
+run = "true"

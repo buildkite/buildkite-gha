@@ -122,9 +122,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Key != "checks" ||
-		!strings.Contains(document.Steps[0].Command, "golang:1.26.5-bookworm@sha256:") ||
-		!strings.Contains(document.Steps[0].Command, "make check") {
+	if len(document.Steps) != 1 || document.Steps[0].Key != "checks" || document.Steps[0].Command != "mise run check" {
 		t.Fatalf("default pipeline = %#v, want one repository check step", document.Steps)
 	}
 }

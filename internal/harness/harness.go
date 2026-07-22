@@ -441,7 +441,7 @@ func treeDigest(root string) (string, error) {
 			return err
 		}
 		if relative == "." {
-			fmt.Fprintf(hash, "d . %o\x00", info.Mode().Perm())
+			_, _ = fmt.Fprintf(hash, "d . %o\x00", info.Mode().Perm())
 			return nil
 		}
 		if entry.Name() == ".git" {
@@ -452,13 +452,13 @@ func treeDigest(root string) (string, error) {
 			return err
 		}
 		if entry.IsDir() {
-			fmt.Fprintf(hash, "d %s %o\x00", filepath.ToSlash(relative), info.Mode().Perm())
+			_, _ = fmt.Fprintf(hash, "d %s %o\x00", filepath.ToSlash(relative), info.Mode().Perm())
 			return nil
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("fixture entry %q is not a regular file", relative)
 		}
-		fmt.Fprintf(hash, "f %s %o %d\x00", filepath.ToSlash(relative), info.Mode().Perm(), info.Size())
+		_, _ = fmt.Fprintf(hash, "f %s %o %d\x00", filepath.ToSlash(relative), info.Mode().Perm(), info.Size())
 		file, err := os.Open(path)
 		if err != nil {
 			return err
@@ -505,8 +505,7 @@ func copyTree(source, destination string) error {
 		}
 		targetFile, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
 		if err != nil {
-			sourceFile.Close()
-			return err
+			return errors.Join(err, sourceFile.Close())
 		}
 		_, copyErr := io.Copy(targetFile, sourceFile)
 		if err := errors.Join(copyErr, targetFile.Close(), sourceFile.Close()); err != nil {
