@@ -80,6 +80,7 @@ func parseCommandFile(path string) (map[string]string, error) {
 
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
@@ -114,7 +115,7 @@ func parseCommandFile(path string) (map[string]string, error) {
 		values[name] = value
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse file command %s: %w", filepath.Base(path), err)
 	}
 	return values, nil
 }

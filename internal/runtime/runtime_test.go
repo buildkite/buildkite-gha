@@ -155,6 +155,22 @@ func TestFileCommandParsing(t *testing.T) {
 	}
 }
 
+func TestFileCommandLineLimitIsExplicit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(path, []byte("value="+strings.Repeat("x", 70*1024)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if values, err := parseCommandFile(path); err != nil || len(values["value"]) != 70*1024 {
+		t.Fatalf("parseCommandFile() value length = %d, error = %v", len(values["value"]), err)
+	}
+	if err := os.WriteFile(path, []byte("value="+strings.Repeat("x", maxStreamLineBytes)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseCommandFile(path); err == nil || !strings.Contains(err.Error(), "parse file command output") {
+		t.Fatalf("parseCommandFile() error = %v, want attributed size failure", err)
+	}
+}
+
 func TestExpressionEvaluationIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := evaluationContext{
