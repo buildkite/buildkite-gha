@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -26,9 +27,22 @@ func TestRunRejectsTamperedProbePayload(t *testing.T) {
 	if err := run([]string{"sign"}, strings.NewReader(`{"phase":"expected"}`), &encoded); err != nil {
 		t.Fatal(err)
 	}
-	tampered := encoded.Bytes()
-	tampered[len(tampered)-3] ^= 1
-	if err := run([]string{"verify"}, bytes.NewReader(tampered), &bytes.Buffer{}); err == nil {
-		t.Fatal("verify accepted a tampered envelope")
+	var envelope map[string]string
+	if err := json.Unmarshal(encoded.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	signature := envelope["signature"]
+	if signature[0] == 'A' {
+		envelope["signature"] = "B" + signature[1:]
+	} else {
+		envelope["signature"] = "A" + signature[1:]
+	}
+	tampered, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"verify"}, bytes.NewReader(tampered), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "invalid ES256 signature") {
+		t.Fatalf("verify error = %v, want invalid ES256 signature", err)
 	}
 }
