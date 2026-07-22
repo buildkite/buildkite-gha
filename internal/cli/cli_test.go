@@ -501,8 +501,7 @@ func TestRunJobPublishesHydrationFailureAndRejectsMissingIdentity(t *testing.T) 
 	planPath, planDigest := writeCLIJobPlan(t, job)
 
 	t.Run("needs require Buildkite", func(t *testing.T) {
-		t.Setenv("BUILDKITE", "")
-		t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "")
+		clearCLIJobIdentity(t)
 		runner := &cliCaptureRunner{}
 		var stdout, stderr bytes.Buffer
 		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prerequisites require Buildkite result identity") {
@@ -616,6 +615,7 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 }
 
 func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
+	clearCLIJobIdentity(t)
 	workspace := t.TempDir()
 	job := plan.Job{
 		Schema: plan.Schema,
@@ -701,6 +701,20 @@ func setCLIJobIdentity(t *testing.T, job plan.Job, planDigest string) {
 	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
 	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", planDigest)
+}
+
+func clearCLIJobIdentity(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"BUILDKITE",
+		"BUILDKITE_BUILD_ID",
+		"BUILDKITE_JOB_ID",
+		"BUILDKITE_STEP_KEY",
+		"BUILDKITE_AGENT_META_DATA_QUEUE",
+		"BUILDKITE_GHA_PLAN_DIGEST",
+	} {
+		t.Setenv(name, "")
+	}
 }
 
 func publishedCLIManifest(t *testing.T, runner *cliCaptureRunner, job plan.Job, planDigest string) transport.ResultManifest {
