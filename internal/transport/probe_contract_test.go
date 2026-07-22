@@ -12,34 +12,35 @@ import (
 	"testing"
 )
 
-const installedProbePath = "/opt/buildkite-gha/phase-0-transport-probe/probe.sh"
+const liveProbePath = ".buildkite/phase-0-transport-probe/probe.sh"
 
-func TestCheckoutSkippedProbeUsesOnlyInstalledCommands(t *testing.T) {
+func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
 	root := filepath.Join("..", "..", ".buildkite", "phase-0-transport-probe")
 	pipeline := readProbeFile(t, filepath.Join(root, "pipeline.yml"))
-	if strings.Count(pipeline, "checkout:\n      skip: true") != 2 {
-		t.Fatal("probe pipeline must skip checkout for both static jobs")
+	if strings.Contains(pipeline, "checkout:\n      skip: true") {
+		t.Fatal("unprivileged live probe must use the exact build checkout")
 	}
 	commands := regexp.MustCompile(`(?m)^    command: "([^"]+)"$`).FindAllStringSubmatch(pipeline, -1)
 	if len(commands) != 2 {
 		t.Fatalf("static probe commands = %d, want 2", len(commands))
 	}
 	for _, command := range commands {
-		if !strings.HasPrefix(command[1], installedProbePath+" ") {
-			t.Fatalf("checkout-skipped command is not installed probe: %q", command[1])
+		if !strings.HasPrefix(command[1], liveProbePath+" ") {
+			t.Fatalf("live probe command is not repository-pinned: %q", command[1])
 		}
 	}
 
 	script := readProbeFile(t, filepath.Join(root, "probe.sh"))
-	if strings.Contains(script, ".buildkite/phase-0-transport-probe") {
-		t.Fatal("probe script contains a repository-relative self invocation")
+	if strings.Contains(script, "checkout:\n      skip: true") {
+		t.Fatal("generated live probe jobs must use the exact build checkout")
 	}
-	if !strings.Contains(script, `readonly probe_path="`+installedProbePath+`"`) || strings.Count(script, `command: "${probe_path} `) != 2 {
-		t.Fatal("generated jobs must use the fixed installed probe path")
+	if !strings.Contains(script, `readonly probe_path="`+liveProbePath+`"`) || strings.Count(script, `command: "${probe_path} `) != 2 {
+		t.Fatal("generated jobs must use the exact build checkout")
 	}
 	for _, required := range []string{
 		`readonly binding_issuer="buildkite-gha-plan-envelope"`,
 		`PHASE0_BINDING_JTI`,
+		`PHASE0_REDACTION_SECRET`,
 		`PHASE0_PRODUCER_PLAN_DIGEST`,
 		`cmp -s "${canonical}" "${manifest}"`,
 		`.producer.job_id == $job_id`,

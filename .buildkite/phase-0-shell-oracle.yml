@@ -8,6 +8,9 @@ steps:
       fixture_commit=$$(go run ./internal/harness/cmd/shell-oracle materialize --source testdata/smoke)
       buildkite-agent meta-data set phase-0-shell-fixture-commit "$$fixture_commit"
       printf 'Materialized shell fixture commit: %s\n' "$$fixture_commit"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
 
   - label: ":pipeline: Produce bounded shell output"
     key: phase-0-shell-producer
@@ -71,3 +74,6 @@ steps:
             --commit "$$fixture_commit" \
             --provider buildkite \
         | tee phase-0-shell-normalized.json
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"

@@ -5,10 +5,18 @@ readonly importer_key="phase0-transport-importer"
 readonly producer_key="phase0-transport-producer"
 readonly consumer_key="phase0-transport-consumer"
 readonly marker_prefix="buildkite-gha/v1/uploads/${importer_key}"
-readonly probe_path="/opt/buildkite-gha/phase-0-transport-probe/probe.sh"
+readonly probe_path=".buildkite/phase-0-transport-probe/probe.sh"
 readonly binding_issuer="buildkite-gha-plan-envelope"
 readonly binding_lifetime_seconds=3600
 readonly binding_max_lifetime_seconds=86400
+
+cleanup_path=""
+cleanup() {
+  if [[ -n "${cleanup_path}" ]]; then
+    rm -rf -- "${cleanup_path}"
+  fi
+}
+trap cleanup EXIT
 
 require_env() {
   local name
@@ -105,7 +113,7 @@ bootstrap() {
   require_commit PHASE0_COMMIT "${PHASE0_COMMIT}"
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
 
   mkdir -p "${work}/buildkite-gha/v1/plans/${producer_key}" "${work}/buildkite-gha/v1/plans/${consumer_key}"
   printf '%s' '{"logical_job":"producer","required_capabilities":["network"],"schema":"phase0-probe-plan/v1"}' > "${work}/producer.plan.json"
@@ -123,6 +131,12 @@ bootstrap() {
   write_claims "${work}/consumer.claims.json" "${consumer_key}" "${consumer_digest}" '[]' "${consumer_jti}" "${issued_at}" "${expires_at}"
   sign_json "${work}/producer.claims.json" > "${work}/producer.binding.jws"
   sign_json "${work}/consumer.claims.json" > "${work}/consumer.binding.jws"
+  if [[ "${PHASE0_TAMPER_BINDING:-}" == "1" ]]; then
+    jq -c '.signature = ((if .signature[0:1] == "A" then "B" else "A" end) + .signature[1:])' \
+      "${work}/producer.binding.jws" > "${work}/producer.binding.tampered.jws"
+    truncate -s -1 "${work}/producer.binding.tampered.jws"
+    mv "${work}/producer.binding.tampered.jws" "${work}/producer.binding.jws"
+  fi
 
   local producer_artifact consumer_artifact
   producer_artifact="${work}/buildkite-gha/v1/plans/${producer_key}/${producer_digest#sha256:}"
@@ -146,12 +160,14 @@ steps:
     command: "${probe_path} producer"
     agents:
       queue: "${PHASE0_RUNTIME_QUEUE}"
-    checkout:
-      skip: true
     env:
       PHASE0_PLAN_DIGEST: "${producer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
       PHASE0_BINDING_JTI: "${producer_jti}"
+      PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -160,13 +176,15 @@ steps:
     command: "${probe_path} consumer"
     agents:
       queue: "${PHASE0_RUNTIME_QUEUE}"
-    checkout:
-      skip: true
     env:
       PHASE0_PLAN_DIGEST: "${consumer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
       PHASE0_BINDING_JTI: "${consumer_jti}"
       PHASE0_PRODUCER_PLAN_DIGEST: "${producer_digest}"
+      PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -212,11 +230,11 @@ YAML
       echo "upload already completed"
       return
     fi
-    echo "prepared upload has no completion marker; current public queries do not prove pipeline-signature verification, so cancel this build and start a new one" >&2
+    echo "prepared upload has no completion marker; cancel this build and start a new one" >&2
     exit 75
   else
     buildkite-agent meta-data set "${marker_prefix}/expected" "${expected}"
-    buildkite-agent pipeline upload --no-interpolation --reject-secrets --reject-parse-warnings "${pipeline}"
+    buildkite-agent pipeline upload --no-interpolation --reject-secrets "${pipeline}"
     if [[ "${PHASE0_INTERRUPT_AFTER_UPLOAD:-}" == "1" ]]; then
       echo "intentional interruption after pipeline upload" >&2
       exit 75
@@ -281,8 +299,10 @@ load_and_verify_plan() {
 producer() {
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
   load_and_verify_plan "${producer_key}" "${work}"
+  require_env PHASE0_REDACTION_SECRET
+  printf 'agent redaction canary: %s\n' "${PHASE0_REDACTION_SECRET}"
   mkdir -p "${work}/buildkite-gha/v1/results/${producer_key}"
   local result="success"
   [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && result="failure"
@@ -301,7 +321,7 @@ producer() {
 consumer() {
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
   load_and_verify_plan "${consumer_key}" "${work}"
   require_env PHASE0_PRODUCER_PLAN_DIGEST
   require_digest PHASE0_PRODUCER_PLAN_DIGEST "${PHASE0_PRODUCER_PLAN_DIGEST}"

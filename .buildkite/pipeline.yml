@@ -1,4 +1,18 @@
 steps:
+  - label: ":test_tube: Load Phase 0 shell oracle"
+    key: "phase-0-shell-oracle-loader"
+    if: build.env("PHASE0_PROBE") == "shell"
+    command: "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml"
+    agents:
+      queue: "elastic-runners"
+
+  - label: ":test_tube: Load Phase 0 transport probe"
+    key: "phase-0-transport-probe-loader"
+    if: build.env("PHASE0_PROBE") == "transport"
+    command: "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml"
+    agents:
+      queue: "elastic-runners"
+
   - label: ":go: Repository checks"
     key: "checks"
     plugins:
