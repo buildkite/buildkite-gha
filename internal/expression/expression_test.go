@@ -81,6 +81,46 @@ func TestEvaluateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
+	context := ConditionContext{
+		Needs:       map[string]map[string]string{"build": {"gate": "yes"}},
+		NeedResults: map[string]string{"build": "failure"},
+		Steps:       map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
+		Failure:     true,
+	}
+	for _, condition := range []string{
+		"always() && needs.build.result == 'failure' && needs.build.outputs.gate == 'yes'",
+		"failure() && steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'",
+		"always() && steps.soft.outputs.ready",
+	} {
+		got, err := EvaluateCondition(condition, context)
+		if err != nil || !got {
+			t.Fatalf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+		}
+	}
+	for _, condition := range []string{"''", "0", "false", "null"} {
+		got, err := EvaluateCondition(condition, ConditionContext{})
+		if err != nil || got {
+			t.Fatalf("EvaluateCondition(%q) = %v, %v, want false", condition, got, err)
+		}
+	}
+}
+
+func TestEvaluateConditionFailsClosed(t *testing.T) {
+	if _, err := EvaluateCondition("1 < 2", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted unsupported ordered comparison")
+	}
+	if _, err := EvaluateCondition("true == 'true'", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() silently coerced mixed equality operands")
+	}
+	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
+		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
+	}
+	if _, err := EvaluateCondition("needs.missing.result", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted an unavailable need result")
+	}
+}
+
 func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	context := CompileContext{
 		GitHub: map[string]any{"event_name": "push", "event": map[string]any{"action": "opened"}},

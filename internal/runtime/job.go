@@ -86,13 +86,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
-	jobCondition := conditionContext{needs: job.Needs, matrix: job.Matrix, vars: job.Vars, github: eval.GitHub}
+	jobCondition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub}
 	for _, need := range job.Needs {
-		jobCondition.failure = jobCondition.failure || need.Result == "failure"
-		jobCondition.cancelled = jobCondition.cancelled || need.Result == "cancelled"
-		jobCondition.unsuccessful = jobCondition.unsuccessful || need.Result != "success"
+		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
+		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
+		jobCondition.Unsuccessful = jobCondition.Unsuccessful || need.Result != "success"
 	}
-	run, err := evaluateCondition(job.Condition, jobCondition)
+	run, err := expression.EvaluateCondition(job.Condition, jobCondition)
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job condition: %w", err)
 	}
@@ -138,18 +138,18 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	}
 	defer cancelJob()
 	posts := make([]registeredPost, 0)
-	statuses := make(map[string]stepStatus, len(job.Steps))
+	statuses := make(map[string]expression.StepStatus, len(job.Steps))
 
 	var runErr error
 	for _, step := range job.Steps {
-		condition := conditionContext{needs: job.Needs, steps: statuses, env: jobResult.Env, vars: job.Vars, matrix: job.Matrix, github: eval.GitHub, failure: runErr != nil, unsuccessful: runErr != nil, cancelled: runCtx.Err() != nil}
-		run, err := evaluateCondition(step.Condition, condition)
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
+		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
 			break
 		}
 		if !run {
-			statuses[strings.ToLower(step.ID)] = stepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
@@ -182,7 +182,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 				runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, err))
 			}
 		}
-		statuses[strings.ToLower(step.ID)] = stepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: result.Outputs}
+		statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: result.Outputs}
 	}
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())
