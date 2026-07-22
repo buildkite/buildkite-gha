@@ -75,6 +75,8 @@ type Job struct {
 	Target                  Target            `json:"target"`
 	RequiredCapabilities    []string          `json:"required_capabilities"`
 	Matrix                  map[string]any    `json:"matrix,omitempty"`
+	Vars                    map[string]string `json:"vars,omitempty"`
+	Dependencies            []string          `json:"dependencies,omitempty"`
 	Needs                   map[string]Need   `json:"needs,omitempty"`
 	Env                     map[string]string `json:"env,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
@@ -215,6 +217,20 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan repeats capability %q", capability)
 		}
 		capabilities[capability] = struct{}{}
+	}
+	if !sort.StringsAreSorted(job.Dependencies) {
+		return fmt.Errorf("job plan dependencies must be sorted")
+	}
+	dependencies := make(map[string]struct{}, len(job.Dependencies))
+	for _, dependency := range job.Dependencies {
+		if !targetPattern.MatchString(dependency) || strings.EqualFold(dependency, job.Target.StepKey) {
+			return fmt.Errorf("job plan contains invalid dependency %q", dependency)
+		}
+		id := strings.ToLower(dependency)
+		if _, exists := dependencies[id]; exists {
+			return fmt.Errorf("job plan repeats dependency %q", dependency)
+		}
+		dependencies[id] = struct{}{}
 	}
 	if len(job.Steps) == 0 {
 		return fmt.Errorf("job plan contains no steps")

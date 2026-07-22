@@ -6,6 +6,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/rhysd/actionlint"
+	"go.yaml.in/yaml/v4"
 )
 
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
@@ -15,6 +16,10 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if len(errs) != 0 {
 		err := errs[0]
 		return nil, fmt.Errorf("%s:%d:%d: %s", path, err.Line, err.Column, err.Message)
+	}
+	scalars, err := scalarValues(source)
+	if err != nil {
+		return nil, fmt.Errorf("%s: parse scalar values: %w", path, err)
 	}
 
 	owned := &Workflow{}
@@ -33,6 +38,29 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
 		}
 	}
+	if call, ok := parsed.FindWorkflowCallEvent(); ok {
+		owned.Callable = true
+		if len(call.Inputs) != 0 {
+			owned.CallInputs = make(map[string]CallInput, len(call.Inputs))
+		}
+		for _, input := range call.Inputs {
+			ownedInput := CallInput{Type: workflowCallInputType(input.Type), Required: input.IsRequired()}
+			if input.Default != nil {
+				value := Value{Data: scalarAt(input.Default, scalars), Span: spanFrom(input.Default.Pos, input.Default.Value)}
+				ownedInput.Default = &value
+			}
+			owned.CallInputs[input.ID] = ownedInput
+		}
+		for name, secret := range call.Secrets {
+			if secret.Required != nil && secret.Required.Expression != nil {
+				return nil, locatedError(path, secret.Required.Expression.Pos, "workflow", fmt.Sprintf("expression-valued required flag for workflow_call secret %q is unsupported", name))
+			}
+			if secret.Required != nil && secret.Required.Value {
+				owned.RequiredCallSecrets = append(owned.RequiredCallSecrets, name)
+			}
+		}
+		sort.Strings(owned.RequiredCallSecrets)
+	}
 
 	ids := make([]string, 0, len(parsed.Jobs))
 	for id := range parsed.Jobs {
@@ -40,7 +68,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		job, err := adaptJob(path, parsed.Jobs[id])
+		job, err := adaptJob(path, parsed.Jobs[id], scalars)
 		if err != nil {
 			return nil, err
 		}
@@ -56,8 +84,26 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	return owned, nil
 }
 
-func adaptJob(path string, in *actionlint.Job) (Job, error) {
-	out := Job{ID: in.ID.Value, Reusable: in.WorkflowCall != nil, Span: pointSpan(in.Pos)}
+func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, error) {
+	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
+	if in.WorkflowCall != nil {
+		call := in.WorkflowCall
+		out.Reusable = &ReusableWorkflowCall{
+			Uses:           call.Uses.Value,
+			Secrets:        len(call.Secrets) != 0,
+			InheritSecrets: call.InheritSecrets,
+			Span:           spanFrom(call.Uses.Pos, call.Uses.Value),
+		}
+		if len(call.Inputs) != 0 {
+			out.Reusable.Inputs = make(map[string]Value, len(call.Inputs))
+			for name, input := range call.Inputs {
+				out.Reusable.Inputs[name] = Value{
+					Data: scalarAt(input.Value, scalars),
+					Span: spanFrom(input.Value.Pos, input.Value.Value),
+				}
+			}
+		}
+	}
 	if in.If != nil {
 		return Job{}, locatedError(path, in.If.Pos, in.ID.Value, "job conditions are unsupported in the Phase 0 runtime")
 	}
@@ -111,15 +157,21 @@ func adaptJob(path string, in *actionlint.Job) (Job, error) {
 
 	if in.Strategy != nil {
 		if in.Strategy.FailFast != nil {
+			if in.Strategy.FailFast.Expression != nil {
+				return Job{}, locatedError(path, in.Strategy.FailFast.Expression.Pos, in.ID.Value, "expression-valued matrix fail-fast is unsupported")
+			}
 			v := in.Strategy.FailFast.Value
 			out.FailFast = &v
 		}
 		if in.Strategy.MaxParallel != nil {
+			if in.Strategy.MaxParallel.Expression != nil {
+				return Job{}, locatedError(path, in.Strategy.MaxParallel.Expression.Pos, in.ID.Value, "expression-valued matrix max-parallel is unsupported")
+			}
 			v := in.Strategy.MaxParallel.Value
 			out.MaxParallel = &v
 		}
 		if in.Strategy.Matrix != nil {
-			matrix, err := adaptMatrix(path, in.ID.Value, in.Strategy.Matrix)
+			matrix, err := adaptMatrix(path, in.ID.Value, in.Strategy.Matrix, scalars)
 			if err != nil {
 				return Job{}, err
 			}
@@ -139,9 +191,15 @@ func adaptJob(path string, in *actionlint.Job) (Job, error) {
 			owned.If = step.If.Value
 		}
 		if step.ContinueOnError != nil {
+			if step.ContinueOnError.Expression != nil {
+				return Job{}, locatedError(path, step.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued step continue-on-error is unsupported")
+			}
 			owned.ContinueOnError = step.ContinueOnError.Value
 		}
 		if step.TimeoutMinutes != nil {
+			if step.TimeoutMinutes.Expression != nil {
+				return Job{}, locatedError(path, step.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued step timeout-minutes is unsupported")
+			}
 			owned.TimeoutMinutes = step.TimeoutMinutes.Value
 		}
 		if step.Env != nil && step.Env.Expression != nil {
@@ -181,13 +239,33 @@ func adaptJob(path string, in *actionlint.Job) (Job, error) {
 	return out, nil
 }
 
+func workflowCallInputType(inputType actionlint.WorkflowCallEventInputType) string {
+	switch inputType {
+	case actionlint.WorkflowCallEventInputTypeBoolean:
+		return "boolean"
+	case actionlint.WorkflowCallEventInputTypeNumber:
+		return "number"
+	case actionlint.WorkflowCallEventInputTypeString:
+		return "string"
+	default:
+		return ""
+	}
+}
+
+func scalarAt(value *actionlint.String, scalars map[Position]any) any {
+	if scalar, ok := scalars[Position{Line: value.Pos.Line, Column: value.Pos.Col}]; ok {
+		return scalar
+	}
+	return value.Value
+}
+
 func adaptEnv(in *actionlint.Env) map[string]string {
 	if in == nil || len(in.Vars) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(in.Vars))
-	for name, variable := range in.Vars {
-		out[name] = variable.Value.Value
+	for _, variable := range in.Vars {
+		out[variable.Name.Value] = variable.Value.Value
 	}
 	return out
 }
@@ -206,12 +284,8 @@ func mergeEnv(base, override map[string]string) map[string]string {
 	return out
 }
 
-func adaptMatrix(path, jobID string, in *actionlint.Matrix) (*Matrix, error) {
-	out := &Matrix{
-		HasInclude: in.Include != nil,
-		HasExclude: in.Exclude != nil,
-		Span:       pointSpan(in.Pos),
-	}
+func adaptMatrix(path, jobID string, in *actionlint.Matrix, scalars map[Position]any) (*Matrix, error) {
+	out := &Matrix{Span: pointSpan(in.Pos)}
 	if in.Expression != nil {
 		expr, err := adaptExpression(in.Expression)
 		if err != nil {
@@ -224,10 +298,19 @@ func adaptMatrix(path, jobID string, in *actionlint.Matrix) (*Matrix, error) {
 	for name := range in.Rows {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	sort.Slice(names, func(i, j int) bool {
+		left, right := matrixRowPosition(in.Rows[names[i]]), matrixRowPosition(in.Rows[names[j]])
+		if left.Line != right.Line {
+			return left.Line < right.Line
+		}
+		if left.Col != right.Col {
+			return left.Col < right.Col
+		}
+		return names[i] < names[j]
+	})
 	for _, name := range names {
 		row := in.Rows[name]
-		owned := MatrixRow{Name: row.Name.Value, Span: pointSpan(row.Name.Pos)}
+		owned := MatrixRow{Name: name, Span: pointSpan(matrixRowPosition(row))}
 		if row.Expression != nil {
 			expr, err := adaptExpression(row.Expression)
 			if err != nil {
@@ -236,35 +319,128 @@ func adaptMatrix(path, jobID string, in *actionlint.Matrix) (*Matrix, error) {
 			owned.Expression = &expr
 		}
 		for _, value := range row.Values {
-			owned.Values = append(owned.Values, Value{Data: adaptValue(value), Span: spanFrom(value.Pos(), value.String())})
+			owned.Values = append(owned.Values, Value{Data: adaptValue(value, scalars), Span: spanFrom(value.Pos(), value.String())})
 		}
 		out.Rows = append(out.Rows, owned)
 		if len(owned.Values) > 0 {
 			out.Span.End = owned.Values[len(owned.Values)-1].Span.End
 		}
 	}
+	var err error
+	out.Include, err = adaptMatrixCombinations(path, jobID, "include", in.Include, scalars)
+	if err != nil {
+		return nil, err
+	}
+	out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
+	if err != nil {
+		return nil, err
+	}
+	for _, combinations := range [][]MatrixCombination{out.Include, out.Exclude} {
+		for _, combination := range combinations {
+			if positionAfter(combination.Span.End, out.Span.End) {
+				out.Span.End = combination.Span.End
+			}
+		}
+	}
 	return out, nil
 }
 
-func adaptValue(in actionlint.RawYAMLValue) any {
+func matrixRowPosition(row *actionlint.MatrixRow) *actionlint.Pos {
+	if row.Name != nil {
+		return row.Name.Pos
+	}
+	return row.Expression.Pos
+}
+
+func adaptMatrixCombinations(path, jobID, section string, in *actionlint.MatrixCombinations, scalars map[Position]any) ([]MatrixCombination, error) {
+	if in == nil {
+		return nil, nil
+	}
+	if in.Expression != nil {
+		return nil, locatedError(path, in.Expression.Pos, jobID, fmt.Sprintf("runtime-dependent matrix %s expressions are unsupported", section))
+	}
+	out := make([]MatrixCombination, 0, len(in.Combinations))
+	for _, combination := range in.Combinations {
+		if combination.Expression != nil {
+			return nil, locatedError(path, combination.Expression.Pos, jobID, fmt.Sprintf("runtime-dependent matrix %s expressions are unsupported", section))
+		}
+		owned := MatrixCombination{Values: make(map[string]Value, len(combination.Assigns))}
+		for name, assignment := range combination.Assigns {
+			value := Value{Data: adaptValue(assignment.Value, scalars), Span: spanFrom(assignment.Value.Pos(), assignment.Value.String())}
+			owned.Values[name] = value
+			start := Position{Line: assignment.Key.Pos.Line, Column: assignment.Key.Pos.Col}
+			if owned.Span.Start.Line == 0 || positionAfter(owned.Span.Start, start) {
+				owned.Span.Start = start
+			}
+			if positionAfter(value.Span.End, owned.Span.End) {
+				owned.Span.End = value.Span.End
+			}
+		}
+		out = append(out, owned)
+	}
+	return out, nil
+}
+
+func positionAfter(left, right Position) bool {
+	return left.Line > right.Line || left.Line == right.Line && left.Column > right.Column
+}
+
+func adaptValue(in actionlint.RawYAMLValue, scalars map[Position]any) any {
 	switch value := in.(type) {
 	case *actionlint.RawYAMLString:
+		if scalar, ok := scalars[Position{Line: value.Pos().Line, Column: value.Pos().Col}]; ok {
+			return scalar
+		}
 		return value.Value
 	case *actionlint.RawYAMLArray:
 		out := make([]any, 0, len(value.Elems))
 		for _, elem := range value.Elems {
-			out = append(out, adaptValue(elem))
+			out = append(out, adaptValue(elem, scalars))
 		}
 		return out
 	case *actionlint.RawYAMLObject:
 		out := make(map[string]any, len(value.Props))
 		for key, property := range value.Props {
-			out[key] = adaptValue(property)
+			out[key] = adaptValue(property, scalars)
 		}
 		return out
 	default:
 		return value.String()
 	}
+}
+
+func scalarValues(source []byte) (map[Position]any, error) {
+	// actionlint's raw scalar model intentionally discards YAML scalar tags.
+	// Join a YAML node tree by source position so quoted strings remain distinct
+	// from the booleans, numbers, and nulls used in matrix contexts.
+	var document yaml.Node
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		return nil, err
+	}
+	values := make(map[Position]any)
+	var walk func(*yaml.Node) error
+	walk = func(node *yaml.Node) error {
+		if node.Kind == yaml.ScalarNode {
+			value := any(node.Value)
+			switch node.ShortTag() {
+			case "!!bool", "!!int", "!!float", "!!null":
+				if err := node.Decode(&value); err != nil {
+					return err
+				}
+			}
+			values[Position{Line: node.Line, Column: node.Column}] = value
+		}
+		for _, child := range node.Content {
+			if err := walk(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(&document); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func adaptExpression(in *actionlint.String) (expression.Expression, error) {

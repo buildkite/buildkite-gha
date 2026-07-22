@@ -20,6 +20,17 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
+func TestRunJobRejectsStaticDependenciesUntilResultTransportExists(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: dependency boundary\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.Dependencies = []string{"gha-producer"}
+	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "result transport is not wired") {
+		t.Fatalf("RunJob() error = %v, want fail-closed dependency boundary", err)
+	}
+}
+
 func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 	node := requireNode24(t)
 	var logs bytes.Buffer

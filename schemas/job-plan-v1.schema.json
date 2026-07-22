@@ -60,6 +60,12 @@
       "maxItems": 16
     },
     "matrix": {"type": "object"},
+    "vars": {"$ref": "#/$defs/stringMap"},
+    "dependencies": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,255}$"},
+      "uniqueItems": true
+    },
     "needs": {
       "type": "object",
       "additionalProperties": {

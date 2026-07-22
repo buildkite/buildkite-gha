@@ -62,6 +62,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the Phase 0 runtime", capability)
 		}
 	}
+	if len(job.Dependencies) != 0 {
+		return JobResult{}, fmt.Errorf("prerequisite result transport is not wired for this phase; refusing to run job with %d static dependencies", len(job.Dependencies))
+	}
 	if err := VerifyWorkflow(job, workspace); err != nil {
 		return JobResult{}, err
 	}

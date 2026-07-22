@@ -1,0 +1,47 @@
+steps:
+  - label: "producer"
+    key: "gha-producer"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3.json"
+    agents:
+      queue: "gha-untrusted"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+  - label: "consumer (variant=one)"
+    key: "gha-consumer-5ebbc197d87b"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/293f2a32d81db23b39190dcace7644d8b44f247c6727a477116f777cdc9b2b60.json"
+    agents:
+      queue: "gha-untrusted"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:293f2a32d81db23b39190dcace7644d8b44f247c6727a477116f777cdc9b2b60"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/293f2a32d81db23b39190dcace7644d8b44f247c6727a477116f777cdc9b2b60.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+      - step: "gha-producer"
+        allow_failure: true
+  - label: "consumer (variant=two)"
+    key: "gha-consumer-91934b28b00f"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/aa6e9bd048cb5824912d2bfa18078e4045d3a2a41ce799f5ace943f894d8f77a.json"
+    agents:
+      queue: "gha-untrusted"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:aa6e9bd048cb5824912d2bfa18078e4045d3a2a41ce799f5ace943f894d8f77a"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/aa6e9bd048cb5824912d2bfa18078e4045d3a2a41ce799f5ace943f894d8f77a.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+      - step: "gha-producer"
+        allow_failure: true

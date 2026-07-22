@@ -1,0 +1,51 @@
+steps:
+  - label: "Producer"
+    key: "gha-producer"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/591e07fdba7d05faf56f9dda91d5eb28d16f324799a667ec3d1e68ae0665292f.json"
+    agents:
+      queue: "gha-linux"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:591e07fdba7d05faf56f9dda91d5eb28d16f324799a667ec3d1e68ae0665292f"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/591e07fdba7d05faf56f9dda91d5eb28d16f324799a667ec3d1e68ae0665292f.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+  - label: "Consumer (variant=one)"
+    key: "gha-consumer-one"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/c097b0b78bdbb6d837314048161418606c7f123242fee95967b48998dd6b2a0c.json"
+    agents:
+      queue: "gha-linux"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:c097b0b78bdbb6d837314048161418606c7f123242fee95967b48998dd6b2a0c"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/c097b0b78bdbb6d837314048161418606c7f123242fee95967b48998dd6b2a0c.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    concurrency: 2
+    concurrency_group: "buildkite-gha/shell/consumer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+      - step: "gha-producer"
+        allow_failure: true
+  - label: "Consumer ($VALUE, variant=\"two\")"
+    key: "gha-consumer-two"
+    command: "buildkite-gha run-job --plan .buildkite-gha/plans/34fed30c7e0cef60eae62467fdddf2990ac6f6f6fa0145f7eed8fbe9c6e4fdfd.json"
+    agents:
+      queue: "gha-linux"
+    checkout:
+      skip: true
+    env:
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:34fed30c7e0cef60eae62467fdddf2990ac6f6f6fa0145f7eed8fbe9c6e4fdfd"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/34fed30c7e0cef60eae62467fdddf2990ac6f6f6fa0145f7eed8fbe9c6e4fdfd.json"
+      BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
+    concurrency: 2
+    concurrency_group: "buildkite-gha/shell/consumer"
+    depends_on:
+      - step: "gha-importer"
+        allow_failure: false
+      - step: "gha-producer"
+        allow_failure: true

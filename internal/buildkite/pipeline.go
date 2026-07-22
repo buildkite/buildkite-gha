@@ -1,0 +1,182 @@
+// Package buildkite emits deterministic Buildkite pipeline YAML from trusted,
+// integration-neutral job descriptions.
+package buildkite
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+const planDirectory = ".buildkite-gha/plans"
+
+var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// Pipeline is the trusted input required to emit generated compatibility jobs.
+type Pipeline struct {
+	CompilerStep string
+	Jobs         []Job
+}
+
+// Job describes one expanded workflow job after queue policy has been applied.
+type Job struct {
+	Key              string
+	Label            string
+	Queue            string
+	PlanDigest       string
+	Dependencies     []string
+	ConcurrencyGroup string
+	Concurrency      int
+}
+
+// PlanPath returns the fixed local path for a content-addressed job plan.
+func PlanPath(digest string) (string, error) {
+	if !digestPattern.MatchString(digest) {
+		return "", fmt.Errorf("invalid plan digest %q", digest)
+	}
+	return planDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + ".json", nil
+}
+
+// Emit validates and emits stable YAML terminated by a newline.
+func Emit(pipeline Pipeline) ([]byte, error) {
+	if !validStepKey(pipeline.CompilerStep) {
+		return nil, fmt.Errorf("invalid compiler step key %q", pipeline.CompilerStep)
+	}
+	if len(pipeline.Jobs) == 0 {
+		return nil, fmt.Errorf("pipeline requires at least one generated job")
+	}
+	jobs, err := orderJobs(pipeline.CompilerStep, pipeline.Jobs)
+	if err != nil {
+		return nil, err
+	}
+
+	var out bytes.Buffer
+	out.WriteString("steps:\n")
+	for _, job := range jobs {
+		planPath, err := PlanPath(job.PlanDigest)
+		if err != nil {
+			return nil, fmt.Errorf("job %q: %w", job.Key, err)
+		}
+		fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
+		fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
+		fmt.Fprintf(&out, "    command: %s\n", yamlScalar("buildkite-gha run-job --plan "+planPath))
+		out.WriteString("    agents:\n")
+		fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
+		out.WriteString("    checkout:\n      skip: true\n")
+		out.WriteString("    env:\n")
+		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlScalar(job.PlanDigest))
+		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PATH: %s\n", yamlScalar(planPath))
+		fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
+		if job.Concurrency != 0 {
+			fmt.Fprintf(&out, "    concurrency: %d\n", job.Concurrency)
+			fmt.Fprintf(&out, "    concurrency_group: %s\n", yamlScalar(job.ConcurrencyGroup))
+		}
+		out.WriteString("    depends_on:\n")
+		fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlScalar(pipeline.CompilerStep))
+		for _, dependency := range job.Dependencies {
+			fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlScalar(dependency))
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func orderJobs(compilerStep string, input []Job) ([]Job, error) {
+	jobs := make(map[string]Job, len(input))
+	digests := make(map[string]string, len(input))
+	indegree := make(map[string]int, len(input))
+	dependents := make(map[string][]string, len(input))
+	for _, job := range input {
+		if err := validateJob(compilerStep, job); err != nil {
+			return nil, err
+		}
+		if _, exists := jobs[job.Key]; exists {
+			return nil, fmt.Errorf("duplicate generated step key %q", job.Key)
+		}
+		if other, exists := digests[job.PlanDigest]; exists {
+			return nil, fmt.Errorf("jobs %q and %q share plan digest %s", other, job.Key, job.PlanDigest)
+		}
+		digests[job.PlanDigest] = job.Key
+		job.Dependencies = append([]string(nil), job.Dependencies...)
+		sort.Strings(job.Dependencies)
+		for i, dependency := range job.Dependencies {
+			if i > 0 && dependency == job.Dependencies[i-1] {
+				return nil, fmt.Errorf("job %q repeats dependency %q", job.Key, dependency)
+			}
+		}
+		jobs[job.Key] = job
+		indegree[job.Key] = len(job.Dependencies)
+	}
+	for key, job := range jobs {
+		for _, dependency := range job.Dependencies {
+			if _, exists := jobs[dependency]; !exists {
+				return nil, fmt.Errorf("job %q has unknown dependency %q", key, dependency)
+			}
+			dependents[dependency] = append(dependents[dependency], key)
+		}
+	}
+	ready := make([]string, 0, len(jobs))
+	for key, degree := range indegree {
+		if degree == 0 {
+			ready = append(ready, key)
+		}
+	}
+	sort.Strings(ready)
+	ordered := make([]Job, 0, len(jobs))
+	for len(ready) > 0 {
+		key := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, jobs[key])
+		for _, dependent := range dependents[key] {
+			indegree[dependent]--
+			if indegree[dependent] == 0 {
+				ready = append(ready, dependent)
+				sort.Strings(ready)
+			}
+		}
+	}
+	if len(ordered) != len(jobs) {
+		return nil, fmt.Errorf("generated job graph contains a cycle")
+	}
+	return ordered, nil
+}
+
+func validateJob(compilerStep string, job Job) error {
+	if !validStepKey(job.Key) || job.Key == compilerStep {
+		return fmt.Errorf("invalid generated step key %q", job.Key)
+	}
+	if job.Label == "" {
+		return fmt.Errorf("job %q requires a label", job.Key)
+	}
+	if !identifierPattern.MatchString(job.Queue) {
+		return fmt.Errorf("job %q has invalid queue %q", job.Key, job.Queue)
+	}
+	if _, err := PlanPath(job.PlanDigest); err != nil {
+		return fmt.Errorf("job %q: %w", job.Key, err)
+	}
+	if job.Concurrency < 0 {
+		return fmt.Errorf("job %q has invalid concurrency %d", job.Key, job.Concurrency)
+	}
+	if job.Concurrency > 0 && job.ConcurrencyGroup == "" || job.Concurrency == 0 && job.ConcurrencyGroup != "" {
+		return fmt.Errorf("job %q requires concurrency and concurrency group together", job.Key)
+	}
+	for _, dependency := range job.Dependencies {
+		if !validStepKey(dependency) || dependency == compilerStep || dependency == job.Key {
+			return fmt.Errorf("job %q has invalid dependency %q", job.Key, dependency)
+		}
+	}
+	return nil
+}
+
+func validStepKey(key string) bool {
+	return identifierPattern.MatchString(key) && !uuidPattern.MatchString(key)
+}
+
+func yamlScalar(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}

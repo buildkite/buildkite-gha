@@ -59,6 +59,27 @@ func TestValidateRejectsAmbiguousSteps(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidStaticDependencies(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		dependencies []string
+		want         string
+	}{
+		{name: "unsorted", dependencies: []string{"gha-z", "gha-a"}, want: "must be sorted"},
+		{name: "duplicate", dependencies: []string{"gha-a", "gha-a"}, want: "repeats dependency"},
+		{name: "self", dependencies: []string{"gha-test"}, want: "invalid dependency"},
+		{name: "invalid", dependencies: []string{"gha/a"}, want: "invalid dependency"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			job.Dependencies = test.dependencies
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = nil
