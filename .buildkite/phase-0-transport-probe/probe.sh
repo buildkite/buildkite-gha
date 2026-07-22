@@ -132,7 +132,10 @@ bootstrap() {
   sign_json "${work}/producer.claims.json" > "${work}/producer.binding.jws"
   sign_json "${work}/consumer.claims.json" > "${work}/consumer.binding.jws"
   if [[ "${PHASE0_TAMPER_BINDING:-}" == "1" ]]; then
-    printf 'x' >> "${work}/producer.binding.jws"
+    jq -c '.signature = ((if .signature[0:1] == "A" then "B" else "A" end) + .signature[1:])' \
+      "${work}/producer.binding.jws" > "${work}/producer.binding.tampered.jws"
+    truncate -s -1 "${work}/producer.binding.tampered.jws"
+    mv "${work}/producer.binding.tampered.jws" "${work}/producer.binding.jws"
   fi
 
   local producer_artifact consumer_artifact
