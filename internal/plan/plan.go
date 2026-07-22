@@ -95,6 +95,9 @@ func Decode(source []byte) (Job, error) {
 	if err := decoder.Decode(&job); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
+	if job.RequiredCapabilities == nil {
+		return Job{}, fmt.Errorf("decode job plan: required_capabilities must be a concrete array")
+	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
 			return Job{}, fmt.Errorf("decode job plan: multiple JSON values")
@@ -166,6 +169,9 @@ func rejectDuplicateKeys(source []byte) error {
 
 // Encode returns stable indented JSON terminated by a newline.
 func Encode(job Job) ([]byte, error) {
+	if job.RequiredCapabilities == nil {
+		job.RequiredCapabilities = []string{}
+	}
 	if err := job.Validate(); err != nil {
 		return nil, err
 	}

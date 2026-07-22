@@ -6,10 +6,9 @@ toolchain go1.26.5
 
 require (
 	github.com/rhysd/actionlint v1.7.12
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	go.yaml.in/yaml/v4 v4.0.0-rc.3
 )
-
-require go.yaml.in/yaml/v4 v4.0.0-rc.3
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
@@ -22,4 +21,5 @@ require (
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.14.0 // indirect
 )

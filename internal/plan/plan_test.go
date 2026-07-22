@@ -59,13 +59,30 @@ func TestValidateRejectsAmbiguousSteps(t *testing.T) {
 	}
 }
 
+func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = nil
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"required_capabilities": []`) {
+		t.Fatalf("Encode() = %s, want concrete capabilities array", encoded)
+	}
+	encoded = []byte(strings.Replace(string(encoded), `"required_capabilities": []`, `"required_capabilities": null`, 1))
+	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "concrete array") {
+		t.Fatalf("Decode() error = %v, want concrete capabilities error", err)
+	}
+}
+
 func validJob() Job {
 	return Job{
-		Schema:   Schema,
-		Compiler: Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow: Workflow{Path: ".github/workflows/ci.yml", Digest: "sha256:" + strings.Repeat("0", 64), LogicalJobID: "test"},
-		Event:    Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
-		Target:   Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
-		Steps:    []Step{{ID: "step-1", Kind: "run", Command: "true"}},
+		Schema:               Schema,
+		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow:             Workflow{Path: ".github/workflows/ci.yml", Digest: "sha256:" + strings.Repeat("0", 64), LogicalJobID: "test"},
+		Event:                Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
+		RequiredCapabilities: []string{},
+		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
 	}
 }

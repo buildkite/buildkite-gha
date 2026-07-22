@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"go.yaml.in/yaml/v4"
 )
 
 const (
@@ -141,6 +144,11 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 	if err != nil {
 		return nil, err
 	}
+	for _, instance := range ir.Jobs {
+		if len(instance.LogicalNeeds) != 0 {
+			return nil, fmt.Errorf("build plan for job %q: jobs with needs are unsupported until producer result manifests can be injected at runtime", instance.LogicalJobID)
+		}
+	}
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode event payload: %w", err)
@@ -174,9 +182,9 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 				Env: cloneMap(step.Env), With: cloneMap(step.With), Source: &span,
 			}
 		}
-		needs := make(map[string]plan.Need, len(instance.LogicalNeeds))
-		for _, need := range instance.LogicalNeeds {
-			needs[need] = plan.Need{}
+		capabilities, err := requiredCapabilities(path, instance.Steps)
+		if err != nil {
+			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
 		job := plan.Job{
 			Schema: plan.Schema,
@@ -192,8 +200,8 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
 			},
 			Target:                  plan.Target{StepKey: instance.Key, Queue: targetQueue},
+			RequiredCapabilities:    capabilities,
 			Matrix:                  instance.Matrix,
-			Needs:                   needs,
 			Env:                     instance.Env,
 			DefaultShell:            instance.DefaultShell,
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
@@ -248,6 +256,7 @@ func parseEvent(source []byte) (Event, error) {
 	var event Event
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&event); err != nil {
 		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
 	}
@@ -257,8 +266,8 @@ func parseEvent(source []byte) (Event, error) {
 		}
 		return Event{}, fmt.Errorf("parse event snapshot: %w", err)
 	}
-	if event.Provider == "" || event.Event == "" || event.Repository.Owner == "" || event.Repository.Name == "" || event.SHA == "" {
-		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, and sha")
+	if strings.TrimSpace(event.Provider) == "" || strings.TrimSpace(event.Event) == "" || strings.TrimSpace(event.Repository.Owner) == "" || strings.TrimSpace(event.Repository.Name) == "" || strings.TrimSpace(event.Ref) == "" || strings.TrimSpace(event.SHA) == "" || strings.TrimSpace(event.Actor) == "" {
+		return Event{}, fmt.Errorf("event snapshot requires provider, event, repository owner/name, ref, sha, and actor")
 	}
 	if event.Payload == nil {
 		event.Payload = map[string]any{}
@@ -280,6 +289,7 @@ func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
 	}
 
 	byLogicalID := make(map[string][]JobInstance, len(jobs))
+	instanceKeys := make(map[string]string)
 	for _, id := range order {
 		job := jobs[id]
 		matrices, err := expandMatrix(path, job)
@@ -287,8 +297,16 @@ func expand(path string, parsed *workflow.Workflow) ([]JobInstance, error) {
 			return nil, err
 		}
 		for _, matrix := range matrices {
+			key, err := instanceKey(job.ID, matrix)
+			if err != nil {
+				return nil, jobError(path, job, fmt.Sprintf("create deterministic instance key: %v", err))
+			}
+			if existingJob, exists := instanceKeys[key]; exists {
+				return nil, jobError(path, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))
+			}
+			instanceKeys[key] = job.ID
 			instance := JobInstance{
-				Key:                     instanceKey(job.ID, matrix),
+				Key:                     key,
 				LogicalJobID:            job.ID,
 				Label:                   instanceLabel(job, matrix),
 				RunsOn:                  append([]string(nil), job.RunsOn...),
@@ -451,14 +469,112 @@ func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, erro
 	return order, nil
 }
 
-func instanceKey(jobID string, matrix map[string]any) string {
+func instanceKey(jobID string, matrix map[string]any) (string, error) {
 	prefix := "gha-" + sanitize(jobID)
 	if len(matrix) == 0 {
-		return prefix
+		return prefix, nil
 	}
-	canonical, _ := json.Marshal(matrix)
+	canonical, err := json.Marshal(matrix)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize matrix: %w", err)
+	}
 	digest := sha256.Sum256(canonical)
-	return prefix + "-" + hex.EncodeToString(digest[:6])
+	return prefix + "-" + hex.EncodeToString(digest[:6]), nil
+}
+
+func requiredCapabilities(workflowPath string, steps []workflow.Step) ([]string, error) {
+	capabilities := map[string]struct{}{}
+	for _, step := range steps {
+		if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") {
+			continue
+		}
+		using, err := localActionRuntime(workflowPath, step.Uses)
+		if err != nil {
+			return nil, err
+		}
+		switch using {
+		case "composite", "node24":
+		case "docker":
+			capabilities["docker"] = struct{}{}
+		default:
+			return nil, fmt.Errorf("local action %q uses unsupported runtime %q", step.Uses, using)
+		}
+	}
+	out := make([]string, 0, len(capabilities))
+	for capability := range capabilities {
+		out = append(out, capability)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func localActionRuntime(workflowPath, uses string) (string, error) {
+	workflowDir := filepath.Dir(filepath.Clean(workflowPath))
+	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
+		return "", fmt.Errorf("resolve local action %q: workflow path must be under .github/workflows", uses)
+	}
+	repositoryRoot := filepath.Dir(filepath.Dir(workflowDir))
+	relativeActionPath := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
+	if relativeActionPath == ".." || strings.HasPrefix(relativeActionPath, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("local action %q escapes the repository root", uses)
+	}
+	actionPath := filepath.Join(repositoryRoot, relativeActionPath)
+	resolvedRoot, err := filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root for local action %q: %w", uses, err)
+	}
+	resolvedActionPath, err := resolveWithinRoot(resolvedRoot, actionPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve local action %q: %w", uses, err)
+	}
+	var source []byte
+	for _, name := range []string{"action.yml", "action.yaml"} {
+		metadataPath, resolveErr := resolveWithinRoot(resolvedRoot, filepath.Join(resolvedActionPath, name))
+		if resolveErr != nil {
+			if os.IsNotExist(resolveErr) {
+				err = resolveErr
+				continue
+			}
+			return "", fmt.Errorf("resolve local action %q metadata: %w", uses, resolveErr)
+		}
+		source, err = os.ReadFile(metadataPath)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read local action %q metadata: %w", uses, err)
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("local action %q has no action.yml or action.yaml", uses)
+	}
+	var metadata struct {
+		Runs struct {
+			Using string `yaml:"using"`
+		} `yaml:"runs"`
+	}
+	if err := yaml.Unmarshal(source, &metadata); err != nil {
+		return "", fmt.Errorf("parse local action %q metadata: %w", uses, err)
+	}
+	if metadata.Runs.Using == "" {
+		return "", fmt.Errorf("local action %q metadata has no runs.using", uses)
+	}
+	return strings.ToLower(metadata.Runs.Using), nil
+}
+
+func resolveWithinRoot(root, path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolved path %q escapes the repository root", path)
+	}
+	return resolved, nil
 }
 
 func instanceLabel(job workflow.Job, matrix map[string]any) string {
