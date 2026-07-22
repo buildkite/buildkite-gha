@@ -1057,9 +1057,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
-- The next work wave implements the parser/compiler spike, differential smoke
-  harness, and the narrow action-runtime lifecycle needed for the Phase 0
-  product fixture before exercising live Buildkite transport.
+- The second work wave is integrated: actionlint is isolated behind owned
+  workflow and expression models, the compiler emits deterministic static IR
+  for the smoke corpus, the differential harness materializes isolated Git
+  repositories and compares normalized observations, and the local action
+  runtime proves JavaScript, composite, and Docker lifecycle behavior with
+  masked output and post-actions.
+- The next work wave connects those slices into the executable product fixture,
+  runs the differential oracle, and implements the Buildkite transport and
+  trust-boundary probe before the live-build verification gate.
 
 ### Phase 0 — Prove the semantic foundation
 
