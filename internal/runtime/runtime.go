@@ -1,0 +1,431 @@
+// Package runtime executes explicitly resolved local GitHub Actions action steps.
+package runtime
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+const defaultCleanupTimeout = 10 * time.Second
+
+// Runner executes local actions using explicitly configured host tools.
+type Runner struct {
+	Stdout          io.Writer
+	Stderr          io.Writer
+	Node24          string
+	ManagedNodeRoot string
+	Shell           string
+	Docker          string
+	CleanupTimeout  time.Duration
+}
+
+// JavaScriptAction is an already-resolved local JavaScript action.
+type JavaScriptAction struct {
+	Name   string
+	Path   string
+	Pre    string
+	Main   string
+	Post   string
+	Inputs map[string]string
+	Env    map[string]string
+}
+
+// ShellStep is an already-resolved shell step inside a local composite action.
+type ShellStep struct {
+	ID     string
+	Script string
+	Shell  string
+	Env    map[string]string
+}
+
+// CompositeAction is an already-resolved local composite action.
+type CompositeAction struct {
+	Name   string
+	Path   string
+	Inputs map[string]string
+	Steps  []ShellStep
+}
+
+// DockerAction is an already-resolved local Docker action.
+type DockerAction struct {
+	Name       string
+	Path       string
+	Dockerfile string
+	Env        map[string]string
+}
+
+// Result contains file-command effects produced by an action or lifecycle.
+type Result struct {
+	Outputs map[string]string
+	Env     map[string]string
+	State   map[string]string
+	Summary string
+}
+
+// RunJavaScript executes action pre and main phases, then its post phase.
+func (r Runner) RunJavaScript(ctx context.Context, action JavaScriptAction) (Result, error) {
+	return r.RunJavaScriptLifecycle(ctx, []JavaScriptAction{action})
+}
+
+// RunJavaScriptLifecycle executes actions in order and registered post actions
+// in LIFO order, including when a main phase fails or the caller is canceled.
+func (r Runner) RunJavaScriptLifecycle(ctx context.Context, actions []JavaScriptAction) (Result, error) {
+	result := newResult()
+	node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
+	if err != nil {
+		return result, err
+	}
+
+	processor := newCommandProcessor(r.stdout(), r.stderr())
+	type registeredPost struct {
+		action JavaScriptAction
+		state  map[string]string
+	}
+	posts := make([]registeredPost, 0, len(actions))
+
+	for _, action := range actions {
+		if action.Main == "" {
+			err = fmt.Errorf("JavaScript action %q has no main entry point", action.Name)
+			break
+		}
+		state := make(map[string]string)
+		if action.Post != "" {
+			posts = append(posts, registeredPost{action: action, state: state})
+		}
+		if action.Pre != "" {
+			if err = r.runJavaScriptPhase(ctx, processor, node, action, action.Pre, nil, state, &result); err != nil {
+				break
+			}
+		}
+		if err = r.runJavaScriptPhase(ctx, processor, node, action, action.Main, nil, state, &result); err != nil {
+			break
+		}
+	}
+
+	cleanupTimeout := r.CleanupTimeout
+	if cleanupTimeout <= 0 {
+		cleanupTimeout = defaultCleanupTimeout
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	for i := len(posts) - 1; i >= 0; i-- {
+		post := posts[i]
+		postErr := r.runJavaScriptPhase(cleanupCtx, processor, node, post.action, post.action.Post, post.state, post.state, &result)
+		if postErr != nil {
+			err = errors.Join(err, fmt.Errorf("post action %q: %w", post.action.Name, postErr))
+		}
+	}
+
+	return result, err
+}
+
+// RunComposite executes the shell steps of an explicitly resolved local
+// composite action and applies each step's environment-file effects in order.
+func (r Runner) RunComposite(ctx context.Context, action CompositeAction) (Result, error) {
+	result := newResult()
+	processor := newCommandProcessor(r.stdout(), r.stderr())
+	for _, step := range action.Steps {
+		shell := step.Shell
+		if shell == "" {
+			shell = r.Shell
+		}
+		if shell == "" {
+			shell = "bash"
+		}
+		env := mergeMaps(actionInputEnv(action.Inputs), result.Env, step.Env, map[string]string{"GITHUB_ACTION_PATH": action.Path})
+		if err := r.runProcess(ctx, processor, action.Path, env, &result, nil, shell, "-e", "-o", "pipefail", "-c", step.Script); err != nil {
+			return result, fmt.Errorf("composite action %q step %q: %w", action.Name, step.ID, err)
+		}
+	}
+	return result, nil
+}
+
+// RunDocker builds and executes an explicitly resolved local Docker action.
+func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
+	result = newResult()
+	docker := r.Docker
+	if docker == "" {
+		docker, err = exec.LookPath("docker")
+		if err != nil {
+			return result, fmt.Errorf("discover Docker: %w", err)
+		}
+	}
+	dockerfile := action.Dockerfile
+	if dockerfile == "" {
+		dockerfile = "Dockerfile"
+	}
+	image := fmt.Sprintf("buildkite-gha-runtime-%d-%d", os.Getpid(), time.Now().UnixNano())
+	build := exec.CommandContext(ctx, docker, "build", "--quiet", "--tag", image, "--file", filepath.Join(action.Path, dockerfile), action.Path)
+	imageOutput, err := build.CombinedOutput()
+	if err != nil {
+		return result, fmt.Errorf("build Docker action %q: %w: %s", action.Name, err, strings.TrimSpace(string(imageOutput)))
+	}
+	defer func() {
+		remove := exec.Command(docker, "image", "rm", image)
+		if output, removeErr := remove.CombinedOutput(); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove Docker action image: %w: %s", removeErr, strings.TrimSpace(string(output))))
+		}
+	}()
+
+	files, err := newCommandFiles()
+	if err != nil {
+		return result, err
+	}
+	defer os.RemoveAll(files.dir)
+	args := []string{"run", "--rm", "--volume", files.dir + ":/github/file_commands"}
+	for _, name := range sortedKeys(action.Env) {
+		args = append(args, "--env", name+"="+action.Env[name])
+	}
+	args = append(args,
+		"--env", "GITHUB_OUTPUT=/github/file_commands/output",
+		"--env", "GITHUB_ENV=/github/file_commands/env",
+		"--env", "GITHUB_STATE=/github/file_commands/state",
+		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
+		image,
+	)
+	processor := newCommandProcessor(r.stdout(), r.stderr())
+	if err := runStreaming(ctx, processor, "", nil, docker, args...); err != nil {
+		return result, fmt.Errorf("run Docker action %q: %w", action.Name, err)
+	}
+	if err := files.apply(&result, nil); err != nil {
+		return result, fmt.Errorf("process Docker action %q file commands: %w", action.Name, err)
+	}
+	return result, nil
+}
+
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+	env := mergeMaps(actionInputEnv(action.Inputs), result.Env, action.Env)
+	env["GITHUB_ACTION_PATH"] = action.Path
+	for name, value := range stateEnv {
+		env["STATE_"+name] = value
+	}
+	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, filepath.Join(action.Path, entry)); err != nil {
+		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
+	}
+	return nil
+}
+
+func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
+	files, err := newCommandFiles()
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(files.dir)
+	env = mergeMaps(env, map[string]string{
+		"GITHUB_OUTPUT":       files.output,
+		"GITHUB_ENV":          files.env,
+		"GITHUB_STATE":        files.state,
+		"GITHUB_STEP_SUMMARY": files.summary,
+	})
+	runErr := runStreaming(ctx, processor, dir, env, name, args...)
+	fileErr := files.apply(result, state)
+	return errors.Join(runErr, fileErr)
+}
+
+func runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = processEnv(env)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	var wg sync.WaitGroup
+	var scanErr error
+	var scanMu sync.Mutex
+	stream := func(reader io.Reader, target io.Writer) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			processor.process(target, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			scanMu.Lock()
+			scanErr = errors.Join(scanErr, err)
+			scanMu.Unlock()
+		}
+	}
+	wg.Add(2)
+	go stream(stdout, processor.stdout)
+	go stream(stderr, processor.stderr)
+	wg.Wait()
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		waitErr = ctx.Err()
+	}
+	if waitErr != nil {
+		waitErr = fmt.Errorf("process %s: %w", name, waitErr)
+	}
+	return errors.Join(waitErr, scanErr)
+}
+
+// DiscoverNode24 resolves an explicit Node binary or a binary in the managed
+// runtime root, and rejects binaries that do not report major version 24.
+func DiscoverNode24(explicit, managedRoot string) (string, error) {
+	var candidates []string
+	if explicit != "" {
+		candidates = append(candidates, explicit)
+	} else if managedRoot != "" {
+		name := "node"
+		if runtime.GOOS == "windows" {
+			name = "node.exe"
+		}
+		candidates = append(candidates,
+			filepath.Join(managedRoot, "node24", "bin", name),
+			filepath.Join(managedRoot, "node", "24", "bin", name),
+			filepath.Join(managedRoot, "bin", name),
+		)
+	} else {
+		return "", errors.New("Node 24 is not configured: set Runner.Node24 or Runner.ManagedNodeRoot")
+	}
+
+	var failures []string
+	for _, candidate := range candidates {
+		output, err := exec.Command(candidate, "--version").CombinedOutput()
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
+			continue
+		}
+		version := strings.TrimSpace(string(output))
+		if strings.HasPrefix(version, "v24.") {
+			return candidate, nil
+		}
+		failures = append(failures, fmt.Sprintf("%s: reported %q", candidate, version))
+	}
+	return "", fmt.Errorf("Node 24 discovery failed: %s", strings.Join(failures, "; "))
+}
+
+func newResult() Result {
+	return Result{Outputs: make(map[string]string), Env: make(map[string]string), State: make(map[string]string)}
+}
+
+func (r Runner) stdout() io.Writer {
+	if r.Stdout != nil {
+		return r.Stdout
+	}
+	return io.Discard
+}
+
+func (r Runner) stderr() io.Writer {
+	if r.Stderr != nil {
+		return r.Stderr
+	}
+	return io.Discard
+}
+
+func actionInputEnv(inputs map[string]string) map[string]string {
+	env := make(map[string]string, len(inputs))
+	for name, value := range inputs {
+		name = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(name, " ", "_"), "-", "_"))
+		env["INPUT_"+name] = value
+	}
+	return env
+}
+
+func mergeMaps(maps ...map[string]string) map[string]string {
+	merged := make(map[string]string)
+	for _, values := range maps {
+		for name, value := range values {
+			merged[name] = value
+		}
+	}
+	return merged
+}
+
+func mapEnv(values map[string]string) []string {
+	env := make([]string, 0, len(values))
+	for _, name := range sortedKeys(values) {
+		env = append(env, name+"="+values[name])
+	}
+	return env
+}
+
+func processEnv(overrides map[string]string) []string {
+	values := make(map[string]string)
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+	return mapEnv(values)
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type commandProcessor struct {
+	mu     sync.Mutex
+	stdout io.Writer
+	stderr io.Writer
+	masks  []string
+}
+
+func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
+	return &commandProcessor{stdout: stdout, stderr: stderr}
+}
+
+func (p *commandProcessor) process(target io.Writer, line string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if value, ok := workflowCommand(line, "add-mask"); ok {
+		if value != "" {
+			p.masks = append(p.masks, value)
+		}
+		return
+	}
+	for _, mask := range p.masks {
+		line = strings.ReplaceAll(line, mask, "***")
+	}
+	fmt.Fprintln(target, line)
+}
+
+func workflowCommand(line, command string) (string, bool) {
+	if !strings.HasPrefix(line, "::") {
+		return "", false
+	}
+	separator := strings.Index(line[2:], "::")
+	if separator < 0 {
+		return "", false
+	}
+	separator += 2
+	header := line[2:separator]
+	name, _, _ := strings.Cut(header, " ")
+	if !strings.EqualFold(name, command) {
+		return "", false
+	}
+	return decodeCommandValue(line[separator+2:]), true
+}
+
+func decodeCommandValue(value string) string {
+	replacer := strings.NewReplacer("%0D", "\r", "%0A", "\n", "%25", "%")
+	return replacer.Replace(value)
+}

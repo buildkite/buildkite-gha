@@ -1,0 +1,8 @@
+name: Runtime lifecycle fixture
+description: Exercises explicit Node 24 pre, main, post, failure, masking, and file commands.
+
+runs:
+  using: node24
+  pre: pre.js
+  main: main.js
+  post: post.js
