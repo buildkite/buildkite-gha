@@ -167,7 +167,6 @@ steps:
       PHASE0_PLAN_PRODUCER: "${importer_key}"
       PHASE0_BINDING_JTI: "${producer_jti}"
       PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
-      PHASE0_REDACTION_SECRET: "phase0-redaction-canary-2026-07-22"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"

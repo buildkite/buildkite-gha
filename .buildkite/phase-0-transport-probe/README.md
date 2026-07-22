@@ -15,7 +15,7 @@ Signed-pipeline compatibility is deferred to the hardening phase as optional def
 The live probe also requires:
 
 - `jq` and `sha256sum` on the runtime queue;
-- `PHASE0_RUNTIME_QUEUE`, `PHASE0_EVENT_NAME`, `PHASE0_REPOSITORY`, `PHASE0_REF`, 40-character `PHASE0_COMMIT`, canonical `PHASE0_EVENT_DIGEST`, and runtime-owned JSON `PHASE0_LOCAL_CAPABILITIES` (for example `["network"]`); and
+- `PHASE0_RUNTIME_QUEUE`, `PHASE0_EVENT_NAME`, `PHASE0_REPOSITORY`, `PHASE0_REF`, 40-character `PHASE0_COMMIT`, canonical `PHASE0_EVENT_DIGEST`, runtime-owned JSON `PHASE0_LOCAL_CAPABILITIES` (for example `["network"]`), and a disposable build-level `PHASE0_REDACTION_SECRET` canary; and
 - immutable organization and pipeline UUIDs exposed as `BUILDKITE_ORGANIZATION_ID` and `BUILDKITE_PIPELINE_ID` by the probe installation until the live environment-variable oracle confirms their source.
 
 The build must use the exact commit supplied in `PHASE0_COMMIT`. Static and generated jobs run the checked-in probe from that checkout. The checked-in signing helper derives a public, disposable key, so it demonstrates signature transport and rejection but grants no production authority. KMS-backed plan signing and checkout-free compiler isolation remain later security gates.
