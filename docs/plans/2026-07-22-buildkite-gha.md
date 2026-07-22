@@ -1063,19 +1063,19 @@ Explicitly defer from beta unless implementation evidence changes the order:
   explicit variable snapshots, bounded local reusable-workflow flattening,
   matrix and dependency expansion, fail-closed runner policy, immutable job
   plans, Buildkite pipeline YAML, and text/JSON compatibility reports.
-  Generated downstream plans remain deliberately non-executable until Phase 2
-  wires producer-attributed result manifests, and `compile` does not yet
-  materialize or upload the content-addressed plan artifacts referenced by its
-  pipeline output.
-- Phase 2's sequential shell runtime, producer-attributed result transport, and
-  `upload` bootstrap are implemented locally. Generated plans
+  `compile` remains a read-only rendering command; `upload` materializes the
+  executable and content-addressed plans used by generated jobs.
+- Phase 2 is complete. Its sequential shell runtime, producer-attributed result
+  transport, and unprivileged `upload` bootstrap are implemented and proven on
+  Buildkite. Generated plans
   now carry conditions, timeouts, `continue-on-error`, bounded event identity,
   and explicit secret requirements. `run-job` allocates a fresh workspace,
   applies standard and file-command environment changes, evaluates the owned
   condition subset, masks registered secrets, propagates timeout/cancellation
-  to process groups, and drains cleanup under a fixed deadline. The live
-  `shell.yml` Buildkite proof, including hydrated downstream `needs` and raw-log
-  secret checks, remains the gate before marking Phase 2 complete.
+  to process groups, and drains cleanup under a fixed deadline. Generated jobs
+  hydrate exact producer results and publish bounded terminal manifests before
+  exit; the live `shell.yml` proof passed with checkout suppressed on ephemeral
+  hosted agents.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1111,6 +1111,24 @@ Explicitly defer from beta unless implementation evidence changes the order:
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all three smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+
+Phase 2 live evidence:
+
+- [Buildkite build 35](https://buildkite.com/buildkite/buildkite-gha/builds/35)
+  ran exact implementation commit
+  `258683ceb29086bb2a0f6ba50907308844ac0ab7`. The producer and both consumer
+  matrix jobs passed on ephemeral hosted Agent `4.0.0-beta.6`, followed by the
+  native Buildkite continuation and the full repository check.
+- The consumer logs emitted the normalized observations
+  `{"result":"smoke-shell","variant":"one"}` and
+  `{"result":"smoke-shell","variant":"two"}`, matching the checked-in
+  GitHub Actions oracle.
+- The producer raw log contained `MASKED_CANARY=***` and did not contain the
+  registered canary value. Protected secret, provider-token, and privileged
+  capabilities remain unavailable to the unsigned upload path.
+- Runtime conformance tests prove that post-actions run after main failure and
+  cancellation, a cancelled process group cannot leave a child behind, and
+  cleanup is bounded by the documented ten-second default grace period.
 
 Phase 0 live evidence:
 
@@ -1240,7 +1258,7 @@ Definition of done:
   succeeds for supported fixtures.
 - No compiler output contains resolved secret values.
 
-### Phase 2 — Sequential shell job runtime (active)
+### Phase 2 — Sequential shell job runtime (complete)
 
 Implement the per-job state machine for `run` steps:
 
