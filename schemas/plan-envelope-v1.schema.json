@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/plan-envelope-v1.schema.json",
+  "title": "buildkite-gha signed job-plan envelope v1",
+  "description": "A JSON wrapper around an RFC 7515 detached JWS over RFC 8785-canonicalized claims.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["claims", "protected", "signature"],
+  "properties": {
+    "claims": {"$ref": "#/$defs/claims"},
+    "protected": {
+      "description": "Base64url without padding of the UTF-8 JWS protected header.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "maxLength": 4096
+    },
+    "signature": {
+      "description": "Base64url without padding of the 64-byte JOSE ECDSA R || S value.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    }
+  },
+  "$defs": {
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "iss",
+        "jti",
+        "iat",
+        "exp",
+        "plan",
+        "build",
+        "provenance",
+        "target",
+        "authorization"
+      ],
+      "properties": {
+        "iss": {"const": "buildkite-gha-plan-envelope"},
+        "jti": {"$ref": "#/$defs/uuid"},
+        "iat": {"type": "integer", "minimum": 0},
+        "exp": {"type": "integer", "minimum": 0},
+        "plan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["digest", "schema", "compiler_version", "compiler_distribution_digest"],
+          "properties": {
+            "digest": {"$ref": "#/$defs/digest"},
+            "schema": {"const": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"},
+            "compiler_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+            "compiler_distribution_digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["organization_id", "pipeline_id", "build_id"],
+          "properties": {
+            "organization_id": {"$ref": "#/$defs/uuid"},
+            "pipeline_id": {"$ref": "#/$defs/uuid"},
+            "build_id": {"$ref": "#/$defs/uuid"}
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "event_name",
+            "event_id",
+            "repository",
+            "ref",
+            "commit",
+            "event_payload_digest",
+            "workflow_path",
+            "workflow_digest",
+            "trust",
+            "attestation"
+          ],
+          "properties": {
+            "provider": {"enum": ["github", "cursor-origin"]},
+            "event_name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128},
+            "event_id": {"type": "string", "minLength": 1, "maxLength": 255},
+            "repository": {"type": "string", "format": "uri", "maxLength": 2048},
+            "ref": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "event_payload_digest": {"$ref": "#/$defs/digest"},
+            "workflow_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "workflow_digest": {"$ref": "#/$defs/digest"},
+            "trust": {"enum": ["trusted", "untrusted"]},
+            "attestation": {"enum": ["buildkite-webhook", "provider-signed", "manual-unattested"]}
+          }
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["step_key", "queue"],
+          "properties": {
+            "step_key": {"$ref": "#/$defs/buildkiteName"},
+            "queue": {"$ref": "#/$defs/buildkiteName"}
+          }
+        },
+        "authorization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["capability_ceiling"],
+          "properties": {
+            "capability_ceiling": {
+              "type": "array",
+              "uniqueItems": true,
+              "maxItems": 16,
+              "items": {"$ref": "#/$defs/capability"}
+            }
+          }
+        }
+      }
+    },
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "buildkiteName": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "minLength": 1, "maxLength": 255},
+    "capability": {
+      "enum": [
+        "network",
+        "docker",
+        "privileged-container",
+        "secrets",
+        "provider-token-read",
+        "provider-token-write"
+      ]
+    }
+  }
+}

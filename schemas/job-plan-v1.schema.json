@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json",
+  "title": "buildkite-gha job plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "compiler",
+    "workflow",
+    "event",
+    "target",
+    "required_capabilities",
+    "steps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
+    },
+    "compiler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "distribution_digest"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+        "distribution_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "digest", "logical_job_id"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "digest": {"$ref": "#/$defs/digest"},
+        "logical_job_id": {"type": "string", "minLength": 1, "maxLength": 255}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "name", "payload_digest"],
+      "properties": {
+        "provider": {"enum": ["github", "cursor-origin"]},
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128},
+        "payload_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_key", "queue"],
+      "properties": {
+        "step_key": {"$ref": "#/$defs/buildkiteName"},
+        "queue": {"$ref": "#/$defs/buildkiteName"}
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/capability"},
+      "maxItems": 16
+    },
+    "steps": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "command"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 255},
+          "kind": {"const": "run"},
+          "command": {"type": "string", "maxLength": 1048576}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "buildkiteName": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "minLength": 1, "maxLength": 255},
+    "capability": {
+      "enum": [
+        "network",
+        "docker",
+        "privileged-container",
+        "secrets",
+        "provider-token-read",
+        "provider-token-write"
+      ]
+    }
+  }
+}
