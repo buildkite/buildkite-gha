@@ -263,8 +263,10 @@ func TestWorkflowCommandParsingIsCaseInsensitiveAndExact(t *testing.T) {
 }
 
 func TestActionMetadataRejectsCaseInsensitiveOutputCollisions(t *testing.T) {
-	actionPath := t.TempDir()
-	writeFixtureFile(t, actionPath, "action.yml", `name: Conflicting outputs
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/conflict/action.yml", `name: Conflicting outputs
 outputs:
   Result:
     value: first
@@ -274,8 +276,9 @@ runs:
   using: composite
   steps: []
 `)
-	if _, err := readActionMetadata(actionPath); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
-		t.Fatalf("readActionMetadata() error = %v, want duplicate output rejection", err)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conflict", Kind: "uses", Uses: "./.github/actions/conflict"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `duplicate case-insensitive name "result"`) {
+		t.Fatalf("RunJob() error = %v, want duplicate output rejection", err)
 	}
 }
 
@@ -444,6 +447,19 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 	job = runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "remote action") {
 		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
+	}
+
+	for _, using := range []string{"node20", "future"} {
+		t.Run(using, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/unsupported/action.yml", "runs:\n  using: "+using+"\n")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "unsupported", Kind: "uses", Uses: "./.github/actions/unsupported"}})
+			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime "`+using+`"`) {
+				t.Fatalf("RunJob() error = %v, want %s fail-closed boundary", err, using)
+			}
+		})
 	}
 }
 

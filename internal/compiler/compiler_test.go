@@ -194,6 +194,23 @@ func TestCompilePlansRejectsNode20LocalAction(t *testing.T) {
 	}
 }
 
+func TestCompilePlansRejectsRuntimeInvalidActionMetadata(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "invalid.yml")
+	actionDir := filepath.Join(repository, ".github", "actions", "invalid")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("unexpected: true\nruns:\n  using: node24\n  main: index.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("on: push\njobs:\n  invalid:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/invalid\n")
+	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-runtime")
+	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+		t.Fatalf("CompilePlans() error = %v, want strict action metadata rejection", err)
+	}
+}
+
 func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	repository := t.TempDir()
 	workflowDir := filepath.Join(repository, ".github", "workflows")
@@ -201,9 +218,9 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflowPath := filepath.Join(workflowDir, "escape.yml")
-	_, err := localActionRuntime(workflowPath, "./../../outside")
-	if err == nil || !strings.Contains(err.Error(), "escapes the repository root") {
-		t.Fatalf("localActionRuntime() error = %v, want repository escape error", err)
+	_, err := loadLocalAction(workflowPath, "./../../outside")
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("loadLocalAction() error = %v, want repository escape error", err)
 	}
 
 	outside := t.TempDir()
@@ -217,9 +234,9 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(actionsDir, "escaped")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = localActionRuntime(workflowPath, "./.github/actions/escaped")
-	if err == nil || !strings.Contains(err.Error(), "escapes the repository root") {
-		t.Fatalf("localActionRuntime() symlink error = %v, want repository escape error", err)
+	_, err = loadLocalAction(workflowPath, "./.github/actions/escaped")
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("loadLocalAction() symlink error = %v, want repository escape error", err)
 	}
 	metadataEscape := filepath.Join(actionsDir, "metadata-escaped")
 	if err := os.MkdirAll(metadataEscape, 0o755); err != nil {
@@ -228,9 +245,9 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "action.yml"), filepath.Join(metadataEscape, "action.yml")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = localActionRuntime(workflowPath, "./.github/actions/metadata-escaped")
-	if err == nil || !strings.Contains(err.Error(), "escapes the repository root") {
-		t.Fatalf("localActionRuntime() metadata symlink error = %v, want repository escape error", err)
+	_, err = loadLocalAction(workflowPath, "./.github/actions/metadata-escaped")
+	if err == nil || !strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("loadLocalAction() metadata symlink error = %v, want repository escape error", err)
 	}
 }
 

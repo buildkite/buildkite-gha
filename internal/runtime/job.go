@@ -1,22 +1,20 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
-	"go.yaml.in/yaml/v4"
 )
 
 // JobResult is the bounded Phase 0 result returned to the transport layer.
@@ -29,52 +27,6 @@ type JobResult struct {
 }
 
 const maxJobOutputBytes = 1024
-
-type actionMetadata struct {
-	Name        string                  `yaml:"name"`
-	Description string                  `yaml:"description"`
-	Inputs      map[string]actionInput  `yaml:"inputs"`
-	Outputs     map[string]actionOutput `yaml:"outputs"`
-	Runs        actionRuns              `yaml:"runs"`
-}
-
-type actionOutput struct {
-	Description string `yaml:"description"`
-	Value       string `yaml:"value"`
-}
-
-type actionInput struct {
-	Description string  `yaml:"description"`
-	Required    bool    `yaml:"required"`
-	Default     *string `yaml:"default"`
-}
-
-type actionRuns struct {
-	Using          string            `yaml:"using"`
-	Pre            string            `yaml:"pre"`
-	PreIf          string            `yaml:"pre-if"`
-	Main           string            `yaml:"main"`
-	Post           string            `yaml:"post"`
-	PostIf         string            `yaml:"post-if"`
-	Image          string            `yaml:"image"`
-	Entrypoint     string            `yaml:"entrypoint"`
-	PreEntrypoint  string            `yaml:"pre-entrypoint"`
-	PostEntrypoint string            `yaml:"post-entrypoint"`
-	Args           []string          `yaml:"args"`
-	Env            map[string]string `yaml:"env"`
-	Steps          []compositeStep   `yaml:"steps"`
-}
-
-type compositeStep struct {
-	ID               string            `yaml:"id"`
-	Name             string            `yaml:"name"`
-	Run              string            `yaml:"run"`
-	Uses             string            `yaml:"uses"`
-	Shell            string            `yaml:"shell"`
-	WorkingDirectory string            `yaml:"working-directory"`
-	Env              map[string]string `yaml:"env"`
-	If               string            `yaml:"if"`
-}
 
 type registeredPost struct {
 	action JavaScriptAction
@@ -227,30 +179,31 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	if !strings.HasPrefix(step.Uses, "./") {
 		return result, nil, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
 	}
-	actionPath, err := workspacePath(workspace, step.Uses)
+	action, err := metadata.Load(workspace, step.Uses)
 	if err != nil {
 		return result, nil, err
 	}
-	metadata, err := readActionMetadata(actionPath)
+	actionRuntime, err := action.Runtime()
 	if err != nil {
-		return result, nil, err
+		return result, nil, fmt.Errorf("action %q uses %w", step.Uses, err)
 	}
+	actionPath := action.Path
 	inputs, err := evaluateMap(step.With, eval)
 	if err != nil {
 		return result, nil, err
 	}
-	inputs, err = resolveActionInputs(metadata, inputs, eval)
+	inputs, err = resolveActionInputs(action, inputs, eval)
 	if err != nil {
 		return result, nil, err
 	}
 	actionEval := eval
 	actionEval.Inputs = inputs
-	switch metadata.Runs.Using {
-	case "node24":
-		if metadata.Runs.Main == "" {
+	switch actionRuntime {
+	case metadata.RuntimeNode24:
+		if action.Runs.Main == "" {
 			return result, nil, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
-		if !supportedLifecycleCondition(metadata.Runs.PreIf) || !supportedLifecycleCondition(metadata.Runs.PostIf) {
+		if !supportedLifecycleCondition(action.Runs.PreIf) || !supportedLifecycleCondition(action.Runs.PostIf) {
 			return result, nil, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
 		}
 		node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
@@ -259,47 +212,46 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		}
 		actionEnv := mergeStringMaps(jobEnv, stepEnv)
 		actionEnv["GITHUB_WORKSPACE"] = workspace
-		action := JavaScriptAction{Name: actionName(metadata, step), Path: actionPath, Pre: metadata.Runs.Pre, Main: metadata.Runs.Main, Post: metadata.Runs.Post, Inputs: inputs, Env: actionEnv}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv}
 		state := map[string]string{}
-		post := postFor(action, state, node)
-		if action.Pre != "" {
-			if err := r.runJavaScriptPhase(ctx, processor, node, action, action.Pre, nil, state, &result); err != nil {
+		post := postFor(javascript, state, node)
+		if javascript.Pre != "" {
+			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
 				return result, post, err
 			}
 		}
-		if err := r.runJavaScriptPhase(ctx, processor, node, action, action.Main, nil, state, &result); err != nil {
+		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
 			return result, post, err
 		}
 		return result, post, nil
-	case "composite":
-		composite, err := r.runCompositeMetadata(ctx, processor, workspace, actionPath, metadata, inputs, jobEnv, stepEnv, actionEval)
+	case metadata.RuntimeComposite:
+		composite, err := r.runCompositeMetadata(ctx, processor, workspace, actionPath, action, inputs, jobEnv, stepEnv, actionEval)
 		return composite, nil, err
-	case "docker":
+	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
 			return result, nil, fmt.Errorf("Docker action %q requires the plan's docker capability", step.Uses)
 		}
-		if metadata.Runs.PreEntrypoint != "" || metadata.Runs.PostEntrypoint != "" || metadata.Runs.Entrypoint != "" || len(metadata.Runs.Args) != 0 {
+		if action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" || len(action.Runs.Args) != 0 {
 			return result, nil, fmt.Errorf("Docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
 		}
-		if metadata.Runs.Image != "Dockerfile" {
-			return result, nil, fmt.Errorf("Docker action image %q is unsupported; Phase 0 requires a local Dockerfile", metadata.Runs.Image)
+		if action.Runs.Image != "Dockerfile" {
+			return result, nil, fmt.Errorf("Docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
 		}
-		dockerEnv, err := evaluateMap(metadata.Runs.Env, actionEval)
+		dockerEnv, err := evaluateMap(action.Runs.Env, actionEval)
 		if err != nil {
 			return result, nil, err
 		}
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(metadata, step), Path: actionPath, Workspace: workspace, Env: mergeStringMaps(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
+		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStringMaps(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
 		return result, nil, err
-	default:
-		return result, nil, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, metadata.Runs.Using)
 	}
+	return result, nil, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, metadata actionMetadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {
+func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {
 	result := newResult()
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
-	for i, step := range metadata.Runs.Steps {
+	for i, step := range action.Runs.Steps {
 		if step.Uses != "" {
 			return result, fmt.Errorf("composite action nested uses %q is unsupported", step.Uses)
 		}
@@ -338,8 +290,8 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			eval.Steps[strings.ToLower(step.ID)] = stepResult.Outputs
 		}
 	}
-	for _, name := range sortedKeys(metadata.Outputs) {
-		output := metadata.Outputs[name]
+	for _, name := range sortedKeys(action.Outputs) {
+		output := action.Outputs[name]
 		value, err := expression.Evaluate(output.Value, eval)
 		if err != nil {
 			return result, fmt.Errorf("composite output %q: %w", name, err)
@@ -347,75 +299,6 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Outputs[name] = value
 	}
 	return result, nil
-}
-
-func readActionMetadata(path string) (actionMetadata, error) {
-	var source []byte
-	var metadataPath string
-	for _, name := range []string{"action.yml", "action.yaml"} {
-		candidate := filepath.Join(path, name)
-		contents, err := os.ReadFile(candidate)
-		if err == nil {
-			source, metadataPath = contents, candidate
-			break
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return actionMetadata{}, err
-		}
-	}
-	if metadataPath == "" {
-		return actionMetadata{}, fmt.Errorf("local action %q has no action.yml or action.yaml", path)
-	}
-	var metadata actionMetadata
-	decoder := yaml.NewDecoder(bytes.NewReader(source))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&metadata); err != nil {
-		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		if err == nil {
-			return actionMetadata{}, fmt.Errorf("parse action metadata %q: multiple YAML documents", metadataPath)
-		}
-		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	if metadata.Runs.Using == "" {
-		return actionMetadata{}, fmt.Errorf("action metadata %q has no runs.using", metadataPath)
-	}
-	inputs, err := lowerActionInputs(metadata.Inputs)
-	if err != nil {
-		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	metadata.Inputs = inputs
-	outputs, err := lowerActionOutputs(metadata.Outputs)
-	if err != nil {
-		return actionMetadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
-	}
-	metadata.Outputs = outputs
-	return metadata, nil
-}
-
-func lowerActionInputs(values map[string]actionInput) (map[string]actionInput, error) {
-	out := make(map[string]actionInput, len(values))
-	for _, name := range sortedKeys(values) {
-		lower := strings.ToLower(name)
-		if _, exists := out[lower]; exists {
-			return nil, fmt.Errorf("action inputs contain duplicate case-insensitive name %q", lower)
-		}
-		out[lower] = values[name]
-	}
-	return out, nil
-}
-
-func lowerActionOutputs(values map[string]actionOutput) (map[string]actionOutput, error) {
-	out := make(map[string]actionOutput, len(values))
-	for _, name := range sortedKeys(values) {
-		lower := strings.ToLower(name)
-		if _, exists := out[lower]; exists {
-			return nil, fmt.Errorf("action outputs contain duplicate case-insensitive name %q", lower)
-		}
-		out[lower] = values[name]
-	}
-	return out, nil
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
@@ -431,7 +314,7 @@ func evaluateMap(values map[string]string, context expression.Context) (map[stri
 	return out, nil
 }
 
-func resolveActionInputs(metadata actionMetadata, supplied map[string]string, context expression.Context) (map[string]string, error) {
+func resolveActionInputs(action metadata.Metadata, supplied map[string]string, context expression.Context) (map[string]string, error) {
 	inputs := make(map[string]string, len(supplied))
 	for _, name := range sortedKeys(supplied) {
 		lower := strings.ToLower(name)
@@ -440,13 +323,13 @@ func resolveActionInputs(metadata actionMetadata, supplied map[string]string, co
 		}
 		inputs[lower] = supplied[name]
 	}
-	names := make([]string, 0, len(metadata.Inputs))
-	for name := range metadata.Inputs {
+	names := make([]string, 0, len(action.Inputs))
+	for name := range action.Inputs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		definition := metadata.Inputs[name]
+		definition := action.Inputs[name]
 		if _, ok := inputs[name]; ok {
 			continue
 		}
@@ -525,12 +408,12 @@ func supportedLifecycleCondition(value string) bool {
 	return value == "" || value == "always()" || value == "${{ always() }}"
 }
 
-func actionName(metadata actionMetadata, step plan.Step) string {
+func actionName(action metadata.Metadata, step plan.Step) string {
 	if step.Name != "" {
 		return step.Name
 	}
-	if metadata.Name != "" {
-		return metadata.Name
+	if action.Name != "" {
+		return action.Name
 	}
 	return step.ID
 }
