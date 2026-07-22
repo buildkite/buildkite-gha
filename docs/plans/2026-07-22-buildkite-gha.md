@@ -505,10 +505,14 @@ supported bootstrap contract is:
 - emit fixed `run-job` commands whose queue, plugins, containers, and
   capabilities are selected through trusted policy rather than copied directly
   from workflow text;
-- sign generated pipeline steps through the configured Buildkite signed-pipeline
-  mechanism; and
 - reject compilation when the bootstrap identity, event provenance, signing
   capability, or target queue policy cannot be established.
+
+Buildkite signed pipelines are an optional defence-in-depth layer, not an
+initial bootstrap requirement. The first implementation relies on the signed,
+build-bound job-plan envelope for runtime authority and keeps generated
+commands fixed by trusted policy. Native signed-pipeline integration is deferred
+to hardening after the runtime and transport semantics are proven.
 
 For an untrusted pull request, either fetch the workflow files through a
 data-only provider adapter or use an agent configuration that disables local
@@ -920,10 +924,9 @@ cleanup. Warn when a customer-managed agent exposes a shorter grace period and
 the runtime can detect it; otherwise make the requirement part of installation
 validation.
 
-Phase 0 must also verify dynamic compilation under Buildkite signed pipelines.
-If generated pipelines require agent-side signing or another trust handoff,
-make that part of the installer and bootstrap contract rather than asking
-security-conscious customers to disable pipeline signing.
+Buildkite signed-pipeline compatibility is deferred to hardening. Early users
+who already require signed pipelines may need to keep this bridge disabled
+until that optional integration is implemented and tested.
 
 ## Native Buildkite interoperability
 
@@ -1098,8 +1101,8 @@ Phase 0 spike support snapshot:
 | Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, and offline-validated GitHub Actions and Buildkite definitions | Neither hosted provider definition has run against the same committed revision |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |
-| Trust | Eight signed-envelope conformance cases plus bounded RFC 8785 runtime bindings with issuer, identifier, lifetime, and signature-first checks for build, step, queue, event, plan, and capabilities | KMS-backed signing, queue verification roots, hook/plugin isolation, and signed-pipeline rejection require the intended live queues |
-| Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed | Current Buildkite APIs expose signature material but no authoritative verification verdict, so the supported behavior is operator cancel/rebuild until a live oracle proves a narrower recovery path |
+| Trust | Eight signed-envelope conformance cases plus bounded RFC 8785 runtime bindings with issuer, identifier, lifetime, and signature-first checks for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, queue verification roots, and hook/plugin isolation require the intended live queues; Buildkite signed-pipeline integration is deferred |
+| Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed | The supported behavior is operator cancel/rebuild until a live oracle proves a narrower recovery path |
 
 ### Phase 0 — Prove the semantic foundation
 
@@ -1153,7 +1156,6 @@ Definition of done:
 - The bootstrap and plan-envelope trust chain is documented and proven with
   tampering, replay, expiry, wrong-build, wrong-job, wrong-queue, and
   untrusted-event fixtures.
-- The dynamic upload path has a documented answer for signed pipelines.
 - The project has a written reuse/fork decision for `act`.
 - Major semantic gaps discovered by the spikes are reflected in the support
   table rather than hidden.
@@ -1370,6 +1372,8 @@ Complete:
 - threat modeling and external security review;
 - untrusted fork and privileged-container policies;
 - archive traversal, symlink, command injection, and resource-exhaustion tests;
+- optional Buildkite signed-pipeline integration for installations that require
+  uploaded step signatures;
 - signed releases, checksums, provenance, and SBOMs;
 - Hosted Agent image integration;
 - the installer Buildkite plugin;
@@ -1627,6 +1631,10 @@ unknown plan.
   executable pipeline steps. The plan now forbids repository-owned code during
   compilation and requires a pinned compiler, isolated signing capability, and
   fail-closed queue policy.
+- Buildkite step signing would add a second signing system before the runtime
+  semantics are proven. The signed job-plan envelope remains the authority
+  boundary, while native signed-pipeline integration moves to optional Phase 9
+  hardening.
 - Concurrent Actions steps require their own supervisor and conformance surface;
   they are now an explicit delivery phase rather than an unowned beta promise.
 - Skipping Buildkite checkout is necessary but does not itself create a clean
@@ -1644,10 +1652,10 @@ unknown plan.
 2. The bootstrap is a trusted, data-only compiler job. It runs a pinned verified
    distribution, executes no repository-owned code, exposes no workflow-readable
    secret, and can request plan signatures without reading signing key material.
-3. Signed dynamic upload is required for any supported configuration that can
-   reach secrets, provider tokens, trusted queues, or privileged containers.
-   Unsigned local and tokenless evaluation remains an explicitly unprivileged
-   development mode.
+3. Buildkite signed pipelines are not required for the initial implementation.
+   Signed, build-bound job-plan envelopes and runtime queue policy authorize
+   protected capabilities. Buildkite step signing is optional defence in depth
+   and is deferred to Phase 9.
 4. Generated compatibility jobs set `checkout.skip: true`, require Buildkite
    Agent v3.130.0 or later, and allocate a fresh `GITHUB_WORKSPACE` themselves.
 5. Parallel and background steps remain in the beta target and are implemented

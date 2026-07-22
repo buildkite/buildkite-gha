@@ -6,11 +6,11 @@ This probe is intentionally dormant: local tests capture commands and never call
 
 `internal/transport` proves deterministic two-job YAML, caller-root materialization and immediate on-disk verification of immutable content-addressed plan bytes, strict compiler dependencies, failure-settling logical `needs`, exact producer-constrained artifact downloads, canonical producer-attributed result manifests, visibility-only metadata, ES256-signed expected/completed markers, fail-closed retry classification, and signature-first verification of build, step, queue, event, plan, capability, replay identity, and bounded validity claims. The Go signer and probe share an RFC 8785 fixture under `fixtures/`; a passing local test is still not evidence about Buildkite scheduling, artifact attribution, upload atomicity, or signature rejection.
 
-## Signed-pipeline answer
+## Signed-pipeline scope
 
-The generator job and every generated step must be signed. Configure the trusted `gha-compiler` uploader with one of the Agent's pipeline-signing mechanisms (`signing-jwks-file` plus `signing-jwks-key-id`, `signing-aws-kms-key`, or the equivalent upload flags), and configure every `gha-runtime` verifier with its public verification material and `verification-failure-behavior=block`. The script does not pass a signing key itself: `buildkite-agent pipeline upload` signs through the uploader's Agent configuration, including the generated commands, pipeline environment, plugins, matrix, and repository. Keep the plan-envelope signer separate from this key.
+Buildkite signed pipelines are outside this initial transport probe. Run the probe on isolated compiler and runtime queues without secrets, provider tokens, privileged containers, or other production capabilities. The signed, build-bound plan envelope remains mandatory and is a separate trust mechanism: `PHASE0_SIGN_JSON` signs plan bindings and markers, and `PHASE0_VERIFY_JSON` verifies them before runtime use.
 
-The relevant current interfaces are the [signed-pipelines configuration](https://buildkite.com/docs/agent/self-hosted/security/signed-pipelines), [pipeline upload signing flags](https://buildkite.com/docs/agent/cli/reference/pipeline), [dynamic-pipeline security contract](https://buildkite.com/docs/pipelines/configure/dynamic-pipelines), [build/job signature response](https://buildkite.com/docs/apis/rest-api/builds), and [job environment endpoint](https://buildkite.com/docs/apis/rest-api/jobs).
+Signed-pipeline compatibility is deferred to the hardening phase as optional defence in depth for installations that already require it. It must use keys separate from the plan-envelope signer when implemented.
 
 The live probe also requires:
 
@@ -25,9 +25,9 @@ Before enabling the pipeline, verify the probe release checksum and signature ou
 
 ## Run and inspect
 
-Install `pipeline.yml` as the pipeline definition, sign that bootstrap definition, and run once normally. Each binding carries the Phase 0 issuer, a deterministic build/step/plan replay identity, and a one-hour validity window; runtime rejects a future, expired, longer-than-24-hour, or wrong-identity binding before consuming the plan. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`. It obtains the producer job UUID from the exact step-constrained artifact search, constrains the download by that UUID, verifies the manifest's canonical bytes, plan digest, build/job/step identity, exact result and bounded outputs, and records that it consumed the expected failure. Removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
+Install `pipeline.yml` as the pipeline definition and run once normally. Each binding carries the Phase 0 issuer, a deterministic build/step/plan replay identity, and a one-hour validity window; runtime rejects a future, expired, longer-than-24-hour, or wrong-identity binding before consuming the plan. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`. It obtains the producer job UUID from the exact step-constrained artifact search, constrains the download by that UUID, verifies the manifest's canonical bytes, plan digest, build/job/step identity, exact result and bounded outputs, and records that it consumed the expected failure. Removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
 
-To inspect exact generated jobs and their pipeline signatures with a read-only REST token:
+To inspect the exact generated jobs with a read-only REST token:
 
 ```bash
 curl --fail --silent --show-error \
@@ -35,10 +35,10 @@ curl --fail --silent --show-error \
   "https://api.buildkite.com/v2/organizations/${BUILDKITE_ORGANIZATION_SLUG}/pipelines/${BUILDKITE_PIPELINE_SLUG}/builds/${BUILDKITE_BUILD_NUMBER}?include_retried_jobs=true" \
   > build.json
 
-jq '.jobs[] | select(.step_key == "phase0-transport-producer" or .step_key == "phase0-transport-consumer") | {id,step_key,state,signature:.step.signature}' build.json
+jq '.jobs[] | select(.step_key == "phase0-transport-producer" or .step_key == "phase0-transport-consumer") | {id,step_key,state}' build.json
 ```
 
-For each returned job UUID, fetch the job environment with a token that has `read_job_env`, then verify the plan digest embedded in the environment and confirm `env` appears in `step.signature.signed_fields`:
+For each returned job UUID, fetch the job environment with a token that has `read_job_env`, then verify the plan digest and execution identity embedded in the environment:
 
 ```bash
 job_id="..."
@@ -48,7 +48,7 @@ curl --fail --silent --show-error \
   | jq '{job_id:"'"${job_id}"'",digest:.env.PHASE0_PLAN_DIGEST,step:.env.BUILDKITE_STEP_KEY,queue:.env.BUILDKITE_AGENT_META_DATA_QUEUE}'
 ```
 
-The exact recovery predicate would be two jobs only, keys equal to `phase0-transport-producer` and `phase0-transport-consumer`, plan digests equal to the verified expected marker, signatures verified under the intended root, and `env` present in both signed-field lists. The REST response exposes signature values and signed-field names, but it does not expose the verifier's acceptance verdict, and the Agent currently documents signing but no supported offline verification command. A non-null signature is therefore visibility evidence, not recovery authority.
+The exact recovery predicate would be two jobs only, keys equal to `phase0-transport-producer` and `phase0-transport-consumer`, with plan digests equal to the verified expected marker. Until the live probe proves that state can be established authoritatively after interruption, signature presence or job visibility is not recovery authority.
 
 ## Interrupted upload and operator recovery
 
@@ -56,4 +56,4 @@ Run once with `PHASE0_INTERRUPT_AFTER_UPLOAD=1`. The importer writes the signed 
 
 Verify the expected marker with `PHASE0_VERIFY_JSON`, then use the build and job-environment queries above for diagnosis. Current public interfaces cannot prove the full recovery predicate, so every prepared-but-incomplete state is operator-fail-closed: cancel the build and start a new one. Do not set an override, retry the upload in place, or use `pipeline upload --replace`. The local classifier has a `verified-completed` state for a future authoritative verifier, but signature presence from REST never enters that state.
 
-Also run negative builds with an unsigned generated upload, a wrong pipeline key, a verifier missing the signing root, and an invalid plan-envelope signature. Record whether a command hook or plugin runs before each rejection, the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old/new pipeline and plan keys. Those observations are live evidence; this repository does not claim them from local simulation.
+Also run negative builds with a verifier missing the plan-envelope trust root and an invalid plan-envelope signature. Record whether a command hook or plugin runs before each rejection, the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old and new plan keys. Those observations are live evidence; this repository does not claim them from local simulation.
