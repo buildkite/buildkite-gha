@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,89 @@ import (
 
 	"go.yaml.in/yaml/v4"
 )
+
+func TestShellOracleDefinitionsMatchFixtureContract(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	fixture := readYAMLMap(t, fixturePath)
+	jobs := yamlMap(t, fixture["jobs"], "jobs")
+	producer := yamlMap(t, jobs["producer"], "producer")
+	consumer := yamlMap(t, jobs["consumer"], "consumer")
+
+	expectedPath := filepath.Join("..", "..", "testdata", "smoke", shellExpectedCapturePath)
+	expectedBytes, err := os.ReadFile(expectedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expected normalizedCapture
+	if err := json.Unmarshal(expectedBytes, &expected); err != nil {
+		t.Fatal(err)
+	}
+	if len(expected.Observations) == 0 {
+		t.Fatal("shell capture expectation has no observations")
+	}
+
+	variantsRaw, ok := yamlMap(t, yamlMap(t, consumer["strategy"], "strategy")["matrix"], "matrix")["variant"].([]any)
+	if !ok {
+		t.Fatalf("consumer matrix variants = %#v, want list", consumer)
+	}
+	wantIdentities := make(map[string]bool, len(variantsRaw))
+	for _, raw := range variantsRaw {
+		variant, ok := raw.(string)
+		if !ok {
+			t.Fatalf("matrix variant = %#v, want string", raw)
+		}
+		wantIdentities["consumer[variant="+variant+"]"] = false
+	}
+
+	result := ""
+	for _, observation := range expected.Observations {
+		if _, ok := wantIdentities[observation.Identity]; !ok {
+			t.Fatalf("expected capture contains identity %q absent from shell.yml matrix", observation.Identity)
+		}
+		wantIdentities[observation.Identity] = true
+		var document struct {
+			Result string `json:"result"`
+		}
+		if err := json.Unmarshal(observation.Document, &document); err != nil {
+			t.Fatal(err)
+		}
+		if result == "" {
+			result = document.Result
+		} else if document.Result != result {
+			t.Fatalf("shell capture results disagree: %q and %q", result, document.Result)
+		}
+	}
+	for identity, found := range wantIdentities {
+		if !found {
+			t.Fatalf("shell.yml matrix identity %q is absent from expected capture", identity)
+		}
+	}
+
+	producerBytes, err := yaml.Marshal(producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(producerBytes), "result="+result) {
+		t.Fatalf("producer does not emit expected result %q", result)
+	}
+	for _, path := range []string{
+		filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml"),
+		filepath.Join("..", "..", ".buildkite", "phase-0-shell-oracle.yml"),
+	} {
+		definition, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(definition), result) {
+			t.Fatalf("%s does not carry fixture result %q", path, result)
+		}
+		for _, raw := range variantsRaw {
+			if !strings.Contains(string(definition), raw.(string)) {
+				t.Fatalf("%s does not carry fixture variant %q", path, raw)
+			}
+		}
+	}
+}
 
 func TestGitHubShellOracleDefinitionIsManualAndPinned(t *testing.T) {
 	path := filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml")

@@ -198,3 +198,57 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 		t.Fatalf("verifyBuildkiteTarget() error = %v, want missing binding", err)
 	}
 }
+
+func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
+	if _, _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
+	}
+	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
+	}
+}
+
+func TestRunJobDoesNotWriteEmptyResultBeforeExecution(t *testing.T) {
+	workspace := t.TempDir()
+	job := plan.Job{
+		Schema: plan.Schema,
+		Compiler: plan.Compiler{
+			Version:            "dev",
+			DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+		},
+		Workflow: plan.Workflow{
+			Path:         "missing-workflow.yml",
+			Digest:       "sha256:" + strings.Repeat("1", 64),
+			LogicalJobID: "missing",
+		},
+		Event:                plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:               plan.Target{StepKey: "gha-missing", Queue: "gha-runtime"},
+		RequiredCapabilities: []string{},
+		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
+	}
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(workspace, "plan.json")
+	resultPath := filepath.Join(workspace, "result.json")
+	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, stderr = %q, want failure", code, stderr.String())
+	}
+	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
+		t.Fatalf("result path stat error = %v, want no empty result file", err)
+	}
+}

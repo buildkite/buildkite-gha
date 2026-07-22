@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -135,8 +137,10 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 		ManagedNodeRoot: os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT"),
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
 	}
-	result, err := runner.RunJob(context.Background(), job, workspace)
-	if resultPath != "" {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, err := runner.RunJob(ctx, job, workspace)
+	if resultPath != "" && result.Conclusion != "" {
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "buildkite-gha: run-job: encode result: %v\n", err)
@@ -156,10 +160,15 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 }
 
 func runJobArgs(args []string) (planPath, resultPath string, err error) {
+	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--plan", "--result":
 			option := args[i]
+			if seen[option] {
+				return "", "", fmt.Errorf("%s may only be specified once", option)
+			}
+			seen[option] = true
 			i++
 			if i == len(args) {
 				return "", "", fmt.Errorf("%s requires a path", option)
@@ -255,9 +264,14 @@ func compile(args []string, stdout, stderr io.Writer) int {
 }
 
 func workflowArgs(args []string) (workflowPath, eventPath string, err error) {
+	eventPathSeen := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--event-path":
+			if eventPathSeen {
+				return "", "", fmt.Errorf("--event-path may only be specified once")
+			}
+			eventPathSeen = true
 			i++
 			if i == len(args) {
 				return "", "", fmt.Errorf("--event-path requires a path")
