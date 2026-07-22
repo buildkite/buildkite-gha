@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-22
+Last reviewed: 2026-07-23
 Target repository: `buildkite/buildkite-gha`
 
 ## Summary
@@ -1067,6 +1067,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
   wires producer-attributed result manifests, and `compile` does not yet
   materialize or upload the content-addressed plan artifacts referenced by its
   pipeline output.
+- Phase 2 is active. Its existing needs-free runtime spike is being extended
+  into the complete sequential shell state machine, producer-attributed result
+  transport, and a real `upload` path. Completion requires the checked-in shell
+  workflow to run end to end on Buildkite, including downstream `needs`
+  consumption, bounded cleanup, and raw-log secret checks.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1220,7 +1225,7 @@ Definition of done:
   succeeds for supported fixtures.
 - No compiler output contains resolved secret values.
 
-### Phase 2 — Sequential shell job runtime
+### Phase 2 — Sequential shell job runtime (active)
 
 Implement the per-job state machine for `run` steps:
 
@@ -1243,6 +1248,23 @@ Definition of done:
 - Downstream conditions can consume bounded prerequisite results and outputs.
 - Cleanup runs after failure and cancellation within a documented grace period.
 - Secret fixtures never appear in captured raw Buildkite logs.
+
+Delivery slices:
+
+1. Complete the sequential state machine and its local conformance tests:
+   conditions and status functions, environment precedence, supported shells
+   and working directories, file commands, timeouts, cancellation,
+   `continue-on-error`, and bounded cleanup.
+2. Promote the Phase 0 result probe into production transport contracts:
+   canonical producer-attributed manifests, exact-step artifact download,
+   bounded metadata mirrors, and verified `needs` injection.
+3. Implement `buildkite-gha upload` for the explicit unprivileged local-event
+   mode, materializing immutable plans before dynamically uploading the
+   generated pipeline. Protected capabilities remain unavailable until the
+   Phase 9 trust installation exists.
+4. Run `testdata/smoke/.github/workflows/shell.yml` on Buildkite, compare its
+   normalized observation with the GitHub Actions oracle, exercise failure and
+   cancellation cleanup, and inspect raw logs for the secret fixture.
 
 ### Phase 3 — Concurrent step runtime
 
