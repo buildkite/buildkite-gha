@@ -37,6 +37,7 @@ func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
 	for _, required := range []string{
 		`readonly binding_issuer="buildkite-gha-plan-envelope"`,
 		`PHASE0_BINDING_JTI`,
+		`PHASE0_REDACTION_SECRET`,
 		`PHASE0_PRODUCER_PLAN_DIGEST`,
 		`cmp -s "${canonical}" "${manifest}"`,
 		`.producer.job_id == $job_id`,

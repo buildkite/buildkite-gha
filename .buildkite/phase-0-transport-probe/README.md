@@ -24,6 +24,8 @@ The build must use the exact commit supplied in `PHASE0_COMMIT`. Static and gene
 
 Install `pipeline.yml` as the pipeline definition and run once normally. Each binding carries the Phase 0 issuer, a deterministic build/step/plan replay identity, and a one-hour validity window; runtime rejects a future, expired, longer-than-24-hour, or wrong-identity binding before consuming the plan. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`. It obtains the producer job UUID from the exact step-constrained artifact search, constrains the download by that UUID, verifies the manifest's canonical bytes, plan digest, build/job/step identity, exact result and bounded outputs, and records that it consumed the expected failure. Removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
 
+The producer also prints the disposable `PHASE0_REDACTION_SECRET` canary. Its log must contain `[REDACTED]` and must not contain the canary value.
+
 The repository's default pipeline loads this probe when the build has `PHASE0_PROBE=transport`. Supply the remaining values as build environment, including `PHASE0_LOCAL_CAPABILITIES=["network"]`. Use the exact organization and pipeline UUIDs from the Buildkite API rather than slugs.
 
 To inspect the exact generated jobs with a read-only REST token:
