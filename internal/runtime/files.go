@@ -4,9 +4,16 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+)
+
+const (
+	maxCommandFileBytes  = 1024 * 1024
+	maxCommandFilesBytes = 2 * 1024 * 1024
+	maxCommandEntries    = 1024
 )
 
 type commandFiles struct {
@@ -39,10 +46,13 @@ func newCommandFiles() (commandFiles, error) {
 }
 
 func (files commandFiles) apply(result *Result, state map[string]string) error {
+	if err := files.checkSizeBudget(); err != nil {
+		return err
+	}
 	outputs, outputErr := parseCommandFile(files.output)
 	env, envErr := parseCommandFile(files.env)
 	states, stateErr := parseCommandFile(files.state)
-	summary, summaryErr := os.ReadFile(files.summary)
+	summary, summaryErr := readBoundedFile(files.summary, maxCommandFileBytes)
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil {
 		return errors.Join(outputErr, envErr, stateErr, summaryErr)
 	}
@@ -71,6 +81,40 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 	return nil
 }
 
+func (files commandFiles) checkSizeBudget() error {
+	var total int64
+	for _, path := range []string{files.output, files.env, files.state, files.summary} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("stat file command %s: %w", filepath.Base(path), err)
+		}
+		if info.Size() > maxCommandFileBytes {
+			return fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), maxCommandFileBytes)
+		}
+		total += info.Size()
+	}
+	if total > maxCommandFilesBytes {
+		return fmt.Errorf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
+	}
+	return nil
+}
+
+func readBoundedFile(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > limit {
+		return nil, fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), limit)
+	}
+	return contents, nil
+}
+
 func parseCommandFile(path string) (map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -81,6 +125,7 @@ func parseCommandFile(path string) (map[string]string, error) {
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
+	entries := 0
 	for scanner.Scan() {
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
@@ -106,6 +151,10 @@ func parseCommandFile(path string) (map[string]string, error) {
 				return nil, fmt.Errorf("missing delimiter %q for %q", delimiter, name)
 			}
 			values[name] = strings.Join(lines, "\n")
+			entries++
+			if entries > maxCommandEntries {
+				return nil, fmt.Errorf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
+			}
 			continue
 		}
 		name, value, ok := strings.Cut(line, "=")
@@ -113,6 +162,10 @@ func parseCommandFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("invalid file command %q", line)
 		}
 		values[name] = value
+		entries++
+		if entries > maxCommandEntries {
+			return nil, fmt.Errorf("file command %s exceeds the %d-entry limit", filepath.Base(path), maxCommandEntries)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("parse file command %s: %w", filepath.Base(path), err)

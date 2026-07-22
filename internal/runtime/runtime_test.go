@@ -172,6 +172,47 @@ func TestFileCommandLineLimitIsExplicit(t *testing.T) {
 	}
 }
 
+func TestFileCommandAggregateLimits(t *testing.T) {
+	files, err := newCommandFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(files.dir)
+
+	many := strings.Repeat("value=x\n", maxCommandEntries+1)
+	if err := os.WriteFile(files.output, []byte(many), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result := newResult()
+	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "entry limit") {
+		t.Fatalf("apply() error = %v, want entry limit", err)
+	}
+
+	if err := os.WriteFile(files.output, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files.summary, bytes.Repeat([]byte("x"), maxCommandFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = newResult()
+	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "summary exceeds") {
+		t.Fatalf("apply() error = %v, want summary size limit", err)
+	}
+
+	for _, path := range []string{files.output, files.env, files.state} {
+		if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 700*1024), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(files.summary, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = newResult()
+	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "aggregate limit") {
+		t.Fatalf("apply() error = %v, want aggregate size limit", err)
+	}
+}
+
 func TestExpressionEvaluationIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	values, err := evaluateMap(map[string]string{
