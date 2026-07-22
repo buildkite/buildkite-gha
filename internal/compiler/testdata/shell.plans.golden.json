@@ -70,6 +70,14 @@
     "dependencies": [
       "gha-producer"
     ],
+    "need_sources": {
+      "producer": [
+        {
+          "step_key": "gha-producer",
+          "plan_digest": "sha256:2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3"
+        }
+      ]
+    },
     "steps": [
       {
         "id": "step-1",
@@ -121,6 +129,14 @@
     "dependencies": [
       "gha-producer"
     ],
+    "need_sources": {
+      "producer": [
+        {
+          "step_key": "gha-producer",
+          "plan_digest": "sha256:2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3"
+        }
+      ]
+    },
     "steps": [
       {
         "id": "step-1",

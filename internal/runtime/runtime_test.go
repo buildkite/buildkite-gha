@@ -25,6 +25,7 @@ func TestRunJobRejectsStaticDependenciesUntilResultTransportExists(t *testing.T)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: dependency boundary\n")
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Dependencies = []string{"gha-producer"}
+	job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "result transport is not wired") {
 		t.Fatalf("RunJob() error = %v, want fail-closed dependency boundary", err)

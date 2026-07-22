@@ -93,6 +93,31 @@ func TestValidateRejectsInvalidStaticDependencies(t *testing.T) {
 	}
 }
 
+func TestValidateBindsEveryDependencyToOneLogicalNeed(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Dependencies = []string{"gha-build-one", "gha-build-two"}
+	job.NeedSources = map[string][]NeedSource{
+		"build": {
+			{StepKey: "gha-build-one", PlanDigest: digest},
+			{StepKey: "gha-build-two", PlanDigest: digest},
+		},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	job.NeedSources["other"] = []NeedSource{{StepKey: "gha-build-two", PlanDigest: digest}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "multiple logical owners") {
+		t.Fatalf("Validate() error = %v, want duplicate logical owner rejection", err)
+	}
+	delete(job.NeedSources, "other")
+	job.NeedSources["build"] = job.NeedSources["build"][:1]
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "dependencies and prerequisite producers differ") {
+		t.Fatalf("Validate() error = %v, want uncovered dependency rejection", err)
+	}
+}
+
 func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = nil

@@ -199,6 +199,11 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 	}
 	eventDigest := sha256.Sum256(payload)
 	plans := make([]plan.Job, 0, len(ir.Jobs))
+	planDigests := make(map[string]string, len(ir.Jobs))
+	logicalByKey := make(map[string]string, len(ir.Jobs))
+	for _, instance := range ir.Jobs {
+		logicalByKey[instance.Key] = instance.LogicalJobID
+	}
 	for _, instance := range ir.Jobs {
 		steps := make([]plan.Step, len(instance.Steps))
 		usedIDs := make(map[string]struct{}, len(instance.Steps))
@@ -231,6 +236,19 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 		if err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
+		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
+		for _, logicalNeed := range instance.LogicalNeeds {
+			for _, dependency := range instance.Needs {
+				if logicalByKey[dependency] != logicalNeed {
+					continue
+				}
+				digest, ok := planDigests[dependency]
+				if !ok {
+					return nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+				}
+				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
+			}
+		}
 		job := plan.Job{
 			Schema: plan.Schema,
 			Compiler: plan.Compiler{
@@ -249,6 +267,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			Matrix:                  instance.Matrix,
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
+			NeedSources:             needSources,
 			Env:                     instance.Env,
 			Condition:               instance.If,
 			TimeoutMinutes:          instance.TimeoutMinutes,
@@ -260,6 +279,12 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 		if err := job.Validate(); err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
+		encoded, err := plan.Encode(job)
+		if err != nil {
+			return nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
+		}
+		digest := sha256.Sum256(encoded)
+		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
 		plans = append(plans, job)
 	}
 	return plans, nil

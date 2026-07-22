@@ -66,16 +66,14 @@
       "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,255}$"},
       "uniqueItems": true
     },
-    "needs": {
+    "need_sources": {
       "type": "object",
       "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["result"],
-        "properties": {
-          "result": {"type": "string"},
-          "outputs": {"$ref": "#/$defs/stringMap"}
-        }
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 256,
+        "uniqueItems": true,
+        "items": {"$ref": "#/$defs/needSource"}
       }
     },
     "env": {"$ref": "#/$defs/stringMap"},
@@ -98,6 +96,15 @@
       "enum": ["network", "docker", "privileged-container", "secrets", "provider-token-read", "provider-token-write"]
     },
     "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "needSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_key", "plan_digest"],
+      "properties": {
+        "step_key": {"$ref": "#/$defs/buildkiteName"},
+        "plan_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
     "position": {
       "type": "object",
       "additionalProperties": false,

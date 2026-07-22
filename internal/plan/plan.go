@@ -13,6 +13,8 @@ import (
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
 
+const MaxNeedProducers = 256
+
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
@@ -43,6 +45,14 @@ type Need struct {
 	Outputs map[string]string `json:"outputs,omitempty"`
 }
 
+// NeedSource binds one logical prerequisite to an exact generated producer
+// and immutable plan. Buildkite scheduling still uses Dependencies; runtimes
+// use these identities to select and verify authoritative result artifacts.
+type NeedSource struct {
+	StepKey    string `json:"step_key"`
+	PlanDigest string `json:"plan_digest"`
+}
+
 type Position struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
@@ -71,16 +81,19 @@ type Step struct {
 
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
-	Schema                  string            `json:"schema"`
-	Compiler                Compiler          `json:"compiler"`
-	Workflow                Workflow          `json:"workflow"`
-	Event                   Event             `json:"event"`
-	Target                  Target            `json:"target"`
-	RequiredCapabilities    []string          `json:"required_capabilities"`
-	Matrix                  map[string]any    `json:"matrix,omitempty"`
-	Vars                    map[string]string `json:"vars,omitempty"`
-	Dependencies            []string          `json:"dependencies,omitempty"`
-	Needs                   map[string]Need   `json:"needs,omitempty"`
+	Schema               string                  `json:"schema"`
+	Compiler             Compiler                `json:"compiler"`
+	Workflow             Workflow                `json:"workflow"`
+	Event                Event                   `json:"event"`
+	Target               Target                  `json:"target"`
+	RequiredCapabilities []string                `json:"required_capabilities"`
+	Matrix               map[string]any          `json:"matrix,omitempty"`
+	Vars                 map[string]string       `json:"vars,omitempty"`
+	Dependencies         []string                `json:"dependencies,omitempty"`
+	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
+	// Needs is populated only from verified producer-attributed manifests at
+	// runtime. It is never accepted from or encoded into an immutable plan.
+	Needs                   map[string]Need   `json:"-"`
 	Env                     map[string]string `json:"env,omitempty"`
 	Condition               string            `json:"condition,omitempty"`
 	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
@@ -240,16 +253,39 @@ func (job Job) Validate() error {
 		}
 		dependencies[id] = struct{}{}
 	}
-	if len(job.Steps) == 0 {
-		return fmt.Errorf("job plan contains no steps")
-	}
-	needIDs := make(map[string]struct{}, len(job.Needs))
-	for name := range job.Needs {
+	needIDs := make(map[string]struct{}, len(job.NeedSources))
+	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
+	for name, sources := range job.NeedSources {
+		if !targetPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+			return fmt.Errorf("job plan contains invalid prerequisite %q", name)
+		}
 		id := strings.ToLower(name)
 		if _, exists := needIDs[id]; exists {
 			return fmt.Errorf("job plan contains duplicate prerequisite %q", name)
 		}
 		needIDs[id] = struct{}{}
+		for i, source := range sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) {
+				return fmt.Errorf("job plan prerequisite %q has invalid producer identity", name)
+			}
+			if i > 0 && sources[i-1].StepKey >= source.StepKey {
+				return fmt.Errorf("job plan prerequisite %q producers must be unique and sorted", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return fmt.Errorf("job plan prerequisite %q producer %q is not a dependency", name, source.StepKey)
+			}
+			if _, exists := sourcedDependencies[key]; exists {
+				return fmt.Errorf("job plan dependency %q has multiple logical owners", source.StepKey)
+			}
+			sourcedDependencies[key] = struct{}{}
+		}
+	}
+	if len(sourcedDependencies) != len(dependencies) {
+		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
+	}
+	if len(job.Steps) == 0 {
+		return fmt.Errorf("job plan contains no steps")
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for i, step := range job.Steps {
