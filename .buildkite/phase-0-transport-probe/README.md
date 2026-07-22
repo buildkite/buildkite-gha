@@ -61,9 +61,9 @@ Also run a negative build with `PHASE0_TAMPER_BINDING=1`; the producer must reje
 
 ## Recorded evidence
 
-- [Buildkite build 23](https://buildkite.com/buildkite/buildkite-gha/builds/23)
+- [Buildkite build 27](https://buildkite.com/buildkite/buildkite-gha/builds/27)
   passed the complete transport and Agent-redaction path at commit
-  `f599211cd891608354563d714cd63c6ff3ff9184`.
+  `787b3adfe306a17fbf073c70b24f8b747b5882a8`.
 - [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
   failed its producer while the failure-settling consumer passed.
 - [Buildkite build 19](https://buildkite.com/buildkite/buildkite-gha/builds/19)

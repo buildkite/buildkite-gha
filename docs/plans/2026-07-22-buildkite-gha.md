@@ -1100,9 +1100,9 @@ Phase 0 live evidence:
   `522a1f9ba87eb2fb0804ca381b1e7a1883d1124f`. Both materialized fixture commit
   `f479cc04720cac8bbb59cc54f193948864f08756` and produced the same normalized
   observation.
-- [Buildkite build 23](https://buildkite.com/buildkite/buildkite-gha/builds/23)
+- [Buildkite build 27](https://buildkite.com/buildkite/buildkite-gha/builds/27)
   passed the complete transport at commit
-  `f599211cd891608354563d714cd63c6ff3ff9184`: immutable plan artifacts,
+  `787b3adfe306a17fbf073c70b24f8b747b5882a8`: immutable plan artifacts,
   producer-constrained result download, generated dependency execution, native
   dependency extension, metadata visibility, and Agent redaction all passed.
 - [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
