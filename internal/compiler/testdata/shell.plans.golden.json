@@ -7,7 +7,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
       "logical_job_id": "producer"
     },
     "event": {
@@ -44,6 +44,26 @@
             "column": 54
           }
         }
+      },
+      {
+        "id": "step-2",
+        "name": "Mask fixture before logging",
+        "kind": "run",
+        "command": "echo \"::add-mask::$CANARY\"\nprintf 'MASKED_CANARY=%s\\n' \"$CANARY\"\n",
+        "shell": "bash",
+        "env": {
+          "CANARY": "phase2-secret-canary-7f4c2a91"
+        },
+        "source": {
+          "start": {
+            "line": 20,
+            "column": 9
+          },
+          "end": {
+            "line": 22,
+            "column": 1
+          }
+        }
       }
     ]
   },
@@ -55,7 +75,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
       "logical_job_id": "consumer"
     },
     "event": {
@@ -82,7 +102,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae"
+          "plan_digest": "sha256:3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf"
         }
       ]
     },
@@ -99,11 +119,11 @@
         },
         "source": {
           "start": {
-            "line": 28,
+            "line": 36,
             "column": 9
           },
           "end": {
-            "line": 31,
+            "line": 39,
             "column": 1
           }
         }
@@ -118,7 +138,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
       "logical_job_id": "consumer"
     },
     "event": {
@@ -145,7 +165,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae"
+          "plan_digest": "sha256:3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf"
         }
       ]
     },
@@ -162,11 +182,11 @@
         },
         "source": {
           "start": {
-            "line": 28,
+            "line": 36,
             "column": 9
           },
           "end": {
-            "line": 31,
+            "line": 39,
             "column": 1
           }
         }

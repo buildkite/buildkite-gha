@@ -1,28 +1,28 @@
 steps:
   - label: "producer"
     key: "gha-producer"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     agents:
       queue: "gha-untrusted"
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/3ab11157376c6fcf6419f4aa518d1a8ed1d9b64db1e249c38483f5d0742081bf.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"
         allow_failure: false
   - label: "consumer (variant=one)"
     key: "gha-consumer-5ebbc197d87b"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/72c64153848c880724027273a3c483e0e19002899c2a14b3f025e65b4491ea4d.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/72c64153848c880724027273a3c483e0e19002899c2a14b3f025e65b4491ea4d.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/05bc2b1c62bd8f9843199f56089a6cc1587ca71add082091091eb3a3c377fccc.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/05bc2b1c62bd8f9843199f56089a6cc1587ca71add082091091eb3a3c377fccc.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     agents:
       queue: "gha-untrusted"
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:72c64153848c880724027273a3c483e0e19002899c2a14b3f025e65b4491ea4d"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/72c64153848c880724027273a3c483e0e19002899c2a14b3f025e65b4491ea4d.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:05bc2b1c62bd8f9843199f56089a6cc1587ca71add082091091eb3a3c377fccc"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/05bc2b1c62bd8f9843199f56089a6cc1587ca71add082091091eb3a3c377fccc.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"
@@ -31,14 +31,14 @@ steps:
         allow_failure: true
   - label: "consumer (variant=two)"
     key: "gha-consumer-91934b28b00f"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/2c91a6a9c3aa70206c241d9433edc41ddf32440e65cbd102d9c4279ecbf20844.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/2c91a6a9c3aa70206c241d9433edc41ddf32440e65cbd102d9c4279ecbf20844.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/8ea926ee39a5fc0f13f1f35460bba48aa7430194eae526b674e8a85c7862ae34.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/8ea926ee39a5fc0f13f1f35460bba48aa7430194eae526b674e8a85c7862ae34.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     agents:
       queue: "gha-untrusted"
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:2c91a6a9c3aa70206c241d9433edc41ddf32440e65cbd102d9c4279ecbf20844"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/2c91a6a9c3aa70206c241d9433edc41ddf32440e65cbd102d9c4279ecbf20844.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:8ea926ee39a5fc0f13f1f35460bba48aa7430194eae526b674e8a85c7862ae34"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/8ea926ee39a5fc0f13f1f35460bba48aa7430194eae526b674e8a85c7862ae34.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"
