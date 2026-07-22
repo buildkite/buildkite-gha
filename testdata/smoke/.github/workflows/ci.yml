@@ -1,0 +1,54 @@
+name: buildkite-gha smoke
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.composite.outputs.result }}
+    steps:
+      - name: Checkout fixture repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Produce shell output
+        id: shell
+        shell: bash
+        run: echo "result=smoke" >> "$GITHUB_OUTPUT"
+
+      - name: Run local JavaScript action
+        id: javascript
+        uses: ./.github/actions/javascript
+        with:
+          message: ${{ steps.shell.outputs.result }}
+
+      - name: Run local composite action
+        id: composite
+        uses: ./.github/actions/composite
+        with:
+          message: ${{ steps.javascript.outputs.result }}
+
+      - name: Verify composite environment
+        shell: bash
+        run: test "$SMOKE_COMPOSITE_SEEN" = "true"
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fixture repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify output
+        shell: bash
+        env:
+          EXPECTED_RESULT: ${{ needs.producer.outputs.result }}
+        run: |
+          test "$EXPECTED_RESULT" = "smoke-javascript-composite"
+          printf '{"result":"%s"}\n' "$EXPECTED_RESULT" > observation.json
+          diff -u expected/observation.json observation.json

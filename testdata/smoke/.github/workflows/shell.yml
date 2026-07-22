@@ -1,0 +1,36 @@
+name: buildkite-gha shell smoke
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.produce.outputs.result }}
+    steps:
+      - name: Produce bounded output
+        id: produce
+        shell: bash
+        run: echo "result=smoke-shell" >> "$GITHUB_OUTPUT"
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [one, two]
+    steps:
+      - name: Consume bounded output
+        shell: bash
+        env:
+          RESULT: ${{ needs.producer.outputs.result }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          test "$RESULT" = "smoke-shell"
+          printf 'SMOKE_OBSERVATION={"result":"%s","variant":"%s"}\n' \
+            "$RESULT" "$VARIANT"
