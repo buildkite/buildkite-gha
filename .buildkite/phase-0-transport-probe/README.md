@@ -57,4 +57,17 @@ Run once with `PHASE0_INTERRUPT_AFTER_UPLOAD=1`. The importer writes the signed 
 
 Verify the expected marker with `PHASE0_VERIFY_JSON`, then use the build and job-environment queries above for diagnosis. Current public interfaces cannot prove the full recovery predicate, so every prepared-but-incomplete state is operator-fail-closed: cancel the build and start a new one. Do not set an override, retry the upload in place, or use `pipeline upload --replace`. The local classifier has a `verified-completed` state for a future authoritative verifier, but signature presence from REST never enters that state.
 
-Also run a negative build with `PHASE0_TAMPER_BINDING=1`; the producer must reject the invalid plan-envelope signature. Record the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old and new plan keys. Those observations are live evidence; this repository does not claim them from local simulation.
+Also run a negative build with `PHASE0_TAMPER_BINDING=1`; the producer must reject the invalid plan-envelope signature. Record the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old and new plan keys. The recorded observations below come from live builds rather than local simulation.
+
+## Recorded evidence
+
+- [Buildkite build 23](https://buildkite.com/buildkite/buildkite-gha/builds/23)
+  passed the complete transport and Agent-redaction path at commit
+  `f599211cd891608354563d714cd63c6ff3ff9184`.
+- [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
+  failed its producer while the failure-settling consumer passed.
+- [Buildkite build 19](https://buildkite.com/buildkite/buildkite-gha/builds/19)
+  rejected the corrupted envelope with `invalid ES256 signature`.
+- [Buildkite build 17](https://buildkite.com/buildkite/buildkite-gha/builds/17)
+  stopped after upload, and its importer retry rejected the incomplete state
+  with exit 75.

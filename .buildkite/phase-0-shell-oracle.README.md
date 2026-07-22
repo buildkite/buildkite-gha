@@ -18,3 +18,11 @@ fails before an observation is accepted.
 Record the GitHub run URL, Buildkite build URL, exact commit, fixture commit
 printed by each provider, and normalized output only after both hosted probes
 pass.
+
+## Recorded evidence
+
+[GitHub Actions run 29917793131](https://github.com/buildkite/buildkite-gha/actions/runs/29917793131)
+and [Buildkite build 11](https://buildkite.com/buildkite/buildkite-gha/builds/11)
+passed at source commit `522a1f9ba87eb2fb0804ca381b1e7a1883d1124f`.
+Both materialized fixture commit `f479cc04720cac8bbb59cc54f193948864f08756`
+and produced the checked-in normalized observation.

@@ -1056,8 +1056,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 - The repository baseline, reviewed architecture plan, and staged
   `testdata/smoke` corpus are committed on `main`.
-- The Phase 0 implementation is merged on `main`. Its remaining live oracles
-  are operational gates rather than unmerged foundation work.
+- Phase 0 is complete. Its local semantic foundation is merged on `main`, and
+  the hosted differential and Buildkite transport oracles have now run against
+  exact commits.
 - Phase 1 is implemented. The static compiler now owns compile-time contexts,
   explicit variable snapshots, bounded local reusable-workflow flattening,
   matrix and dependency expansion, fail-closed runner policy, immutable job
@@ -1090,8 +1091,28 @@ Explicitly defer from beta unless implementation evidence changes the order:
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all three smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
-  Hosted differential execution and the real transport, signing, interruption,
-  and dependency-extension oracles have not run yet.
+
+Phase 0 live evidence:
+
+- [GitHub Actions run 29917793131](https://github.com/buildkite/buildkite-gha/actions/runs/29917793131)
+  and [Buildkite build 11](https://buildkite.com/buildkite/buildkite-gha/builds/11)
+  ran the shell differential oracle at commit
+  `522a1f9ba87eb2fb0804ca381b1e7a1883d1124f`. Both materialized fixture commit
+  `f479cc04720cac8bbb59cc54f193948864f08756` and produced the same normalized
+  observation.
+- [Buildkite build 23](https://buildkite.com/buildkite/buildkite-gha/builds/23)
+  passed the complete transport at commit
+  `f599211cd891608354563d714cd63c6ff3ff9184`: immutable plan artifacts,
+  producer-constrained result download, generated dependency execution, native
+  dependency extension, metadata visibility, and Agent redaction all passed.
+- [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
+  proved that the consumer runs and verifies a failure manifest after its
+  producer fails. [Buildkite build 19](https://buildkite.com/buildkite/buildkite-gha/builds/19)
+  rejected a directly corrupted ES256 signature before using its claims.
+- [Buildkite build 17](https://buildkite.com/buildkite/buildkite-gha/builds/17)
+  stopped after dynamic upload, then a retry rejected the prepared but
+  incomplete state with exit 75. The supported recovery remains cancel and
+  rebuild; the implementation does not assume upload atomicity.
 
 Phase 0 spike support snapshot:
 
@@ -1099,12 +1120,12 @@ Phase 0 spike support snapshot:
 | --- | --- | --- |
 | Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
 | Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
-| Differential | Isolated committed fixture, canonical capture/comparison, and offline-validated GitHub Actions and Buildkite definitions | Neither hosted provider definition has run against the same committed revision |
-| Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |
-| Trust | Eight signed-envelope conformance cases plus bounded RFC 8785 runtime bindings with issuer, identifier, lifetime, and signature-first checks for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, queue verification roots, and hook/plugin isolation require the intended live queues; Buildkite signed-pipeline integration is deferred |
-| Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed | The supported behavior is operator cancel/rebuild until a live oracle proves a narrower recovery path |
+| Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
+| Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
+| Trust | Eight signed-envelope conformance cases plus live rejection of a corrupted signature and bounded RFC 8785 runtime bindings for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, verification-only queue roots, and checkout-free hook/plugin isolation are production hardening gates; Buildkite signed-pipeline integration is optional Phase 9 work |
+| Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed; a live interrupted upload and retry returned exit 75 | Operator cancel/rebuild is the supported recovery until Buildkite exposes an authoritative completed-upload query |
 
-### Phase 0 — Prove the semantic foundation
+### Phase 0 — Prove the semantic foundation (complete)
 
 Create the standalone repository, license, command skeleton, architecture ADR,
 and compatibility test harness.
@@ -1133,10 +1154,11 @@ Build four spikes before committing to the runtime implementation:
    upload is atomic, and retry the bootstrap after an intentionally interrupted
    upload.
 
-The transport spike must also cross the intended trust boundary: compile an
-untrusted fixture as inert data, sign its event and plan envelope on the trusted
-compiler queue, reject tampered and unattested envelopes at runtime, and prove
-that repository hooks or plugins cannot run in the bootstrap job.
+The Phase 0 live transport spike uses exact-commit checkouts, an intentionally
+public disposable signing key, and an unprivileged queue. It proves transport,
+binding, and rejection mechanics without claiming a production trust boundary.
+KMS-backed plan signing, verification-only roots, and checkout-free compiler
+isolation are Phase 9 gates before protected capabilities are enabled.
 
 Use the spikes to decide which `act` packages can be imported, which need a
 maintained fork, and which semantics should be implemented independently. Keep
@@ -1670,34 +1692,39 @@ unknown plan.
    dedicated non-exportable AWS KMS P-256 signer and verification-only JWKS on
    runtime queues. This trust domain remains separate from Buildkite pipeline
    signing.
+9. Explicit bridge, provider, and Buildkite variable maps use
+   `Bridge < Provider < Buildkite` precedence and are snapshotted into every
+   compiled plan.
+10. No current Buildkite query authoritatively verifies a completed dynamic
+    upload after interruption. Recovery fails closed with exit 75 and requires
+    the operator to cancel and rebuild.
+11. Until Buildkite has a scheduler-visible skipped result, a runtime-skipped
+    imported job exits successfully after publishing its logical `skipped`
+    result and emits a clear annotation. Downstream compatibility semantics use
+    the logical result rather than the Buildkite job state.
 
-## Decisions required during Phase 0
+## Decisions deferred after Phase 0
 
-1. What event payload can Buildkite expose today for GitHub push and pull
-   request builds, and what minimal platform API is missing?
-2. Should supported GHA jobs run directly on the Hosted Agent VM by default, or
-   inside a compatibility image? Which choice best matches expected tool-cache
-   and Docker behavior?
-3. How will the runtime distribution provide Node 20/24 consistently across
-   hosted and self-hosted agents?
-4. Can common cache and artifact actions be supported by a job-local protocol
-   adapter, or should the runtime recognize those actions explicitly?
-5. How should a runtime-skipped imported job appear in the Buildkite UI before
-   a scheduler-visible skip API exists?
-6. Which GitHub Actions event and expression subset defines the first customer
-   beta rather than only the technical alpha?
-7. What is the initial Cursor Origin provider contract for checkout, event
-   payloads, pull requests, and short-lived tokens?
-8. Which queue capabilities and trust properties are required before the
-   compiler may schedule Docker or privileged workloads?
-9. What is the initial source and permission model for `github.token` and
-    `GITHUB_TOKEN`: a customer-supplied secret, a short-lived GitHub App token,
-    or an explicitly tokenless workflow?
-10. What is the source and precedence model for repository, organization, and
-    environment values exposed through the non-secret `vars` context?
-11. Which documented Buildkite query can verify the exact key and plan-digest
-    set after an upload is interrupted between pipeline creation and completion
-    marker publication?
+None of these decisions blocks the Phase 2 sequential shell runtime. Resolve
+them in the phase that first needs the capability:
+
+1. Phase 6 provider integration will determine which authenticated GitHub event
+   payload Buildkite exposes and whether a small platform API is missing.
+2. Phase 5 container work will choose direct Hosted Agent execution versus a
+   compatibility image from measured tool-cache and Docker behavior.
+3. Phase 4 action work will define how the distribution supplies Node 20 and
+   Node 24 on hosted and self-hosted agents.
+4. Phase 6 will choose job-local protocol adapters versus recognized built-ins
+   for cache and artifact actions.
+5. Phase 4 will set the customer-beta event and expression subset from the
+   hosted differential corpus.
+6. Phase 6 will define Cursor Origin checkout, event, pull-request, and
+   short-lived-token contracts alongside the GitHub provider adapter.
+7. Phases 5 and 9 will define the queue capabilities and trust properties
+   required for Docker and privileged workloads.
+8. Phases 6 and 9 will choose the source and permission model for
+   `github.token` and `GITHUB_TOKEN`; tokenless workflows remain the default
+   until then.
 
 ## Recommended first product milestone
 
