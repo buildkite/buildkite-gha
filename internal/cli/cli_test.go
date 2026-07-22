@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"go.yaml.in/yaml/v4"
 )
 
 func TestRunHelpAndVersion(t *testing.T) {
@@ -70,11 +72,40 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		if want := "2 logical jobs, 3 instances"; !strings.Contains(stdout.String(), want) {
+		if want := "2 logical jobs and 3 static instances"; !strings.Contains(stdout.String(), want) {
 			t.Fatalf("Run() stdout = %q, want %q", stdout.String(), want)
 		}
-		if !strings.Contains(stdout.String(), "run-job validates the Phase 0 execution subset") {
-			t.Fatalf("Run() stdout = %q, want explicit runtime boundary", stdout.String())
+	})
+
+	t.Run("validate json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.Report
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "compilable" || report.Instances != 3 {
+			t.Fatalf("report = %#v", report)
+		}
+	})
+
+	t.Run("validate json blocker", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "dynamic.yml")
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		}
+		var report compatibility.Report
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_COMPILE" {
+			t.Fatalf("report = %#v", report)
 		}
 	})
 
@@ -84,15 +115,28 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
+		var pipeline struct {
+			Steps []struct {
+				Key string `yaml:"key"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(stdout.Bytes(), &pipeline); err != nil {
+			t.Fatalf("compile output is not pipeline YAML: %v", err)
+		}
+		if len(pipeline.Steps) != 3 {
+			t.Fatalf("compiled steps = %d, want 3", len(pipeline.Steps))
+		}
+	})
+
+	t.Run("compile ir json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		args := []string{"compile", "--format", "ir-json", workflowPath, "--event-path", eventPath}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
 		var ir compiler.IR
-		if err := json.Unmarshal(stdout.Bytes(), &ir); err != nil {
-			t.Fatalf("compile output is not JSON: %v", err)
-		}
-		if len(ir.Jobs) != 3 {
-			t.Fatalf("compiled jobs = %d, want 3", len(ir.Jobs))
-		}
-		if !ir.Execution.Supported || ir.Execution.Reason == "" {
-			t.Fatalf("compile output execution boundary = %#v, want supported Phase 0 boundary", ir.Execution)
+		if err := json.Unmarshal(stdout.Bytes(), &ir); err != nil || len(ir.Jobs) != 3 {
+			t.Fatalf("compile IR = %#v, error = %v", ir, err)
 		}
 	})
 }
@@ -150,6 +194,8 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	planDigest := sha256.Sum256(encoded)
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
 	oldDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -170,6 +216,12 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if !strings.Contains(string(result), `"result": "cli-ok"`) {
 		t.Fatalf("result = %s", result)
 	}
+	stdout.Reset()
+	stderr.Reset()
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
+	if code := Run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev"); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
+		t.Fatalf("Run() code = %d, stderr = %q, want digest mismatch", code, stderr.String())
+	}
 	job.Compiler.Version = "0.0.0-other"
 	encoded, err = plan.Encode(job)
 	if err != nil {
@@ -178,6 +230,8 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	planDigest = sha256.Sum256(encoded)
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
 	stdout.Reset()
 	stderr.Reset()
 	if code := Run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev"); code != 1 || !strings.Contains(stderr.String(), "does not match runtime version") {
@@ -205,6 +259,12 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
+	}
+	if _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("validateArgs() error = %v, want duplicate format error", err)
+	}
+	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)
 	}
 }
 

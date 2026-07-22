@@ -36,6 +36,26 @@ func TestParseSmokeWorkflowsIntoOwnedModel(t *testing.T) {
 	}
 }
 
+func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
+	source := []byte("on: push\nenv:\n  WorkflowValue: workflow\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      JobValue: job\n    steps:\n      - run: true\n        env:\n          STEP_VALUE: step\n")
+	parsed, err := Parse("env.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		env        map[string]string
+		key, value string
+	}{
+		{parsed.Env, "WorkflowValue", "workflow"},
+		{parsed.Jobs[0].Env, "JobValue", "job"},
+		{parsed.Jobs[0].Steps[0].Env, "STEP_VALUE", "step"},
+	} {
+		if check.env[check.key] != check.value {
+			t.Fatalf("env = %#v, want %s=%s", check.env, check.key, check.value)
+		}
+	}
+}
+
 func TestParseMatrixPreservesDeclarationOrderAndCombinationSpans(t *testing.T) {
 	source := []byte(`on: push
 jobs:

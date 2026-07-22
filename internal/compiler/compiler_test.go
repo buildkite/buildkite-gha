@@ -366,7 +366,7 @@ jobs:
 	if first.SourcePath != "./.github/workflows/reusable.yml" || first.SourceDigest != wantCalleeDigest || first.Steps[0].Run != `echo "hello true"` {
 		t.Fatalf("callee provenance/input = %q / %q / %q, want repository-relative path, digest, and statically substituted input", first.SourcePath, first.SourceDigest, first.Steps[0].Run)
 	}
-	if prepare.SourcePath != callerPath || finish.SourcePath != callerPath {
+	if prepare.SourcePath != "./.github/workflows/caller.yml" || finish.SourcePath != "./.github/workflows/caller.yml" {
 		t.Fatalf("caller source provenance = %q / %q", prepare.SourcePath, finish.SourcePath)
 	}
 }
@@ -434,12 +434,52 @@ jobs:
 	}
 }
 
+func TestCompilePlansResolveReusableLocalActionsFromRepositoryRoot(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/docker\n")
+	actionDir := filepath.Join(repository, ".github", "actions", "docker")
+	if err := os.MkdirAll(actionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: docker\n  image: Dockerfile\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker"}) || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" {
+		t.Fatalf("reusable local-action plan = %#v", plans)
+	}
+}
+
 func TestCompileRejectsUnsafeOrDynamicReusableWorkflowCalls(t *testing.T) {
+	t.Run("input workflow symlink escape", func(t *testing.T) {
+		repository := t.TempDir()
+		workflowDir := filepath.Join(repository, ".github", "workflows")
+		if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		outside := filepath.Join(t.TempDir(), "outside.yml")
+		if err := os.WriteFile(outside, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(workflowDir, "escaped.yml")
+		if err := os.Symlink(outside, path); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "escapes repository root") {
+			t.Fatalf("Compile() error = %v, want input workflow symlink confinement rejection", err)
+		}
+	})
+
 	t.Run("remote", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: owner/repository/.github/workflows/reusable.yml@main\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), "only repository-local ./ paths are supported") || !strings.Contains(err.Error(), path+":4:11") {
+		if err == nil || !strings.Contains(err.Error(), "only repository-local ./ paths are supported") || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:4:11") {
 			t.Fatalf("Compile() error = %v, want source-located remote rejection", err)
 		}
 	})
@@ -455,7 +495,7 @@ jobs:
 `)
 		writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-		if err == nil || !strings.Contains(err.Error(), `input "target" is not statically resolvable`) || !strings.Contains(err.Error(), path+":6:15") {
+		if err == nil || !strings.Contains(err.Error(), `input "target" is not statically resolvable`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:6:15") {
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
 		}
 	})
@@ -567,6 +607,16 @@ jobs:
 }
 
 func TestCompileRejectsRuntimeExpressionsLaunderedThroughReusableInputs(t *testing.T) {
+	t.Run("matrix expression", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    strategy:\n      matrix: ${{ fromJSON(vars.MATRIX) }}\n    uses: ./.github/workflows/reusable.yml\n")
+		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "expression-valued reusable-workflow matrices are unsupported") {
+			t.Fatalf("Compile() error = %v, want explicit call-matrix rejection", err)
+		}
+	})
+
 	t.Run("matrix value", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", `on: push
@@ -775,11 +825,19 @@ jobs:
 	}
 }
 
-func TestCompilePlansRejectsNeedsWithoutRuntimeManifestInjection(t *testing.T) {
+func TestCompilePlansRecordsStaticDependenciesWithoutRuntimeResults(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
-	_, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
-	if err == nil || !strings.Contains(err.Error(), "jobs with needs are unsupported until producer result manifests can be injected at runtime") {
-		t.Fatalf("CompilePlans() error = %v, want needs boundary", err)
+	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 || len(plans[0].Dependencies) != 0 {
+		t.Fatalf("plans = %#v, want producer plus two consumers", plans)
+	}
+	for _, consumer := range plans[1:] {
+		if !reflect.DeepEqual(consumer.Dependencies, []string{plans[0].Target.StepKey}) || consumer.Needs != nil {
+			t.Fatalf("consumer dependencies/results = %#v / %#v", consumer.Dependencies, consumer.Needs)
+		}
 	}
 }
 
@@ -843,8 +901,7 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	workflowPath := filepath.Join(workflowDir, "escape.yml")
-	_, err := loadLocalAction(workflowPath, "./../../outside")
+	_, err := loadLocalAction(repository, "./../../outside")
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("loadLocalAction() error = %v, want repository escape error", err)
 	}
@@ -860,7 +917,7 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(actionsDir, "escaped")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = loadLocalAction(workflowPath, "./.github/actions/escaped")
+	_, err = loadLocalAction(repository, "./.github/actions/escaped")
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("loadLocalAction() symlink error = %v, want repository escape error", err)
 	}
@@ -871,15 +928,28 @@ func TestLocalActionCapabilityResolutionStaysWithinRepository(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "action.yml"), filepath.Join(metadataEscape, "action.yml")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = loadLocalAction(workflowPath, "./.github/actions/metadata-escaped")
+	_, err = loadLocalAction(repository, "./.github/actions/metadata-escaped")
 	if err == nil || !strings.Contains(err.Error(), "escapes") {
 		t.Fatalf("loadLocalAction() metadata symlink error = %v, want repository escape error", err)
 	}
 }
 
+func TestWorkflowRepositoryNormalizesInMemoryWorkflowPath(t *testing.T) {
+	repository := t.TempDir()
+	path := filepath.Join(repository, ".github", "workflows", "memory.yml")
+	root, canonical, err := workflowRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCanonical := filepath.Join(root, ".github", "workflows", "memory.yml")
+	if canonical != wantCanonical {
+		t.Fatalf("workflow repository = %q / %q, want canonical path %q", root, canonical, wantCanonical)
+	}
+}
+
 func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
-	path := smokePath(".github", "workflows", "schema-fixture.yml")
-	source := []byte("on: push\njobs:\n  schema:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	path := smokePath(".github", "workflows", "shell.yml")
+	source := readFile(t, path)
 	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)

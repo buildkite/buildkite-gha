@@ -1,0 +1,148 @@
+[
+  {
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json",
+    "compiler": {
+      "version": "0.0.0-test",
+      "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "workflow": {
+      "path": "./.github/workflows/shell.yml",
+      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "logical_job_id": "producer"
+    },
+    "event": {
+      "provider": "github",
+      "name": "push",
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+    },
+    "target": {
+      "step_key": "gha-producer",
+      "queue": "gha-untrusted"
+    },
+    "required_capabilities": [],
+    "outputs": {
+      "result": "${{ steps.produce.outputs.result }}"
+    },
+    "steps": [
+      {
+        "id": "produce",
+        "name": "Produce bounded output",
+        "kind": "run",
+        "command": "echo \"result=smoke-shell\" \u003e\u003e \"$GITHUB_OUTPUT\"",
+        "shell": "bash",
+        "source": {
+          "start": {
+            "line": 15,
+            "column": 9
+          },
+          "end": {
+            "line": 15,
+            "column": 54
+          }
+        }
+      }
+    ]
+  },
+  {
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json",
+    "compiler": {
+      "version": "0.0.0-test",
+      "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "workflow": {
+      "path": "./.github/workflows/shell.yml",
+      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "logical_job_id": "consumer"
+    },
+    "event": {
+      "provider": "github",
+      "name": "push",
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+    },
+    "target": {
+      "step_key": "gha-consumer-5ebbc197d87b",
+      "queue": "gha-untrusted"
+    },
+    "required_capabilities": [],
+    "matrix": {
+      "variant": "one"
+    },
+    "dependencies": [
+      "gha-producer"
+    ],
+    "steps": [
+      {
+        "id": "step-1",
+        "name": "Consume bounded output",
+        "kind": "run",
+        "command": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
+        "shell": "bash",
+        "env": {
+          "RESULT": "${{ needs.producer.outputs.result }}",
+          "VARIANT": "${{ matrix.variant }}"
+        },
+        "source": {
+          "start": {
+            "line": 28,
+            "column": 9
+          },
+          "end": {
+            "line": 31,
+            "column": 1
+          }
+        }
+      }
+    ]
+  },
+  {
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json",
+    "compiler": {
+      "version": "0.0.0-test",
+      "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "workflow": {
+      "path": "./.github/workflows/shell.yml",
+      "digest": "sha256:867a8bad267d5a4c135722f4651c6fa4e83f88ebab50bc0bdf5cf3f391e279ae",
+      "logical_job_id": "consumer"
+    },
+    "event": {
+      "provider": "github",
+      "name": "push",
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+    },
+    "target": {
+      "step_key": "gha-consumer-91934b28b00f",
+      "queue": "gha-untrusted"
+    },
+    "required_capabilities": [],
+    "matrix": {
+      "variant": "two"
+    },
+    "dependencies": [
+      "gha-producer"
+    ],
+    "steps": [
+      {
+        "id": "step-1",
+        "name": "Consume bounded output",
+        "kind": "run",
+        "command": "test \"$RESULT\" = \"smoke-shell\"\nprintf 'SMOKE_OBSERVATION={\"result\":\"%s\",\"variant\":\"%s\"}\\n' \\\n  \"$RESULT\" \"$VARIANT\"\n",
+        "shell": "bash",
+        "env": {
+          "RESULT": "${{ needs.producer.outputs.result }}",
+          "VARIANT": "${{ matrix.variant }}"
+        },
+        "source": {
+          "start": {
+            "line": 28,
+            "column": 9
+          },
+          "end": {
+            "line": 31,
+            "column": 1
+          }
+        }
+      }
+    ]
+  }
+]

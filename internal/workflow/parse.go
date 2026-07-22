@@ -264,8 +264,8 @@ func adaptEnv(in *actionlint.Env) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in.Vars))
-	for name, variable := range in.Vars {
-		out[name] = variable.Value.Value
+	for _, variable := range in.Vars {
+		out[variable.Name.Value] = variable.Value.Value
 	}
 	return out
 }

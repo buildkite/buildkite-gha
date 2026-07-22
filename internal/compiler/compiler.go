@@ -89,6 +89,7 @@ type JobInstance struct {
 	Outputs                 map[string]string `json:"outputs,omitempty"`
 	SourcePath              string            `json:"source_path"`
 	SourceDigest            string            `json:"source_digest"`
+	RepositoryRoot          string            `json:"-"`
 	Source                  workflow.Span     `json:"source"`
 }
 
@@ -186,11 +187,10 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 	if err != nil {
 		return nil, err
 	}
-	for _, instance := range ir.Jobs {
-		if len(instance.LogicalNeeds) != 0 {
-			return nil, fmt.Errorf("build plan for job %q: jobs with needs are unsupported until producer result manifests can be injected at runtime", instance.LogicalJobID)
-		}
-	}
+	return compilePlans(ir, compilerVersion, compilerDistributionDigest)
+}
+
+func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]plan.Job, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode event payload: %w", err)
@@ -224,7 +224,7 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 				Env: cloneMap(step.Env), With: cloneMap(step.With), Source: &span,
 			}
 		}
-		capabilities, err := requiredCapabilities(path, instance.Steps)
+		capabilities, err := requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
 		if err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
@@ -245,6 +245,7 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 			RequiredCapabilities:    capabilities,
 			Matrix:                  instance.Matrix,
 			Vars:                    cloneMap(ir.Vars),
+			Dependencies:            append([]string(nil), instance.Needs...),
 			Env:                     instance.Env,
 			DefaultShell:            instance.DefaultShell,
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
@@ -360,6 +361,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
+	sourceRoots := make(map[string]string, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
@@ -368,6 +370,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		jobs[job.ID] = job
 		sourcePaths[job.ID] = sourced.path
 		sourceDigests[job.ID] = sourced.digest
+		sourceRoots[job.ID] = sourced.root
 		if err := supported(sourced.path, job); err != nil {
 			return nil, err
 		}
@@ -420,6 +423,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Outputs:                 cloneMap(job.Outputs),
 				SourcePath:              jobPath,
 				SourceDigest:            sourceDigests[id],
+				RepositoryRoot:          sourceRoots[id],
 				Source:                  job.Span,
 			}
 			for _, need := range job.Needs {
@@ -865,13 +869,16 @@ func instanceKey(jobID string, matrix map[string]any) (string, error) {
 	return prefix + "-" + hex.EncodeToString(digest[:6]), nil
 }
 
-func requiredCapabilities(workflowPath string, steps []workflow.Step) ([]string, error) {
+func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.Step) ([]string, error) {
 	capabilities := map[string]struct{}{}
 	for _, step := range steps {
 		if step.Kind != "uses" || !strings.HasPrefix(step.Uses, "./") {
 			continue
 		}
-		action, err := loadLocalAction(workflowPath, step.Uses)
+		if repositoryRoot == "" {
+			return nil, fmt.Errorf("resolve local action %q: workflow path %q must identify a repository root", step.Uses, workflowPath)
+		}
+		action, err := loadLocalAction(repositoryRoot, step.Uses)
 		if err != nil {
 			return nil, err
 		}
@@ -891,12 +898,7 @@ func requiredCapabilities(workflowPath string, steps []workflow.Step) ([]string,
 	return out, nil
 }
 
-func loadLocalAction(workflowPath, uses string) (metadata.Metadata, error) {
-	workflowDir := filepath.Dir(filepath.Clean(workflowPath))
-	if filepath.Base(workflowDir) != "workflows" || filepath.Base(filepath.Dir(workflowDir)) != ".github" {
-		return metadata.Metadata{}, fmt.Errorf("resolve local action %q: workflow path must be under .github/workflows", uses)
-	}
-	repositoryRoot := filepath.Dir(filepath.Dir(workflowDir))
+func loadLocalAction(repositoryRoot, uses string) (metadata.Metadata, error) {
 	relativeActionPath := filepath.Clean(filepath.FromSlash(strings.TrimPrefix(uses, "./")))
 	return metadata.Load(repositoryRoot, relativeActionPath)
 }

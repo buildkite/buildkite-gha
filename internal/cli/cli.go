@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,9 +12,11 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 const usage = `Usage:
@@ -22,7 +25,7 @@ const usage = `Usage:
 
 Commands:
   validate  Validate the supported static workflow subset
-  compile   Compile a workflow to deterministic JSON IR
+  compile   Compile a workflow to deterministic Buildkite pipeline YAML
   upload    Compile and upload a Buildkite pipeline
   run-job   Run a compiled job plan
 
@@ -30,8 +33,8 @@ Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--event-path <path>] <workflow>\n",
-	"compile":  "Usage: buildkite-gha compile --event-path <path> <workflow>\n",
+	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--format text|json] <workflow>\n",
+	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":   "Usage: buildkite-gha upload <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
@@ -59,6 +62,9 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 		if commandHelp, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 				fmt.Fprint(stdout, commandHelp)
+				if args[0] == "compile" {
+					fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+				}
 				if args[0] == "upload" {
 					fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 				}
@@ -68,7 +74,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 			case "validate":
 				return validate(args[1:], stdout, stderr)
 			case "compile":
-				return compile(args[1:], stdout, stderr)
+				return compile(args[1:], stdout, stderr, version)
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version)
 			default:
@@ -96,6 +102,9 @@ func help(args []string, stdout, stderr io.Writer) int {
 	}
 
 	fmt.Fprint(stdout, commandHelp)
+	if args[0] == "compile" {
+		fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+	}
 	if args[0] == "upload" {
 		fmt.Fprintf(stdout, "\nThe %s command is not implemented yet.\n", args[0])
 	}
@@ -111,6 +120,13 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
+	}
+	if expected := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST"); expected != "" {
+		actual := transport.Digest(source)
+		if actual != expected {
+			fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", actual, expected)
+			return 1
+		}
 	}
 	job, err := plan.Decode(source)
 	if err != nil {
@@ -204,7 +220,7 @@ func verifyBuildkiteTarget(job plan.Job) error {
 }
 
 func validate(args []string, stdout, stderr io.Writer) int {
-	workflowPath, eventPath, err := workflowArgs(args)
+	workflowPath, eventPath, format, err := validateArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
 	}
@@ -226,15 +242,46 @@ func validate(args []string, stdout, stderr io.Writer) int {
 		report, err = compiler.ValidateEvent(workflowPath, source, event)
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
+		if writeErr := compatibility.Write(stdout, format, compatibility.Blocked(workflowPath, err)); writeErr != nil {
+			fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
+		}
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s: valid for static compilation (%d logical jobs, %d instances); run-job validates the Phase 0 execution subset\n", workflowPath, report.LogicalJobs, report.Instances)
+	if err := compatibility.Write(stdout, format, compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)); err != nil {
+		fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
+		return 1
+	}
 	return 0
 }
 
-func compile(args []string, stdout, stderr io.Writer) int {
-	workflowPath, eventPath, err := workflowArgs(args)
+func validateArgs(args []string) (workflowPath, eventPath, format string, err error) {
+	format = "text"
+	filtered := make([]string, 0, len(args))
+	formatSeen := false
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--format" {
+			filtered = append(filtered, args[i])
+			continue
+		}
+		if formatSeen {
+			return "", "", "", fmt.Errorf("--format may only be specified once")
+		}
+		formatSeen = true
+		i++
+		if i == len(args) {
+			return "", "", "", fmt.Errorf("--format requires text or json")
+		}
+		format = args[i]
+		if format != "text" && format != "json" {
+			return "", "", "", fmt.Errorf("--format must be text or json")
+		}
+	}
+	workflowPath, eventPath, err = workflowArgs(filtered)
+	return workflowPath, eventPath, format, err
+}
+
+func compile(args []string, stdout, stderr io.Writer, version string) int {
+	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
 		return usageError(stderr, "compile: %v", err)
 	}
@@ -251,7 +298,19 @@ func compile(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
-	result, err := compiler.Compile(workflowPath, source, event)
+	var result []byte
+	if format == "ir-json" {
+		result, err = compiler.Compile(workflowPath, source, event)
+	} else {
+		digest, digestErr := executableDigest()
+		if digestErr != nil {
+			fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", digestErr)
+			return 1
+		}
+		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
+		err = compileErr
+		result = bundle.Pipeline
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
@@ -261,6 +320,45 @@ func compile(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {
+	format = "pipeline"
+	filtered := make([]string, 0, len(args))
+	formatSeen := false
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--format" {
+			filtered = append(filtered, args[i])
+			continue
+		}
+		if formatSeen {
+			return "", "", "", fmt.Errorf("--format may only be specified once")
+		}
+		formatSeen = true
+		i++
+		if i == len(args) {
+			return "", "", "", fmt.Errorf("--format requires pipeline or ir-json")
+		}
+		format = args[i]
+		if format != "pipeline" && format != "ir-json" {
+			return "", "", "", fmt.Errorf("--format must be pipeline or ir-json")
+		}
+	}
+	workflowPath, eventPath, err = workflowArgs(filtered)
+	return workflowPath, eventPath, format, err
+}
+
+func executableDigest() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate compiler executable: %w", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read compiler executable: %w", err)
+	}
+	sum := sha256.Sum256(contents)
+	return fmt.Sprintf("sha256:%x", sum), nil
 }
 
 func workflowArgs(args []string) (workflowPath, eventPath string, err error) {

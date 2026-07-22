@@ -1055,9 +1055,14 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `testdata/smoke` corpus are committed on `main`.
 - The Phase 0 implementation is merged on `main`. Its remaining live oracles
   are operational gates rather than unmerged foundation work.
-- Phase 1 implementation has started. Its first slice implements static matrix
-  `include`/`exclude`, typed values, source-order expansion, and exact
-  dependency fan-out; Buildkite pipeline emission is the next slice.
+- Phase 1 is implemented. The static compiler now owns compile-time contexts,
+  explicit variable snapshots, bounded local reusable-workflow flattening,
+  matrix and dependency expansion, fail-closed runner policy, immutable job
+  plans, Buildkite pipeline YAML, and text/JSON compatibility reports.
+  Generated downstream plans remain deliberately non-executable until Phase 2
+  wires producer-attributed result manifests, and `compile` does not yet
+  materialize or upload the content-addressed plan artifacts referenced by its
+  pipeline output.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1073,25 +1078,23 @@ Explicitly defer from beta unless implementation evidence changes the order:
   dormant probe cover immutable artifacts, dependency policy, producer
   attribution, bounded canonical signed bindings and markers, and fail-closed
   upload recovery.
-- The end-of-phase Deep Analysis pass is integrated: compiler output validates
-  against the owned plan schema, every job with `needs` now fails closed until
-  result-manifest injection exists, expression substitution is single-pass,
+- The Phase 0 Deep Analysis pass is integrated: compiler output validates
+  against the owned plan schema, expression substitution is single-pass,
   runtime output is bounded without pipe deadlocks, inherited environment is
   allowlisted, and transport artifacts are materialized from verified bytes in
   a confined root before upload.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
-  pipeline validation pass. The managed GitHub repository and Buildkite
-  pipeline now exist, but the first builds stopped at the managed bootstrap's
-  default `buildkite-agent pipeline upload` because the repository has no
-  `.buildkite/pipeline.yml`. Hosted differential execution and the real
-  transport, signing, interruption, and dependency-extension oracles have not
-  run yet.
+  pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
+  repository checks, and all three smoke compiler outputs pass the current
+  Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+  Hosted differential execution and the real transport, signing, interruption,
+  and dependency-extension oracles have not run yet.
 
 Phase 0 spike support snapshot:
 
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
-| Compile | Actionlint-backed owned model, deterministic static graph and matrix expansion, source spans, stable keys, schema-valid versioned owned job plans; the first Phase 1 slice adds source-ordered matrix `include`/`exclude`, typed scalar values, and exact dependency fan-out | Dynamic graph expressions, every versioned job plan with `needs`, reusable-workflow jobs, and expression-derived `runs-on` fail closed |
+| Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
 | Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, and offline-validated GitHub Actions and Buildkite definitions | Neither hosted provider definition has run against the same committed revision |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, signed markers, and exact command capture | Real artifact ordering/selection, metadata visibility, upload atomicity, importer dependency extension, and per-dependency failure behavior require a live build |
