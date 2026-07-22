@@ -13,7 +13,11 @@
     "event": {
       "provider": "github",
       "name": "push",
-      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9",
+      "repository": "buildkite/buildkite-gha",
+      "ref": "refs/heads/main",
+      "sha": "1111111111111111111111111111111111111111",
+      "actor": "buildkite-gha-smoke"
     },
     "target": {
       "step_key": "gha-producer",
@@ -57,7 +61,11 @@
     "event": {
       "provider": "github",
       "name": "push",
-      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9",
+      "repository": "buildkite/buildkite-gha",
+      "ref": "refs/heads/main",
+      "sha": "1111111111111111111111111111111111111111",
+      "actor": "buildkite-gha-smoke"
     },
     "target": {
       "step_key": "gha-consumer-5ebbc197d87b",
@@ -74,7 +82,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3"
+          "plan_digest": "sha256:f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae"
         }
       ]
     },
@@ -116,7 +124,11 @@
     "event": {
       "provider": "github",
       "name": "push",
-      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9"
+      "payload_digest": "sha256:090ba1b9ca860d37bb4ca7492549a8a347caac3490f763399e6498622c9b47f9",
+      "repository": "buildkite/buildkite-gha",
+      "ref": "refs/heads/main",
+      "sha": "1111111111111111111111111111111111111111",
+      "actor": "buildkite-gha-smoke"
     },
     "target": {
       "step_key": "gha-consumer-91934b28b00f",
@@ -133,7 +145,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:2a9b179ecc1a074d2d29b02d2751f5b67137d16877c64459cad0b6dee9bcbde3"
+          "plan_digest": "sha256:f1f904ff42a17cd9c5d770eeb3a00194abcd720526f3847f836ea9c20ca340ae"
         }
       ]
     },

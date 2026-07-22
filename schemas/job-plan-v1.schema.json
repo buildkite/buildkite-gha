@@ -41,7 +41,11 @@
       "properties": {
         "provider": {"enum": ["github", "cursor-origin"]},
         "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128},
-        "payload_digest": {"$ref": "#/$defs/digest"}
+        "payload_digest": {"$ref": "#/$defs/digest"},
+        "repository": {"type": "string", "maxLength": 512},
+        "ref": {"type": "string", "maxLength": 1024},
+        "sha": {"type": "string", "maxLength": 128},
+        "actor": {"type": "string", "maxLength": 256}
       }
     },
     "target": {
@@ -58,6 +62,12 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/capability"},
       "maxItems": 16
+    },
+    "required_secrets": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+      "uniqueItems": true,
+      "maxItems": 128
     },
     "matrix": {"type": "object"},
     "vars": {"$ref": "#/$defs/stringMap"},

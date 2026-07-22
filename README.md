@@ -43,13 +43,16 @@ allowlists only that queue for the untrusted event; it is never inferred from
 workflow text or ambient environment. This path is intentionally unsigned and
 does not claim the KMS-backed plan authority required for production use.
 
-`run-job` consumes a versioned job plan and supports the current Linux shell
-and local Node 24 JavaScript, composite, and Docker action spikes. Static plans
-record dependency IDs, but producer-attributed result manifests are not yet
-injected into downstream runtime `needs` contexts, so `run-job` refuses every
-plan with static dependencies. Remote action resolution,
-services and job containers, conditions, timeouts, cancellation, and
-`continue-on-error` are also outside the current executable subset. Use `buildkite-gha help`,
+`run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
+a fresh checkout-free workspace. The sequential runtime supports env and
+working-directory precedence, file commands, job and step conditions, bounded
+prerequisite results and outputs supplied by the transport layer, timeouts,
+process-tree cancellation, masking, and step `continue-on-error`. Secret names
+resolve only through the explicit `BUILDKITE_GHA_SECRET_` namespace and are
+registered with the Buildkite Agent redactor before execution. Remote action
+resolution, services, job containers, and concurrent steps remain outside the
+executable subset; local Node 24, composite, and Docker action spikes still
+require an explicitly materialized and source-bound workspace. Use `buildkite-gha help`,
 `buildkite-gha help <command>`, or `buildkite-gha --version` for exact usage.
 
 ## Development

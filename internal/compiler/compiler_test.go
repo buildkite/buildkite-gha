@@ -826,7 +826,7 @@ jobs:
 	}
 }
 
-func TestCompilePlansRecordsStaticDependenciesWithoutRuntimeResults(t *testing.T) {
+func TestCompilePlansRecordsStaticDependenciesWithVerifiedNeedSources(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {

@@ -17,6 +17,7 @@ const MaxNeedProducers = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Compiler struct {
 	Version            string `json:"version"`
@@ -27,6 +28,10 @@ type Event struct {
 	Provider      string `json:"provider"`
 	Name          string `json:"name"`
 	PayloadDigest string `json:"payload_digest"`
+	Repository    string `json:"repository,omitempty"`
+	Ref           string `json:"ref,omitempty"`
+	SHA           string `json:"sha,omitempty"`
+	Actor         string `json:"actor,omitempty"`
 }
 
 type Workflow struct {
@@ -87,6 +92,7 @@ type Job struct {
 	Event                Event                   `json:"event"`
 	Target               Target                  `json:"target"`
 	RequiredCapabilities []string                `json:"required_capabilities"`
+	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
 	Dependencies         []string                `json:"dependencies,omitempty"`
@@ -215,6 +221,9 @@ func (job Job) Validate() error {
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
 	}
+	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
+		return fmt.Errorf("job plan event identity exceeds its size limit")
+	}
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
 	}
@@ -223,6 +232,9 @@ func (job Job) Validate() error {
 	}
 	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
 		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
+	}
+	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
+		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -238,6 +250,19 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan repeats capability %q", capability)
 		}
 		capabilities[capability] = struct{}{}
+	}
+	if !sort.StringsAreSorted(job.RequiredSecrets) {
+		return fmt.Errorf("job plan required secrets must be sorted")
+	}
+	for i, name := range job.RequiredSecrets {
+		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
+			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
+		}
+	}
+	if len(job.RequiredSecrets) != 0 {
+		if _, ok := capabilities["secrets"]; !ok {
+			return fmt.Errorf("job plan required secrets need the secrets capability")
+		}
 	}
 	if !sort.StringsAreSorted(job.Dependencies) {
 		return fmt.Errorf("job plan dependencies must be sorted")
@@ -302,6 +327,9 @@ func (job Job) Validate() error {
 		ids[id] = struct{}{}
 		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
 			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
+		}
+		if len(step.Condition) > 65536 {
+			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
 		}
 		switch step.Kind {
 		case "run":

@@ -35,6 +35,10 @@ type Context struct {
 	Steps       map[string]map[string]string
 	Needs       map[string]map[string]string
 	NeedResults map[string]string
+	Secrets     map[string]string
+	Vars        map[string]string
+	Env         map[string]string
+	GitHub      map[string]any
 }
 
 // CompileContext contains the non-secret values available while constructing
@@ -298,6 +302,12 @@ func Evaluate(template string, context Context) (string, error) {
 func evaluateReference(reference string, context Context) (string, error) {
 	parts := strings.Split(reference, ".")
 	switch {
+	case len(parts) >= 2 && parts[0] == "github":
+		value, ok := lookupRuntimeValue(context.GitHub, parts[1:])
+		if !ok {
+			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(parts[1:], "."))
+		}
+		return fmt.Sprint(value), nil
 	case len(parts) == 2 && parts[0] == "inputs":
 		return context.Inputs[parts[1]], nil
 	case len(parts) == 2 && parts[0] == "matrix":
@@ -306,6 +316,12 @@ func evaluateReference(reference string, context Context) (string, error) {
 			return "", fmt.Errorf("expression references unavailable matrix value %q", parts[1])
 		}
 		return fmt.Sprint(value), nil
+	case len(parts) == 2 && parts[0] == "secrets":
+		return findString(context.Secrets, parts[1]), nil
+	case len(parts) == 2 && parts[0] == "vars":
+		return findString(context.Vars, parts[1]), nil
+	case len(parts) == 2 && parts[0] == "env":
+		return findString(context.Env, parts[1]), nil
 	case len(parts) == 4 && parts[0] == "steps" && parts[2] == "outputs":
 		outputs, ok := findOutputs(context.Steps, parts[1])
 		if !ok {
@@ -328,6 +344,36 @@ func evaluateReference(reference string, context Context) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported expression %q", reference)
 	}
+}
+
+func lookupRuntimeValue(value any, path []string) (any, bool) {
+	current := value
+	for _, part := range path {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		matched := false
+		for name, item := range object {
+			if strings.EqualFold(name, part) {
+				current, matched = item, true
+				break
+			}
+		}
+		if !matched {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func findString(values map[string]string, name string) string {
+	for candidate, value := range values {
+		if strings.EqualFold(candidate, name) {
+			return value
+		}
+	}
+	return ""
 }
 
 func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {

@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	defaultCleanupTimeout = 10 * time.Second
-	maxStreamLineBytes    = 1024 * 1024
+	defaultCleanupTimeout   = 10 * time.Second
+	defaultTerminationGrace = 2 * time.Second
+	maxStreamLineBytes      = 1024 * 1024
 )
 
 // Runner executes local actions using explicitly configured host tools.
@@ -30,6 +31,8 @@ type Runner struct {
 	ManagedNodeRoot string
 	Docker          string
 	CleanupTimeout  time.Duration
+	Secrets         SecretResolver
+	Redactor        Redactor
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -58,6 +61,7 @@ type Result struct {
 	Env     map[string]string
 	State   map[string]string
 	Summary string
+	Paths   []string
 }
 
 // RunDocker builds and executes an explicitly resolved local Docker action.
@@ -111,6 +115,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	args = append(args,
 		"--env", "GITHUB_OUTPUT=/github/file_commands/output",
 		"--env", "GITHUB_ENV=/github/file_commands/env",
+		"--env", "GITHUB_PATH=/github/file_commands/path",
 		"--env", "GITHUB_STATE=/github/file_commands/state",
 		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
 		image,
@@ -145,18 +150,30 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 	env = mergeStringMaps(env, map[string]string{
 		"GITHUB_OUTPUT":       files.output,
 		"GITHUB_ENV":          files.env,
+		"GITHUB_PATH":         files.path,
 		"GITHUB_STATE":        files.state,
 		"GITHUB_STEP_SUMMARY": files.summary,
 	})
 	runErr := runStreaming(ctx, processor, dir, env, name, args...)
+	pathStart := len(result.Paths)
 	fileErr := files.apply(result, state)
+	if fileErr == nil && len(result.Paths) > pathStart {
+		pathEnv := map[string]string{"PATH": env["PATH"]}
+		if result.Env["PATH"] != "" {
+			pathEnv["PATH"] = result.Env["PATH"]
+		}
+		applyPaths(pathEnv, result.Paths[pathStart:])
+		result.Env["PATH"] = pathEnv["PATH"]
+		result.Paths = result.Paths[:pathStart]
+	}
 	return errors.Join(runErr, fileErr)
 }
 
 func runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
+	configureProcessGroup(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -168,6 +185,8 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	finished := make(chan struct{})
+	go terminateProcessGroup(ctx, cmd.Process.Pid, defaultTerminationGrace, finished)
 
 	var wg sync.WaitGroup
 	streamErrs := make([]error, 2)
@@ -185,6 +204,7 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 	go stream(1, "stderr", stderr, processor.stderr)
 	wg.Wait()
 	waitErr := cmd.Wait()
+	close(finished)
 	if ctx.Err() != nil {
 		waitErr = ctx.Err()
 	}
@@ -370,9 +390,7 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 		return
 	}
 	if value, ok := workflowCommand(line, "add-mask"); ok {
-		if value != "" {
-			p.masks = append(p.masks, value)
-		}
+		p.addMaskLocked(value)
 		return
 	}
 	for _, mask := range p.masks {
@@ -385,6 +403,24 @@ func (p *commandProcessor) suppress() {
 	p.mu.Lock()
 	p.discard = true
 	p.mu.Unlock()
+}
+
+func (p *commandProcessor) addMask(value string) {
+	p.mu.Lock()
+	p.addMaskLocked(value)
+	p.mu.Unlock()
+}
+
+func (p *commandProcessor) addMaskLocked(value string) {
+	if value == "" {
+		return
+	}
+	p.masks = append(p.masks, value)
+	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+		if line != "" && line != value {
+			p.masks = append(p.masks, line)
+		}
+	}
 }
 
 func workflowCommand(line, command string) (string, bool) {

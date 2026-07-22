@@ -64,7 +64,7 @@ func TestEvaluateFailsClosed(t *testing.T) {
 		template string
 		want     string
 	}{
-		{name: "unsupported", template: "${{ github.sha }}", want: `unsupported expression "github.sha"`},
+		{name: "unavailable github value", template: "${{ github.sha }}", want: `unavailable github value "sha"`},
 		{name: "unavailable matrix value", template: "${{ matrix.missing }}", want: `unavailable matrix value "missing"`},
 		{name: "unavailable step", template: "${{ steps.missing.outputs.value }}", want: `unavailable step "missing"`},
 		{name: "unavailable need", template: "${{ needs.missing.outputs.value }}", want: `unavailable need "missing"`},

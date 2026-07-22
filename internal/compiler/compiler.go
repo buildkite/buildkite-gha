@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,8 @@ const (
 	schema             = "buildkite-gha/compiler-ir/v0"
 	maxMatrixInstances = 256
 )
+
+var secretReferencePattern = regexp.MustCompile(`(?i)\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 
 // Event is the explicit provider event snapshot supplied to compilation.
 type Event struct {
@@ -249,6 +252,11 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
 			}
 		}
+		secrets := requiredSecrets(instance)
+		if len(secrets) != 0 {
+			capabilities = append(capabilities, "secrets")
+			sort.Strings(capabilities)
+		}
 		job := plan.Job{
 			Schema: plan.Schema,
 			Compiler: plan.Compiler{
@@ -261,9 +269,12 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			},
 			Event: plan.Event{
 				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
+				Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
+				Ref:        ir.Event.Ref, SHA: ir.Event.SHA, Actor: ir.Event.Actor,
 			},
 			Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 			RequiredCapabilities:    capabilities,
+			RequiredSecrets:         secrets,
 			Matrix:                  instance.Matrix,
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
@@ -288,6 +299,41 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 		plans = append(plans, job)
 	}
 	return plans, nil
+}
+
+func requiredSecrets(instance JobInstance) []string {
+	found := map[string]string{}
+	collect := func(value string) {
+		for _, match := range secretReferencePattern.FindAllStringSubmatch(value, -1) {
+			name := strings.ToUpper(match[1])
+			found[name] = name
+		}
+	}
+	collect(instance.If)
+	collect(instance.DefaultShell)
+	collect(instance.DefaultWorkingDirectory)
+	for _, value := range instance.Env {
+		collect(value)
+	}
+	for _, value := range instance.Outputs {
+		collect(value)
+	}
+	for _, step := range instance.Steps {
+		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
+			collect(value)
+		}
+		for _, values := range []map[string]string{step.Env, step.With} {
+			for _, value := range values {
+				collect(value)
+			}
+		}
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func planSpan(span workflow.Span) plan.Span {

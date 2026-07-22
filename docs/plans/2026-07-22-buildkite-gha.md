@@ -1067,11 +1067,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
   wires producer-attributed result manifests, and `compile` does not yet
   materialize or upload the content-addressed plan artifacts referenced by its
   pipeline output.
-- Phase 2 is active. Its existing needs-free runtime spike is being extended
-  into the complete sequential shell state machine, producer-attributed result
-  transport, and a real `upload` path. Completion requires the checked-in shell
-  workflow to run end to end on Buildkite, including downstream `needs`
-  consumption, bounded cleanup, and raw-log secret checks.
+- Phase 2's sequential shell runtime, producer-attributed result transport, and
+  `upload` bootstrap are implemented locally. Generated plans
+  now carry conditions, timeouts, `continue-on-error`, bounded event identity,
+  and explicit secret requirements. `run-job` allocates a fresh workspace,
+  applies standard and file-command environment changes, evaluates the owned
+  condition subset, masks registered secrets, propagates timeout/cancellation
+  to process groups, and drains cleanup under a fixed deadline. The live
+  `shell.yml` Buildkite proof, including hydrated downstream `needs` and raw-log
+  secret checks, remains the gate before marking Phase 2 complete.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1133,7 +1137,7 @@ Phase 0 spike support snapshot:
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
 | Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
-| Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
+| Execute | Sequential Bash/sh steps; fresh workspaces; bounded prerequisite, step, and job outputs; environment, path, state, and summary files; status conditions; masking; timeouts; process-group cancellation; `continue-on-error`; and bounded LIFO post-actions | Producer result hydration still enters through the transport boundary; remote actions, nested composite actions, services/job containers, concurrent steps, and unsupported expression/coercion forms fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
 | Trust | Eight signed-envelope conformance cases plus live rejection of a corrupted signature and bounded RFC 8785 runtime bindings for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, verification-only queue roots, and checkout-free hook/plugin isolation are production hardening gates; Buildkite signed-pipeline integration is optional Phase 9 work |

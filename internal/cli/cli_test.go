@@ -362,7 +362,7 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 }
 
-func TestRunJobDoesNotWriteEmptyResultBeforeExecution(t *testing.T) {
+func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	workspace := t.TempDir()
 	job := plan.Job{
 		Schema: plan.Schema,
@@ -399,10 +399,11 @@ func TestRunJobDoesNotWriteEmptyResultBeforeExecution(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
 
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() code = %d, stderr = %q, want failure", code, stderr.String())
+	if code := Run([]string{"run-job", "--plan", planPath, "--result", resultPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q, want success", code, stderr.String())
 	}
-	if _, err := os.Stat(resultPath); !os.IsNotExist(err) {
-		t.Fatalf("result path stat error = %v, want no empty result file", err)
+	result, err := os.ReadFile(resultPath)
+	if err != nil || !bytes.Contains(result, []byte(`"conclusion": "success"`)) {
+		t.Fatalf("result = %q, error = %v", result, err)
 	}
 }

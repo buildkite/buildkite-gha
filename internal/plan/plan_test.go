@@ -134,6 +134,14 @@ func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	}
 }
 
+func TestRequiredSecretsRequireCapability(t *testing.T) {
+	job := validJob()
+	job.RequiredSecrets = []string{"TOKEN"}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "secrets capability") {
+		t.Fatalf("Validate() error = %v, want capability binding", err)
+	}
+}
+
 func validJob() Job {
 	return Job{
 		Schema:               Schema,

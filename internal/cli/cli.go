@@ -148,21 +148,18 @@ func runJob(args []string, stdout, stderr io.Writer, version string) int {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
-	workspace, err := os.Getwd()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve workspace: %v\n", err)
-		return 1
-	}
 	runner := gharuntime.Runner{
 		Stdout:          stdout,
 		Stderr:          stderr,
 		Node24:          os.Getenv("BUILDKITE_GHA_NODE24"),
 		ManagedNodeRoot: os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT"),
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Secrets:         gharuntime.EnvironmentSecrets{},
+		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	result, err := runner.RunJob(ctx, job, workspace)
+	result, err := runner.RunJob(ctx, job, "")
 	if resultPath != "" && result.Conclusion != "" {
 		encoded, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
