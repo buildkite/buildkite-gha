@@ -31,6 +31,9 @@ func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
 	}
 
 	script := readProbeFile(t, filepath.Join(root, "probe.sh"))
+	if strings.Contains(script, "checkout:\n      skip: true") {
+		t.Fatal("generated live probe jobs must use the exact build checkout")
+	}
 	if !strings.Contains(script, `readonly probe_path="`+liveProbePath+`"`) || strings.Count(script, `command: "${probe_path} `) != 2 {
 		t.Fatal("generated jobs must use the exact build checkout")
 	}

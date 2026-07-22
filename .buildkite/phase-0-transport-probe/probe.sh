@@ -160,8 +160,6 @@ steps:
     command: "${probe_path} producer"
     agents:
       queue: "${PHASE0_RUNTIME_QUEUE}"
-    checkout:
-      skip: true
     env:
       PHASE0_PLAN_DIGEST: "${producer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
@@ -178,8 +176,6 @@ steps:
     command: "${probe_path} consumer"
     agents:
       queue: "${PHASE0_RUNTIME_QUEUE}"
-    checkout:
-      skip: true
     env:
       PHASE0_PLAN_DIGEST: "${consumer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
