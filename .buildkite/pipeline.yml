@@ -1,0 +1,4 @@
+steps:
+  - label: ":go: Repository checks"
+    key: "checks"
+    command: "make check"
