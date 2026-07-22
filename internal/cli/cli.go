@@ -473,6 +473,10 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -498,6 +502,18 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %s with importer %s.\n", len(bundle.Plans), executablePath, importerStep)
 	return 0
+}
+
+func validateUnprivilegedBundle(bundle compiler.Bundle) error {
+	for _, artifact := range bundle.Plans {
+		for _, capability := range artifact.Job.RequiredCapabilities {
+			switch capability {
+			case "secrets", "provider-token-read", "provider-token-write", "privileged-container":
+				return fmt.Errorf("job %q requires protected capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
+			}
+		}
+	}
+	return nil
 }
 
 func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, err error) {
