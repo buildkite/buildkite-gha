@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"go.yaml.in/yaml/v4"
 )
@@ -75,13 +76,6 @@ type compositeStep struct {
 	If               string            `yaml:"if"`
 }
 
-type evaluationContext struct {
-	inputs map[string]string
-	steps  map[string]Result
-	matrix map[string]any
-	needs  map[string]plan.Need
-}
-
 type registeredPost struct {
 	action JavaScriptAction
 	state  map[string]string
@@ -124,8 +118,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return JobResult{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
-	steps := make(map[string]Result, len(job.Steps))
-	eval := evaluationContext{steps: steps, matrix: job.Matrix, needs: job.Needs}
+	eval := expression.Context{
+		Matrix: job.Matrix,
+		Steps:  make(map[string]map[string]string, len(job.Steps)),
+		Needs:  needOutputs(job.Needs),
+	}
 	jobEnv, err := evaluateMap(job.Env, eval)
 	if err != nil {
 		return JobResult{}, fmt.Errorf("evaluate job environment: %w", err)
@@ -146,7 +143,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	var runErr error
 	for _, step := range job.Steps {
 		result, post, err := r.runJobStep(ctx, processor, workspace, job, step, jobResult.Env, eval)
-		steps[strings.ToLower(step.ID)] = result
+		eval.Steps[strings.ToLower(step.ID)] = result.Outputs
 		mergeInto(jobResult.Env, result.Env)
 		mergeInto(jobResult.State, result.State)
 		jobResult.Summary += result.Summary
@@ -176,8 +173,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 
 	if runErr == nil {
 		for _, name := range sortedKeys(job.Outputs) {
-			expression := job.Outputs[name]
-			value, err := evaluate(expression, eval)
+			template := job.Outputs[name]
+			value, err := expression.Evaluate(template, eval)
 			if err != nil {
 				return jobResult, fmt.Errorf("job output %q: %w", name, err)
 			}
@@ -191,14 +188,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	return jobResult, runErr
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval evaluationContext) (Result, *registeredPost, error) {
+func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context) (Result, *registeredPost, error) {
 	stepEnv, err := evaluateMap(step.Env, eval)
 	if err != nil {
 		return newResult(), nil, err
 	}
 	result := newResult()
 	if step.Kind == "run" {
-		script, err := evaluate(step.Command, eval)
+		script, err := expression.Evaluate(step.Command, eval)
 		if err != nil {
 			return result, nil, err
 		}
@@ -247,7 +244,7 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		return result, nil, err
 	}
 	actionEval := eval
-	actionEval.inputs = inputs
+	actionEval.Inputs = inputs
 	switch metadata.Runs.Using {
 	case "node24":
 		if metadata.Runs.Main == "" {
@@ -298,11 +295,10 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	}
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, metadata actionMetadata, inputs, jobEnv, stepEnv map[string]string, eval evaluationContext) (Result, error) {
+func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, metadata actionMetadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {
 	result := newResult()
-	nested := make(map[string]Result)
-	eval.inputs = inputs
-	eval.steps = nested
+	eval.Inputs = inputs
+	eval.Steps = make(map[string]map[string]string)
 	for i, step := range metadata.Runs.Steps {
 		if step.Uses != "" {
 			return result, fmt.Errorf("composite action nested uses %q is unsupported", step.Uses)
@@ -313,7 +309,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		if strings.TrimSpace(step.Run) == "" {
 			return result, fmt.Errorf("composite action step %d has no run command", i+1)
 		}
-		script, err := evaluate(step.Run, eval)
+		script, err := expression.Evaluate(step.Run, eval)
 		if err != nil {
 			return result, err
 		}
@@ -339,12 +335,12 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		mergeInto(result.State, stepResult.State)
 		result.Summary += stepResult.Summary
 		if step.ID != "" {
-			nested[strings.ToLower(step.ID)] = stepResult
+			eval.Steps[strings.ToLower(step.ID)] = stepResult.Outputs
 		}
 	}
 	for _, name := range sortedKeys(metadata.Outputs) {
 		output := metadata.Outputs[name]
-		value, err := evaluate(output.Value, eval)
+		value, err := expression.Evaluate(output.Value, eval)
 		if err != nil {
 			return result, fmt.Errorf("composite output %q: %w", name, err)
 		}
@@ -422,55 +418,11 @@ func lowerActionOutputs(values map[string]actionOutput) (map[string]actionOutput
 	return out, nil
 }
 
-func evaluate(value string, context evaluationContext) (string, error) {
-	const open, close = "${{", "}}"
-	var evaluated strings.Builder
-	remaining := value
-	for {
-		start := strings.Index(remaining, open)
-		if start < 0 {
-			evaluated.WriteString(remaining)
-			return evaluated.String(), nil
-		}
-		evaluated.WriteString(remaining[:start])
-		end := strings.Index(remaining[start+len(open):], close)
-		if end < 0 {
-			return "", fmt.Errorf("unterminated expression in %q", value)
-		}
-		end += start + len(open)
-		expression := strings.TrimSpace(remaining[start+len(open) : end])
-		parts := strings.Split(expression, ".")
-		var replacement string
-		switch {
-		case len(parts) == 2 && parts[0] == "inputs":
-			replacement = context.inputs[parts[1]]
-		case len(parts) == 2 && parts[0] == "matrix":
-			replacement = fmt.Sprint(context.matrix[parts[1]])
-		case len(parts) == 4 && parts[0] == "steps" && parts[2] == "outputs":
-			step, ok := context.steps[strings.ToLower(parts[1])]
-			if !ok {
-				return "", fmt.Errorf("expression references unavailable step %q", parts[1])
-			}
-			replacement = step.Outputs[parts[3]]
-		case len(parts) == 4 && parts[0] == "needs" && parts[2] == "outputs":
-			need, ok := findNeed(context.needs, parts[1])
-			if !ok {
-				return "", fmt.Errorf("expression references unavailable need %q", parts[1])
-			}
-			replacement = need.Outputs[parts[3]]
-		default:
-			return "", fmt.Errorf("unsupported expression %q", expression)
-		}
-		evaluated.WriteString(replacement)
-		remaining = remaining[end+len(close):]
-	}
-}
-
-func evaluateMap(values map[string]string, context evaluationContext) (map[string]string, error) {
+func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
 	out := make(map[string]string, len(values))
 	for _, name := range sortedKeys(values) {
 		value := values[name]
-		resolved, err := evaluate(value, context)
+		resolved, err := expression.Evaluate(value, context)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate %q: %w", name, err)
 		}
@@ -479,7 +431,7 @@ func evaluateMap(values map[string]string, context evaluationContext) (map[strin
 	return out, nil
 }
 
-func resolveActionInputs(metadata actionMetadata, supplied map[string]string, context evaluationContext) (map[string]string, error) {
+func resolveActionInputs(metadata actionMetadata, supplied map[string]string, context expression.Context) (map[string]string, error) {
 	inputs := make(map[string]string, len(supplied))
 	for _, name := range sortedKeys(supplied) {
 		lower := strings.ToLower(name)
@@ -499,8 +451,8 @@ func resolveActionInputs(metadata actionMetadata, supplied map[string]string, co
 			continue
 		}
 		if definition.Default != nil {
-			context.inputs = inputs
-			value, err := evaluate(*definition.Default, context)
+			context.Inputs = inputs
+			value, err := expression.Evaluate(*definition.Default, context)
 			if err != nil {
 				return nil, fmt.Errorf("action input %q default: %w", name, err)
 			}
@@ -514,13 +466,12 @@ func resolveActionInputs(metadata actionMetadata, supplied map[string]string, co
 	return inputs, nil
 }
 
-func findNeed(needs map[string]plan.Need, name string) (plan.Need, bool) {
-	for candidate, need := range needs {
-		if strings.EqualFold(candidate, name) {
-			return need, true
-		}
+func needOutputs(needs map[string]plan.Need) map[string]map[string]string {
+	outputs := make(map[string]map[string]string, len(needs))
+	for name, need := range needs {
+		outputs[name] = need.Outputs
 	}
-	return plan.Need{}, false
+	return outputs
 }
 
 func shellCommand(shell, script string) ([]string, error) {

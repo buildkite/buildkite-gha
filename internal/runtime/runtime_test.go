@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -173,31 +174,14 @@ func TestFileCommandLineLimitIsExplicit(t *testing.T) {
 
 func TestExpressionEvaluationIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
-	context := evaluationContext{
-		inputs: map[string]string{"value": literal},
-		matrix: map[string]any{"value": literal, "secret": "reevaluated"},
-		steps:  map[string]Result{"producer": {Outputs: map[string]string{"value": literal}}},
-		needs:  map[string]plan.Need{"producer": {Outputs: map[string]string{"value": literal}}},
-	}
-	tests := map[string]string{
-		"${{ inputs.value }}":                 literal,
-		"${{ matrix.value }}":                 literal,
-		"${{ steps.producer.outputs.value }}": literal,
-		"${{ needs.producer.outputs.value }}": literal,
-		"before ${{ inputs.value }} after":    "before " + literal + " after",
-	}
-	for expression, want := range tests {
-		got, err := evaluate(expression, context)
-		if err != nil {
-			t.Fatalf("evaluate(%q) error = %v", expression, err)
-		}
-		if got != want {
-			t.Errorf("evaluate(%q) = %q, want %q", expression, got, want)
-		}
-	}
-	got, err := evaluate("${{ inputs.value }}:${{ matrix.secret }}", context)
-	if err != nil || got != literal+":reevaluated" {
-		t.Fatalf("evaluate() = %q, %v, want both original expressions evaluated once", got, err)
+	values, err := evaluateMap(map[string]string{
+		"value": "before ${{ matrix.value }} after",
+	}, expression.Context{Matrix: map[string]any{
+		"value":  literal,
+		"secret": "reevaluated",
+	}})
+	if err != nil || values["value"] != "before "+literal+" after" {
+		t.Fatalf("evaluateMap() = %#v, %v, want single-pass substitution", values, err)
 	}
 }
 
@@ -412,7 +396,7 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	_, err := evaluateMap(map[string]string{
 		"z-last":  "${{ unsupported.z }}",
 		"a-first": "${{ unsupported.a }}",
-	}, evaluationContext{})
+	}, expression.Context{})
 	if err == nil || !strings.Contains(err.Error(), `evaluate "a-first"`) {
 		t.Fatalf("evaluateMap() error = %v, want alphabetically first key", err)
 	}
