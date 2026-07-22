@@ -74,9 +74,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
 	eval := expression.Context{
-		Matrix: job.Matrix,
-		Steps:  make(map[string]map[string]string, len(job.Steps)),
-		Needs:  needOutputs(job.Needs),
+		Matrix:      job.Matrix,
+		Steps:       make(map[string]map[string]string, len(job.Steps)),
+		Needs:       needOutputs(job.Needs),
+		NeedResults: needResults(job.Needs),
 	}
 	jobEnv, err := evaluateMap(job.Env, eval)
 	if err != nil {
@@ -358,6 +359,14 @@ func needOutputs(needs map[string]plan.Need) map[string]map[string]string {
 		outputs[name] = need.Outputs
 	}
 	return outputs
+}
+
+func needResults(needs map[string]plan.Need) map[string]string {
+	results := make(map[string]string, len(needs))
+	for name, need := range needs {
+		results[name] = need.Result
+	}
+	return results
 }
 
 func shellCommand(shell, script string) ([]string, error) {

@@ -112,11 +112,31 @@ func TestResultManifestIsCanonicalAndProducerBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata["buildkite-gha/v1/ci/producer/result"] != "failure" || metadata["buildkite-gha/v1/ci/producer/manifest-digest"] != Digest(encoded) {
+	if metadata["buildkite-gha/v1/results/ci/producer"] != "failure" || metadata["buildkite-gha/v1/results/ci/producer/manifest-digest"] != Digest(encoded) || metadata["buildkite-gha/v1/outputs/ci/producer/alpha"] != "first" {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 	if _, err := ResultMetadata("ci/other", "producer", verified, encoded); err == nil {
 		t.Fatal("untrusted metadata namespace was accepted")
+	}
+}
+
+func TestResultManifestEnforcesOutputLimits(t *testing.T) {
+	manifest := ResultManifest{
+		PlanDigest: Digest([]byte("plan")),
+		Producer:   Producer{BuildID: testBuildID, JobID: testJobID, StepKey: "gha-producer"},
+		Result:     "success",
+		Outputs:    []Output{{Name: "value", Value: strings.Repeat("x", MaxResultOutputBytes+1)}},
+	}
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "oversized output") {
+		t.Fatalf("MarshalResultManifest() error = %v, want output size rejection", err)
+	}
+	manifest.Outputs = make([]Output, MaxResultOutputs+1)
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "maximum") {
+		t.Fatalf("MarshalResultManifest() error = %v, want output count rejection", err)
+	}
+	manifest.Outputs = []Output{{Name: "Value", Value: "one"}, {Name: "value", Value: "two"}}
+	if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "duplicate output") {
+		t.Fatalf("MarshalResultManifest() error = %v, want case-insensitive duplicate rejection", err)
 	}
 }
 

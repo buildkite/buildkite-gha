@@ -30,10 +30,11 @@ type Expression struct {
 
 // Context contains the Phase 0 values available while evaluating a template.
 type Context struct {
-	Inputs map[string]string
-	Matrix map[string]any
-	Steps  map[string]map[string]string
-	Needs  map[string]map[string]string
+	Inputs      map[string]string
+	Matrix      map[string]any
+	Steps       map[string]map[string]string
+	Needs       map[string]map[string]string
+	NeedResults map[string]string
 }
 
 // CompileContext contains the non-secret values available while constructing
@@ -317,6 +318,13 @@ func evaluateReference(reference string, context Context) (string, error) {
 			return "", fmt.Errorf("expression references unavailable need %q", parts[1])
 		}
 		return outputs[parts[3]], nil
+	case len(parts) == 3 && parts[0] == "needs" && parts[2] == "result":
+		for candidate, result := range context.NeedResults {
+			if strings.EqualFold(candidate, parts[1]) {
+				return result, nil
+			}
+		}
+		return "", fmt.Errorf("expression references unavailable need %q", parts[1])
 	default:
 		return "", fmt.Errorf("unsupported expression %q", reference)
 	}
