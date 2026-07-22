@@ -180,6 +180,7 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`--event-path testdata/smoke/events/push.json`,
 		`--runtime-queue hosted`,
 		`testdata/smoke/.github/workflows/shell.yml`,
+		`buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)
@@ -187,10 +188,9 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Key       string `yaml:"key"`
-			Command   string `yaml:"command"`
-			DependsOn string `yaml:"depends_on"`
-			Agents    struct {
+			Key     string `yaml:"key"`
+			Command string `yaml:"command"`
+			Agents  struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 		} `yaml:"steps"`
@@ -198,8 +198,38 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" || document.Steps[1].DependsOn != "phase-2-upload-importer" {
+	if len(document.Steps) != 1 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" {
 		t.Fatalf("Phase 2 upload proof = %#v", document.Steps)
+	}
+
+	continuationSource, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-2-upload-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var continuation struct {
+		Steps []struct {
+			Key       string `yaml:"key"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(continuation.Steps) != 1 || continuation.Steps[0].Key != "phase-2-native-after-shell" {
+		t.Fatalf("Phase 2 continuation = %#v", continuation.Steps)
+	}
+	wantDependencies := []string{"gha-consumer-5ebbc197d87b", "gha-consumer-91934b28b00f"}
+	if len(continuation.Steps[0].DependsOn) != len(wantDependencies) {
+		t.Fatalf("Phase 2 continuation dependencies = %#v", continuation.Steps[0].DependsOn)
+	}
+	for i, want := range wantDependencies {
+		dependency := continuation.Steps[0].DependsOn[i]
+		if dependency.Step != want || !dependency.AllowFailure {
+			t.Fatalf("Phase 2 continuation dependency %d = %#v, want %q with allow_failure", i, dependency, want)
+		}
 	}
 }
 

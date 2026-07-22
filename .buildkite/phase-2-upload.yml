@@ -16,10 +16,4 @@ steps:
         --event-path testdata/smoke/events/push.json \
         --runtime-queue hosted \
         testdata/smoke/.github/workflows/shell.yml
-
-  - label: ":white_check_mark: Phase 2 native dependency extension"
-    key: "phase-2-native-after-import"
-    depends_on: "phase-2-upload-importer"
-    agents:
-      queue: "elastic-runners"
-    command: "echo 'Phase 2 imported job settled before native continuation'"
+      buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml

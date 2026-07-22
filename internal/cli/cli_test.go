@@ -35,6 +35,7 @@ func TestRunHelpAndVersion(t *testing.T) {
 		{name: "help flag", args: []string{"--help"}, wantOutput: "validate"},
 		{name: "help command", args: []string{"help"}, wantOutput: "run-job"},
 		{name: "command help", args: []string{"help", "compile"}, wantOutput: "buildkite-gha compile --event-path"},
+		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "--runtime-queue hosted"},
 		{name: "command help flag", args: []string{"run-job", "--help"}, wantOutput: "--plan <path>"},
 		{name: "version flag", args: []string{"--version"}, wantOutput: "buildkite-gha test-version\n"},
 	}
@@ -140,7 +141,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "elastic-runners", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
@@ -186,7 +187,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
 	for _, step := range pipeline.Steps {
-		if !step.Checkout.Skip || step.Agents.Queue != "elastic-runners" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
+		if !step.Checkout.Skip || step.Agents.Queue != "hosted" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
 		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
@@ -205,7 +206,7 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
 	runner := &cliCaptureRunner{failAt: 2}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", workflowPath, "--event-path", eventPath}, &stdout, &stderr, "dev", runner); code != 1 {
+	if code := run([]string{"upload", workflowPath, "--event-path", eventPath, "--runtime-queue", "hosted"}, &stdout, &stderr, "dev", runner); code != 1 {
 		t.Fatalf("run() code = %d, want 1", code)
 	}
 	if len(runner.commands) != 2 || !strings.Contains(stderr.String(), "upload artifact") {
@@ -229,6 +230,21 @@ func TestUnprivilegedUploadRejectsProtectedCapabilities(t *testing.T) {
 	}}}}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
 		t.Fatalf("validateUnprivilegedBundle() rejected unprotected capabilities: %v", err)
+	}
+}
+
+func TestUnprivilegedUploadRejectsActionSteps(t *testing.T) {
+	for _, step := range []plan.Step{
+		{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"},
+		{ID: "malformed", Kind: "run", Uses: "./.github/actions/local"},
+	} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "action-job"},
+			Steps:    []plan.Step{step},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "action step") {
+			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v, want action-step rejection", step, err)
+		}
 	}
 }
 
@@ -297,7 +313,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{name: "unknown command", args: []string{"nope"}, want: `unknown command "nope"`},
 		{name: "unknown help command", args: []string{"help", "nope"}, want: `unknown command "nope"`},
 		{name: "version arguments", args: []string{"--version", "extra"}, want: "does not accept arguments"},
-		{name: "upload missing event", args: []string{"upload", "workflow.yml"}, want: "--event-path is required"},
+		{name: "upload missing event", args: []string{"upload", "--runtime-queue", "hosted", "workflow.yml"}, want: "--event-path is required"},
 	}
 
 	for _, test := range tests {
@@ -611,6 +627,12 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
+	}
+	if _, _, _, err := uploadArgs([]string{"workflow.yml"}); err == nil || !strings.Contains(err.Error(), "is required") {
+		t.Fatalf("uploadArgs() error = %v, want required runtime queue error", err)
+	}
+	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "elastic-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
+		t.Fatalf("uploadArgs() error = %v, want fixed runtime queue error", err)
 	}
 }
 

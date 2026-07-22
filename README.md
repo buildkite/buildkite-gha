@@ -17,7 +17,7 @@ The current command surface is:
 ```text
 buildkite-gha validate [--event-path <path>] [--format text|json] <workflow>
 buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>
-buildkite-gha upload --event-path <path> [--runtime-queue <queue>] <workflow>
+buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>
 buildkite-gha run-job --plan <path> [--result <path>]
 ```
 
@@ -38,10 +38,14 @@ and uploads the exact executable plus every content-addressed plan, then uses
 `buildkite-agent pipeline upload --no-interpolation --reject-secrets`. Generated
 jobs skip checkout, download both artifacts from the exact importer into a
 fresh temporary directory, verify the executable SHA-256, and run the plan.
-`--runtime-queue` explicitly maps supported Linux labels to one queue and
-allowlists only that queue for the untrusted event; it is never inferred from
-workflow text or ambient environment. This path is intentionally unsigned and
-does not claim the KMS-backed plan authority required for production use.
+This Phase 2 development path requires `--runtime-queue hosted` and rejects
+every other queue. Its supported Linux label mapping and untrusted allowlist
+are fixed independently of the flag value, so CLI input cannot grant access to
+another queue. Trusted installation-specific queue policy remains deferred.
+This path is intentionally unsigned and does not claim the KMS-backed plan
+authority required for production use. It also rejects action steps because
+its generated jobs have empty, checkout-free workspaces; only shell steps are
+currently executable through this path.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The sequential runtime supports env and

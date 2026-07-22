@@ -38,11 +38,14 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload --event-path <path> [--runtime-queue <queue>] <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
-const resultPublicationTimeout = 10 * time.Second
+const (
+	resultPublicationTimeout = 10 * time.Second
+	unprivilegedRuntimeQueue = "hosted"
+)
 
 // Run executes the command and returns its process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
@@ -419,7 +422,7 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, runtimeQueue, err := uploadArgs(args)
+	workflowPath, eventPath, _, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
@@ -445,30 +448,25 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	var bundle compiler.Bundle
-	if runtimeQueue == "" {
-		bundle, err = compiler.CompileBundle(workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep)
-	} else {
-		bundle, err = compiler.CompileBundleWithOptions(
-			workflowPath,
-			workflowSource,
-			eventSource,
-			version,
-			distributionDigest,
-			importerStep,
-			compiler.Options{
-				EventTrust: compiler.EventUntrusted,
-				Runners: compiler.RunnerPolicy{
-					Labels: map[string]string{
-						"ubuntu-latest": runtimeQueue,
-						"ubuntu-24.04":  runtimeQueue,
-						"ubuntu-22.04":  runtimeQueue,
-					},
-					UntrustedQueues: []string{runtimeQueue},
+	bundle, err := compiler.CompileBundleWithOptions(
+		workflowPath,
+		workflowSource,
+		eventSource,
+		version,
+		distributionDigest,
+		importerStep,
+		compiler.Options{
+			EventTrust: compiler.EventUntrusted,
+			Runners: compiler.RunnerPolicy{
+				Labels: map[string]string{
+					"ubuntu-latest": unprivilegedRuntimeQueue,
+					"ubuntu-24.04":  unprivilegedRuntimeQueue,
+					"ubuntu-22.04":  unprivilegedRuntimeQueue,
 				},
+				UntrustedQueues: []string{unprivilegedRuntimeQueue},
 			},
-		)
-	}
+		},
+	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -506,6 +504,11 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
+		for _, step := range artifact.Job.Steps {
+			if step.Kind == "uses" || step.Uses != "" {
+				return fmt.Errorf("job %q contains action step %q, unavailable to checkout-free unprivileged upload", artifact.Job.Workflow.LogicalJobID, step.ID)
+			}
+		}
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			switch capability {
 			case "secrets", "provider-token-read", "provider-token-write", "privileged-container":
@@ -535,6 +538,15 @@ func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, er
 		runtimeQueue = args[i]
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
+	if err != nil {
+		return "", "", "", err
+	}
+	if !runtimeQueueSeen {
+		return "", "", "", fmt.Errorf("--runtime-queue %s is required for unprivileged upload", unprivilegedRuntimeQueue)
+	}
+	if runtimeQueue != unprivilegedRuntimeQueue {
+		return "", "", "", fmt.Errorf("--runtime-queue must be %q for unprivileged upload", unprivilegedRuntimeQueue)
+	}
 	return workflowPath, eventPath, runtimeQueue, err
 }
 
