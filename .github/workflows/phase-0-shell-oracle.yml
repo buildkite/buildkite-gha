@@ -1,0 +1,128 @@
+name: Phase 0 shell differential oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full commit containing this oracle definition and fixture
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      fixture_commit: ${{ steps.fixture.outputs.commit }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Materialize exact fixture commit
+        id: fixture
+        env:
+          WORKFLOW_COMMIT: ${{ github.sha }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$WORKFLOW_COMMIT" = "$SOURCE_COMMIT"
+          scripts/phase-0-shell-oracle-checkout "$SOURCE_COMMIT"
+          fixture_commit=$(go run ./internal/harness/cmd/shell-oracle materialize --source testdata/smoke)
+          printf 'commit=%s\n' "$fixture_commit" >> "$GITHUB_OUTPUT"
+          printf 'Materialized shell fixture commit: %s\n' "$fixture_commit"
+
+  producer:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      result: ${{ steps.produce.outputs.result }}
+    steps:
+      - name: Produce bounded output
+        id: produce
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'result=smoke-shell\n' >> "$GITHUB_OUTPUT"
+
+  consumer:
+    needs: [prepare, producer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [one, two]
+    steps:
+      - name: Capture portable observation
+        env:
+          RESULT: ${{ needs.producer.outputs.result }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RESULT" = "smoke-shell"
+          printf 'SMOKE_OBSERVATION={"result":"%s","variant":"%s"}\n' \
+            "$RESULT" "$VARIANT" | tee "observation-$VARIANT.log"
+
+      - name: Upload captured observation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: github-shell-observation-${{ matrix.variant }}
+          path: observation-${{ matrix.variant }}.log
+          if-no-files-found: error
+          retention-days: 1
+
+  compare:
+    needs: [prepare, consumer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download captured observations
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: github-shell-observation-*
+          path: phase-0-shell-observations
+          merge-multiple: true
+
+      - name: Normalize and compare
+        env:
+          FIXTURE_COMMIT: ${{ needs.prepare.outputs.fixture_commit }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/phase-0-shell-oracle-checkout "$SOURCE_COMMIT"
+          cat \
+            phase-0-shell-observations/observation-one.log \
+            phase-0-shell-observations/observation-two.log \
+            | go run ./internal/harness/cmd/shell-oracle compare \
+                --source testdata/smoke \
+                --commit "$FIXTURE_COMMIT" \
+                --provider github \
+            | tee phase-0-shell-normalized.json

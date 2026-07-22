@@ -1,0 +1,19 @@
+{
+  "observations": [
+    {
+      "identity": "consumer[variant=one]",
+      "document": {
+        "result": "smoke-shell",
+        "variant": "one"
+      }
+    },
+    {
+      "identity": "consumer[variant=two]",
+      "document": {
+        "result": "smoke-shell",
+        "variant": "two"
+      }
+    }
+  ],
+  "lifecycle": []
+}
