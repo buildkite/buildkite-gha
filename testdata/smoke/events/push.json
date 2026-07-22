@@ -1,0 +1,16 @@
+{
+  "provider": "github",
+  "event": "push",
+  "repository": {
+    "owner": "buildkite",
+    "name": "buildkite-gha",
+    "clone_url": "https://github.com/buildkite/buildkite-gha.git",
+    "default_branch": "main"
+  },
+  "ref": "refs/heads/main",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha-smoke",
+  "payload": {
+    "ref": "refs/heads/main"
+  }
+}

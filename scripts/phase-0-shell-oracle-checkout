@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+expected_commit=${1:?source commit is required}
+if [[ ! $expected_commit =~ ^[0-9a-f]{40}$ ]]; then
+  echo "source commit must be a full lowercase Git object ID" >&2
+  exit 1
+fi
+
+actual_commit=$(git rev-parse HEAD)
+if [[ $actual_commit != "$expected_commit" ]]; then
+  echo "checked out $actual_commit, expected $expected_commit" >&2
+  exit 1
+fi

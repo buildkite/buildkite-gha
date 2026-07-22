@@ -1,0 +1,53 @@
+name: buildkite-gha artifact smoke
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create payload
+        shell: bash
+        run: |
+          mkdir -p payload
+          printf '%s\n' "smoke-artifact" > payload/result.txt
+
+      - name: Upload payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: smoke-payload
+          path: payload/result.txt
+          if-no-files-found: error
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [one, two]
+    steps:
+      - name: Checkout fixture repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Download payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: smoke-payload
+          path: payload
+
+      - name: Verify artifact
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          result=$(cat payload/result.txt)
+          test "$result" = "smoke-artifact"
+          printf '{"artifact":"%s","variant":"%s"}\n' \
+            "$result" "$VARIANT" > observation.json
+          diff -u "expected/artifact-observation-$VARIANT.json" observation.json

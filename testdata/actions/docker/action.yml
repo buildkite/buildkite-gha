@@ -1,0 +1,6 @@
+name: Runtime Docker fixture
+description: Exercises a local Docker action with file commands and masking.
+
+runs:
+  using: docker
+  image: Dockerfile
