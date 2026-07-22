@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -119,6 +121,7 @@ func TestResultManifestIsCanonicalAndProducerBound(t *testing.T) {
 }
 
 type capturedCommand struct {
+	dir   string
 	name  string
 	args  []string
 	stdin string
@@ -127,12 +130,16 @@ type capturedCommand struct {
 type captureRunner struct {
 	commands []capturedCommand
 	failAt   int
+	afterRun func(int)
 }
 
-func (r *captureRunner) Run(_ context.Context, name string, args []string, stdin []byte) ([]byte, error) {
-	r.commands = append(r.commands, capturedCommand{name: name, args: append([]string(nil), args...), stdin: string(stdin)})
+func (r *captureRunner) Run(_ context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
+	r.commands = append(r.commands, capturedCommand{dir: dir, name: name, args: append([]string(nil), args...), stdin: string(stdin)})
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
+	}
+	if r.afterRun != nil {
+		r.afterRun(len(r.commands))
 	}
 	return nil, nil
 }
@@ -173,7 +180,14 @@ func TestUploadOrdersArtifactsMarkersAndPipelineAndFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &captureRunner{}
-	if err := Upload(context.Background(), Agent{Runner: runner}, []PlanArtifact{consumer, producer}, pipeline, expected, completed); err != nil {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, filepath.FromSlash(consumer.Path()))), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(consumer.Path())), []byte("stale plan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upload(context.Background(), Agent{Runner: runner}, root, []PlanArtifact{consumer, producer}, pipeline, expected, completed); err != nil {
 		t.Fatal(err)
 	}
 	wantKinds := []string{"artifact", "artifact", "artifact", "artifact", "meta-data", "pipeline", "meta-data"}
@@ -182,20 +196,67 @@ func TestUploadOrdersArtifactsMarkersAndPipelineAndFailsClosed(t *testing.T) {
 			t.Fatalf("command %d = %#v, want %s", i, runner.commands[i], kind)
 		}
 	}
-	if runner.commands[0].args[2] != consumer.Path() || runner.commands[1].args[2] != consumer.BindingPath() || runner.commands[2].args[2] != producer.Path() || runner.commands[3].args[2] != producer.BindingPath() {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := func(relative string) string { return filepath.Join(resolvedRoot, filepath.FromSlash(relative)) }
+	if runner.commands[0].dir != resolvedRoot || runner.commands[1].dir != resolvedRoot || runner.commands[2].dir != resolvedRoot || runner.commands[3].dir != resolvedRoot || runner.commands[0].args[2] != consumer.Path() || runner.commands[1].args[2] != consumer.BindingPath() || runner.commands[2].args[2] != producer.Path() || runner.commands[3].args[2] != producer.BindingPath() {
 		t.Fatalf("plans and bindings not sorted before upload: %#v", runner.commands[:4])
+	}
+	for _, plan := range []PlanArtifact{producer, consumer} {
+		contents, err := os.ReadFile(path(plan.Path()))
+		if err != nil || !bytes.Equal(contents, plan.Contents) {
+			t.Fatalf("materialized plan %q = %q, %v", plan.StepKey, contents, err)
+		}
+		binding, err := os.ReadFile(path(plan.BindingPath()))
+		if err != nil || !bytes.Equal(binding, plan.Binding) {
+			t.Fatalf("materialized binding %q = %q, %v", plan.StepKey, binding, err)
+		}
 	}
 
 	failing := &captureRunner{failAt: 6}
-	err = Upload(context.Background(), Agent{Runner: failing}, []PlanArtifact{producer, consumer}, pipeline, expected, completed)
+	err = Upload(context.Background(), Agent{Runner: failing}, t.TempDir(), []PlanArtifact{producer, consumer}, pipeline, expected, completed)
 	if err == nil || len(failing.commands) != 6 {
 		t.Fatalf("Upload() error = %v, commands = %d; completion marker must not be published", err, len(failing.commands))
 	}
 
 	missing := &captureRunner{}
-	err = Upload(context.Background(), Agent{Runner: missing}, []PlanArtifact{producer}, pipeline, expected, completed)
+	err = Upload(context.Background(), Agent{Runner: missing}, t.TempDir(), []PlanArtifact{producer}, pipeline, expected, completed)
 	if err == nil || len(missing.commands) != 0 {
 		t.Fatalf("Upload() error = %v, commands = %d; missing signed plan set must fail before side effects", err, len(missing.commands))
+	}
+}
+
+func TestUploadRejectsTamperedMaterializedBindingBeforeAgentReadsIt(t *testing.T) {
+	key := testKey(t)
+	producer := testPlan("gha-producer", `{"job":"producer"}`)
+	consumer := testPlan("gha-consumer", `{"job":"consumer"}`)
+	pipeline := []byte("steps: []\n")
+	intent := UploadIntent{
+		BuildID: testBuildID, ImporterKey: "gha-importer", PipelineDigest: Digest(pipeline),
+		Jobs: []UploadJob{{Key: producer.StepKey, PlanDigest: producer.Digest}, {Key: consumer.StepKey, PlanDigest: consumer.Digest}},
+	}
+	expected, err := SignMarker(key, intent, "expected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := SignMarker(key, intent, "completed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	tampered := filepath.Join(root, filepath.FromSlash(consumer.BindingPath()))
+	runner := &captureRunner{afterRun: func(command int) {
+		if command == 1 {
+			if err := os.WriteFile(tampered, []byte("tampered"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}}
+	err = Upload(context.Background(), Agent{Runner: runner}, root, []PlanArtifact{producer, consumer}, pipeline, expected, completed)
+	if err == nil || !strings.Contains(err.Error(), "on-disk bytes differ") || len(runner.commands) != 1 {
+		t.Fatalf("Upload() error = %v, commands = %d", err, len(runner.commands))
 	}
 }
 
