@@ -60,63 +60,6 @@ type Result struct {
 	Summary string
 }
 
-// RunJavaScript executes action pre and main phases, then its post phase.
-func (r Runner) RunJavaScript(ctx context.Context, action JavaScriptAction) (Result, error) {
-	return r.RunJavaScriptLifecycle(ctx, []JavaScriptAction{action})
-}
-
-// RunJavaScriptLifecycle executes actions in order and registered post actions
-// in LIFO order, including when a main phase fails or the caller is canceled.
-func (r Runner) RunJavaScriptLifecycle(ctx context.Context, actions []JavaScriptAction) (Result, error) {
-	result := newResult()
-	node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
-	if err != nil {
-		return result, err
-	}
-
-	processor := newCommandProcessor(r.stdout(), r.stderr())
-	type registeredPost struct {
-		action JavaScriptAction
-		state  map[string]string
-	}
-	posts := make([]registeredPost, 0, len(actions))
-
-	for _, action := range actions {
-		if action.Main == "" {
-			err = fmt.Errorf("JavaScript action %q has no main entry point", action.Name)
-			break
-		}
-		state := make(map[string]string)
-		if action.Post != "" {
-			posts = append(posts, registeredPost{action: action, state: state})
-		}
-		if action.Pre != "" {
-			if err = r.runJavaScriptPhase(ctx, processor, node, action, action.Pre, nil, state, &result); err != nil {
-				break
-			}
-		}
-		if err = r.runJavaScriptPhase(ctx, processor, node, action, action.Main, nil, state, &result); err != nil {
-			break
-		}
-	}
-
-	cleanupTimeout := r.CleanupTimeout
-	if cleanupTimeout <= 0 {
-		cleanupTimeout = defaultCleanupTimeout
-	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	defer cancel()
-	for i := len(posts) - 1; i >= 0; i-- {
-		post := posts[i]
-		postErr := r.runJavaScriptPhase(cleanupCtx, processor, node, post.action, post.action.Post, post.state, post.state, &result)
-		if postErr != nil {
-			err = errors.Join(err, fmt.Errorf("post action %q: %w", post.action.Name, postErr))
-		}
-	}
-
-	return result, err
-}
-
 // RunDocker builds and executes an explicitly resolved local Docker action.
 func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
 	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)

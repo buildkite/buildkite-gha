@@ -19,48 +19,16 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-func TestJavaScriptLifecycle(t *testing.T) {
-	node := requireNode24(t)
-	var logs bytes.Buffer
-	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
-	smokeJavaScript := fixturePath(t, "smoke", ".github", "actions", "javascript")
-
-	javascript, err := runner.RunJavaScript(context.Background(), JavaScriptAction{
-		Name:   "smoke JavaScript",
-		Path:   smokeJavaScript,
-		Main:   "index.js",
-		Post:   "post.js",
-		Inputs: map[string]string{"message": "smoke"},
-	})
-	if err != nil {
-		t.Fatalf("RunJavaScript() error = %v", err)
-	}
-	if got := javascript.Outputs["result"]; got != "smoke-javascript" {
-		t.Errorf("JavaScript output = %q, want %q", got, "smoke-javascript")
-	}
-	if !strings.Contains(javascript.Summary, "main phase") || !strings.Contains(javascript.Summary, "post phase") {
-		t.Errorf("JavaScript summary = %q, want main and post summaries", javascript.Summary)
-	}
-	if strings.Contains(logs.String(), "smoke-mask-value") {
-		t.Fatalf("forwarded logs contain literal masked value: %q", logs.String())
-	}
-	if !strings.Contains(logs.String(), "masked probe: ***") {
-		t.Errorf("forwarded logs = %q, want masked probe", logs.String())
-	}
-}
-
 func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 	node := requireNode24(t)
 	var logs bytes.Buffer
-	actionPath := fixturePath(t, "actions", "javascript")
+	workspace := fixturePath(t)
 	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
-
-	result, err := runner.RunJavaScript(context.Background(), JavaScriptAction{
-		Name: "runtime lifecycle", Path: actionPath, Pre: "pre.js", Main: "main.js", Post: "post.js",
-		Inputs: map[string]string{"message": "hello"},
-	})
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "hello"}}})
+	job.Outputs = map[string]string{"result": "${{ steps.javascript.outputs.result }}"}
+	result, err := runner.RunJob(context.Background(), job, workspace)
 	if err != nil {
-		t.Fatalf("RunJavaScript() error = %v", err)
+		t.Fatalf("RunJob() error = %v", err)
 	}
 	if got := result.Outputs["result"]; got != "hello-javascript" {
 		t.Errorf("output = %q, want hello-javascript", got)
@@ -96,18 +64,15 @@ func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	node := requireNode24(t)
 	var logs bytes.Buffer
-	actionPath := fixturePath(t, "actions", "javascript")
+	workspace := fixturePath(t)
 	runner := Runner{Stdout: &logs, Stderr: &logs, Node24: node}
-	action := func(order string, fail bool) JavaScriptAction {
-		return JavaScriptAction{
-			Name: order, Path: actionPath, Pre: "pre.js", Main: "main.js", Post: "post.js",
-			Inputs: map[string]string{"message": order, "order": order, "fail": fmt.Sprint(fail)},
-		}
-	}
-
-	_, err := runner.RunJavaScriptLifecycle(context.Background(), []JavaScriptAction{action("one", false), action("two", true)})
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{
+		{ID: "one", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "one", "order": "one"}},
+		{ID: "two", Kind: "uses", Uses: "./actions/javascript", With: map[string]string{"message": "two", "order": "two", "fail": "true"}},
+	})
+	_, err := runner.RunJob(context.Background(), job, workspace)
 	if err == nil {
-		t.Fatal("RunJavaScriptLifecycle() error = nil, want main failure")
+		t.Fatal("RunJob() error = nil, want main failure")
 	}
 	if !strings.Contains(logs.String(), "requested main failure") {
 		t.Fatalf("forwarded logs = %q, want requested main failure", logs.String())
@@ -121,15 +86,17 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 
 func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	node := requireNode24(t)
-	actionPath := fixturePath(t, "actions", "javascript")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Slow post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/slow/main.js", "console.log('main completed')\n")
+	writeFixtureFile(t, workspace, ".github/actions/slow/post.js", "setTimeout(() => console.log('slow post completed'), 30000)\n")
 	runner := Runner{Node24: node, CleanupTimeout: 200 * time.Millisecond}
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
 	started := time.Now()
-	_, err := runner.RunJavaScript(context.Background(), JavaScriptAction{
-		Name: "slow post", Path: actionPath, Main: "main.js", Post: "slow-post.js",
-		Inputs: map[string]string{"message": "slow"},
-	})
+	_, err := runner.RunJob(context.Background(), job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("RunJavaScript() error = %v, want context deadline exceeded", err)
+		t.Fatalf("RunJob() error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Errorf("bounded cleanup took %s, want under 3s", elapsed)
