@@ -28,7 +28,7 @@ run = "golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh testdata/actions/docker/entrypoint.sh"
+run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh scripts/phase-0-shell-oracle-checkout testdata/actions/docker/entrypoint.sh"
 
 [tasks.vet]
 description = "Run go vet"
