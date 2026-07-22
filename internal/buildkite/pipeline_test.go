@@ -122,7 +122,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Key != "checks" || document.Steps[0].Command != "mise run check" {
+	if len(document.Steps) != 1 || document.Steps[0].Key != "checks" || document.Steps[0].Command != "mise run --jobs 1 check" {
 		t.Fatalf("default pipeline = %#v, want one repository check step", document.Steps)
 	}
 }

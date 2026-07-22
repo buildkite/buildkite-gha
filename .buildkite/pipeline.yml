@@ -4,13 +4,6 @@ steps:
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "mise run check"
-    cache:
-      paths:
-        - "~/.local/share/mise"
-        - "~/.cache/mise"
-        - "~/.local/state/mise"
-      size: "20g"
-      name: "mise-cache"
+    command: "mise run --jobs 1 check"
     agents:
-      queue: "hosted"
+      queue: "elastic-runners"
