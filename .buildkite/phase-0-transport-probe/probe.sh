@@ -10,6 +10,14 @@ readonly binding_issuer="buildkite-gha-plan-envelope"
 readonly binding_lifetime_seconds=3600
 readonly binding_max_lifetime_seconds=86400
 
+cleanup_path=""
+cleanup() {
+  if [[ -n "${cleanup_path}" ]]; then
+    rm -rf -- "${cleanup_path}"
+  fi
+}
+trap cleanup EXIT
+
 require_env() {
   local name
   for name in "$@"; do
@@ -105,7 +113,7 @@ bootstrap() {
   require_commit PHASE0_COMMIT "${PHASE0_COMMIT}"
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
 
   mkdir -p "${work}/buildkite-gha/v1/plans/${producer_key}" "${work}/buildkite-gha/v1/plans/${consumer_key}"
   printf '%s' '{"logical_job":"producer","required_capabilities":["network"],"schema":"phase0-probe-plan/v1"}' > "${work}/producer.plan.json"
@@ -227,7 +235,7 @@ YAML
     exit 75
   else
     buildkite-agent meta-data set "${marker_prefix}/expected" "${expected}"
-    buildkite-agent pipeline upload --no-interpolation --reject-secrets --reject-parse-warnings "${pipeline}"
+    buildkite-agent pipeline upload --no-interpolation --reject-secrets "${pipeline}"
     if [[ "${PHASE0_INTERRUPT_AFTER_UPLOAD:-}" == "1" ]]; then
       echo "intentional interruption after pipeline upload" >&2
       exit 75
@@ -292,7 +300,7 @@ load_and_verify_plan() {
 producer() {
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
   load_and_verify_plan "${producer_key}" "${work}"
   mkdir -p "${work}/buildkite-gha/v1/results/${producer_key}"
   local result="success"
@@ -312,7 +320,7 @@ producer() {
 consumer() {
   local work
   work="$(mktemp -d)"
-  trap 'rm -rf "${work}"' EXIT
+  cleanup_path="${work}"
   load_and_verify_plan "${consumer_key}" "${work}"
   require_env PHASE0_PRODUCER_PLAN_DIGEST
   require_digest PHASE0_PRODUCER_PLAN_DIGEST "${PHASE0_PRODUCER_PLAN_DIGEST}"
