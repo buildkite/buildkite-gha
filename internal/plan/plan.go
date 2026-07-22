@@ -63,6 +63,9 @@ type Step struct {
 	WorkingDirectory string            `json:"working_directory,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	With             map[string]string `json:"with,omitempty"`
+	Condition        string            `json:"condition,omitempty"`
+	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
+	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
 	Source           *Span             `json:"source,omitempty"`
 }
 
@@ -79,6 +82,8 @@ type Job struct {
 	Dependencies            []string          `json:"dependencies,omitempty"`
 	Needs                   map[string]Need   `json:"needs,omitempty"`
 	Env                     map[string]string `json:"env,omitempty"`
+	Condition               string            `json:"condition,omitempty"`
+	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
@@ -203,6 +208,9 @@ func (job Job) Validate() error {
 	if !targetPattern.MatchString(job.Target.StepKey) || !targetPattern.MatchString(job.Target.Queue) {
 		return fmt.Errorf("job plan requires a target step key and queue")
 	}
+	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
+		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
+	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
 		return fmt.Errorf("job plan capabilities must be sorted")
@@ -256,6 +264,9 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan contains duplicate step id %q", step.ID)
 		}
 		ids[id] = struct{}{}
+		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
+			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
+		}
 		switch step.Kind {
 		case "run":
 			if strings.TrimSpace(step.Command) == "" {

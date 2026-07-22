@@ -56,6 +56,22 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
+func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
+	source := []byte("name: runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    if: always()\n    timeout-minutes: 5\n    steps:\n      - run: echo ok\n        if: success()\n        timeout-minutes: 2\n        continue-on-error: true\n")
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := parsed.Jobs[0]
+	if job.If != "always()" || job.TimeoutMinutes != 5 {
+		t.Fatalf("job controls = if %q timeout %v", job.If, job.TimeoutMinutes)
+	}
+	step := job.Steps[0]
+	if step.If != "success()" || step.TimeoutMinutes != 2 || !step.ContinueOnError {
+		t.Fatalf("step controls = %#v", step)
+	}
+}
+
 func TestParseMatrixPreservesDeclarationOrderAndCombinationSpans(t *testing.T) {
 	source := []byte(`on: push
 jobs:

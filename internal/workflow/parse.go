@@ -105,13 +105,19 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 		}
 	}
 	if in.If != nil {
-		return Job{}, locatedError(path, in.If.Pos, in.ID.Value, "job conditions are unsupported in the Phase 0 runtime")
+		out.If = in.If.Value
 	}
 	if in.Container != nil || in.Services != nil {
 		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job and service containers are unsupported in the Phase 0 runtime")
 	}
-	if in.TimeoutMinutes != nil || in.ContinueOnError != nil {
-		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job timeout and continue-on-error are unsupported in the Phase 0 runtime")
+	if in.ContinueOnError != nil {
+		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job continue-on-error is unsupported")
+	}
+	if in.TimeoutMinutes != nil {
+		if in.TimeoutMinutes.Expression != nil {
+			return Job{}, locatedError(path, in.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued job timeout-minutes is unsupported")
+		}
+		out.TimeoutMinutes = in.TimeoutMinutes.Value
 	}
 	if in.Env != nil && in.Env.Expression != nil {
 		return Job{}, locatedError(path, in.Env.Expression.Pos, in.ID.Value, "expression-valued job env is unsupported")

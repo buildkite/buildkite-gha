@@ -46,6 +46,8 @@ type Job struct {
 	MaxParallel             *int                   `json:"max_parallel,omitempty"`
 	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                     map[string]string      `json:"env,omitempty"`
+	If                      string                 `json:"if,omitempty"`
+	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	DefaultShell            string                 `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`

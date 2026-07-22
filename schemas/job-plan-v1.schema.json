@@ -79,6 +79,8 @@
       }
     },
     "env": {"$ref": "#/$defs/stringMap"},
+    "condition": {"type": "string", "maxLength": 65536},
+    "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
     "default_shell": {"type": "string"},
     "default_working_directory": {"type": "string"},
     "outputs": {"$ref": "#/$defs/stringMap"},
@@ -128,6 +130,9 @@
         "working_directory": {"type": "string"},
         "env": {"$ref": "#/$defs/stringMap"},
         "with": {"$ref": "#/$defs/stringMap"},
+        "condition": {"type": "string", "maxLength": 65536},
+        "continue_on_error": {"type": "boolean"},
+        "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
         "source": {"$ref": "#/$defs/span"}
       },
       "allOf": [

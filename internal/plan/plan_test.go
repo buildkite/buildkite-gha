@@ -59,6 +59,19 @@ func TestValidateRejectsAmbiguousSteps(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOutOfRangeTimeouts(t *testing.T) {
+	job := validJob()
+	job.TimeoutMinutes = 361
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "job timeout_minutes") {
+		t.Fatalf("Validate() error = %v, want job timeout error", err)
+	}
+	job = validJob()
+	job.Steps[0].TimeoutMinutes = -1
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "step-1") {
+		t.Fatalf("Validate() error = %v, want step timeout error", err)
+	}
+}
+
 func TestValidateRejectsInvalidStaticDependencies(t *testing.T) {
 	for _, test := range []struct {
 		name         string

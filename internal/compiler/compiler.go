@@ -84,6 +84,8 @@ type JobInstance struct {
 	MaxParallel             *int              `json:"max_parallel,omitempty"`
 	Steps                   []workflow.Step   `json:"steps"`
 	Env                     map[string]string `json:"env,omitempty"`
+	If                      string            `json:"if,omitempty"`
+	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
@@ -221,7 +223,8 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			steps[i] = plan.Step{
 				ID: id, Name: step.Name, Kind: step.Kind, Command: step.Run, Uses: step.Uses,
 				Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
-				Env: cloneMap(step.Env), With: cloneMap(step.With), Source: &span,
+				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
+				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
 			}
 		}
 		capabilities, err := requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
@@ -247,6 +250,8 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
 			Env:                     instance.Env,
+			Condition:               instance.If,
+			TimeoutMinutes:          instance.TimeoutMinutes,
 			DefaultShell:            instance.DefaultShell,
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
 			Outputs:                 instance.Outputs,
@@ -418,6 +423,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), job.Steps...),
 				Env:                     cloneMap(job.Env),
+				If:                      job.If,
+				TimeoutMinutes:          job.TimeoutMinutes,
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 				Outputs:                 cloneMap(job.Outputs),
@@ -458,15 +465,6 @@ func supported(path string, job workflow.Job) error {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
 			}
 			ids[id] = struct{}{}
-		}
-		if step.If != "" {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step conditions are unsupported in the Phase 0 runtime")
-		}
-		if step.ContinueOnError {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error is unsupported in the Phase 0 runtime")
-		}
-		if step.TimeoutMinutes != 0 {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step timeouts are unsupported in the Phase 0 runtime")
 		}
 	}
 	return nil
