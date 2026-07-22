@@ -117,13 +117,33 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		Steps []struct {
 			Key     string `yaml:"key"`
 			Command string `yaml:"command"`
+			If      string `yaml:"if"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Key != "checks" || document.Steps[0].Command != "mise run --jobs 1 check" {
-		t.Fatalf("default pipeline = %#v, want one repository check step", document.Steps)
+	if len(document.Steps) != 3 {
+		t.Fatalf("default pipeline = %#v, want two gated probe loaders and repository checks", document.Steps)
+	}
+	steps := make(map[string]struct {
+		command   string
+		condition string
+	}, len(document.Steps))
+	for _, step := range document.Steps {
+		steps[step.Key] = struct {
+			command   string
+			condition string
+		}{step.Command, step.If}
+	}
+	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
+		t.Fatalf("repository checks = %#v", got)
+	}
+	if got := steps["phase-0-shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml" || got.condition != `build.env("PHASE0_PROBE") == "shell"` {
+		t.Fatalf("shell oracle loader = %#v", got)
+	}
+	if got := steps["phase-0-transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml" || got.condition != `build.env("PHASE0_PROBE") == "transport"` {
+		t.Fatalf("transport probe loader = %#v", got)
 	}
 }
 

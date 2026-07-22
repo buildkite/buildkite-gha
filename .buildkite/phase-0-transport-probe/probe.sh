@@ -5,7 +5,7 @@ readonly importer_key="phase0-transport-importer"
 readonly producer_key="phase0-transport-producer"
 readonly consumer_key="phase0-transport-consumer"
 readonly marker_prefix="buildkite-gha/v1/uploads/${importer_key}"
-readonly probe_path="/opt/buildkite-gha/phase-0-transport-probe/probe.sh"
+readonly probe_path=".buildkite/phase-0-transport-probe/probe.sh"
 readonly binding_issuer="buildkite-gha-plan-envelope"
 readonly binding_lifetime_seconds=3600
 readonly binding_max_lifetime_seconds=86400
@@ -123,6 +123,9 @@ bootstrap() {
   write_claims "${work}/consumer.claims.json" "${consumer_key}" "${consumer_digest}" '[]' "${consumer_jti}" "${issued_at}" "${expires_at}"
   sign_json "${work}/producer.claims.json" > "${work}/producer.binding.jws"
   sign_json "${work}/consumer.claims.json" > "${work}/consumer.binding.jws"
+  if [[ "${PHASE0_TAMPER_BINDING:-}" == "1" ]]; then
+    printf 'x' >> "${work}/producer.binding.jws"
+  fi
 
   local producer_artifact consumer_artifact
   producer_artifact="${work}/buildkite-gha/v1/plans/${producer_key}/${producer_digest#sha256:}"
@@ -152,6 +155,10 @@ steps:
       PHASE0_PLAN_DIGEST: "${producer_digest}"
       PHASE0_PLAN_PRODUCER: "${importer_key}"
       PHASE0_BINDING_JTI: "${producer_jti}"
+      PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -167,6 +174,10 @@ steps:
       PHASE0_PLAN_PRODUCER: "${importer_key}"
       PHASE0_BINDING_JTI: "${consumer_jti}"
       PHASE0_PRODUCER_PLAN_DIGEST: "${producer_digest}"
+      PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
     depends_on:
       - step: "${importer_key}"
         allow_failure: false
@@ -212,7 +223,7 @@ YAML
       echo "upload already completed"
       return
     fi
-    echo "prepared upload has no completion marker; current public queries do not prove pipeline-signature verification, so cancel this build and start a new one" >&2
+    echo "prepared upload has no completion marker; cancel this build and start a new one" >&2
     exit 75
   else
     buildkite-agent meta-data set "${marker_prefix}/expected" "${expected}"

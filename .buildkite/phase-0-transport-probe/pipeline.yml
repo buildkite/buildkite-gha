@@ -1,17 +1,19 @@
 steps:
   - label: ":pipeline: Phase 0 transport importer"
     key: "phase0-transport-importer"
-    command: "/opt/buildkite-gha/phase-0-transport-probe/probe.sh bootstrap"
+    command: ".buildkite/phase-0-transport-probe/probe.sh bootstrap"
     agents:
-      queue: "gha-compiler"
-    checkout:
-      skip: true
+      queue: "elastic-runners"
+    env:
+      PHASE0_SIGN_JSON: "scripts/phase-0-sign-json"
+      PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
 
   - label: ":white_check_mark: Native dependency-extension check"
     key: "phase0-native-after-import"
     depends_on: "phase0-transport-importer"
-    command: "/opt/buildkite-gha/phase-0-transport-probe/probe.sh native"
+    command: ".buildkite/phase-0-transport-probe/probe.sh native"
     agents:
-      queue: "gha-runtime"
-    checkout:
-      skip: true
+      queue: "elastic-runners"

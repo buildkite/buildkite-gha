@@ -23,6 +23,8 @@ import (
 
 const markerType = "buildkite-gha-upload-marker+jws"
 
+const probePayloadType = "buildkite-gha-phase0-live-probe+jws"
+
 type protectedHeader struct {
 	Algorithm string `json:"alg"`
 	KeyID     string `json:"kid"`
@@ -49,6 +51,20 @@ func NewTestES256Key(id string) (ES256Key, error) {
 		return ES256Key{}, err
 	}
 	return ES256Key{ID: id, Private: private, Public: &private.PublicKey}, nil
+}
+
+// SignProbePayload signs already-canonical JSON for the unprivileged Phase 0
+// live transport probe. Production plan signing uses a separate trust path.
+func SignProbePayload(key ES256Key, payload []byte) (string, error) {
+	if !json.Valid(payload) {
+		return "", errors.New("probe payload must be valid JSON")
+	}
+	return key.sign(probePayloadType, payload)
+}
+
+// VerifyProbePayload verifies and returns the Phase 0 live probe payload.
+func VerifyProbePayload(key ES256Key, encoded string) ([]byte, error) {
+	return key.verify(probePayloadType, encoded)
 }
 
 func (k ES256Key) sign(typ string, payload []byte) (string, error) {

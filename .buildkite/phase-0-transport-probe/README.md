@@ -8,24 +8,23 @@ This probe is intentionally dormant: local tests capture commands and never call
 
 ## Signed-pipeline scope
 
-Buildkite signed pipelines are outside this initial transport probe. Run the probe on isolated compiler and runtime queues without secrets, provider tokens, privileged containers, or other production capabilities. The signed, build-bound plan envelope remains mandatory and is a separate trust mechanism: `PHASE0_SIGN_JSON` signs plan bindings and markers, and `PHASE0_VERIFY_JSON` verifies them before runtime use.
+Buildkite signed pipelines are outside this initial transport probe. Run the probe on the existing `elastic-runners` queue without secrets, provider tokens, privileged containers, or other production capabilities. The signed, build-bound plan envelope remains mandatory and is a separate trust mechanism: `PHASE0_SIGN_JSON` signs plan bindings and markers, and `PHASE0_VERIFY_JSON` verifies them before runtime use.
 
 Signed-pipeline compatibility is deferred to the hardening phase as optional defence in depth for installations that already require it. It must use keys separate from the plan-envelope signer when implemented.
 
 The live probe also requires:
 
-- Buildkite Agent v3.130.0 or newer on compiler and runtime queues for `checkout.skip`;
-- `jq`, `sha256sum`, and a pinned probe distribution installed at `/opt/buildkite-gha/phase-0-transport-probe/probe.sh` on both queues;
-- `PHASE0_SIGN_JSON`, a trusted compiler-queue command that accepts RFC 8785 canonical JSON on stdin and emits its detached ES256 envelope on stdout;
-- `PHASE0_VERIFY_JSON`, a runtime-queue command using verification-only roots that accepts that envelope on stdin, enforces the protected-header profile, and emits the verified RFC 8785 claims on stdout;
+- `jq` and `sha256sum` on the runtime queue;
 - `PHASE0_RUNTIME_QUEUE`, `PHASE0_EVENT_NAME`, `PHASE0_REPOSITORY`, `PHASE0_REF`, 40-character `PHASE0_COMMIT`, canonical `PHASE0_EVENT_DIGEST`, and runtime-owned JSON `PHASE0_LOCAL_CAPABILITIES` (for example `["network"]`); and
 - immutable organization and pipeline UUIDs exposed as `BUILDKITE_ORGANIZATION_ID` and `BUILDKITE_PIPELINE_ID` by the probe installation until the live environment-variable oracle confirms their source.
 
-Before enabling the pipeline, verify the probe release checksum and signature outside the build, install it into `/opt/buildkite-gha/phase-0-transport-probe`, and make the directory root-owned and unwritable by the agent user. The static importer, generated jobs, and native check all invoke that fixed path, so `checkout.skip: true` never falls back to repository code. Do not replace it with a checkout path, point either signing command at repository-owned code, or store private material in pipeline YAML. A real acceptance run must use the intended KMS-backed signer or signing broker; a disposable local key can only demonstrate transport mechanics.
+The build must use the exact commit supplied in `PHASE0_COMMIT`. Static and generated jobs run the checked-in probe from that checkout. The checked-in signing helper derives a public, disposable key, so it demonstrates signature transport and rejection but grants no production authority. KMS-backed plan signing and checkout-free compiler isolation remain later security gates.
 
 ## Run and inspect
 
 Install `pipeline.yml` as the pipeline definition and run once normally. Each binding carries the Phase 0 issuer, a deterministic build/step/plan replay identity, and a one-hour validity window; runtime rejects a future, expired, longer-than-24-hour, or wrong-identity binding before consuming the plan. Then repeat with `PHASE0_PRODUCER_FAIL=1`; the consumer must still run because its logical edge has `allow_failure: true`. It obtains the producer job UUID from the exact step-constrained artifact search, constrains the download by that UUID, verifies the manifest's canonical bytes, plan digest, build/job/step identity, exact result and bounded outputs, and records that it consumed the expected failure. Removing a compiler plan artifact must prevent both jobs from running successfully. The native step must not start until the dynamically uploaded consumer has completed, which tests Buildkite's dependency extension from the importer.
+
+The repository's default pipeline loads this probe when the build has `PHASE0_PROBE=transport`. Supply the remaining values as build environment, including `PHASE0_LOCAL_CAPABILITIES=["network"]`. Use the exact organization and pipeline UUIDs from the Buildkite API rather than slugs.
 
 To inspect the exact generated jobs with a read-only REST token:
 
@@ -56,4 +55,4 @@ Run once with `PHASE0_INTERRUPT_AFTER_UPLOAD=1`. The importer writes the signed 
 
 Verify the expected marker with `PHASE0_VERIFY_JSON`, then use the build and job-environment queries above for diagnosis. Current public interfaces cannot prove the full recovery predicate, so every prepared-but-incomplete state is operator-fail-closed: cancel the build and start a new one. Do not set an override, retry the upload in place, or use `pipeline upload --replace`. The local classifier has a `verified-completed` state for a future authoritative verifier, but signature presence from REST never enters that state.
 
-Also run negative builds with a verifier missing the plan-envelope trust root and an invalid plan-envelope signature. Record whether a command hook or plugin runs before each rejection, the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old and new plan keys. Those observations are live evidence; this repository does not claim them from local simulation.
+Also run a negative build with `PHASE0_TAMPER_BINDING=1`; the producer must reject the invalid plan-envelope signature. Record the resulting job state and diagnostic, artifact selection under retries, metadata visibility, actual queue source, and behavior across old and new plan keys. Those observations are live evidence; this repository does not claim them from local simulation.
