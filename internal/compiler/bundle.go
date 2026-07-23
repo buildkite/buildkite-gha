@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -33,6 +34,12 @@ func CompileBundle(path string, source, eventSource []byte, compilerVersion, com
 // CompileBundleWithOptions produces versioned plans and the Buildkite pipeline
 // that schedules their exact static dependency graph.
 func CompileBundleWithOptions(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
+	return CompileBundleContext(context.Background(), path, source, eventSource, compilerVersion, compilerDistributionDigest, compilerStep, options)
+}
+
+// CompileBundleContext produces a complete bundle and permits cancellation
+// while trusted compilation resolves immutable public action source.
+func CompileBundleContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")
 	}
@@ -43,7 +50,7 @@ func CompileBundleWithOptions(path string, source, eventSource []byte, compilerV
 	if err != nil {
 		return Bundle{}, err
 	}
-	plans, err := compilePlans(ir, compilerVersion, compilerDistributionDigest)
+	plans, err := compilePlans(ctx, ir, compilerVersion, compilerDistributionDigest, options)
 	if err != nil {
 		return Bundle{}, err
 	}

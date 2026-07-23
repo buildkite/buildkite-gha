@@ -93,6 +93,14 @@ func TestRunsOnPolicySeparatesTrustedAndUntrustedEvents(t *testing.T) {
 	}
 }
 
+func TestUntrustedOptionsRejectRemoteActionSource(t *testing.T) {
+	options := defaultOptions()
+	options.ActionSource = &fakeActionSource{}
+	if err := options.validate(); err == nil || !strings.Contains(err.Error(), "untrusted compilation may not configure") {
+		t.Fatalf("Options.validate() error = %v, want untrusted action source rejection", err)
+	}
+}
+
 func TestCompileEvaluatesGitHubEventVarsAndMatrixForRunsOn(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:

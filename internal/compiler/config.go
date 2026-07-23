@@ -37,9 +37,10 @@ type RunnerPolicy struct {
 // Options are the complete non-secret graph-construction inputs beyond the
 // workflow and canonical event snapshot.
 type Options struct {
-	Vars       VariableSources
-	Runners    RunnerPolicy
-	EventTrust EventTrust
+	Vars         VariableSources
+	Runners      RunnerPolicy
+	EventTrust   EventTrust
+	ActionSource ActionSource
 }
 
 func defaultOptions() Options {
@@ -58,6 +59,9 @@ func defaultOptions() Options {
 func (options Options) validate() error {
 	if options.EventTrust != EventTrusted && options.EventTrust != EventUntrusted {
 		return fmt.Errorf("event trust must be %q or %q", EventTrusted, EventUntrusted)
+	}
+	if options.EventTrust == EventUntrusted && options.ActionSource != nil {
+		return fmt.Errorf("untrusted compilation may not configure remote action source resolution")
 	}
 	if len(options.Runners.Labels) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")

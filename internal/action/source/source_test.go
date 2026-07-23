@@ -253,6 +253,34 @@ func TestDigestTreeIsCanonicalAndFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDigestTreeExcludesGitMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(root, ".git", "config")
+	if err := os.WriteFile(metadata, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metadata, []byte("second"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second {
+		t.Fatalf("digest includes Git metadata: %q != %q", first, second)
+	}
+}
+
 func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	t.Helper()
 	var b bytes.Buffer

@@ -3,6 +3,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -179,6 +180,12 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 // CompilePlansWithOptions creates one plan per job using compiler-selected
 // queues and the same snapshotted vars used for graph construction.
 func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
+	return CompilePlansContext(context.Background(), path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
+}
+
+// CompilePlansContext creates one plan per job and permits cancellation while
+// trusted compilation resolves immutable public action source.
+func CompilePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	if compilerVersion == "" {
 		return nil, fmt.Errorf("compiler version is required")
 	}
@@ -189,10 +196,10 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 	if err != nil {
 		return nil, err
 	}
-	return compilePlans(ir, compilerVersion, compilerDistributionDigest)
+	return compilePlans(ctx, ir, compilerVersion, compilerDistributionDigest, options)
 }
 
-func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]plan.Job, error) {
+func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode event payload: %w", err)
@@ -204,8 +211,11 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 	for _, instance := range ir.Jobs {
 		logicalByKey[instance.Key] = instance.LogicalJobID
 	}
+	actionSource := newMemoizedActionSource(options.ActionSource)
 	for _, instance := range ir.Jobs {
 		steps := make([]plan.Step, len(instance.Steps))
+		var actionIndexes []int
+		var actionRefs []string
 		usedIDs := make(map[string]struct{}, len(instance.Steps))
 		for _, step := range instance.Steps {
 			if step.ID != "" {
@@ -231,10 +241,31 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
 				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
 			}
+			if step.Kind == "uses" {
+				actionIndexes = append(actionIndexes, i)
+				actionRefs = append(actionRefs, step.Uses)
+			}
 		}
-		capabilities, err := requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
-		if err != nil {
-			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		jobSchema := plan.Schema
+		var actions []plan.ActionLock
+		var capabilities []string
+		if ir.Event.Trust == EventTrusted && len(actionRefs) != 0 {
+			selectors, locks, actionCapabilities, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
+			if err != nil {
+				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			}
+			for i, selector := range selectors {
+				steps[actionIndexes[i]].Action = &plan.ActionSelector{Lock: selector.Lock}
+			}
+			jobSchema = plan.SchemaV3
+			actions = locks
+			capabilities = actionCapabilities
+		} else {
+			var err error
+			capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
+			if err != nil {
+				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			}
 		}
 		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
 		for _, logicalNeed := range instance.LogicalNeeds {
@@ -258,7 +289,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			sort.Strings(capabilities)
 		}
 		job := plan.Job{
-			Schema: plan.Schema,
+			Schema: jobSchema,
 			Compiler: plan.Compiler{
 				Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 			},
@@ -286,6 +317,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
 			Outputs:                 instance.Outputs,
 			Steps:                   steps,
+			Actions:                 actions,
 		}
 		if err := job.Validate(); err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)

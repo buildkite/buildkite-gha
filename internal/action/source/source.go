@@ -528,7 +528,7 @@ func DigestTree(root string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("action source tree is not a directory")
 	}
-	m, err := buildManifest(root, defaults(), Reference{}, "")
+	m, err := buildManifestFiles(root, defaults(), Reference{}, "", true)
 	if err != nil {
 		return "", fmt.Errorf("digest action source tree: %w", err)
 	}
@@ -536,11 +536,22 @@ func DigestTree(root string) (string, error) {
 }
 
 func buildManifest(root string, c config, ref Reference, commit string) (manifest, error) {
+	return buildManifestFiles(root, c, ref, commit, false)
+}
+
+func buildManifestFiles(root string, c config, ref Reference, commit string, excludeGitMetadata bool) (manifest, error) {
 	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
 	var total int64
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
+		}
+		rel, _ := filepath.Rel(root, p)
+		if excludeGitMetadata && rel == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -548,7 +559,6 @@ func buildManifest(root string, c config, ref Reference, commit string) (manifes
 		if d.Type()&os.ModeType != 0 {
 			return fmt.Errorf("cache contains special file")
 		}
-		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
 		st, e := d.Info()
 		if e != nil {
