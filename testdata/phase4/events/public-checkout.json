@@ -1,0 +1,16 @@
+{
+  "provider": "github",
+  "event": "push",
+  "repository": {
+    "owner": "actions",
+    "name": "checkout",
+    "clone_url": "https://github.com/actions/checkout.git",
+    "default_branch": "main"
+  },
+  "ref": "refs/tags/v7",
+  "sha": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+  "actor": "buildkite-gha-phase4",
+  "payload": {
+    "ref": "refs/tags/v7"
+  }
+}

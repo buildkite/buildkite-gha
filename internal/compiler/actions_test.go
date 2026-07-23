@@ -316,11 +316,12 @@ func TestTrustedCheckoutAdapterInputBoundary(t *testing.T) {
 	}
 }
 
-func TestPhase4ContinuationDependsOnCompiledActionsOracleTerminal(t *testing.T) {
+func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: remote\nruns:\n  using: node24\n  main: index.js\n")
-	workflowPath := filepath.Join("..", "..", ".github", "workflows", "phase-4-actions-oracle.yml")
-	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, smokePath("events", "push.json")), "phase4-test", testDistributionDigest, Options{
+	workflowPath := filepath.Join("..", "..", "testdata", "phase4", ".github", "workflows", "public-actions.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json")
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "phase4-test", testDistributionDigest, Options{
 		EventTrust:   EventTrusted,
 		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}},
 		ActionSource: &fakeActionSource{root: remote, calls: map[string]int{}},
@@ -352,7 +353,7 @@ func TestPhase4ContinuationDependsOnCompiledActionsOracleTerminal(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(terminals) != 1 || len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != terminals[0] {
-		t.Fatalf("Phase 4 continuation dependencies = %#v, compiled actions oracle terminals = %#v", continuation.Steps, terminals)
+		t.Fatalf("Phase 4 continuation dependencies = %#v, compiled public actions terminals = %#v", continuation.Steps, terminals)
 	}
 }
 

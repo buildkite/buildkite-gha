@@ -2,6 +2,7 @@ package buildkite
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -402,6 +403,28 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicEvent struct {
+		Repository struct {
+			Owner string `json:"owner"`
+			Name  string `json:"name"`
+		} `json:"repository"`
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(eventSource, &publicEvent); err != nil {
+		t.Fatal(err)
+	}
+	workflowSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "phase4", ".github", "workflows", "public-actions.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowText := string(workflowSource)
+	if publicEvent.Repository.Owner != "actions" || publicEvent.Repository.Name != "checkout" || !strings.Contains(workflowText, "uses: actions/checkout@"+publicEvent.SHA) || !strings.Contains(workflowText, `test "$(git rev-parse HEAD)" = "`+publicEvent.SHA+`"`) {
+		t.Fatalf("Phase 4 public checkout identity drifted: event=%#v workflow=%s", publicEvent, workflowSource)
+	}
 	for _, required := range []string{
 		`scripts/phase-0-shell-oracle-checkout "$$PHASE4_COMMIT"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
@@ -410,10 +433,10 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		`runtime_version="phase4-$${PHASE4_COMMIT}"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`mise exec -- go run ./internal/harness/cmd/phase4-upload`,
-		`--event-path testdata/smoke/events/push.json`, `--runtime "$$distribution_root/buildkite-gha"`,
+		`--event-path testdata/phase4/events/public-checkout.json`, `--runtime "$$distribution_root/buildkite-gha"`,
 		`--runtime-version "$$runtime_version"`, `--runtime-queue hosted`,
-		`--node24 "$$(mise where node@24)/bin/node"`, `--commit "$$PHASE4_COMMIT"`,
-		`.github/workflows/phase-4-actions-oracle.yml`,
+		`--node24 "$$(mise where node@24)/bin/node"`, `--commit ` + publicEvent.SHA,
+		`testdata/phase4/.github/workflows/public-actions.yml`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 4 upload proof lacks %q:\n%s", required, source)
@@ -459,7 +482,7 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
 		t.Fatal(err)
 	}
-	if len(continuation.Steps) != 1 || continuation.Steps[0].Key != "phase-4-native-after-actions" || continuation.Steps[0].Agents.Queue != "elastic-runners" || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != "gha-consumer" || !continuation.Steps[0].DependsOn[0].AllowFailure {
+	if len(continuation.Steps) != 1 || continuation.Steps[0].Key != "phase-4-native-after-actions" || continuation.Steps[0].Agents.Queue != "elastic-runners" || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != "gha-public-actions" || !continuation.Steps[0].DependsOn[0].AllowFailure {
 		t.Fatalf("Phase 4 continuation = %#v", continuation.Steps)
 	}
 }
