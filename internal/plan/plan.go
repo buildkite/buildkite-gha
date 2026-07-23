@@ -375,7 +375,7 @@ func (job Job) Validate() error {
 }
 
 func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.TimeoutMinutes != 0 {
+	if step.Background || step.Command != "" || step.Uses != "" || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.TimeoutMinutes != 0 {
 		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
 	}
 	switch step.Kind {
@@ -391,9 +391,6 @@ func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
 	case "cancel":
 		if len(step.Targets) != 1 {
 			return fmt.Errorf("cancel step %q must target exactly one background step", step.ID)
-		}
-		if step.ContinueOnError {
-			return fmt.Errorf("cancel step %q cannot continue on error", step.ID)
 		}
 	}
 	seen := make(map[string]struct{}, len(step.Targets))

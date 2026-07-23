@@ -840,8 +840,8 @@ jobs:
       - id: second
         run: echo second
         background: true
-      - wait: [first, second]
         continue-on-error: true
+      - wait: [first, second]
       - wait-all:
       - cancel: first
       - parallel:
@@ -862,7 +862,7 @@ jobs:
 	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
 		t.Fatalf("background plan steps = %#v", steps)
 	}
-	if steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || !steps[2].ContinueOnError {
+	if !steps[1].ContinueOnError || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError {
 		t.Fatalf("targeted plan barrier = %#v", steps[2])
 	}
 	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {

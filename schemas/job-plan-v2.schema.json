@@ -179,6 +179,7 @@
                 {"required": ["env"]},
                 {"required": ["with"]},
                 {"required": ["condition"]},
+                {"required": ["continue_on_error"]},
                 {"required": ["timeout_minutes"]}
               ]
             }

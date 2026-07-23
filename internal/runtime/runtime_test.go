@@ -387,7 +387,7 @@ func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
 	}
 }
 
-func TestBackgroundAndBarrierContinueOnError(t *testing.T) {
+func TestBackgroundContinueOnError(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -396,16 +396,13 @@ func TestBackgroundAndBarrierContinueOnError(t *testing.T) {
 		{ID: "soft-background", Kind: "run", Background: true, ContinueOnError: true, Command: "exit 7"},
 		{ID: "wait-soft", Kind: "wait", Targets: []string{"soft-background"}},
 		{ID: "after-soft", Kind: "run", Condition: "steps.soft-background.outcome == 'failure' && steps.soft-background.conclusion == 'success'", Command: "echo after-soft"},
-		{ID: "hard-background", Kind: "run", Background: true, Command: "exit 8"},
-		{ID: "soft-barrier", Kind: "wait", Targets: []string{"hard-background"}, ContinueOnError: true},
-		{ID: "after-barrier", Kind: "run", Condition: "steps.soft-barrier.outcome == 'failure' && steps.soft-barrier.conclusion == 'success'", Command: "echo after-barrier"},
 	})
 
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if !strings.Contains(logs.String(), "after-soft") || !strings.Contains(logs.String(), "after-barrier") {
+	if !strings.Contains(logs.String(), "after-soft") {
 		t.Fatalf("RunJob() logs = %q", logs.String())
 	}
 }

@@ -83,9 +83,9 @@ jobs:
         id: producer
         run: echo ok
         background: true
+        continue-on-error: true
       - name: Targeted barrier
         wait: [producer]
-        continue-on-error: true
       - name: Full barrier
         wait-all:
       - name: Stop producer
@@ -108,10 +108,10 @@ jobs:
 	if len(steps) != 7 {
 		t.Fatalf("steps = %#v, want seven lowered steps", steps)
 	}
-	if steps[0].Kind != "run" || !steps[0].Background || steps[0].ID != "producer" {
+	if steps[0].Kind != "run" || !steps[0].Background || steps[0].ID != "producer" || !steps[0].ContinueOnError {
 		t.Fatalf("background step = %#v", steps[0])
 	}
-	if steps[1].Kind != "wait" || len(steps[1].Targets) != 1 || steps[1].Targets[0] != "producer" || !steps[1].ContinueOnError {
+	if steps[1].Kind != "wait" || len(steps[1].Targets) != 1 || steps[1].Targets[0] != "producer" || steps[1].ContinueOnError {
 		t.Fatalf("targeted wait = %#v", steps[1])
 	}
 	if steps[2].Kind != "wait-all" || len(steps[2].Targets) != 0 {
@@ -169,6 +169,7 @@ func TestParseConcurrentControlsFailClosed(t *testing.T) {
 		{name: "unknown target", steps: "      - wait: future\n      - id: future\n        run: true\n        background: true\n", want: `wait target "future" is not a prior background step`},
 		{name: "duplicate target", steps: "      - id: work\n        run: true\n        background: true\n      - wait: [work, WORK]\n", want: `wait repeats background step "WORK"`},
 		{name: "conditional control", steps: "      - wait-all:\n        if: always()\n", want: `wait-all control does not support "if"`},
+		{name: "continue-on-error control", steps: "      - wait-all:\n        continue-on-error: true\n", want: `wait-all control does not support "continue-on-error"`},
 		{name: "empty parallel", steps: "      - parallel: []\n", want: "parallel requires a non-empty list"},
 		{name: "nested background", steps: "      - parallel:\n          - run: true\n            background: true\n", want: `parallel member does not support "background"`},
 		{name: "parallel member execution", steps: "      - parallel:\n          - run: true\n            uses: ./action\n", want: "parallel member must declare exactly one"},

@@ -66,9 +66,9 @@ jobs:
         shell: bash
         run: exit 7
         background: true
+        continue-on-error: true
 
       - wait: expected-failure
-        continue-on-error: true
 
       - id: verify-failure
         if: steps.expected-failure.outcome == 'failure'

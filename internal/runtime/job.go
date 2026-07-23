@@ -172,11 +172,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 					outcome = "cancelled"
 				}
 				conclusion = outcome
-				if step.ContinueOnError && outcome == "failure" {
-					conclusion = "success"
-				} else {
-					runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, barrierErr))
-				}
+				runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, barrierErr))
 			}
 			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}

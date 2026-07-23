@@ -603,9 +603,6 @@ func parseStepConcurrency(path string, step *yaml.Node) (stepConcurrency, expect
 		return stepConcurrency{Kind: kind, Parallel: members}, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
 	}
 	allowed := map[string]bool{"name": true, kind: true}
-	if kind == "wait" || kind == "wait-all" {
-		allowed["continue-on-error"] = true
-	}
 	for name := range entries {
 		if !allowed[name] {
 			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, mappingKey(step, name), fmt.Sprintf("%s control does not support %q", kind, name))
