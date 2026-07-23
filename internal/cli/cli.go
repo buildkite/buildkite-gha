@@ -178,6 +178,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	runner := gharuntime.Runner{
 		Stdout:          stdout,
 		Stderr:          stderr,
+		Node20:          os.Getenv("BUILDKITE_GHA_NODE20"),
 		Node24:          os.Getenv("BUILDKITE_GHA_NODE24"),
 		ManagedNodeRoot: os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT"),
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),

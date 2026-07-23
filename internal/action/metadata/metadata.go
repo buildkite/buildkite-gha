@@ -70,6 +70,8 @@ type CompositeStep struct {
 type Runtime string
 
 const (
+	// RuntimeNode20 executes a JavaScript action with managed Node 20.
+	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
 	// RuntimeComposite executes a composite action.
@@ -153,6 +155,8 @@ func Load(root, path string) (Metadata, error) {
 // so compilation and execution share one support boundary.
 func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
+	case string(RuntimeNode20):
+		return RuntimeNode20, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
 	case string(RuntimeComposite):

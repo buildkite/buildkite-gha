@@ -15,10 +15,10 @@ func TestLoadAndClassify(t *testing.T) {
 		wantCapacity string
 		wantError    string
 	}{
+		{name: "Node 20", using: "node20", wantRuntime: RuntimeNode20},
 		{name: "Node 24", using: "node24", wantRuntime: RuntimeNode24},
 		{name: "composite", using: "composite", wantRuntime: RuntimeComposite},
 		{name: "Docker", using: "docker", wantRuntime: RuntimeDocker, wantCapacity: "docker"},
-		{name: "Node 20", using: "node20", wantError: `unsupported runtime "node20"`},
 		{name: "unknown", using: "future", wantError: `unsupported runtime "future"`},
 	}
 	for _, test := range tests {

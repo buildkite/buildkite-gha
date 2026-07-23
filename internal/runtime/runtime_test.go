@@ -479,22 +479,25 @@ func TestJavaScriptMainSeesPrePathEffects(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/path/action.yml", `name: JavaScript path writer
 runs:
-  using: node24
+  using: node20
   pre: pre.js
   main: main.js
+  post: post.js
 `)
 	writeFixtureFile(t, workspace, ".github/actions/path/pre.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/path/main.js", "")
-	fakeNode := filepath.Join(workspace, "node24")
-	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+	writeFixtureFile(t, workspace, ".github/actions/path/post.js", "")
+	fakeNode := filepath.Join(workspace, "node20")
+	writeFixtureFile(t, workspace, "node20", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then
-  echo v24.0.0
+  echo v20.0.0
   exit 0
 fi
 case "${1##*/}" in
   pre.js) printf '%s\n' "$PATH_ENTRY" >> "$GITHUB_PATH" ;;
   main.js) case ":$PATH:" in *":$PATH_ENTRY:"*) ;; *) exit 9 ;; esac ;;
+  post.js) printf 'NODE20_POST=true\n' >> "$GITHUB_ENV" ;;
 esac
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -504,12 +507,15 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
 	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node20: fakeNode}).RunJob(context.Background(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
 	if result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v", result)
+	}
+	if result.Env["NODE20_POST"] != "true" {
+		t.Fatalf("RunJob() environment = %#v, want node20 post lifecycle effect", result.Env)
 	}
 }
 
@@ -1324,7 +1330,7 @@ runs:
 	}
 }
 
-func TestDiscoverNode24ManagedAndWrongExplicitVersion(t *testing.T) {
+func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	managed := t.TempDir()
 	node := filepath.Join(managed, "node24", "bin", "node")
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
@@ -1344,6 +1350,20 @@ func TestDiscoverNode24ManagedAndWrongExplicitVersion(t *testing.T) {
 	}
 	if _, err := DiscoverNode24(wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
 		t.Fatalf("DiscoverNode24() error = %v, want wrong-version detail", err)
+	}
+
+	node20 := filepath.Join(managed, "node", "20", "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node20), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(node20, []byte("#!/bin/sh\necho v20.99.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DiscoverNode(20, "", managed); err != nil || got != node20 {
+		t.Fatalf("DiscoverNode(20) = %q, %v, want %q, nil", got, err, node20)
+	}
+	if _, err := DiscoverNode(24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
+		t.Fatalf("DiscoverNode(24) error = %v, want exact-major rejection", err)
 	}
 }
 
@@ -1518,7 +1538,7 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
 	}
 
-	for _, using := range []string{"node20", "future"} {
+	for _, using := range []string{"future"} {
 		t.Run(using, func(t *testing.T) {
 			workspace := t.TempDir()
 			workflowPath := ".github/workflows/test.yml"

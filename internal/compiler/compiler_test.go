@@ -1062,7 +1062,7 @@ func TestCompilePlansDerivesDockerCapability(t *testing.T) {
 	}
 }
 
-func TestCompilePlansRejectsNode20LocalAction(t *testing.T) {
+func TestCompilePlansAcceptsNode20LocalAction(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "node20.yml")
 	actionDir := filepath.Join(repository, ".github", "actions", "node20")
@@ -1073,9 +1073,8 @@ func TestCompilePlansRejectsNode20LocalAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  node20:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/node20\n")
-	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
-	if err == nil || !strings.Contains(err.Error(), `uses unsupported runtime "node20"`) {
-		t.Fatalf("CompilePlans() error = %v, want node20 fail-closed boundary", err)
+	if _, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted"); err != nil {
+		t.Fatalf("CompilePlans() error = %v, want node20 support", err)
 	}
 }
 

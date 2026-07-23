@@ -443,14 +443,18 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
-	case metadata.RuntimeNode24:
+	case metadata.RuntimeNode20, metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
 		if !supportedLifecycleCondition(action.Runs.PreIf) || !supportedLifecycleCondition(action.Runs.PostIf) {
 			return result, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
 		}
-		node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
+		major, explicit := 24, r.Node24
+		if actionRuntime == metadata.RuntimeNode20 {
+			major, explicit = 20, r.Node20
+		}
+		node, err := DiscoverNode(major, explicit, r.ManagedNodeRoot)
 		if err != nil {
 			return result, err
 		}
