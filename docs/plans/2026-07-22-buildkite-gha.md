@@ -1095,6 +1095,21 @@ Explicitly defer from beta unless implementation evidence changes the order:
   hydrate exact producer results and publish bounded terminal manifests before
   exit; the live `shell.yml` proof passed with checkout suppressed on ephemeral
   hosted agents.
+- Phase 3 is complete. The shell runtime now owns background, wait, wait-all,
+  cancel, and parallel controls through a ten-active-step supervisor. Effects
+  and failures remain barrier-scoped, workflow commands and mask registration
+  are serialized across concurrent streams, and cancellation escalates across
+  complete process groups without skipping bounded cleanup.
+- Phase 4 is implemented within the tokenless public-action boundary. Trusted
+  v3 plans carry immutable local and public action locks, verify complete source
+  trees, transport exact managed Node 20/24 runtimes, execute nested composites
+  and JavaScript pre/main/post lifecycle, and fail closed on private sources or
+  provider-dependent authentication. The public unsigned `upload` path remains
+  shell-only. Because this repository is private, live evidence is split: a
+  synthetic public event proves anonymous checkout and portable setup actions
+  on Buildkite, while the GitHub-hosted oracle and local conformance suite cover
+  the private repository's JavaScript/composite fixture. This does not claim a
+  same-workflow private checkout proof on Buildkite.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1128,8 +1143,30 @@ Explicitly defer from beta unless implementation evidence changes the order:
   an authoritative completion order.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
-  repository checks, and all three smoke compiler outputs pass the current
+  repository checks, and all four smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+
+Phase 4 live evidence:
+
+- [Buildkite build 56](https://buildkite.com/buildkite/buildkite-gha/builds/56)
+  ran exact implementation commit
+  `582b766f74a621c18365be650fe22483d115cd5f`. Its trusted importer compiled a
+  synthetic event for public `actions/checkout` commit
+  `3d3c42e5aac5ba805825da76410c181273ba90b1`; the generated hosted job fetched
+  that exact SHA anonymously, then pinned `setup-node` and `setup-go` installed
+  and verified Node 24.18.0 and Go 1.26.5. The repository check, generated job,
+  separate continuation loader, and native continuation all passed.
+- [GitHub Actions run 30045630660](https://github.com/buildkite/buildkite-gha/actions/runs/30045630660)
+  ran the same implementation commit against the private repository. Its
+  producer and consumer proved the local JavaScript/composite output chain,
+  environment propagation, state, summaries, masking registration, and post
+  lifecycle on GitHub's runner.
+- Buildkite build 56 does not claim local-action or cross-job v3 evidence: its
+  event repository intentionally differs from the repository containing the
+  compiled proof workflow. Those Buildkite runtime semantics are covered by
+  deterministic conformance tests. Build 53 documented the reason for the
+  split by failing the credential-scrubbed anonymous fetch of this private
+  repository; no private credential was added or forwarded.
 
 Phase 2 live evidence:
 
@@ -1321,7 +1358,7 @@ Delivery slices:
    normalized observation with the GitHub Actions oracle, exercise failure and
    cancellation cleanup, and inspect raw logs for the secret fixture.
 
-### Phase 3 — Concurrent step runtime
+### Phase 3 — Concurrent step runtime (complete)
 
 Extend the shell state machine with the shipped GitHub Actions concurrency
 contract:
@@ -1349,7 +1386,7 @@ Definition of done:
 - Cancellation reliably terminates complete process trees without skipping
   bounded post-job cleanup.
 
-### Phase 4 — JavaScript and composite actions
+### Phase 4 — JavaScript and composite actions (implemented)
 
 Implement:
 

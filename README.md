@@ -6,10 +6,10 @@ into Buildkite pipeline jobs and execute each job's Actions steps inside a
 compatibility runtime, without creating a GitHub Actions run.
 
 The Phase 0 semantic foundation, Phase 1 static compiler, Phase 2 shell
-runtime, and Phase 3 concurrent-step runtime are implemented. The compiler
-validates the supported graph, expands local reusable workflows and matrices,
-applies queue policy, produces immutable job plans, and emits a Buildkite
-pipeline.
+runtime, Phase 3 concurrent-step runtime, and Phase 4 JavaScript/composite
+action runtime are implemented. The compiler validates the supported graph,
+expands local reusable workflows and matrices, applies queue policy, produces
+immutable job plans, and emits a Buildkite pipeline.
 
 ## Commands
 
@@ -64,17 +64,24 @@ timing against only the direct process; the bridge intentionally terminates the
 complete process tree. Other workflow commands are not yet implemented. Secret
 names resolve only through the explicit
 `BUILDKITE_GHA_SECRET_` namespace and are registered with the Buildkite Agent
-redactor before execution. Remote action resolution, services, and job
-containers remain outside the executable subset; local Node 24, composite, and
-Docker action spikes still require an explicitly materialized and source-bound
-workspace. In Buildkite, `run-job` verifies the exact build, job, step, and plan
-digest before resolving each prerequisite from its attributed producer
-artifact, then publishes the terminal result under a bounded cleanup context;
-metadata is only a best-effort mirror. Identity, plan-decode, and digest
-failures happen before a producer can publish a trusted manifest, and retrying
-a producer can make artifact selection ambiguous; consumers fail closed in
-both cases, so retry the whole build. Use `buildkite-gha help`,
-`buildkite-gha help <command>`, or `buildkite-gha --version` for exact usage.
+redactor before execution. Trusted v3 plans additionally support managed Node
+20/24 JavaScript actions, local and nested composite actions, global LIFO
+pre/main/post lifecycle, and anonymous public GitHub action sources bound to
+exact commits and verified repository digests. The narrow tokenless checkout
+adapter accepts only github.com, the public event repository, its exact event
+SHA, the workspace root, and a credential-free shallow fetch; private checkout,
+provider tokens, alternate repositories or refs, and credential persistence
+remain deferred. These action capabilities are intentionally unavailable to
+the unsigned `upload` command. Docker actions, services, and job containers
+remain outside the executable subset. In Buildkite, `run-job` verifies the
+exact build, job, step, and plan digest before resolving each prerequisite from
+its attributed producer artifact, then publishes the terminal result under a
+bounded cleanup context; metadata is only a best-effort mirror. Identity,
+plan-decode, and digest failures happen before a producer can publish a trusted
+manifest, and retrying a producer can make artifact selection ambiguous;
+consumers fail closed in both cases, so retry the whole build. Use
+`buildkite-gha help`, `buildkite-gha help <command>`, or
+`buildkite-gha --version` for exact usage.
 
 ## Development
 
@@ -108,6 +115,21 @@ with `PHASE3_PROBE=concurrent` and `PHASE3_COMMIT=<full commit>` to load
 `.buildkite/phase-3-upload.yml`. To run the matching GitHub-hosted differential,
 dispatch `.github/workflows/phase-0-shell-oracle.yml` on that ref with the same
 `source_commit` and `target=concurrent`.
+
+The Phase 4 proof is deliberately split because this repository is private and
+the implemented checkout boundary is public and tokenless. Start an exact-commit
+build with `PHASE4_PROBE=actions` and `PHASE4_COMMIT=<full commit>` to load
+`.buildkite/phase-4-upload.yml`. Its trusted importer compiles the synthetic
+public event in `testdata/phase4`: generated jobs anonymously check out the
+exact pinned `actions/checkout` commit, execute pinned `setup-node` and
+`setup-go`, verify exact tool versions, and settle before the native Buildkite
+continuation. `.github/workflows/phase-4-actions-oracle.yml` separately runs on
+GitHub against this private repository to exercise local JavaScript/composite
+outputs and lifecycle. The split does not claim that Buildkite executed those
+private local actions; Buildkite runtime coverage for them remains in the
+conformance suite. The exact-commit evidence is
+[Buildkite build 56](https://buildkite.com/buildkite/buildkite-gha/builds/56)
+and [GitHub Actions run 30045630660](https://github.com/buildkite/buildkite-gha/actions/runs/30045630660).
 
 ## License
 
