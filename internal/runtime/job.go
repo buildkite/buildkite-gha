@@ -30,9 +30,10 @@ type JobResult struct {
 const maxJobOutputBytes = 1024
 
 type registeredPost struct {
-	action JavaScriptAction
-	state  map[string]string
-	node   string
+	action    JavaScriptAction
+	state     map[string]string
+	node      string
+	condition string
 }
 
 type postRegistry struct {
@@ -147,6 +148,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(runnerTemp) }()
+	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
+		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
 	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
 		jobResult.Env["PATH"] = path
@@ -242,6 +246,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
+		runPost, conditionErr := evaluateLifecycleCondition(post.condition, runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+		if conditionErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("post action %q condition: %w", post.action.Name, conditionErr))
+			continue
+		}
+		if !runPost {
+			continue
+		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
 		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
@@ -361,6 +373,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         "Linux",
 		"RUNNER_TEMP":       runnerTemp,
+		"RUNNER_TOOL_CACHE": filepath.Join(runnerTemp, "tool-cache"),
 	}
 }
 
@@ -482,8 +495,11 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
-		if !supportedLifecycleCondition(action.Runs.PreIf) || !supportedLifecycleCondition(action.Runs.PostIf) {
-			return result, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
+		if _, err := evaluateLifecycleCondition(action.Runs.PreIf, false, false); err != nil {
+			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
+		}
+		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
+			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
 		}
 		major, explicit := 24, r.Node24
 		if actionRuntime == metadata.RuntimeNode20 {
@@ -496,11 +512,14 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv}
 		state := map[string]string{}
-		post := postFor(javascript, state, node)
+		post := postFor(javascript, state, node, action.Runs.PostIf)
 		posts.register(post)
 		if javascript.Pre != "" {
-			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
-				return result, err
+			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
+			if runPre {
+				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
+					return result, err
+				}
 			}
 		}
 		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
@@ -732,16 +751,30 @@ func workspacePath(root, path string) (string, error) {
 	return resolved, nil
 }
 
-func postFor(action JavaScriptAction, state map[string]string, node string) *registeredPost {
+func postFor(action JavaScriptAction, state map[string]string, node, condition string) *registeredPost {
 	if action.Post == "" {
 		return nil
 	}
-	return &registeredPost{action: action, state: state, node: node}
+	return &registeredPost{action: action, state: state, node: node, condition: condition}
 }
 
-func supportedLifecycleCondition(value string) bool {
+func evaluateLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
 	value = strings.TrimSpace(value)
-	return value == "" || value == "always()" || value == "${{ always() }}"
+	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
+		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+	}
+	switch strings.ToLower(value) {
+	case "", "always()":
+		return true, nil
+	case "success()":
+		return !unsuccessful && !cancelled, nil
+	case "failure()":
+		return unsuccessful && !cancelled, nil
+	case "cancelled()":
+		return cancelled, nil
+	default:
+		return false, fmt.Errorf("condition %q is unsupported", value)
+	}
 }
 
 func actionName(action metadata.Metadata, step plan.Step) string {

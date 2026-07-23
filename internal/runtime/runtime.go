@@ -360,7 +360,7 @@ func (r Runner) stderr() io.Writer {
 func actionInputEnv(inputs map[string]string) map[string]string {
 	env := make(map[string]string, len(inputs))
 	for name, value := range inputs {
-		name = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(name, " ", "_"), "-", "_"))
+		name = strings.ToUpper(strings.ReplaceAll(name, " ", "_"))
 		env["INPUT_"+name] = value
 	}
 	return env

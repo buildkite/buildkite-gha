@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -1022,6 +1023,78 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	}
 }
 
+func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		condition   string
+		failMain    bool
+		wantPost    bool
+		wantFailure bool
+	}{
+		{name: "success after success", condition: "success()", wantPost: true},
+		{name: "success after failure", condition: "${{ success() }}", failMain: true, wantFailure: true},
+		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantFailure: true},
+		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantFailure: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", "name: Conditional post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: "+test.condition+"\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/main.js", "")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/post.js", "")
+			fakeNode := filepath.Join(workspace, "node24")
+			writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "${1##*/}" = post.js ]; then touch "$POST_MARKER"; fi
+if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
+`)
+			if err := os.Chmod(fakeNode, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(workspace, "post-ran")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conditional", Kind: "uses", Uses: "./.github/actions/conditional"}})
+			job.Env = map[string]string{"POST_MARKER": marker, "FAIL_MAIN": strconv.FormatBool(test.failMain)}
+
+			result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+			if (err != nil) != test.wantFailure || (result.Conclusion == "failure") != test.wantFailure {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			_, statErr := os.Stat(marker)
+			if gotPost := statErr == nil; gotPost != test.wantPost {
+				t.Fatalf("post ran = %v, want %v (stat error %v)", gotPost, test.wantPost, statErr)
+			}
+		})
+	}
+}
+
+func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:      "tool-cache",
+		Kind:    "run",
+		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
+	}})
+	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
+	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
+	env := actionInputEnv(map[string]string{"node-version": "24", "two words": "value"})
+	if env["INPUT_NODE-VERSION"] != "24" || env["INPUT_TWO_WORDS"] != "value" {
+		t.Fatalf("actionInputEnv() = %#v", env)
+	}
+	if _, ok := env["INPUT_NODE_VERSION"]; ok {
+		t.Fatalf("actionInputEnv() rewrote a hyphen: %#v", env)
+	}
+}
+
 func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
@@ -1729,6 +1802,75 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 	if len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
+	}
+}
+
+func TestLivePortableSetupActions(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
+		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to execute public setup actions with anonymous downloads")
+	}
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "portable-setup.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+          token: ""
+      - run: node --version | grep '^v24\.'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+          token: ""
+      - run: go version | grep 'go1\.26\.5 '
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := source.NewResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(filepath.Join(t.TempDir(), "actions"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlansContext(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+		EventTrust: compiler.EventTrusted,
+		Runners:    compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
+		ActionSource: compiler.PublicActionSource{
+			Resolver: resolver,
+			Store:    store,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV3 || len(plans[0].Actions) != 2 {
+		t.Fatalf("portable setup plans = %#v", plans)
+	}
+	if got := plans[0].Steps[0].With["node-version"]; got != "24" {
+		t.Fatalf("setup-node plan input = %q, want 24", got)
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).RunJob(ctx, plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\nlogs:\n%s", result, err, logs.String())
 	}
 }
 
