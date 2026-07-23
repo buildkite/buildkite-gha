@@ -13,6 +13,13 @@ steps:
     agents:
       queue: "elastic-runners"
 
+  - label: ":pipeline: Load Phase 2 upload proof"
+    key: "phase-2-upload-loader"
+    if: build.env("PHASE2_PROBE") == "upload"
+    command: "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml"
+    agents:
+      queue: "elastic-runners"
+
   - label: ":go: Repository checks"
     key: "checks"
     plugins:

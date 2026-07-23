@@ -104,6 +104,19 @@ func TestCompileBundleDoesNotExposeEventValues(t *testing.T) {
 	}
 }
 
+func TestCompileBundleDeclaresSecretCapabilityAndNames(t *testing.T) {
+	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.deploy_token }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
+	event := readFile(t, smokePath("events", "push.json"))
+	bundle, err := CompileBundle("workflow.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"CANARY", "DEPLOY_TOKEN"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"secrets"}) {
+		t.Fatalf("secret boundary = names %#v capabilities %#v", job.RequiredSecrets, job.RequiredCapabilities)
+	}
+}
+
 func encodeGoldenPlans(t *testing.T, artifacts []PlanArtifact) []byte {
 	t.Helper()
 	plans := make([]json.RawMessage, len(artifacts))

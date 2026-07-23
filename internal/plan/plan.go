@@ -13,8 +13,11 @@ import (
 
 const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
 
+const MaxNeedProducers = 256
+
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Compiler struct {
 	Version            string `json:"version"`
@@ -25,6 +28,10 @@ type Event struct {
 	Provider      string `json:"provider"`
 	Name          string `json:"name"`
 	PayloadDigest string `json:"payload_digest"`
+	Repository    string `json:"repository,omitempty"`
+	Ref           string `json:"ref,omitempty"`
+	SHA           string `json:"sha,omitempty"`
+	Actor         string `json:"actor,omitempty"`
 }
 
 type Workflow struct {
@@ -41,6 +48,14 @@ type Target struct {
 type Need struct {
 	Result  string            `json:"result"`
 	Outputs map[string]string `json:"outputs,omitempty"`
+}
+
+// NeedSource binds one logical prerequisite to an exact generated producer
+// and immutable plan. Buildkite scheduling still uses Dependencies; runtimes
+// use these identities to select and verify authoritative result artifacts.
+type NeedSource struct {
+	StepKey    string `json:"step_key"`
+	PlanDigest string `json:"plan_digest"`
 }
 
 type Position struct {
@@ -63,22 +78,31 @@ type Step struct {
 	WorkingDirectory string            `json:"working_directory,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	With             map[string]string `json:"with,omitempty"`
+	Condition        string            `json:"condition,omitempty"`
+	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
+	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
 	Source           *Span             `json:"source,omitempty"`
 }
 
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
-	Schema                  string            `json:"schema"`
-	Compiler                Compiler          `json:"compiler"`
-	Workflow                Workflow          `json:"workflow"`
-	Event                   Event             `json:"event"`
-	Target                  Target            `json:"target"`
-	RequiredCapabilities    []string          `json:"required_capabilities"`
-	Matrix                  map[string]any    `json:"matrix,omitempty"`
-	Vars                    map[string]string `json:"vars,omitempty"`
-	Dependencies            []string          `json:"dependencies,omitempty"`
-	Needs                   map[string]Need   `json:"needs,omitempty"`
+	Schema               string                  `json:"schema"`
+	Compiler             Compiler                `json:"compiler"`
+	Workflow             Workflow                `json:"workflow"`
+	Event                Event                   `json:"event"`
+	Target               Target                  `json:"target"`
+	RequiredCapabilities []string                `json:"required_capabilities"`
+	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
+	Matrix               map[string]any          `json:"matrix,omitempty"`
+	Vars                 map[string]string       `json:"vars,omitempty"`
+	Dependencies         []string                `json:"dependencies,omitempty"`
+	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
+	// Needs is populated only from verified producer-attributed manifests at
+	// runtime. It is never accepted from or encoded into an immutable plan.
+	Needs                   map[string]Need   `json:"-"`
 	Env                     map[string]string `json:"env,omitempty"`
+	Condition               string            `json:"condition,omitempty"`
+	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
@@ -197,11 +221,20 @@ func (job Job) Validate() error {
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
 	}
+	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
+		return fmt.Errorf("job plan event identity exceeds its size limit")
+	}
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
 	}
 	if !targetPattern.MatchString(job.Target.StepKey) || !targetPattern.MatchString(job.Target.Queue) {
 		return fmt.Errorf("job plan requires a target step key and queue")
+	}
+	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
+		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
+	}
+	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
+		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {
@@ -218,6 +251,19 @@ func (job Job) Validate() error {
 		}
 		capabilities[capability] = struct{}{}
 	}
+	if !sort.StringsAreSorted(job.RequiredSecrets) {
+		return fmt.Errorf("job plan required secrets must be sorted")
+	}
+	for i, name := range job.RequiredSecrets {
+		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
+			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
+		}
+	}
+	if len(job.RequiredSecrets) != 0 {
+		if _, ok := capabilities["secrets"]; !ok {
+			return fmt.Errorf("job plan required secrets need the secrets capability")
+		}
+	}
 	if !sort.StringsAreSorted(job.Dependencies) {
 		return fmt.Errorf("job plan dependencies must be sorted")
 	}
@@ -232,16 +278,39 @@ func (job Job) Validate() error {
 		}
 		dependencies[id] = struct{}{}
 	}
-	if len(job.Steps) == 0 {
-		return fmt.Errorf("job plan contains no steps")
-	}
-	needIDs := make(map[string]struct{}, len(job.Needs))
-	for name := range job.Needs {
+	needIDs := make(map[string]struct{}, len(job.NeedSources))
+	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
+	for name, sources := range job.NeedSources {
+		if !targetPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+			return fmt.Errorf("job plan contains invalid prerequisite %q", name)
+		}
 		id := strings.ToLower(name)
 		if _, exists := needIDs[id]; exists {
 			return fmt.Errorf("job plan contains duplicate prerequisite %q", name)
 		}
 		needIDs[id] = struct{}{}
+		for i, source := range sources {
+			if !targetPattern.MatchString(source.StepKey) || !digestPattern.MatchString(source.PlanDigest) {
+				return fmt.Errorf("job plan prerequisite %q has invalid producer identity", name)
+			}
+			if i > 0 && sources[i-1].StepKey >= source.StepKey {
+				return fmt.Errorf("job plan prerequisite %q producers must be unique and sorted", name)
+			}
+			key := strings.ToLower(source.StepKey)
+			if _, exists := dependencies[key]; !exists {
+				return fmt.Errorf("job plan prerequisite %q producer %q is not a dependency", name, source.StepKey)
+			}
+			if _, exists := sourcedDependencies[key]; exists {
+				return fmt.Errorf("job plan dependency %q has multiple logical owners", source.StepKey)
+			}
+			sourcedDependencies[key] = struct{}{}
+		}
+	}
+	if len(sourcedDependencies) != len(dependencies) {
+		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
+	}
+	if len(job.Steps) == 0 {
+		return fmt.Errorf("job plan contains no steps")
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for i, step := range job.Steps {
@@ -256,6 +325,12 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan contains duplicate step id %q", step.ID)
 		}
 		ids[id] = struct{}{}
+		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
+			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
+		}
+		if len(step.Condition) > 65536 {
+			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
+		}
 		switch step.Kind {
 		case "run":
 			if strings.TrimSpace(step.Command) == "" {

@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -825,7 +826,7 @@ jobs:
 	}
 }
 
-func TestCompilePlansRecordsStaticDependenciesWithoutRuntimeResults(t *testing.T) {
+func TestCompilePlansRecordsStaticDependenciesWithVerifiedNeedSources(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
@@ -835,9 +836,51 @@ func TestCompilePlansRecordsStaticDependenciesWithoutRuntimeResults(t *testing.T
 		t.Fatalf("plans = %#v, want producer plus two consumers", plans)
 	}
 	for _, consumer := range plans[1:] {
-		if !reflect.DeepEqual(consumer.Dependencies, []string{plans[0].Target.StepKey}) || consumer.Needs != nil {
-			t.Fatalf("consumer dependencies/results = %#v / %#v", consumer.Dependencies, consumer.Needs)
+		producerContents, err := plan.Encode(plans[0])
+		if err != nil {
+			t.Fatal(err)
 		}
+		wantSources := map[string][]plan.NeedSource{"producer": {{StepKey: plans[0].Target.StepKey, PlanDigest: transport.Digest(producerContents)}}}
+		if !reflect.DeepEqual(consumer.Dependencies, []string{plans[0].Target.StepKey}) || !reflect.DeepEqual(consumer.NeedSources, wantSources) || consumer.Needs != nil {
+			t.Fatalf("consumer dependencies/sources/results = %#v / %#v / %#v", consumer.Dependencies, consumer.NeedSources, consumer.Needs)
+		}
+	}
+}
+
+func TestCompilePlansMapsLogicalNeedToEveryMatrixProducer(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [one, two]
+    steps:
+      - run: echo ok
+  consume:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo done
+`)
+	plans, err := CompilePlans("matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 3 {
+		t.Fatalf("plans = %d, want two producers and one consumer", len(plans))
+	}
+	wantSources := make([]plan.NeedSource, 2)
+	for i := range 2 {
+		encoded, err := plan.Encode(plans[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantSources[i] = plan.NeedSource{StepKey: plans[i].Target.StepKey, PlanDigest: transport.Digest(encoded)}
+	}
+	sort.Slice(wantSources, func(i, j int) bool { return wantSources[i].StepKey < wantSources[j].StepKey })
+	if !reflect.DeepEqual(plans[2].NeedSources, map[string][]plan.NeedSource{"build": wantSources}) {
+		t.Fatalf("need sources = %#v, want exact matrix fan-in %#v", plans[2].NeedSources, wantSources)
 	}
 }
 

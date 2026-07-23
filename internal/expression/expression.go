@@ -30,10 +30,38 @@ type Expression struct {
 
 // Context contains the Phase 0 values available while evaluating a template.
 type Context struct {
-	Inputs map[string]string
-	Matrix map[string]any
-	Steps  map[string]map[string]string
-	Needs  map[string]map[string]string
+	Inputs      map[string]string
+	Matrix      map[string]any
+	Steps       map[string]map[string]string
+	Needs       map[string]map[string]string
+	NeedResults map[string]string
+	Secrets     map[string]string
+	Vars        map[string]string
+	Env         map[string]string
+	GitHub      map[string]any
+}
+
+// StepStatus contains the values exposed for one completed step while
+// evaluating a condition.
+type StepStatus struct {
+	Outcome    string
+	Conclusion string
+	Outputs    map[string]string
+}
+
+// ConditionContext contains the runtime values available while evaluating a
+// job or step condition.
+type ConditionContext struct {
+	Needs        map[string]map[string]string
+	NeedResults  map[string]string
+	Steps        map[string]StepStatus
+	Env          map[string]string
+	Vars         map[string]string
+	Matrix       map[string]any
+	GitHub       map[string]any
+	Failure      bool
+	Cancelled    bool
+	Unsuccessful bool
 }
 
 // CompileContext contains the non-secret values available while constructing
@@ -115,6 +143,230 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 		}
 		remaining = remaining[end+len(close):]
 	}
+}
+
+// EvaluateCondition evaluates a job or step condition. Unsupported syntax and
+// unavailable values fail closed with an error.
+func EvaluateCondition(source string, context ConditionContext) (bool, error) {
+	condition := strings.TrimSpace(source)
+	if condition == "" {
+		return !context.Unsuccessful && !context.Cancelled, nil
+	}
+	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
+		condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(condition + "}}"))
+	if parseErr != nil {
+		return false, fmt.Errorf("parse condition: %w", parseErr)
+	}
+	value, err := evaluateConditionNode(node, context)
+	if err != nil {
+		return false, err
+	}
+	result := conditionTruthy(value)
+	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
+		return false, nil
+	}
+	return result, nil
+}
+
+func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return nil, nil
+	case *actionlint.BoolNode:
+		return node.Value, nil
+	case *actionlint.IntNode:
+		return node.Value, nil
+	case *actionlint.FloatNode:
+		return node.Value, nil
+	case *actionlint.StringNode:
+		return node.Value, nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return nil, err
+		}
+		return resolveConditionReference(root, path, context)
+	case *actionlint.NotOpNode:
+		value, err := evaluateConditionNode(node.Operand, context)
+		if err != nil {
+			return nil, err
+		}
+		return !conditionTruthy(value), nil
+	case *actionlint.LogicalOpNode:
+		left, err := evaluateConditionNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		leftBool := conditionTruthy(left)
+		if node.Kind == actionlint.LogicalOpNodeKindAnd && !leftBool {
+			return false, nil
+		}
+		if node.Kind == actionlint.LogicalOpNodeKindOr && leftBool {
+			return true, nil
+		}
+		right, err := evaluateConditionNode(node.Right, context)
+		if err != nil {
+			return nil, err
+		}
+		return conditionTruthy(right), nil
+	case *actionlint.CompareOpNode:
+		left, err := evaluateConditionNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		right, err := evaluateConditionNode(node.Right, context)
+		if err != nil {
+			return nil, err
+		}
+		equal, err := conditionEqual(left, right)
+		if err != nil {
+			return nil, err
+		}
+		switch node.Kind {
+		case actionlint.CompareOpNodeKindEq:
+			return equal, nil
+		case actionlint.CompareOpNodeKindNotEq:
+			return !equal, nil
+		default:
+			return nil, fmt.Errorf("condition comparison %s is unsupported", node.Kind)
+		}
+	case *actionlint.FuncCallNode:
+		if len(node.Args) != 0 {
+			return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+		}
+		switch strings.ToLower(node.Callee) {
+		case "always":
+			return true, nil
+		case "success":
+			return !context.Unsuccessful && !context.Cancelled, nil
+		case "failure":
+			return context.Failure, nil
+		case "cancelled":
+			return context.Cancelled, nil
+		default:
+			return nil, fmt.Errorf("condition function %q is unsupported", node.Callee)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported condition expression")
+	}
+}
+
+func resolveConditionReference(root string, path []string, context ConditionContext) (any, error) {
+	switch {
+	case strings.EqualFold(root, "github"):
+		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
+			return value, nil
+		}
+	case len(path) == 1 && strings.EqualFold(root, "env"):
+		return findString(context.Env, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "vars"):
+		return findString(context.Vars, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+		for name, value := range context.Matrix {
+			if strings.EqualFold(name, path[0]) {
+				return value, nil
+			}
+		}
+	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
+		for name, result := range context.NeedResults {
+			if strings.EqualFold(name, path[0]) {
+				return result, nil
+			}
+		}
+	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
+		if outputs, ok := findOutputs(context.Needs, path[0]); ok {
+			return findString(outputs, path[2]), nil
+		}
+	case len(path) == 2 && strings.EqualFold(root, "steps"):
+		for name, step := range context.Steps {
+			if !strings.EqualFold(name, path[0]) {
+				continue
+			}
+			switch {
+			case strings.EqualFold(path[1], "outcome"):
+				return step.Outcome, nil
+			case strings.EqualFold(path[1], "conclusion"):
+				return step.Conclusion, nil
+			}
+		}
+	case len(path) == 3 && strings.EqualFold(root, "steps") && strings.EqualFold(path[1], "outputs"):
+		for name, step := range context.Steps {
+			if strings.EqualFold(name, path[0]) {
+				return findString(step.Outputs, path[2]), nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("condition references unavailable value %s.%s", root, strings.Join(path, "."))
+}
+
+func conditionTruthy(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case int:
+		return value != 0
+	case float64:
+		return value != 0
+	case string:
+		return value != ""
+	default:
+		return false
+	}
+}
+
+func conditionEqual(left, right any) (bool, error) {
+	switch left := left.(type) {
+	case nil:
+		return right == nil, nil
+	case string:
+		right, ok := right.(string)
+		if !ok {
+			return false, fmt.Errorf("mixed-type condition equality is unsupported")
+		}
+		return strings.EqualFold(left, right), nil
+	case bool:
+		right, ok := right.(bool)
+		if !ok {
+			return false, fmt.Errorf("mixed-type condition equality is unsupported")
+		}
+		return left == right, nil
+	case int:
+		switch right := right.(type) {
+		case int:
+			return left == right, nil
+		case float64:
+			return float64(left) == right, nil
+		}
+	case float64:
+		switch right := right.(type) {
+		case int:
+			return left == float64(right), nil
+		case float64:
+			return left == right, nil
+		}
+	}
+	return false, fmt.Errorf("mixed-type condition equality is unsupported")
+}
+
+func containsStatusFunction(node actionlint.ExprNode) bool {
+	found := false
+	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
+		if !entering {
+			return
+		}
+		call, ok := node.(*actionlint.FuncCallNode)
+		if ok {
+			switch strings.ToLower(call.Callee) {
+			case "always", "success", "failure", "cancelled":
+				found = true
+			}
+		}
+	})
+	return found
 }
 
 func expressionBody(text string) (string, error) {
@@ -297,6 +549,12 @@ func Evaluate(template string, context Context) (string, error) {
 func evaluateReference(reference string, context Context) (string, error) {
 	parts := strings.Split(reference, ".")
 	switch {
+	case len(parts) >= 2 && parts[0] == "github":
+		value, ok := lookupRuntimeValue(context.GitHub, parts[1:])
+		if !ok {
+			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(parts[1:], "."))
+		}
+		return fmt.Sprint(value), nil
 	case len(parts) == 2 && parts[0] == "inputs":
 		return context.Inputs[parts[1]], nil
 	case len(parts) == 2 && parts[0] == "matrix":
@@ -305,6 +563,12 @@ func evaluateReference(reference string, context Context) (string, error) {
 			return "", fmt.Errorf("expression references unavailable matrix value %q", parts[1])
 		}
 		return fmt.Sprint(value), nil
+	case len(parts) == 2 && parts[0] == "secrets":
+		return findString(context.Secrets, parts[1]), nil
+	case len(parts) == 2 && parts[0] == "vars":
+		return findString(context.Vars, parts[1]), nil
+	case len(parts) == 2 && parts[0] == "env":
+		return findString(context.Env, parts[1]), nil
 	case len(parts) == 4 && parts[0] == "steps" && parts[2] == "outputs":
 		outputs, ok := findOutputs(context.Steps, parts[1])
 		if !ok {
@@ -317,9 +581,46 @@ func evaluateReference(reference string, context Context) (string, error) {
 			return "", fmt.Errorf("expression references unavailable need %q", parts[1])
 		}
 		return outputs[parts[3]], nil
+	case len(parts) == 3 && parts[0] == "needs" && parts[2] == "result":
+		for candidate, result := range context.NeedResults {
+			if strings.EqualFold(candidate, parts[1]) {
+				return result, nil
+			}
+		}
+		return "", fmt.Errorf("expression references unavailable need %q", parts[1])
 	default:
 		return "", fmt.Errorf("unsupported expression %q", reference)
 	}
+}
+
+func lookupRuntimeValue(value any, path []string) (any, bool) {
+	current := value
+	for _, part := range path {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		matched := false
+		for name, item := range object {
+			if strings.EqualFold(name, part) {
+				current, matched = item, true
+				break
+			}
+		}
+		if !matched {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func findString(values map[string]string, name string) string {
+	for candidate, value := range values {
+		if strings.EqualFold(candidate, name) {
+			return value
+		}
+	}
+	return ""
 }
 
 func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {

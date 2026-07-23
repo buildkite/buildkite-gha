@@ -17,6 +17,14 @@ jobs:
         shell: bash
         run: echo "result=smoke-shell" >> "$GITHUB_OUTPUT"
 
+      - name: Mask fixture before logging
+        shell: bash
+        env:
+          CANARY: phase2-secret-canary-7f4c2a91
+        run: |
+          echo "::add-mask::$CANARY"
+          printf 'MASKED_CANARY=%s\n' "$CANARY"
+
   consumer:
     needs: producer
     runs-on: ubuntu-latest

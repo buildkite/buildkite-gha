@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-22
+Last reviewed: 2026-07-23
 Target repository: `buildkite/buildkite-gha`
 
 ## Summary
@@ -588,6 +588,13 @@ the authoritative manifest. Consumers must have explicit dependencies on
 producers. Metadata has a 100 KB hard limit per value and values over 1 KB are
 discouraged, so larger outputs use namespaced artifacts directly.
 
+Failures before the runtime can establish its build, job, step, and plan
+identity cannot publish a trusted terminal manifest. Consumers diagnose that
+case as a missing producer result and fail closed. Retrying an individual
+producer can leave multiple attributed artifacts without an authoritative
+attempt selector, which also fails closed; the supported recovery for either
+case is to retry the whole build.
+
 Values that influence a trusted decision, including continuation inputs,
 native replacement validation, and retry state, must come from a
 producer-attributed artifact or carry a compiler-verifiable signature. A
@@ -607,6 +614,11 @@ execution and report the UI difference explicitly. In particular:
 - a false runtime job condition produces a short no-op Buildkite job, because a
   running command cannot currently mark itself as scheduler-skipped;
 - cancellation does not behave exactly like dependency failure in Buildkite;
+- an unavailable step reference in a condition fails closed instead of
+  coercing to an empty value;
+- a run step selected by `always()` or `cancelled()` after cancellation inherits
+  the cancelled execution context, while registered post-actions receive the
+  bounded cleanup grace period;
 - beta matrix fail-fast can prevent undispatched siblings from starting, but
   cannot cancel in-progress siblings until the bridge has a safely scoped
   cancel-own-matrix capability; and
@@ -781,6 +793,11 @@ Implement the observable Actions contracts for:
 - `::add-mask`;
 - `::stop-commands`; and
 - supported legacy command behavior and security restrictions.
+
+The Phase 2 shell runtime implements `::add-mask` only. It applies dynamically
+registered masks to subsequent log lines and rejects or scrubs them from the
+bounded job result before transport; annotations, groups, stop-commands, and
+legacy workflow commands remain later compatibility work.
 
 Map warnings and errors to Buildkite log output and annotations. Map dynamic
 mask values to `buildkite-agent redactor add` before subsequent output is
@@ -1063,10 +1080,20 @@ Explicitly defer from beta unless implementation evidence changes the order:
   explicit variable snapshots, bounded local reusable-workflow flattening,
   matrix and dependency expansion, fail-closed runner policy, immutable job
   plans, Buildkite pipeline YAML, and text/JSON compatibility reports.
-  Generated downstream plans remain deliberately non-executable until Phase 2
-  wires producer-attributed result manifests, and `compile` does not yet
-  materialize or upload the content-addressed plan artifacts referenced by its
-  pipeline output.
+  `compile` remains a read-only rendering command; `upload` materializes the
+  executable and content-addressed plans used by generated jobs.
+- Phase 2 is complete. Its sequential shell runtime, producer-attributed result
+  transport, and unprivileged `upload` bootstrap are implemented and proven on
+  Buildkite. Generated plans
+  now carry conditions, timeouts, `continue-on-error`, bounded event identity,
+  and explicit secret requirements. `run-job` allocates a fresh workspace,
+  applies standard and file-command environment changes, evaluates the owned
+  condition subset, masks registered and dynamically derived values in logs
+  and results, propagates timeout/cancellation
+  to process groups, and drains cleanup under a fixed deadline. Generated jobs
+  hydrate exact producer results and publish bounded terminal manifests before
+  exit; the live `shell.yml` proof passed with checkout suppressed on ephemeral
+  hosted agents.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases define the signed plan-envelope trust contract.
@@ -1087,10 +1114,42 @@ Explicitly defer from beta unless implementation evidence changes the order:
   runtime output is bounded without pipe deadlocks, inherited environment is
   allowlisted, and transport artifacts are materialized from verified bytes in
   a confined root before upload.
+- Phase 2 result transport is wired into `run-job`. Job plans map every logical
+  `needs.<job>` to one or more exact producer step keys and immutable plan
+  digests; consumers resolve each corresponding Buildkite job UUID before
+  downloading its canonical bounded manifest and supplying verified logical
+  results and outputs to the runtime context. Every Buildkite run verifies its
+  exact build, job, step, and plan digest, then publishes success, failure,
+  cancellation, or skipped state under a bounded background context before
+  exiting. Artifacts are authoritative; namespaced metadata remains a
+  best-effort UI/query mirror. Matrix fan-in with conflicting output values
+  currently fails closed because the public artifact contract does not expose
+  an authoritative completion order.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all three smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+
+Phase 2 live evidence:
+
+- [Buildkite build 40](https://buildkite.com/buildkite/buildkite-gha/builds/40)
+  ran exact implementation commit
+  `e93298085ffef96e1cb0982e7a0b88f3558b11da`. The producer and both consumer
+  matrix jobs passed on ephemeral hosted Agent `4.0.0-beta.6`, followed by the
+  native Buildkite continuation and the full repository check.
+- The consumer logs emitted the normalized observations
+  `{"result":"smoke-shell","variant":"one"}` and
+  `{"result":"smoke-shell","variant":"two"}`, matching the checked-in
+  GitHub Actions oracle.
+- The producer raw log contained `MASKED_CANARY=***` and did not contain the
+  registered canary value. Protected secret, provider-token, and privileged
+  capabilities remain unavailable to the unsigned upload path.
+- The native continuation started only after both generated consumers had
+  finished, proving the separate continuation loader does not rely on the
+  reverse insertion order of sequential dynamic uploads.
+- Runtime conformance tests prove that post-actions run after main failure and
+  cancellation, a cancelled process group cannot leave a child behind, and
+  cleanup is bounded by the documented ten-second default grace period.
 
 Phase 0 live evidence:
 
@@ -1119,7 +1178,7 @@ Phase 0 spike support snapshot:
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
 | Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
-| Execute | Needs-free Bash/sh steps and local Node 24, composite, and Dockerfile actions; outputs, environment, state, summaries, masking, failure results, and LIFO post-actions | Remote actions, nested composite actions, all dependency-result semantics, conditions, services/job containers, timeouts, cancellation, and `continue-on-error` fail closed |
+| Execute | Sequential Bash/sh steps; fresh workspaces; bounded prerequisite, step, and job outputs; environment, path, state, and summary files; status conditions; masking; timeouts; process-group cancellation; `continue-on-error`; and bounded LIFO post-actions | Producer result hydration still enters through the transport boundary; remote actions, nested composite actions, services/job containers, concurrent steps, and unsupported expression/coercion forms fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
 | Trust | Eight signed-envelope conformance cases plus live rejection of a corrupted signature and bounded RFC 8785 runtime bindings for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, verification-only queue roots, and checkout-free hook/plugin isolation are production hardening gates; Buildkite signed-pipeline integration is optional Phase 9 work |
@@ -1220,7 +1279,7 @@ Definition of done:
   succeeds for supported fixtures.
 - No compiler output contains resolved secret values.
 
-### Phase 2 — Sequential shell job runtime
+### Phase 2 — Sequential shell job runtime (complete)
 
 Implement the per-job state machine for `run` steps:
 
@@ -1243,6 +1302,23 @@ Definition of done:
 - Downstream conditions can consume bounded prerequisite results and outputs.
 - Cleanup runs after failure and cancellation within a documented grace period.
 - Secret fixtures never appear in captured raw Buildkite logs.
+
+Delivery slices:
+
+1. Complete the sequential state machine and its local conformance tests:
+   conditions and status functions, environment precedence, supported shells
+   and working directories, file commands, timeouts, cancellation,
+   `continue-on-error`, and bounded cleanup.
+2. Promote the Phase 0 result probe into production transport contracts:
+   canonical producer-attributed manifests, exact-step artifact download,
+   bounded metadata mirrors, and verified `needs` injection.
+3. Implement `buildkite-gha upload` for the explicit unprivileged local-event
+   mode, materializing immutable plans before dynamically uploading the
+   generated pipeline. Protected capabilities remain unavailable until the
+   Phase 9 trust installation exists.
+4. Run `testdata/smoke/.github/workflows/shell.yml` on Buildkite, compare its
+   normalized observation with the GitHub Actions oracle, exercise failure and
+   cancellation cleanup, and inspect raw logs for the secret fixture.
 
 ### Phase 3 — Concurrent step runtime
 

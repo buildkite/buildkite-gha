@@ -59,6 +59,19 @@ func TestValidateRejectsAmbiguousSteps(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOutOfRangeTimeouts(t *testing.T) {
+	job := validJob()
+	job.TimeoutMinutes = 361
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "job timeout_minutes") {
+		t.Fatalf("Validate() error = %v, want job timeout error", err)
+	}
+	job = validJob()
+	job.Steps[0].TimeoutMinutes = -1
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "step-1") {
+		t.Fatalf("Validate() error = %v, want step timeout error", err)
+	}
+}
+
 func TestValidateRejectsInvalidStaticDependencies(t *testing.T) {
 	for _, test := range []struct {
 		name         string
@@ -80,6 +93,31 @@ func TestValidateRejectsInvalidStaticDependencies(t *testing.T) {
 	}
 }
 
+func TestValidateBindsEveryDependencyToOneLogicalNeed(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Dependencies = []string{"gha-build-one", "gha-build-two"}
+	job.NeedSources = map[string][]NeedSource{
+		"build": {
+			{StepKey: "gha-build-one", PlanDigest: digest},
+			{StepKey: "gha-build-two", PlanDigest: digest},
+		},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	job.NeedSources["other"] = []NeedSource{{StepKey: "gha-build-two", PlanDigest: digest}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "multiple logical owners") {
+		t.Fatalf("Validate() error = %v, want duplicate logical owner rejection", err)
+	}
+	delete(job.NeedSources, "other")
+	job.NeedSources["build"] = job.NeedSources["build"][:1]
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "dependencies and prerequisite producers differ") {
+		t.Fatalf("Validate() error = %v, want uncovered dependency rejection", err)
+	}
+}
+
 func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = nil
@@ -93,6 +131,14 @@ func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	encoded = []byte(strings.Replace(string(encoded), `"required_capabilities": []`, `"required_capabilities": null`, 1))
 	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "concrete array") {
 		t.Fatalf("Decode() error = %v, want concrete capabilities error", err)
+	}
+}
+
+func TestRequiredSecretsRequireCapability(t *testing.T) {
+	job := validJob()
+	job.RequiredSecrets = []string{"TOKEN"}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "secrets capability") {
+		t.Fatalf("Validate() error = %v, want capability binding", err)
 	}
 }
 

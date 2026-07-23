@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,14 +23,183 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-func TestRunJobRejectsStaticDependenciesUntilResultTransportExists(t *testing.T) {
+type testSecretResolver map[string]string
+
+func (s testSecretResolver) ResolveSecret(_ context.Context, name string) (string, error) {
+	value, ok := s[name]
+	if !ok {
+		return "", fmt.Errorf("denied")
+	}
+	return value, nil
+}
+
+type testRedactor struct{ values []string }
+
+func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
+	r.values = append(r.values, value)
+	return nil
+}
+
+func TestSequentialRunControlsAndEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	if err := os.Mkdir(filepath.Join(workspace, "subdir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	redactor := &testRedactor{}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "first", Kind: "run", WorkingDirectory: "subdir", Env: map[string]string{"LEVEL": "step"}, Command: `test "$LEVEL" = step
+test "$TOKEN" = mask-me
+test "$GITHUB_SHA" = 0123456789abcdef
+test "${{ github.repository }}" = buildkite/example
+echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+echo "LEVEL=file" >> "$GITHUB_ENV"
+echo "secret=${{ secrets.CANARY }}"`},
+		{ID: "soft", Kind: "run", Command: "exit 7", ContinueOnError: true},
+		{ID: "after-soft", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Command: `test "$LEVEL" = file
+case "$PATH" in "$GITHUB_WORKSPACE/bin"*) ;; *) exit 9 ;; esac
+echo after-soft`},
+	})
+	job.Env = map[string]string{"LEVEL": "job", "TOKEN": "${{ secrets.CANARY }}"}
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"CANARY"}
+	job.Event.Repository = "buildkite/example"
+	job.Event.Ref = "refs/heads/main"
+	job.Event.SHA = "0123456789abcdef"
+	job.Event.Actor = "octocat"
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"CANARY": "mask-me"}, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v, logs = %q", err, logs.String())
+	}
+	if result.Conclusion != "success" || result.Env["LEVEL"] != "file" || result.Env["TOKEN"] != "***" || len(redactor.values) != 1 {
+		t.Fatalf("RunJob() result = %#v, redactions = %#v", result, redactor.values)
+	}
+	if strings.Contains(logs.String(), "mask-me") || !strings.Contains(logs.String(), "secret=***") || !strings.Contains(logs.String(), "after-soft") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestEnvironmentSecretsCannotReadAmbientAgentVariables(t *testing.T) {
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "ambient-token")
+	t.Setenv("BUILDKITE_GHA_SECRET_BUILDKITE_AGENT_ACCESS_TOKEN", "")
+	if _, err := (EnvironmentSecrets{}).ResolveSecret(context.Background(), "BUILDKITE_AGENT_ACCESS_TOKEN"); err != nil {
+		// The explicit namespace exists but is empty; this still proves the ambient
+		// variable was not selected.
+		return
+	}
+	value, _ := (EnvironmentSecrets{}).ResolveSecret(context.Background(), "BUILDKITE_AGENT_ACCESS_TOKEN")
+	if value == "ambient-token" {
+		t.Fatal("EnvironmentSecrets exposed the ambient Buildkite Agent token")
+	}
+}
+
+func TestFailureConditionsAndCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "fail", Kind: "run", Command: "exit 1"},
+		{ID: "default", Kind: "run", Command: "echo must-not-run"},
+		{ID: "recover", Kind: "run", Condition: "failure()", Command: "echo recovered"},
+	})
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || strings.Contains(logs.String(), "must-not-run") || !strings.Contains(logs.String(), "recovered") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+
+	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "timeout", Kind: "run", Command: "sleep 30", TimeoutMinutes: 0.0005}})
+	started := time.Now()
+	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" || time.Since(started) > 3*time.Second {
+		t.Fatalf("timed RunJob() result = %#v, error = %v, elapsed = %s", result, err, time.Since(started))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cancel", Kind: "run", Condition: "always()", Command: "sleep 30"}})
+	result, err = (Runner{}).RunJob(ctx, job, workspace)
+	if !errors.Is(err, context.Canceled) || result.Conclusion != "cancelled" {
+		t.Fatalf("cancelled RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
+	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	err := runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runStreaming() error = %v, want deadline", err)
+	}
+	contents, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(contents)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child process %d survived cancellation", pid)
+}
+
+func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.Needs = map[string]plan.Need{"producer": {Result: "failure", Outputs: map[string]string{"gate": "yes"}}}
+	job.Condition = "always() && needs.producer.result == 'failure' && needs.producer.outputs.gate"
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	job.Condition = ""
+	job.Needs["producer"] = plan.Need{Result: "skipped"}
+	result, err = (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "skipped" {
+		t.Fatalf("RunJob() skipped prerequisite result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"CANARY"}
+	job.Outputs = map[string]string{"leak": "${{ secrets.CANARY }}"}
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "contains a registered secret") || strings.Contains(err.Error(), "do-not-publish") {
+		t.Fatalf("RunJob() error = %v, want non-disclosing secret-output rejection", err)
+	}
+}
+
+func TestRunJobRequiresHydratedStaticDependencyResults(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: dependency boundary\n")
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 	job.Dependencies = []string{"gha-producer"}
+	job.NeedSources = map[string][]plan.NeedSource{"producer": {{StepKey: "gha-producer", PlanDigest: "sha256:" + strings.Repeat("1", 64)}}}
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "no hydrated prerequisite results") {
+		t.Fatalf("RunJob() error = %v, want fail-closed hydration boundary", err)
+	}
 	job.Needs = map[string]plan.Need{"producer": {Result: "success"}}
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "result transport is not wired") {
-		t.Fatalf("RunJob() error = %v, want fail-closed dependency boundary", err)
+	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() hydrated result = %#v, error = %v", result, err)
 	}
 }
 
@@ -112,6 +284,23 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Errorf("bounded cleanup took %s, want under 3s", elapsed)
+	}
+}
+
+func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: Cancellation cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "setTimeout(() => {}, 30000)\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "console.log('post-after-cancel')\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 }
 
@@ -410,6 +599,33 @@ func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
 	}
 }
 
+func TestRunJobRejectsDynamicallyMaskedJobOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:    "derive",
+		Kind:  "run",
+		Shell: "sh",
+		Command: `printf '%s\n' '::add-mask::derived-mask-value'
+printf '%s\n' 'secret=derived-mask-value' >> "$GITHUB_OUTPUT"
+printf '%s\n' 'DYNAMIC_VALUE=derived-mask-value' >> "$GITHUB_ENV"
+printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
+	}})
+	job.Outputs = map[string]string{"secret": "${{ steps.derive.outputs.secret }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "secret" contains a registered secret`) {
+		t.Fatalf("RunJob() error = %v, want dynamically masked output rejection", err)
+	}
+	if strings.Contains(logs.String(), "derived-mask-value") || strings.Contains(fmt.Sprintf("%#v", result), "derived-mask-value") {
+		t.Fatalf("RunJob() leaked dynamically masked value: result = %#v, logs = %q", result, logs.String())
+	}
+	if result.Env["DYNAMIC_VALUE"] != "***" || result.Summary != "***\n" {
+		t.Fatalf("RunJob() did not scrub dynamic mask from bounded result: %#v", result)
+	}
+}
+
 func TestCompositeExposesOnlyDeclaredOutputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -491,7 +707,7 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 
 func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 	workspace := fixturePath(t, "smoke")
-	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"}})
+	job := runtimePlan(t, workspace, ".github/workflows/ci.yml", []plan.Step{{ID: "local", Kind: "uses", Uses: "./actions/javascript"}})
 	job.Workflow.Digest = "sha256:" + strings.Repeat("0", 64)
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "workflow digest mismatch") {
 		t.Fatalf("RunJob() error = %v, want workflow digest mismatch", err)

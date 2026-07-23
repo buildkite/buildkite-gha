@@ -17,7 +17,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-// JobResult is the bounded Phase 0 result returned to the transport layer.
+// JobResult is the bounded logical result returned to the transport layer.
 type JobResult struct {
 	Conclusion string            `json:"conclusion"`
 	Outputs    map[string]string `json:"outputs,omitempty"`
@@ -58,57 +58,134 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
-		if capability != "docker" {
-			return JobResult{}, fmt.Errorf("capability %q is unsupported in the Phase 0 runtime", capability)
+		if capability != "docker" && capability != "secrets" {
+			return JobResult{}, fmt.Errorf("capability %q is unsupported in the sequential runtime", capability)
 		}
 	}
-	if len(job.Dependencies) != 0 {
-		return JobResult{}, fmt.Errorf("prerequisite result transport is not wired for this phase; refusing to run job with %d static dependencies", len(job.Dependencies))
-	}
-	if err := VerifyWorkflow(job, workspace); err != nil {
-		return JobResult{}, err
-	}
-	workspace, err := filepath.Abs(workspace)
-	if err != nil {
-		return JobResult{}, fmt.Errorf("resolve workspace: %w", err)
+	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
+		return JobResult{}, fmt.Errorf("job has %d static dependencies but no hydrated prerequisite results", len(job.Dependencies))
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
 	eval := expression.Context{
-		Matrix: job.Matrix,
-		Steps:  make(map[string]map[string]string, len(job.Steps)),
-		Needs:  needOutputs(job.Needs),
+		Matrix:      job.Matrix,
+		Steps:       make(map[string]map[string]string, len(job.Steps)),
+		Needs:       needOutputs(job.Needs),
+		NeedResults: needResults(job.Needs),
+		Vars:        job.Vars,
+		GitHub:      githubContext(job),
 	}
-	jobEnv, err := evaluateMap(job.Env, eval)
-	if err != nil {
-		return JobResult{}, fmt.Errorf("evaluate job environment: %w", err)
-	}
-	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: jobEnv, State: map[string]string{}}
-	jobResult.Env["GITHUB_WORKSPACE"] = workspace
+	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
 	for _, name := range sortedKeys(job.Needs) {
 		need := job.Needs[name]
 		if need.Result == "" {
 			return jobResult, fmt.Errorf("prerequisite result %q is missing from the job plan", name)
 		}
-		if need.Result != "success" {
-			return jobResult, fmt.Errorf("prerequisite %q has result %q; non-success dependency semantics are unsupported in the Phase 0 runtime", name, need.Result)
+		switch need.Result {
+		case "success", "failure", "cancelled", "skipped":
+		default:
+			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
+	jobCondition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub}
+	for _, need := range job.Needs {
+		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
+		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
+		jobCondition.Unsuccessful = jobCondition.Unsuccessful || need.Result != "success"
+	}
+	run, err := expression.EvaluateCondition(job.Condition, jobCondition)
+	if err != nil {
+		return jobResult, fmt.Errorf("evaluate job condition: %w", err)
+	}
+	if !run {
+		jobResult.Conclusion = "skipped"
+		return jobResult, nil
+	}
+
+	secrets, err := r.resolveSecrets(ctx, processor, job.RequiredSecrets)
+	if err != nil {
+		return jobResult, err
+	}
+	eval.Secrets = secrets
+	if workspace == "" {
+		workspace, err = os.MkdirTemp("", "buildkite-gha-workspace-")
+		if err != nil {
+			return jobResult, fmt.Errorf("create workspace: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(workspace) }()
+	}
+	workspace, err = filepath.Abs(workspace)
+	if err != nil {
+		return jobResult, fmt.Errorf("resolve workspace: %w", err)
+	}
+	jobEnv, err := evaluateMap(job.Env, eval)
+	if err != nil {
+		return jobResult, fmt.Errorf("evaluate job environment: %w", err)
+	}
+	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
+	if err != nil {
+		return jobResult, fmt.Errorf("create runner temp: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(runnerTemp) }()
+	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
+	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
+		jobResult.Env["PATH"] = path
+	}
+	eval.Env = jobResult.Env
+	runCtx := ctx
+	cancelJob := func() {}
+	if job.TimeoutMinutes > 0 {
+		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
+	}
+	defer cancelJob()
 	posts := make([]registeredPost, 0)
+	statuses := make(map[string]expression.StepStatus, len(job.Steps))
 
 	var runErr error
 	for _, step := range job.Steps {
-		result, post, err := r.runJobStep(ctx, processor, workspace, job, step, jobResult.Env, eval)
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
+		run, err := expression.EvaluateCondition(step.Condition, condition)
+		if err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
+			break
+		}
+		if !run {
+			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			continue
+		}
+		stepCtx := runCtx
+		cancelStep := func() {}
+		if step.TimeoutMinutes > 0 {
+			stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
+		}
+		result, post, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobResult.Env, eval)
+		cancelStep()
 		eval.Steps[strings.ToLower(step.ID)] = result.Outputs
 		mergeInto(jobResult.Env, result.Env)
+		applyPaths(jobResult.Env, result.Paths)
+		eval.Env = jobResult.Env
 		mergeInto(jobResult.State, result.State)
 		jobResult.Summary += result.Summary
 		if post != nil {
 			posts = append(posts, *post)
 		}
+		outcome, conclusion := "success", "success"
 		if err != nil {
-			runErr = fmt.Errorf("step %q: %w", step.ID, err)
-			break
+			outcome = "failure"
+			if ctx.Err() != nil {
+				outcome = "cancelled"
+			}
+			conclusion = outcome
+			if step.ContinueOnError && outcome == "failure" {
+				conclusion = "success"
+			} else {
+				runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, err))
+			}
 		}
+		statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: result.Outputs}
+	}
+	if runCtx.Err() != nil {
+		runErr = errors.Join(runErr, runCtx.Err())
 	}
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
@@ -126,21 +203,126 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		}
 	}
 
-	if runErr == nil {
-		for _, name := range sortedKeys(job.Outputs) {
-			template := job.Outputs[name]
-			value, err := expression.Evaluate(template, eval)
-			if err != nil {
-				return jobResult, fmt.Errorf("job output %q: %w", name, err)
-			}
-			if len(value) > maxJobOutputBytes {
-				return jobResult, fmt.Errorf("job output %q exceeds the %d-byte Phase 0 limit", name, maxJobOutputBytes)
-			}
-			jobResult.Outputs[name] = value
+	sensitiveValues := processor.maskValues()
+	for _, name := range sortedKeys(job.Outputs) {
+		template := job.Outputs[name]
+		value, err := expression.Evaluate(template, eval)
+		if err != nil {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
 		}
+		if len(value) > maxJobOutputBytes {
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
+		}
+		for _, sensitive := range sensitiveValues {
+			if sensitive != "" && strings.Contains(value, sensitive) {
+				return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q contains a registered secret", name))
+			}
+		}
+		jobResult.Outputs[name] = value
+	}
+	if ctx.Err() != nil {
+		jobResult.Conclusion = "cancelled"
+	} else if runErr == nil {
 		jobResult.Conclusion = "success"
 	}
-	return jobResult, runErr
+	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
+	scrub := func(value string) string {
+		for _, sensitive := range sensitiveValues {
+			if sensitive != "" {
+				value = strings.ReplaceAll(value, sensitive, "***")
+			}
+		}
+		return value
+	}
+	for name, value := range result.Outputs {
+		result.Outputs[name] = scrub(value)
+	}
+	for name, value := range result.Env {
+		result.Env[name] = scrub(value)
+	}
+	for name, value := range result.State {
+		result.State[name] = scrub(value)
+	}
+	result.Summary = scrub(result.Summary)
+	return result
+}
+
+func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor, names []string) (map[string]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if r.Secrets == nil || r.Redactor == nil {
+		return nil, fmt.Errorf("job requires secrets but a secret resolver and redactor are not configured")
+	}
+	values := make(map[string]string, len(names))
+	for _, name := range names {
+		value, err := r.Secrets.ResolveSecret(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve secret %q: %w", name, err)
+		}
+		if value != "" {
+			if err := r.Redactor.AddRedaction(ctx, value); err != nil {
+				return nil, err
+			}
+			processor.addMask(value)
+		}
+		values[name] = value
+	}
+	return values, nil
+}
+
+func durationMinutes(minutes float64) time.Duration {
+	return time.Duration(minutes * float64(time.Minute))
+}
+
+func applyPaths(env map[string]string, paths []string) {
+	for _, path := range paths {
+		if env["PATH"] == "" {
+			env["PATH"] = path
+		} else {
+			env["PATH"] = path + string(os.PathListSeparator) + env["PATH"]
+		}
+	}
+}
+
+func githubContext(job plan.Job) map[string]any {
+	return map[string]any{
+		"repository": job.Event.Repository,
+		"ref":        job.Event.Ref,
+		"sha":        job.Event.SHA,
+		"actor":      job.Event.Actor,
+		"event_name": job.Event.Name,
+	}
+}
+
+func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]string {
+	return map[string]string{
+		"CI":                "true",
+		"GITHUB_ACTIONS":    "true",
+		"GITHUB_ACTOR":      job.Event.Actor,
+		"GITHUB_EVENT_NAME": job.Event.Name,
+		"GITHUB_JOB":        job.Workflow.LogicalJobID,
+		"GITHUB_REF":        job.Event.Ref,
+		"GITHUB_REPOSITORY": job.Event.Repository,
+		"GITHUB_SHA":        job.Event.SHA,
+		"GITHUB_WORKSPACE":  workspace,
+		"RUNNER_OS":         "Linux",
+		"RUNNER_TEMP":       runnerTemp,
+	}
+}
+
+func mergeStepEnvironment(base map[string]string, overlays ...map[string]string) map[string]string {
+	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
+	for name, value := range base {
+		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
+			out[name] = value
+		}
+	}
+	return out
 }
 
 func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context) (Result, *registeredPost, error) {
@@ -154,14 +336,20 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		if err != nil {
 			return result, nil, err
 		}
-		shell := step.Shell
+		shell, err := expression.Evaluate(step.Shell, eval)
+		if err != nil {
+			return result, nil, err
+		}
 		if shell == "" {
 			shell = job.DefaultShell
 		}
 		if shell == "" {
 			shell = "bash"
 		}
-		workingDirectory := step.WorkingDirectory
+		workingDirectory, err := expression.Evaluate(step.WorkingDirectory, eval)
+		if err != nil {
+			return result, nil, err
+		}
 		if workingDirectory == "" {
 			workingDirectory = job.DefaultWorkingDirectory
 		}
@@ -173,14 +361,16 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		if err != nil {
 			return result, nil, err
 		}
-		runEnv := mergeStringMaps(jobEnv, stepEnv)
-		runEnv["GITHUB_WORKSPACE"] = workspace
+		runEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		err = r.runProcess(ctx, processor, dir, runEnv, &result, nil, args[0], args[1:]...)
 		return result, nil, err
 	}
 
 	if !strings.HasPrefix(step.Uses, "./") {
 		return result, nil, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
+	}
+	if err := VerifyWorkflow(job, workspace); err != nil {
+		return result, nil, err
 	}
 	action, err := metadata.Load(workspace, step.Uses)
 	if err != nil {
@@ -213,8 +403,7 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		if err != nil {
 			return result, nil, err
 		}
-		actionEnv := mergeStringMaps(jobEnv, stepEnv)
-		actionEnv["GITHUB_WORKSPACE"] = workspace
+		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv}
 		state := map[string]string{}
 		post := postFor(javascript, state, node)
@@ -244,7 +433,7 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		if err != nil {
 			return result, nil, err
 		}
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStringMaps(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
+		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
 		return result, nil, err
 	}
 	return result, nil, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
@@ -281,8 +470,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			return result, err
 		}
 		stepResult := newResult()
-		runEnv := mergeStringMaps(jobEnv, result.Env, stepEnv, env, actionInputEnv(inputs), map[string]string{"GITHUB_ACTION_PATH": actionPath})
-		runEnv["GITHUB_WORKSPACE"] = workspace
+		runEnv := mergeStepEnvironment(jobEnv, result.Env, stepEnv, env, actionInputEnv(inputs), map[string]string{"GITHUB_ACTION_PATH": actionPath})
 		if err := r.runProcess(ctx, processor, dir, runEnv, &stepResult, nil, args[0], args[1:]...); err != nil {
 			return result, err
 		}
@@ -358,6 +546,14 @@ func needOutputs(needs map[string]plan.Need) map[string]map[string]string {
 		outputs[name] = need.Outputs
 	}
 	return outputs
+}
+
+func needResults(needs map[string]plan.Need) map[string]string {
+	results := make(map[string]string, len(needs))
+	for name, need := range needs {
+		results[name] = need.Result
+	}
+	return results
 }
 
 func shellCommand(shell, script string) ([]string, error) {

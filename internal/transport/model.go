@@ -16,7 +16,11 @@ import (
 )
 
 const (
-	ResultManifestSchema = "buildkite-gha/result-manifest/v1"
+	ResultManifestSchema   = "buildkite-gha/result-manifest/v1"
+	MaxResultOutputs       = 64
+	MaxResultOutputBytes   = 1024
+	MaxResultManifestBytes = 96 * 1024
+	MaxResultProducers     = 256
 )
 
 var (
@@ -156,6 +160,15 @@ type Producer struct {
 	StepKey string `json:"step_key"`
 }
 
+// Validate rejects incomplete or malformed Buildkite producer identity before
+// a job runs and becomes responsible for publishing a terminal result.
+func (p Producer) Validate() error {
+	if !uuidPattern.MatchString(p.BuildID) || !uuidPattern.MatchString(p.JobID) || !keyPattern.MatchString(p.StepKey) {
+		return errors.New("invalid result producer identity")
+	}
+	return nil
+}
+
 // ResultManifest is authoritative; metadata only mirrors its bounded values.
 type ResultManifest struct {
 	Schema     string   `json:"schema"`
@@ -168,7 +181,11 @@ type ResultManifest struct {
 // MarshalResultManifest sorts outputs and returns stable canonical bytes.
 func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	manifest.Schema = ResultManifestSchema
-	if !digestPattern.MatchString(manifest.PlanDigest) || !keyPattern.MatchString(manifest.Producer.StepKey) || !uuidPattern.MatchString(manifest.Producer.BuildID) || !uuidPattern.MatchString(manifest.Producer.JobID) {
+	manifest.Outputs = append([]Output(nil), manifest.Outputs...)
+	if manifest.Outputs == nil {
+		manifest.Outputs = []Output{}
+	}
+	if !digestPattern.MatchString(manifest.PlanDigest) || manifest.Producer.Validate() != nil {
 		return nil, errors.New("invalid result manifest identity")
 	}
 	switch manifest.Result {
@@ -176,24 +193,40 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("invalid logical result %q", manifest.Result)
 	}
-	if len(manifest.Outputs) > 64 {
-		return nil, fmt.Errorf("result manifest has %d outputs, maximum is 64", len(manifest.Outputs))
+	if len(manifest.Outputs) > MaxResultOutputs {
+		return nil, fmt.Errorf("result manifest has %d outputs, maximum is %d", len(manifest.Outputs), MaxResultOutputs)
 	}
 	sort.Slice(manifest.Outputs, func(i, j int) bool { return manifest.Outputs[i].Name < manifest.Outputs[j].Name })
-	for i, output := range manifest.Outputs {
-		if !keyPattern.MatchString(output.Name) || len(output.Value) > 1024 {
+	outputNames := make(map[string]struct{}, len(manifest.Outputs))
+	for _, output := range manifest.Outputs {
+		if !keyPattern.MatchString(output.Name) || len(output.Value) > MaxResultOutputBytes {
 			return nil, fmt.Errorf("invalid or oversized output %q", output.Name)
 		}
-		if i > 0 && manifest.Outputs[i-1].Name == output.Name {
+		name := strings.ToLower(output.Name)
+		if _, exists := outputNames[name]; exists {
 			return nil, fmt.Errorf("duplicate output %q", output.Name)
 		}
+		outputNames[name] = struct{}{}
 	}
-	return json.Marshal(manifest)
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(manifest); err != nil {
+		return nil, fmt.Errorf("encode result manifest: %w", err)
+	}
+	encoded := bytes.TrimSuffix(out.Bytes(), []byte("\n"))
+	if len(encoded) > MaxResultManifestBytes {
+		return nil, fmt.Errorf("result manifest is %d bytes, maximum is %d", len(encoded), MaxResultManifestBytes)
+	}
+	return encoded, nil
 }
 
 // VerifyResultManifest checks both the signed-plan identity and exact artifact
 // producer selected by the downloader.
 func VerifyResultManifest(data []byte, expectedPlan string, expected Producer) (ResultManifest, error) {
+	if len(data) > MaxResultManifestBytes {
+		return ResultManifest{}, fmt.Errorf("result manifest is %d bytes, maximum is %d", len(data), MaxResultManifestBytes)
+	}
 	var manifest ResultManifest
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -227,13 +260,14 @@ func ResultMetadata(workflow, instance string, manifest ResultManifest, manifest
 	if !keyPattern.MatchString(workflow) || !keyPattern.MatchString(instance) {
 		return nil, errors.New("invalid result metadata namespace")
 	}
-	prefix := fmt.Sprintf("buildkite-gha/v1/%s/%s", workflow, instance)
+	resultPrefix := fmt.Sprintf("buildkite-gha/v1/results/%s/%s", workflow, instance)
+	outputPrefix := fmt.Sprintf("buildkite-gha/v1/outputs/%s/%s", workflow, instance)
 	values := map[string]string{
-		prefix + "/result":          manifest.Result,
-		prefix + "/manifest-digest": Digest(manifestBytes),
+		resultPrefix:                      manifest.Result,
+		resultPrefix + "/manifest-digest": Digest(manifestBytes),
 	}
 	for _, output := range manifest.Outputs {
-		values[prefix+"/outputs/"+output.Name] = output.Value
+		values[outputPrefix+"/"+output.Name] = output.Value
 	}
 	return values, nil
 }

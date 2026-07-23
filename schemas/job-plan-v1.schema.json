@@ -41,7 +41,11 @@
       "properties": {
         "provider": {"enum": ["github", "cursor-origin"]},
         "name": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "maxLength": 128},
-        "payload_digest": {"$ref": "#/$defs/digest"}
+        "payload_digest": {"$ref": "#/$defs/digest"},
+        "repository": {"type": "string", "maxLength": 512},
+        "ref": {"type": "string", "maxLength": 1024},
+        "sha": {"type": "string", "maxLength": 128},
+        "actor": {"type": "string", "maxLength": 256}
       }
     },
     "target": {
@@ -59,6 +63,12 @@
       "items": {"$ref": "#/$defs/capability"},
       "maxItems": 16
     },
+    "required_secrets": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+      "uniqueItems": true,
+      "maxItems": 128
+    },
     "matrix": {"type": "object"},
     "vars": {"$ref": "#/$defs/stringMap"},
     "dependencies": {
@@ -66,19 +76,19 @@
       "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,255}$"},
       "uniqueItems": true
     },
-    "needs": {
+    "need_sources": {
       "type": "object",
       "additionalProperties": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["result"],
-        "properties": {
-          "result": {"type": "string"},
-          "outputs": {"$ref": "#/$defs/stringMap"}
-        }
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 256,
+        "uniqueItems": true,
+        "items": {"$ref": "#/$defs/needSource"}
       }
     },
     "env": {"$ref": "#/$defs/stringMap"},
+    "condition": {"type": "string", "maxLength": 65536},
+    "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
     "default_shell": {"type": "string"},
     "default_working_directory": {"type": "string"},
     "outputs": {"$ref": "#/$defs/stringMap"},
@@ -96,6 +106,15 @@
       "enum": ["network", "docker", "privileged-container", "secrets", "provider-token-read", "provider-token-write"]
     },
     "stringMap": {"type": "object", "additionalProperties": {"type": "string"}},
+    "needSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_key", "plan_digest"],
+      "properties": {
+        "step_key": {"$ref": "#/$defs/buildkiteName"},
+        "plan_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
     "position": {
       "type": "object",
       "additionalProperties": false,
@@ -128,6 +147,9 @@
         "working_directory": {"type": "string"},
         "env": {"$ref": "#/$defs/stringMap"},
         "with": {"$ref": "#/$defs/stringMap"},
+        "condition": {"type": "string", "maxLength": 65536},
+        "continue_on_error": {"type": "boolean"},
+        "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
         "source": {"$ref": "#/$defs/span"}
       },
       "allOf": [

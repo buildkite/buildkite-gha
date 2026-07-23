@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,8 @@ const (
 	schema             = "buildkite-gha/compiler-ir/v0"
 	maxMatrixInstances = 256
 )
+
+var secretReferencePattern = regexp.MustCompile(`(?i)\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 
 // Event is the explicit provider event snapshot supplied to compilation.
 type Event struct {
@@ -84,6 +87,8 @@ type JobInstance struct {
 	MaxParallel             *int              `json:"max_parallel,omitempty"`
 	Steps                   []workflow.Step   `json:"steps"`
 	Env                     map[string]string `json:"env,omitempty"`
+	If                      string            `json:"if,omitempty"`
+	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
@@ -197,6 +202,11 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 	}
 	eventDigest := sha256.Sum256(payload)
 	plans := make([]plan.Job, 0, len(ir.Jobs))
+	planDigests := make(map[string]string, len(ir.Jobs))
+	logicalByKey := make(map[string]string, len(ir.Jobs))
+	for _, instance := range ir.Jobs {
+		logicalByKey[instance.Key] = instance.LogicalJobID
+	}
 	for _, instance := range ir.Jobs {
 		steps := make([]plan.Step, len(instance.Steps))
 		usedIDs := make(map[string]struct{}, len(instance.Steps))
@@ -221,12 +231,31 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			steps[i] = plan.Step{
 				ID: id, Name: step.Name, Kind: step.Kind, Command: step.Run, Uses: step.Uses,
 				Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
-				Env: cloneMap(step.Env), With: cloneMap(step.With), Source: &span,
+				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
+				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
 			}
 		}
 		capabilities, err := requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
 		if err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		}
+		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
+		for _, logicalNeed := range instance.LogicalNeeds {
+			for _, dependency := range instance.Needs {
+				if logicalByKey[dependency] != logicalNeed {
+					continue
+				}
+				digest, ok := planDigests[dependency]
+				if !ok {
+					return nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+				}
+				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
+			}
+		}
+		secrets := requiredSecrets(instance)
+		if len(secrets) != 0 {
+			capabilities = append(capabilities, "secrets")
+			sort.Strings(capabilities)
 		}
 		job := plan.Job{
 			Schema: plan.Schema,
@@ -240,13 +269,19 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			},
 			Event: plan.Event{
 				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
+				Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
+				Ref:        ir.Event.Ref, SHA: ir.Event.SHA, Actor: ir.Event.Actor,
 			},
 			Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 			RequiredCapabilities:    capabilities,
+			RequiredSecrets:         secrets,
 			Matrix:                  instance.Matrix,
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
+			NeedSources:             needSources,
 			Env:                     instance.Env,
+			Condition:               instance.If,
+			TimeoutMinutes:          instance.TimeoutMinutes,
 			DefaultShell:            instance.DefaultShell,
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
 			Outputs:                 instance.Outputs,
@@ -255,9 +290,50 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 		if err := job.Validate(); err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
+		encoded, err := plan.Encode(job)
+		if err != nil {
+			return nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
+		}
+		digest := sha256.Sum256(encoded)
+		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
 		plans = append(plans, job)
 	}
 	return plans, nil
+}
+
+func requiredSecrets(instance JobInstance) []string {
+	found := map[string]string{}
+	collect := func(value string) {
+		for _, match := range secretReferencePattern.FindAllStringSubmatch(value, -1) {
+			name := strings.ToUpper(match[1])
+			found[name] = name
+		}
+	}
+	collect(instance.If)
+	collect(instance.DefaultShell)
+	collect(instance.DefaultWorkingDirectory)
+	for _, value := range instance.Env {
+		collect(value)
+	}
+	for _, value := range instance.Outputs {
+		collect(value)
+	}
+	for _, step := range instance.Steps {
+		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
+			collect(value)
+		}
+		for _, values := range []map[string]string{step.Env, step.With} {
+			for _, value := range values {
+				collect(value)
+			}
+		}
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func planSpan(span workflow.Span) plan.Span {
@@ -418,6 +494,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), job.Steps...),
 				Env:                     cloneMap(job.Env),
+				If:                      job.If,
+				TimeoutMinutes:          job.TimeoutMinutes,
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 				Outputs:                 cloneMap(job.Outputs),
@@ -458,15 +536,6 @@ func supported(path string, job workflow.Job) error {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
 			}
 			ids[id] = struct{}{}
-		}
-		if step.If != "" {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step conditions are unsupported in the Phase 0 runtime")
-		}
-		if step.ContinueOnError {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "continue-on-error is unsupported in the Phase 0 runtime")
-		}
-		if step.TimeoutMinutes != 0 {
-			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "step timeouts are unsupported in the Phase 0 runtime")
 		}
 	}
 	return nil

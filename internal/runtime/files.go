@@ -22,6 +22,7 @@ type commandFiles struct {
 	env     string
 	state   string
 	summary string
+	path    string
 }
 
 func newCommandFiles() (commandFiles, error) {
@@ -35,8 +36,9 @@ func newCommandFiles() (commandFiles, error) {
 		env:     filepath.Join(dir, "env"),
 		state:   filepath.Join(dir, "state"),
 		summary: filepath.Join(dir, "summary"),
+		path:    filepath.Join(dir, "path"),
 	}
-	for _, path := range []string{files.output, files.env, files.state, files.summary} {
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
 		if err := os.WriteFile(path, nil, 0o600); err != nil {
 			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), os.RemoveAll(dir))
 		}
@@ -52,8 +54,9 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 	env, envErr := parseCommandFile(files.env)
 	states, stateErr := parseCommandFile(files.state)
 	summary, summaryErr := readBoundedFile(files.summary, maxCommandFileBytes)
-	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil {
-		return errors.Join(outputErr, envErr, stateErr, summaryErr)
+	paths, pathErr := parsePathFile(files.path)
+	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
+		return errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
 	for name := range env {
 		if strings.EqualFold(name, "NODE_OPTIONS") {
@@ -77,12 +80,13 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 		}
 	}
 	result.Summary += string(summary)
+	result.Paths = append(result.Paths, paths...)
 	return nil
 }
 
 func (files commandFiles) checkSizeBudget() error {
 	var total int64
-	for _, path := range []string{files.output, files.env, files.state, files.summary} {
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
 		info, err := os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("stat file command %s: %w", filepath.Base(path), err)
@@ -96,6 +100,24 @@ func (files commandFiles) checkSizeBudget() error {
 		return fmt.Errorf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
 	}
 	return nil
+}
+
+func parsePathFile(path string) ([]string, error) {
+	contents, err := readBoundedFile(path, maxCommandFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(contents), "\r\n", "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		paths = append(paths, line)
+		if len(paths) > maxCommandEntries {
+			return nil, fmt.Errorf("file command path exceeds the %d-entry limit", maxCommandEntries)
+		}
+	}
+	return paths, nil
 }
 
 func readBoundedFile(path string, limit int64) ([]byte, error) {
