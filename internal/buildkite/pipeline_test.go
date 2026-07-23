@@ -421,10 +421,11 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 	}
 	var upload struct {
 		Steps []struct {
-			Key       string `yaml:"key"`
-			Command   string `yaml:"command"`
-			DependsOn string `yaml:"depends_on"`
-			Agents    struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+			Agents                 struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 		} `yaml:"steps"`
@@ -436,7 +437,7 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		t.Fatalf("Phase 4 upload proof = %#v", upload.Steps)
 	}
 	loader := upload.Steps[1]
-	if loader.Key != "phase-4-continuation-loader" || loader.DependsOn != "phase-4-upload-importer" || loader.Agents.Queue != "elastic-runners" || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-4-upload-continuation.yml" {
+	if loader.Key != "phase-4-continuation-loader" || loader.DependsOn != "phase-4-upload-importer" || !loader.AllowDependencyFailure || loader.Agents.Queue != "elastic-runners" || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-4-upload-continuation.yml" {
 		t.Fatalf("Phase 4 continuation loader = %#v", loader)
 	}
 	continuationSource, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-4-upload-continuation.yml"))
