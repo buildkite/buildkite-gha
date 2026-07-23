@@ -3,6 +3,7 @@ package workflow
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -16,6 +17,7 @@ type stepConcurrency struct {
 	Kind       string
 	Background bool
 	Targets    []string
+	Parallel   []Step
 }
 
 type expectedActionlintDiagnostic struct {
@@ -230,6 +232,24 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		control, hasConcurrency := concurrency[stepPosition]
 		if hasConcurrency {
 			delete(concurrency, stepPosition)
+		}
+		if control.Kind == "parallel" {
+			targets := make([]string, 0, len(control.Parallel))
+			for i, member := range control.Parallel {
+				if member.ID == "" {
+					member.ID = parallelStepID(stepPosition, i+1)
+				}
+				member.Background = true
+				targets = append(targets, member.ID)
+				out.Steps = append(out.Steps, member)
+				out.Span.End = member.Span.End
+			}
+			barrierSpan := pointSpan(step.Pos)
+			barrierSpan.End = out.Span.End
+			barrier := Step{ID: parallelBarrierID(stepPosition), Kind: "wait", Targets: targets, Span: barrierSpan}
+			out.Steps = append(out.Steps, barrier)
+			out.Span.End = barrier.Span.End
+			continue
 		}
 		owned := Step{Background: control.Background, Targets: append([]string(nil), control.Targets...), Span: pointSpan(step.Pos)}
 		if step.ID != nil {
@@ -564,7 +584,23 @@ func parseStepConcurrency(path string, step *yaml.Node) (stepConcurrency, expect
 
 	kind := controlKinds[0]
 	if kind == "parallel" {
-		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "parallel steps are not yet supported by the Phase 3 runtime")
+		if len(entries) != 1 {
+			names := make([]string, 0, len(entries))
+			for name := range entries {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if name != kind {
+					return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, mappingKey(step, name), fmt.Sprintf("parallel control does not support %q", name))
+				}
+			}
+		}
+		members, err := parseParallelSteps(path, entries[kind])
+		if err != nil {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, err
+		}
+		return stepConcurrency{Kind: kind, Parallel: members}, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
 	}
 	allowed := map[string]bool{"name": true, kind: true}
 	if kind == "wait" || kind == "wait-all" {
@@ -595,6 +631,206 @@ func parseStepConcurrency(path string, step *yaml.Node) (stepConcurrency, expect
 		control.Targets = targets
 	}
 	return control, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
+}
+
+func parseParallelSteps(path string, node *yaml.Node) ([]Step, error) {
+	if node.Kind != yaml.SequenceNode || len(node.Content) == 0 {
+		return nil, yamlNodeError(path, node, "parallel requires a non-empty list of run or uses steps")
+	}
+	steps := make([]Step, 0, len(node.Content))
+	for _, child := range node.Content {
+		step, err := parseParallelStep(path, child)
+		if err != nil {
+			return nil, err
+		}
+		steps = append(steps, step)
+	}
+	return steps, nil
+}
+
+func parseParallelStep(path string, node *yaml.Node) (Step, error) {
+	if node.Kind != yaml.MappingNode {
+		return Step{}, yamlNodeError(path, node, "parallel member must be a run or uses step")
+	}
+	entries := mappingEntries(node)
+	allowed := map[string]bool{
+		"id": true, "name": true, "run": true, "uses": true, "shell": true, "working-directory": true,
+		"env": true, "with": true, "if": true, "continue-on-error": true, "timeout-minutes": true,
+	}
+	for name := range entries {
+		if !allowed[name] {
+			return Step{}, yamlNodeError(path, mappingKey(node, name), fmt.Sprintf("parallel member does not support %q", name))
+		}
+	}
+	run, hasRun := entries["run"]
+	uses, hasUses := entries["uses"]
+	if hasRun == hasUses {
+		return Step{}, yamlNodeError(path, node, "parallel member must declare exactly one of run or uses")
+	}
+	if err := validateParallelStepSyntax(path, node); err != nil {
+		return Step{}, err
+	}
+	execution := run
+	if hasUses {
+		execution = uses
+	}
+	if execution.Kind != yaml.ScalarNode || execution.ShortTag() == "!!null" || strings.TrimSpace(execution.Value) == "" {
+		return Step{}, yamlNodeError(path, execution, "parallel member execution must be a non-empty scalar")
+	}
+	step := Step{Span: yamlStepSpan(node, execution)}
+	var err error
+	if step.ID, err = optionalString(entries["id"]); err != nil {
+		return Step{}, yamlNodeError(path, entries["id"], "parallel member id must be a string")
+	}
+	if step.Name, err = optionalScalar(entries["name"]); err != nil {
+		return Step{}, yamlNodeError(path, entries["name"], "parallel member name must be a scalar")
+	}
+	if step.If, err = optionalScalar(entries["if"]); err != nil {
+		return Step{}, yamlNodeError(path, entries["if"], "parallel member if must be a scalar")
+	}
+	if step.Env, err = scalarMap(entries["env"]); err != nil {
+		return Step{}, yamlNodeError(path, entries["env"], "parallel member env must be a scalar mapping")
+	}
+	if value := entries["continue-on-error"]; value != nil {
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!bool" {
+			return Step{}, yamlNodeError(path, value, "parallel member continue-on-error must be a literal boolean")
+		}
+		if err := value.Decode(&step.ContinueOnError); err != nil {
+			return Step{}, yamlNodeError(path, value, "parallel member continue-on-error must be a literal boolean")
+		}
+	}
+	if value := entries["timeout-minutes"]; value != nil {
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" && value.ShortTag() != "!!float" {
+			return Step{}, yamlNodeError(path, value, "parallel member timeout-minutes must be a literal number")
+		}
+		step.TimeoutMinutes, err = strconv.ParseFloat(value.Value, 64)
+		if err != nil {
+			return Step{}, yamlNodeError(path, value, "parallel member timeout-minutes must be a literal number")
+		}
+	}
+	if hasRun {
+		if entries["with"] != nil {
+			return Step{}, yamlNodeError(path, mappingKey(node, "with"), "parallel run member does not support with")
+		}
+		step.Kind = "run"
+		step.Run = run.Value
+		if step.Shell, err = optionalScalar(entries["shell"]); err != nil {
+			return Step{}, yamlNodeError(path, entries["shell"], "parallel member shell must be a scalar")
+		}
+		if step.WorkingDirectory, err = optionalScalar(entries["working-directory"]); err != nil {
+			return Step{}, yamlNodeError(path, entries["working-directory"], "parallel member working-directory must be a scalar")
+		}
+		return step, nil
+	}
+	if entries["shell"] != nil || entries["working-directory"] != nil {
+		return Step{}, yamlNodeError(path, node, "parallel uses member cannot declare shell or working-directory")
+	}
+	step.Kind = "uses"
+	step.Uses = uses.Value
+	if step.With, err = scalarMap(entries["with"]); err != nil {
+		return Step{}, yamlNodeError(path, entries["with"], "parallel member with must be a scalar mapping")
+	}
+	for name, value := range step.With {
+		lower := strings.ToLower(name)
+		if lower != name {
+			delete(step.With, name)
+			step.With[lower] = value
+		}
+	}
+	_, hasEntrypoint := step.With["entrypoint"]
+	_, hasArgs := step.With["args"]
+	if strings.HasPrefix(strings.ToLower(step.Uses), "docker://") && (hasEntrypoint || hasArgs) {
+		return Step{}, yamlNodeError(path, entries["with"], "parallel docker action member uses unsupported entrypoint or args overrides")
+	}
+	return step, nil
+}
+
+func validateParallelStepSyntax(path string, step *yaml.Node) error {
+	stringNode := func(value string) *yaml.Node {
+		return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+	}
+	mappingNode := func(content ...*yaml.Node) *yaml.Node {
+		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: content}
+	}
+	document := yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{
+		mappingNode(
+			stringNode("on"), stringNode("push"),
+			stringNode("jobs"), mappingNode(
+				stringNode("parallel"), mappingNode(
+					stringNode("runs-on"), stringNode("ubuntu-latest"),
+					stringNode("steps"), &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{step}},
+				),
+			),
+		),
+	}}
+	source, err := yaml.Marshal(&document)
+	if err != nil {
+		return yamlNodeError(path, step, fmt.Sprintf("validate parallel member: %v", err))
+	}
+	_, errs := actionlint.Parse(source)
+	if len(errs) != 0 {
+		return yamlNodeError(path, step, fmt.Sprintf("invalid parallel member: %s", errs[0].Message))
+	}
+	return nil
+}
+
+func optionalString(node *yaml.Node) (string, error) {
+	if node == nil {
+		return "", nil
+	}
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!str" || node.Value == "" {
+		return "", fmt.Errorf("value is not a string")
+	}
+	return node.Value, nil
+}
+
+func optionalScalar(node *yaml.Node) (string, error) {
+	if node == nil {
+		return "", nil
+	}
+	if node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" {
+		return "", fmt.Errorf("value is not a scalar")
+	}
+	return node.Value, nil
+}
+
+func scalarMap(node *yaml.Node) (map[string]string, error) {
+	if node == nil {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("value is not a mapping")
+	}
+	values := make(map[string]string, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key, value := node.Content[i], node.Content[i+1]
+		if key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" || key.Value == "" || value.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("mapping contains a non-scalar entry")
+		}
+		values[key.Value] = value.Value
+	}
+	return values, nil
+}
+
+func parallelStepID(position Position, member int) string {
+	return fmt.Sprintf("__parallel_%d_%d_%d", position.Line, position.Column, member)
+}
+
+func parallelBarrierID(position Position) string {
+	return fmt.Sprintf("__parallel_%d_%d_wait", position.Line, position.Column)
+}
+
+func yamlStepSpan(step, execution *yaml.Node) Span {
+	span := Span{Start: nodePosition(step), End: nodePosition(execution)}
+	for _, r := range execution.Value {
+		if r == '\n' {
+			span.End.Line++
+			span.End.Column = 1
+		} else {
+			span.End.Column++
+		}
+	}
+	return span
 }
 
 func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected []expectedActionlintDiagnostic) error {

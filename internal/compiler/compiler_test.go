@@ -844,6 +844,12 @@ jobs:
         continue-on-error: true
       - wait-all:
       - cancel: first
+      - parallel:
+          - run: echo ${{ secrets.PARALLEL_TOKEN }}
+            env:
+              PARALLEL_SECRET: ${{ secrets.PARALLEL_TOKEN }}
+          - id: named-parallel
+            run: echo named
 `)
 	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
@@ -853,7 +859,7 @@ jobs:
 		t.Fatalf("plans = %#v, want one v2 plan", plans)
 	}
 	steps := plans[0].Steps
-	if len(steps) != 5 || !steps[0].Background || !steps[1].Background {
+	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
 		t.Fatalf("background plan steps = %#v", steps)
 	}
 	if steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || !steps[2].ContinueOnError {
@@ -861,6 +867,15 @@ jobs:
 	}
 	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
 		t.Fatalf("plan controls = %#v", steps[3:])
+	}
+	if !steps[5].Background || !steps[6].Background || steps[5].ID == "" || steps[6].ID != "named-parallel" {
+		t.Fatalf("lowered parallel members = %#v", steps[5:7])
+	}
+	if steps[7].Kind != "wait" || !reflect.DeepEqual(steps[7].Targets, []string{steps[5].ID, "named-parallel"}) {
+		t.Fatalf("lowered parallel barrier = %#v", steps[7])
+	}
+	if !reflect.DeepEqual(plans[0].RequiredSecrets, []string{"PARALLEL_TOKEN"}) || !plans[0].HasCapability("secrets") {
+		t.Fatalf("parallel secrets = %#v, capabilities = %#v", plans[0].RequiredSecrets, plans[0].RequiredCapabilities)
 	}
 }
 
