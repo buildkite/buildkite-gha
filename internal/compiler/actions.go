@@ -174,6 +174,7 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
+	b.caps["network"] = true
 	return key, lock, materialized.RepositoryRoot, ref.Path, nil
 }
 

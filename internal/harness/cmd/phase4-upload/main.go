@@ -181,7 +181,7 @@ func deterministicGzip(source []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	w.Header.OS = 255
+	w.OS = 255
 	if _, err := w.Write(source); err != nil {
 		return nil, err
 	}

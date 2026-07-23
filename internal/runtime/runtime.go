@@ -33,6 +33,7 @@ type Runner struct {
 	Node24          string
 	ManagedNodeRoot string
 	Docker          string
+	Git             string
 	CleanupTimeout  time.Duration
 	InterruptGrace  time.Duration
 	TerminateGrace  time.Duration

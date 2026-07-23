@@ -275,7 +275,7 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 	if err != nil {
 		return fmt.Errorf("GitHub API request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	lr := io.LimitReader(resp.Body, 1<<20+1)
 	body, err := io.ReadAll(lr)
 	if err != nil {
@@ -381,7 +381,7 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err != nil {
 		return Materialized{}, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	if err = s.downloadExtract(ctx, resolved, filepath.Join(tmp, "tree")); err != nil {
 		return Materialized{}, err
 	}
@@ -454,7 +454,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	if e != nil {
 		return fmt.Errorf("download archive: %w", e)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if !validArchiveURL(resp.Request.URL, s.cfg.finalHosts) {
 		return fmt.Errorf("archive final URL denied")
 	}
@@ -574,11 +574,15 @@ func buildManifestFiles(root string, c config, ref Reference, commit string, exc
 		}
 		h := sha256.New()
 		_, e = io.Copy(h, f)
-		f.Close()
+		_ = f.Close()
 		if e != nil {
 			return e
 		}
-		m.Files = append(m.Files, manifestFile{Path: rel, Size: st.Size(), SHA256: hex.EncodeToString(h.Sum(nil)), Mode: uint32(st.Mode().Perm() & 0o777)})
+		mode := uint32(0o644)
+		if st.Mode().Perm()&0o111 != 0 {
+			mode = 0o755
+		}
+		m.Files = append(m.Files, manifestFile{Path: rel, Size: st.Size(), SHA256: hex.EncodeToString(h.Sum(nil)), Mode: mode})
 		return nil
 	})
 	if err != nil {
@@ -629,7 +633,8 @@ func extractTar(r io.Reader, dst string, c config) error {
 			return fmt.Errorf("read archive: %w", e)
 		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
-			if h.Xattrs != nil || !benignPAX(h.PAXRecords) {
+			// archive/tar still exposes legacy xattrs separately from PAX records.
+			if h.Xattrs != nil || !benignPAX(h.PAXRecords) { //nolint:staticcheck
 				return fmt.Errorf("archive extended metadata is not allowed")
 			}
 			continue
@@ -640,7 +645,9 @@ func extractTar(r io.Reader, dst string, c config) error {
 		}
 		// A PAX linkpath is resolved by archive/tar into Linkname and may be
 		// removed from PAXRecords, so reject it independently for every type.
-		if h.Xattrs != nil || h.Linkname != "" || !benignPAX(h.PAXRecords) {
+		// Check the deprecated field because callers can construct Header values
+		// with legacy xattrs that are not represented in PAXRecords.
+		if h.Xattrs != nil || h.Linkname != "" || !benignPAX(h.PAXRecords) { //nolint:staticcheck
 			return fmt.Errorf("archive extended metadata is not allowed")
 		}
 		name := h.Name
@@ -677,7 +684,7 @@ func extractTar(r io.Reader, dst string, c config) error {
 		switch h.Typeflag {
 		case tar.TypeDir:
 			e = os.MkdirAll(out, os.FileMode(h.Mode)&0o777|0o700)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, tar.TypeRegA: //nolint:staticcheck // TypeRegA remains valid input for legacy tar archives.
 			if h.Size < 0 || h.Size > c.maxFile || total+h.Size > c.maxExpanded {
 				return fmt.Errorf("archive size exceeds limit")
 			}

@@ -250,6 +250,14 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 		var actions []plan.ActionLock
 		var capabilities []string
 		if ir.Event.Trust == EventTrusted && len(actionRefs) != 0 {
+			for _, i := range actionIndexes {
+				if strings.HasPrefix(strings.ToLower(instance.Steps[i].Uses), "actions/checkout@") {
+					if err := validateCheckoutInputs(instance.Steps[i].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
+						span := instance.Steps[i].Span.Start
+						return nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+					}
+				}
+			}
 			selectors, locks, actionCapabilities, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
 			if err != nil {
 				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -331,6 +339,48 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 		plans = append(plans, job)
 	}
 	return plans, nil
+}
+
+func validateCheckoutInputs(inputs map[string]string, repository, sha string) error {
+	names := make([]string, 0, len(inputs))
+	for name := range inputs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		value := inputs[name]
+		normalized := strings.ToLower(name)
+		if seen[normalized] {
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+		}
+		seen[normalized] = true
+		switch normalized {
+		case "repository":
+			if !strings.EqualFold(value, repository) {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "ref":
+			if value != sha {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "persist-credentials":
+			if value != "false" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "fetch-depth":
+			if value != "1" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "clean", "set-safe-directory":
+			if value != "true" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		default:
+			return fmt.Errorf("explicit input %q is unsupported (including empty values); Phase 6 is required", name)
+		}
+	}
+	return nil
 }
 
 func requiredSecrets(instance JobInstance) ([]string, error) {

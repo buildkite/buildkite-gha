@@ -72,7 +72,7 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	writeAction(t, repo, "nested")
 	digest := digestTree(t, repo)
 	commit := strings.Repeat("a", 40)
-	job := plan.Job{Actions: []plan.ActionLock{{ID: "lock", Source: "github", Repository: "owner/repo", RequestedRef: "do-not-use", Commit: commit, Path: "nested", SourceDigest: digest}}}
+	job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{{ID: "lock", Source: "github", Repository: "owner/repo", RequestedRef: "do-not-use", Commit: commit, Path: "nested", SourceDigest: digest}}}
 	fake := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, ActionRoot: filepath.Join(repo, "wrong"), SourceDigest: digest}}
 	r := newActionLockResolver(job, "", fake)
 
@@ -176,7 +176,7 @@ runs:
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "owner/project", SHA: strings.Repeat("b", 40),
 		},
 		Target:               plan.Target{StepKey: "gha-v3", Queue: "trusted"},
-		RequiredCapabilities: []string{},
+		RequiredCapabilities: []string{"network"},
 		Steps: []plan.Step{
 			{ID: "checkout", Kind: "uses", Uses: "owner/repo@v1", Action: &plan.ActionSelector{Lock: remoteID}},
 			{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$V3_LOCAL_CHILD" = seen`},

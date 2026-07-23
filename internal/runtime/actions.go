@@ -105,6 +105,9 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 
 func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLockEntry) (metadata.Metadata, error) {
 	lock := entry.lock
+	if !r.job.HasCapability("network") {
+		return metadata.Metadata{}, fmt.Errorf("GitHub action materialization requires the plan's network capability")
+	}
 	if r.materializer == nil {
 		return metadata.Metadata{}, fmt.Errorf("GitHub action materializer is missing")
 	}

@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"go.yaml.in/yaml/v4"
 )
 
 type fakeActionSource struct {
@@ -73,7 +75,7 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(locks) != 2 || f.calls["Owner/Repo@v1"] != 1 || len(caps) != 1 || caps[0] != "docker" {
+	if len(locks) != 2 || f.calls["Owner/Repo@v1"] != 1 || !reflect.DeepEqual(caps, []string{"docker", "network"}) {
 		t.Fatalf("unexpected result: %#v calls=%v caps=%v", locks, f.calls, caps)
 	}
 	var found bool
@@ -251,6 +253,109 @@ jobs:
 	}
 }
 
+func TestTrustedCheckoutAdapterInputBoundary(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	compile := func(with string, trust EventTrust) ([]plan.Job, error) {
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" + with)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		options := Options{
+			EventTrust: trust,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+		}
+		if trust == EventTrusted {
+			options.ActionSource = &fakeActionSource{root: remote, calls: map[string]int{}}
+		}
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase4-test", testDistributionDigest, options)
+	}
+
+	accepted := []string{
+		"",
+		"        with:\n          repository: buildkite/buildkite-gha\n          ref: 1111111111111111111111111111111111111111\n          fetch-depth: '1'\n          persist-credentials: false\n          clean: true\n          set-safe-directory: true\n",
+	}
+	for _, with := range accepted {
+		plans, err := compile(with, EventTrusted)
+		if err != nil {
+			t.Fatalf("trusted checkout with %q: %v", with, err)
+		}
+		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
+			t.Fatalf("trusted checkout plans = %#v", plans)
+		}
+	}
+
+	rejected := map[string]string{
+		"token":       "          token: ''\n",
+		"repository":  "          repository: other/repository\n",
+		"ref":         "          ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+		"ssh-key":     "          ssh-key: key\n",
+		"submodules":  "          submodules: true\n",
+		"path":        "          path: nested\n",
+		"fetch-depth": "          fetch-depth: '0'\n",
+		"credentials": "          persist-credentials: true\n",
+	}
+	for name, input := range rejected {
+		t.Run(name, func(t *testing.T) {
+			_, err := compile("        with:\n"+input, EventTrusted)
+			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "tokenless checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+			}
+		})
+	}
+
+	if plans, err := compile("        with:\n          token: ''\n", EventUntrusted); err != nil || len(plans) != 1 || plans[0].Schema != plan.SchemaV2 {
+		t.Fatalf("untrusted checkout compilation = %#v, %v", plans, err)
+	}
+}
+
+func TestPhase4ContinuationDependsOnCompiledActionsOracleTerminal(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: remote\nruns:\n  using: node24\n  main: index.js\n")
+	workflowPath := filepath.Join("..", "..", ".github", "workflows", "phase-4-actions-oracle.yml")
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, smokePath("events", "push.json")), "phase4-test", testDistributionDigest, Options{
+		EventTrust:   EventTrusted,
+		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}},
+		ActionSource: &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependedOn := make(map[string]bool)
+	for _, job := range plans {
+		for _, dependency := range job.Dependencies {
+			dependedOn[dependency] = true
+		}
+	}
+	var terminals []string
+	for _, job := range plans {
+		if !dependedOn[job.Target.StepKey] {
+			terminals = append(terminals, job.Target.StepKey)
+		}
+	}
+	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "phase-4-upload-continuation.yml"))
+	var continuation struct {
+		Steps []struct {
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(terminals) != 1 || len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != terminals[0] {
+		t.Fatalf("Phase 4 continuation dependencies = %#v, compiled actions oracle terminals = %#v", continuation.Steps, terminals)
+	}
+}
+
 func TestCompilePlansTrustedRemoteActionRequiresSource(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "remote.yml")
@@ -314,7 +419,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := source.NewStore(filepath.Join(t.TempDir(), "actions"), nil)
+	actionCache := filepath.Join(t.TempDir(), "actions")
+	store, err := source.NewStore(actionCache, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,5 +446,20 @@ jobs:
 		if want := wantCommits[lock.Repository]; lock.Commit != want || lock.SourceDigest == "" {
 			t.Fatalf("public action lock = %#v, want commit %q", lock, want)
 		}
+	}
+	checkoutRoot := filepath.Join(actionCache, "actions", "checkout", wantCommits["actions/checkout"], "tree")
+	checkout, err := metadata.Load(checkoutRoot, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token := checkout.Inputs["token"].Default; token == nil || *token != "${{ github.token }}" {
+		t.Fatalf("actions/checkout token default = %#v, want github.token", token)
+	}
+	distribution, err := os.ReadFile(filepath.Join(checkoutRoot, "dist", "index.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(distribution, []byte("getInput('token', { required: true })")) || !bytes.Contains(distribution, []byte("Input required and not supplied:")) {
+		t.Fatal("pinned actions/checkout no longer requires a token before Git; revisit the built-in tokenless adapter")
 	}
 }

@@ -80,7 +80,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
-		if capability != "docker" && capability != "secrets" {
+		if capability != "docker" && capability != "secrets" && capability != "network" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
 	}
@@ -446,6 +446,13 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		action, actionLock = resolvedAction, &lock
+		if lock.Source == "github" && lock.Repository == "actions/checkout" && lock.Path == "" {
+			inputs, err := evaluateMap(step.With, eval)
+			if err != nil {
+				return result, err
+			}
+			return r.runCheckout(ctx, processor, workspace, job, inputs)
+		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {
 			return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)

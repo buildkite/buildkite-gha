@@ -91,7 +91,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			return nil, err
 		}
 		if other, exists := runtimeDigests[digest]; exists {
-			return nil, fmt.Errorf("Node runtime majors %d and %d share digest %s", other, major, digest)
+			return nil, fmt.Errorf("node runtime majors %d and %d share digest %s", other, major, digest)
 		}
 		runtimeDigests[digest] = major
 		runtimeMajors = append(runtimeMajors, major)

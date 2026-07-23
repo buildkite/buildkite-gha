@@ -46,9 +46,9 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(r.URL.Path, "/git/ref/tags/"):
-			fmt.Fprintf(w, `{"object":{"type":"tag","sha":"%s"}}`, testSHA)
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"tag","sha":"%s"}}`, testSHA)
 		case strings.Contains(r.URL.Path, "/git/tags/"):
-			fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
 		default:
 			http.NotFound(w, r)
 		}
@@ -79,7 +79,7 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls = append(calls, r.URL.EscapedPath())
 				if strings.Contains(r.URL.Path, "/commits/") {
-					fmt.Fprintf(w, `{"sha":"%s"}`, testSHA)
+					_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, testSHA)
 					return
 				}
 				http.NotFound(w, r)
@@ -231,6 +231,29 @@ func TestDigestTreeIsCanonicalAndFailsClosed(t *testing.T) {
 	}
 	if first != second || !strings.HasPrefix(first, "sha256:") {
 		t.Fatalf("digests = %q and %q, want stable sha256 digest", first, second)
+	}
+	if err := os.Chmod(entry, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	nonExecutableMode, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonExecutableMode != first {
+		t.Fatalf("digest changed across non-executable Git modes: %q != %q", nonExecutableMode, first)
+	}
+	if err := os.Chmod(entry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	executableMode, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executableMode == first {
+		t.Fatal("digest did not change when Git executable bit changed")
+	}
+	if err := os.Chmod(entry, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(entry, []byte("console.log('two')\n"), 0o644); err != nil {
 		t.Fatal(err)
