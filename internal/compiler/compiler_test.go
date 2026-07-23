@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -1059,6 +1060,50 @@ func TestCompilePlansDerivesDockerCapability(t *testing.T) {
 	}
 	if got := plans[0].RequiredCapabilities; len(got) != 1 || got[0] != "docker" {
 		t.Fatalf("required capabilities = %#v, want [docker]", got)
+	}
+}
+
+func TestCollectNestedActionCapabilities(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, source string) {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "action.yml"), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	write("inner", "runs:\n  using: composite\n  steps:\n    - uses: ./docker\n")
+	write("outer", "runs:\n  using: composite\n  steps:\n    - uses: ./inner\n")
+	capabilities := map[string]struct{}{}
+	if err := collectActionCapabilities(root, "./outer", capabilities, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := capabilities["docker"]; !ok {
+		t.Fatalf("capabilities = %#v, want nested docker", capabilities)
+	}
+
+	write("remote", "runs:\n  using: composite\n  steps:\n    - uses: owner/action@v1\n")
+	if err := collectActionCapabilities(root, "./remote", map[string]struct{}{}, nil); err == nil || !strings.Contains(err.Error(), `nested remote action "owner/action@v1" is unsupported`) {
+		t.Fatalf("remote error = %v", err)
+	}
+	write("recursive", "runs:\n  using: composite\n  steps:\n    - uses: ./recursive\n")
+	if err := collectActionCapabilities(root, "./recursive", map[string]struct{}{}, nil); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+		t.Fatalf("recursion error = %v", err)
+	}
+
+	for i := 0; i <= metadata.MaxNestedActionDepth; i++ {
+		next := ""
+		if i < metadata.MaxNestedActionDepth {
+			next = fmt.Sprintf("  steps:\n    - uses: ./depth-%d\n", i+1)
+		}
+		write(fmt.Sprintf("depth-%d", i), "runs:\n  using: composite\n"+next)
+	}
+	if err := collectActionCapabilities(root, "./depth-0", map[string]struct{}{}, nil); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
+		t.Fatalf("depth error = %v", err)
 	}
 }
 

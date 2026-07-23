@@ -375,6 +375,10 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 }
 
 func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) (Result, error) {
+	return r.runActionStep(ctx, processor, workspace, job, step, jobEnv, eval, posts, nil)
+}
+
+func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actionStack []string) (Result, error) {
 	stepEnv, err := evaluateMap(step.Env, eval)
 	if err != nil {
 		return newResult(), err
@@ -432,6 +436,15 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
 	}
 	actionPath := action.Path
+	for _, ancestor := range actionStack {
+		if ancestor == actionPath {
+			return result, fmt.Errorf("local action recursion detected at %q", actionPath)
+		}
+	}
+	if len(actionStack) >= metadata.MaxNestedActionDepth {
+		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
+	}
+	actionStack = append(append([]string(nil), actionStack...), actionPath)
 	inputs, err := evaluateMap(step.With, eval)
 	if err != nil {
 		return result, err
@@ -473,7 +486,7 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		composite, err := r.runCompositeMetadata(ctx, processor, workspace, actionPath, action, inputs, jobEnv, stepEnv, actionEval)
+		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, jobEnv, stepEnv, actionEval, posts, actionStack)
 		return composite, err
 	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
@@ -495,40 +508,61 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {
+func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actionStack []string) (Result, error) {
 	result := newResult()
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
+	statuses := make(map[string]expression.StepStatus)
+	compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
+	compositeEnv["GITHUB_ACTION_PATH"] = actionPath
+	var runErr error
 	for i, step := range action.Runs.Steps {
-		if step.Uses != "" {
-			return result, fmt.Errorf("composite action nested uses %q is unsupported", step.Uses)
-		}
-		if step.If != "" {
-			return result, fmt.Errorf("composite action step conditions are unsupported")
-		}
-		if strings.TrimSpace(step.Run) == "" {
-			return result, fmt.Errorf("composite action step %d has no run command", i+1)
-		}
-		script, err := expression.Evaluate(step.Run, eval)
+		// GITHUB_ENV effects are visible to subsequent children. Keep this
+		// composite's invocation environment in expression contexts, while
+		// rebuilding the map so a child's declared env cannot leak to siblings.
+		eval.Env = mergeStringMaps(compositeEnv, result.Env)
+		id := strings.ToLower(step.ID)
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
+		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
-			return result, err
+			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
+			continue
 		}
-		env, err := evaluateMap(step.Env, eval)
-		if err != nil {
-			return result, err
-		}
-		dir, err := workspacePath(workspace, step.WorkingDirectory)
-		if err != nil {
-			return result, err
-		}
-		args, err := shellCommand(step.Shell, script)
-		if err != nil {
-			return result, err
+		if !run {
+			if id != "" {
+				eval.Steps[id] = map[string]string{}
+				statuses[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			}
+			continue
 		}
 		stepResult := newResult()
-		runEnv := mergeStepEnvironment(jobEnv, result.Env, stepEnv, env, actionInputEnv(inputs), map[string]string{"GITHUB_ACTION_PATH": actionPath})
-		if err := r.runProcess(ctx, processor, dir, runEnv, &stepResult, nil, args[0], args[1:]...); err != nil {
-			return result, err
+		childErr := error(nil)
+		childJobEnv := mergeStepEnvironment(compositeEnv, result.Env)
+		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
+		if step.Uses != "" {
+			// runActionStep owns template evaluation for an action invocation.
+			// Passing env (the evaluated map) here would evaluate expressions twice.
+			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
+			stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childJobEnv, eval, posts, actionStack)
+		} else if strings.TrimSpace(step.Run) == "" {
+			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
+		} else {
+			var script, dir string
+			var args []string
+			var env map[string]string
+			env, childErr = evaluateMap(step.Env, eval)
+			if childErr == nil {
+				script, childErr = expression.Evaluate(step.Run, eval)
+			}
+			if childErr == nil {
+				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
+			}
+			if childErr == nil {
+				args, childErr = shellCommand(step.Shell, script)
+			}
+			if childErr == nil {
+				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)
+			}
 		}
 		mergeInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {
@@ -539,19 +573,28 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Paths = append(result.Paths, stepResult.Paths...)
 		mergeInto(result.State, stepResult.State)
 		result.Summary += stepResult.Summary
-		if step.ID != "" {
-			eval.Steps[strings.ToLower(step.ID)] = stepResult.Outputs
+		if id != "" {
+			eval.Steps[id] = stepResult.Outputs
+			outcome := "success"
+			if childErr != nil {
+				outcome = "failure"
+			}
+			statuses[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+		}
+		if childErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
 	for _, name := range sortedKeys(action.Outputs) {
 		output := action.Outputs[name]
 		value, err := expression.Evaluate(output.Value, eval)
 		if err != nil {
-			return result, fmt.Errorf("composite output %q: %w", name, err)
+			runErr = errors.Join(runErr, fmt.Errorf("composite output %q: %w", name, err))
+			continue
 		}
 		result.Outputs[name] = value
 	}
-	return result, nil
+	return result, runErr
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {

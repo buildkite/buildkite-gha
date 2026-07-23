@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -1481,6 +1482,200 @@ runs:
 	}
 	if result.Env["COMPOSITE_ENV"] != "propagated" || result.Summary != "composite summary\n" {
 		t.Fatalf("RunJob() effects = %#v, summary = %q", result.Env, result.Summary)
+	}
+}
+
+func TestNestedCompositeEvaluatesEnvironmentOnceAndIsolatesStepScopes(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/js/action.yml", `name: Nested JavaScript
+inputs:
+  message:
+    required: true
+runs:
+  using: node24
+  main: main.js
+`)
+	writeFixtureFile(t, workspace, ".github/actions/js/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/inner/action.yml", `name: Inner
+outputs:
+  result:
+    value: ${{ steps.same.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: verify-path
+      shell: sh
+      run: test "$GITHUB_ACTION_PATH" = "$EXPECTED_INNER_PATH"
+    - id: same
+      uses: ./.github/actions/js
+      with:
+        message: nested-input
+      env:
+        VALUE: ${{ env.TEMPLATE }}
+        DYNAMIC_COPY: ${{ env.DYNAMIC }}
+        CHILD_ONLY: private
+`)
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+inputs:
+  parent-only:
+    required: true
+outputs:
+  result:
+    value: ${{ steps.nested.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: same
+      shell: sh
+      run: |
+        printf '%s\n' 'DYNAMIC=from-env-file' >> "$GITHUB_ENV"
+        printf 'TEMPLATE=$%s\n' '{{ inputs.not_evaluated }}' >> "$GITHUB_ENV"
+    - id: nested
+      uses: ./.github/actions/inner
+    - id: verify
+      shell: sh
+      run: test -z "${CHILD_ONLY:-}"
+`)
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+printf 'input=%s value=%s dynamic=%s path=%s expected=%s\n' "$INPUT_MESSAGE" "$VALUE" "$DYNAMIC_COPY" "$GITHUB_ACTION_PATH" "$EXPECTED_ACTION_PATH" >&2
+test "$INPUT_MESSAGE" = nested-input
+test -z "${INPUT_PARENT_ONLY:-}"
+test "$VALUE" = '${{ inputs.not_evaluated }}'
+test "$DYNAMIC_COPY" = from-env-file
+test "$GITHUB_ACTION_PATH" = "$EXPECTED_ACTION_PATH"
+printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", With: map[string]string{"parent-only": "private-to-parent"}}})
+	job.Env = map[string]string{
+		"EXPECTED_ACTION_PATH": filepath.Join(workspace, ".github", "actions", "js"),
+		"EXPECTED_INNER_PATH":  filepath.Join(workspace, ".github", "actions", "inner"),
+	}
+	job.Outputs = map[string]string{"result": "${{ steps.outer.outputs.result }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+	if result.Outputs["result"] != "nested-ok" {
+		t.Fatalf("result = %#v, want nested composite output chain", result.Outputs)
+	}
+}
+
+func TestNestedJavaScriptPostSharesJobLIFORegistry(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	for _, name := range []string{"top", "nested"} {
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/main.js", "")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/post.js", "")
+	}
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Nested lifecycle
+runs:
+  using: composite
+  steps:
+    - id: child
+      uses: ./.github/actions/nested
+`)
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "top", Kind: "uses", Uses: "./.github/actions/top"},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"},
+	})
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestCompositeConditionsRunAfterFailureAndPreserveFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/conditions/action.yml", `name: Conditional composite
+runs:
+  using: composite
+  steps:
+    - id: failed
+      shell: sh
+      run: exit 7
+    - id: skipped
+      shell: sh
+      run: touch "$SHOULD_NOT_RUN"
+    - id: observed
+      if: failure() && steps.failed.outcome == 'failure'
+      shell: sh
+      run: touch "$STATUS_RAN"
+    - id: cleanup
+      if: always()
+      shell: sh
+      run: touch "$ALWAYS_RAN"
+`)
+	statusRan := filepath.Join(workspace, "status-ran")
+	alwaysRan := filepath.Join(workspace, "always-ran")
+	shouldNotRun := filepath.Join(workspace, "should-not-run")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditions"}})
+	job.Env = map[string]string{"STATUS_RAN": statusRan, "ALWAYS_RAN": alwaysRan, "SHOULD_NOT_RUN": shouldNotRun}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v, want preserved composite failure", result, err)
+	}
+	for _, path := range []string{statusRan, alwaysRan} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("expected conditional child %q to run: %v", path, statErr)
+		}
+	}
+	if _, statErr := os.Stat(shouldNotRun); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("default child ran after failure: %v", statErr)
+	}
+}
+
+func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/recursive/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/recursive\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "recursive", Kind: "uses", Uses: "./.github/actions/recursive"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+		t.Fatalf("RunJob() recursion error = %v", err)
+	}
+
+	for i := 0; i <= metadata.MaxNestedActionDepth; i++ {
+		next := ""
+		if i < metadata.MaxNestedActionDepth {
+			next = fmt.Sprintf("  steps:\n    - uses: ./.github/actions/depth-%d\n", i+1)
+		}
+		writeFixtureFile(t, workspace, fmt.Sprintf(".github/actions/depth-%d/action.yml", i), "runs:\n  using: composite\n"+next)
+	}
+	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "deep", Kind: "uses", Uses: "./.github/actions/depth-0"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
+		t.Fatalf("RunJob() depth error = %v", err)
 	}
 }
 

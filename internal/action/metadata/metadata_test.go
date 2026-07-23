@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,42 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 			t.Fatalf("Load() error = %v, want metadata symlink rejection", err)
 		}
 	})
+}
+
+func TestLoadRejectsCompositeControlsWithLocation(t *testing.T) {
+	for _, control := range []string{"background", "wait", "wait-all", "cancel", "parallel"} {
+		t.Run(control, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "action.yml", "runs:\n  using: composite\n  steps:\n    - id: child\n      run: echo ok\n      "+control+": true\n")
+			_, err := Load(root, ".")
+			want := fmt.Sprintf("parse action metadata %q:6:7: composite child 1 (id %q) declares unsupported control %q", filepath.Join(root, "action.yml"), "child", control)
+			if err == nil || err.Error() != want {
+				t.Fatalf("Load() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidCompositeStepSyntax(t *testing.T) {
+	tests := []struct {
+		name    string
+		steps   string
+		wantErr string
+	}{
+		{name: "both run and uses", steps: "    - run: echo no\n      uses: ./other\n", wantErr: "composite child 1 declares both run and uses"},
+		{name: "no execution", steps: "    - id: empty\n", wantErr: "composite child 1 has no run or uses execution"},
+		{name: "with on run", steps: "    - run: echo no\n      with:\n        value: no\n", wantErr: "composite run child 1 may not declare with"},
+		{name: "duplicate ids", steps: "    - id: Same\n      run: echo one\n    - id: same\n      run: echo two\n", wantErr: `duplicate case-insensitive composite child id "same"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeAction(t, root, "action.yml", "runs:\n  using: composite\n  steps:\n"+test.steps)
+			if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), test.wantErr) || !strings.Contains(err.Error(), filepath.Join(root, "action.yml")) {
+				t.Fatalf("Load() error = %v, want source-located %q", err, test.wantErr)
+			}
+		})
+	}
 }
 
 func TestLoadNormalizesNamesAndRejectsCollisions(t *testing.T) {

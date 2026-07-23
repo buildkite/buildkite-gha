@@ -958,16 +958,8 @@ func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.
 		if repositoryRoot == "" {
 			return nil, fmt.Errorf("resolve local action %q: workflow path %q must identify a repository root", step.Uses, workflowPath)
 		}
-		action, err := loadLocalAction(repositoryRoot, step.Uses)
-		if err != nil {
+		if err := collectActionCapabilities(repositoryRoot, step.Uses, capabilities, nil); err != nil {
 			return nil, err
-		}
-		runtime, err := action.Runtime()
-		if err != nil {
-			return nil, fmt.Errorf("local action %q uses %w", step.Uses, err)
-		}
-		for _, capability := range runtime.RequiredCapabilities() {
-			capabilities[capability] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(capabilities))
@@ -976,6 +968,43 @@ func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func collectActionCapabilities(repositoryRoot, uses string, capabilities map[string]struct{}, stack []string) error {
+	if !strings.HasPrefix(uses, "./") {
+		return fmt.Errorf("nested remote action %q is unsupported", uses)
+	}
+	action, err := loadLocalAction(repositoryRoot, uses)
+	if err != nil {
+		return err
+	}
+	for _, ancestor := range stack {
+		if ancestor == action.Path {
+			return fmt.Errorf("local action recursion detected at %q", action.Path)
+		}
+	}
+	if len(stack) >= metadata.MaxNestedActionDepth {
+		return fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, action.Path)
+	}
+	runtime, err := action.Runtime()
+	if err != nil {
+		return fmt.Errorf("local action %q uses %w", uses, err)
+	}
+	for _, capability := range runtime.RequiredCapabilities() {
+		capabilities[capability] = struct{}{}
+	}
+	if runtime != metadata.RuntimeComposite {
+		return nil
+	}
+	stack = append(append([]string(nil), stack...), action.Path)
+	for _, child := range action.Runs.Steps {
+		if child.Uses != "" {
+			if err := collectActionCapabilities(repositoryRoot, child.Uses, capabilities, stack); err != nil {
+				return fmt.Errorf("local action %q nested uses %w", uses, err)
+			}
+		}
+	}
+	return nil
 }
 
 func loadLocalAction(repositoryRoot, uses string) (metadata.Metadata, error) {
