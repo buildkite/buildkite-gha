@@ -372,7 +372,7 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
-	case len(path) == 1 && strings.EqualFold(root, "inputs"):
+	case len(path) == 1 && strings.EqualFold(root, "inputs") && context.Inputs != nil:
 		return findString(context.Inputs, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "env"):
 		return findString(context.Env, path[0]), nil

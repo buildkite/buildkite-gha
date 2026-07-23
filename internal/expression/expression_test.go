@@ -183,6 +183,9 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if _, err := EvaluateCondition("needs.missing.result", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted an unavailable need result")
 	}
+	if _, err := EvaluateCondition("inputs.enabled", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted inputs outside an action context")
+	}
 }
 
 func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
