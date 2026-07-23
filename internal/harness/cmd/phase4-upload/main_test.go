@@ -14,6 +14,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 type capturedUpload struct {
@@ -158,7 +159,7 @@ func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
 	args := []string{
 		"--event-path", eventPath,
 		"--runtime", runtimePath,
-		"--runtime-version", "phase4-test",
+		"--runtime-version", "0.0.0-phase4.test",
 		"--runtime-queue", "hosted",
 		"--node24", nodePath,
 		"--commit", commit,
@@ -184,6 +185,29 @@ func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
 	var jobPlan plan.Job
 	for _, upload := range runner.uploads {
 		if strings.HasSuffix(upload.path, ".json") {
+			var planDocument any
+			if err := json.Unmarshal(upload.contents, &planDocument); err != nil {
+				t.Fatal(err)
+			}
+			schemaSource, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "schemas", "job-plan-v3.schema.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var schemaDocument any
+			if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+				t.Fatal(err)
+			}
+			compiler := jsonschema.NewCompiler()
+			if err := compiler.AddResource(plan.SchemaV3, schemaDocument); err != nil {
+				t.Fatal(err)
+			}
+			schema, err := compiler.Compile(plan.SchemaV3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := schema.Validate(planDocument); err != nil {
+				t.Fatalf("Phase 4 plan does not validate against v3 schema: %v\n%s", err, upload.contents)
+			}
 			decoded, err := plan.Decode(upload.contents)
 			if err != nil {
 				t.Fatal(err)
@@ -191,7 +215,7 @@ func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
 			jobPlan = decoded
 		}
 	}
-	if jobPlan.Schema != plan.SchemaV3 || jobPlan.Event.SHA != commit || len(jobPlan.Actions) != 1 || jobPlan.Actions[0].Source != "workspace" {
+	if jobPlan.Schema != plan.SchemaV3 || jobPlan.Compiler.Version != "0.0.0-phase4.test" || jobPlan.Event.SHA != commit || len(jobPlan.Actions) != 1 || jobPlan.Actions[0].Source != "workspace" {
 		t.Fatalf("trusted plan = %#v", jobPlan)
 	}
 	nodeArchive, err := deterministicGzip(nodeBytes)

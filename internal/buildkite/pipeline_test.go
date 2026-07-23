@@ -430,7 +430,7 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`version: "2026.5.12"`,
-		`runtime_version="phase4-$${PHASE4_COMMIT}"`,
+		`runtime_version="0.0.0-phase4.$${PHASE4_COMMIT}"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`mise exec -- go run ./internal/harness/cmd/phase4-upload`,
 		`--event-path testdata/phase4/events/public-checkout.json`, `--runtime "$$distribution_root/buildkite-gha"`,
