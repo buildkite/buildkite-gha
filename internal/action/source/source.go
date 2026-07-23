@@ -517,6 +517,24 @@ type manifestFile struct {
 	Mode   uint32 `json:"mode"`
 }
 
+// DigestTree returns the canonical source digest for a local action directory.
+// It uses the same bounded manifest and file-mode model as immutable remote
+// action source. Symlinks and other special files fail closed.
+func DigestTree(root string) (string, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return "", fmt.Errorf("stat action source tree: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("action source tree is not a directory")
+	}
+	m, err := buildManifest(root, defaults(), Reference{}, "")
+	if err != nil {
+		return "", fmt.Errorf("digest action source tree: %w", err)
+	}
+	return m.Digest, nil
+}
+
 func buildManifest(root string, c config, ref Reference, commit string) (manifest, error) {
 	m := manifest{Schema: "buildkite-gha-action-source/v1", Owner: strings.ToLower(ref.Owner), Repository: strings.ToLower(ref.Repository), Commit: commit}
 	var total int64

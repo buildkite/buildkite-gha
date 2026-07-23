@@ -209,6 +209,50 @@ func TestExtractDigestIndependentOfUmask(t *testing.T) {
 	}
 }
 
+func TestDigestTreeIsCanonicalAndFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: dist/index.js\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(root, "dist", "index.js")
+	if err := os.WriteFile(entry, []byte("console.log('one')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || !strings.HasPrefix(first, "sha256:") {
+		t.Fatalf("digests = %q and %q, want stable sha256 digest", first, second)
+	}
+	if err := os.WriteFile(entry, []byte("console.log('two')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == first {
+		t.Fatal("digest did not change with action source")
+	}
+	if err := os.Symlink("index.js", filepath.Join(root, "dist", "linked.js")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DigestTree(root); err == nil || !strings.Contains(err.Error(), "special file") {
+		t.Fatalf("DigestTree() symlink error = %v, want special-file rejection", err)
+	}
+	if _, err := DigestTree(entry); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("DigestTree() file error = %v, want directory rejection", err)
+	}
+}
+
 func tarBytes(t *testing.T, entries []tar.Header) []byte {
 	t.Helper()
 	var b bytes.Buffer

@@ -576,11 +576,8 @@ func validateTopLevelIdentity(uses string, lock ActionLock) error {
 func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
 	if strings.HasPrefix(uses, "./") {
 		path := strings.TrimPrefix(uses, "./")
-		if path != "" && !cleanActionPath(path) || child.Source != parent.Source {
-			return fmt.Errorf("local child leaves parent source domain")
-		}
-		if parent.Source == "github" && (child.Repository != parent.Repository || child.Commit != parent.Commit || child.RequestedRef != parent.RequestedRef || child.SourceDigest != parent.SourceDigest) {
-			return fmt.Errorf("local child changes parent source identity")
+		if path != "" && !cleanActionPath(path) || child.Source != "workspace" || child.Path != path {
+			return fmt.Errorf("local child does not match workspace action identity")
 		}
 		return nil
 	}

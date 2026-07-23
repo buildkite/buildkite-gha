@@ -241,15 +241,15 @@ func TestV3RemoteNestedActionLocks(t *testing.T) {
 	job.Schema = SchemaV3
 	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
-		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}}},
+		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"owner/repo/root/child@v1": {Lock: "a-0000000000000002"}}},
 		{ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root/child", SourceDigest: digest},
 	}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	job.Actions[1].Commit = strings.Repeat("d", 40)
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "changes parent source identity") {
-		t.Fatalf("Validate() error = %v, want nested source-domain rejection", err)
+	job.Actions[1].Path = "other"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "remote child does not match lock identity") {
+		t.Fatalf("Validate() error = %v, want nested remote identity rejection", err)
 	}
 }
 
@@ -305,14 +305,43 @@ func TestV3LocalChildPreservesParentIdentity(t *testing.T) {
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./root", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
 		{ID: "a-0000000000000001", Source: "workspace", Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}}},
-		{ID: "a-0000000000000002", Source: "workspace", Path: "compiler/resolved/child", SourceDigest: digest},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: digest},
 	}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	job.Actions[1].Path = "root/child"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not match workspace action identity") {
+		t.Fatalf("Validate() error = %v, want workspace-root child path rejection", err)
+	}
+	job.Actions[1].Path = "child"
 	job.Actions[1].SourceDigest = "sha256:" + strings.Repeat("b", 64)
 	if err := job.Validate(); err != nil {
 		t.Fatalf("workspace child may bind its own action tree digest: %v", err)
+	}
+}
+
+func TestV3RemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV3
+	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{
+			ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1",
+			Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("a", 64),
+			Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}},
+		},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: "sha256:" + strings.Repeat("b", 64)},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	job.Actions[1] = ActionLock{
+		ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1",
+		Commit: strings.Repeat("c", 40), Path: "child", SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not match workspace action identity") {
+		t.Fatalf("Validate() error = %v, want downloaded-source substitution rejection", err)
 	}
 }
 
@@ -389,7 +418,11 @@ func TestV3ActionLockGraphDepthAndCycles(t *testing.T) {
 		job.Actions = make([]ActionLock, count)
 		for i := range count {
 			id := "a-" + leftPadHex(i)
-			job.Actions[i] = ActionLock{ID: id, Source: "workspace", Path: "action-" + leftPadHex(i), SourceDigest: "sha256:" + strings.Repeat(string(rune('a'+i%6)), 64)}
+			path := "child"
+			if i == 0 {
+				path = "action-" + leftPadHex(i)
+			}
+			job.Actions[i] = ActionLock{ID: id, Source: "workspace", Path: path, SourceDigest: "sha256:" + strings.Repeat(string(rune('a'+i%6)), 64)}
 			if i+1 < count {
 				job.Actions[i].Children = map[string]ActionSelector{"./child": {Lock: "a-" + leftPadHex(i+1)}}
 			}
@@ -405,7 +438,7 @@ func TestV3ActionLockGraphDepthAndCycles(t *testing.T) {
 		t.Fatalf("overflow depth error = %v", err)
 	}
 	cyclic := chain(2)
-	cyclic.Actions[1].Children = map[string]ActionSelector{"./root": {Lock: cyclic.Actions[0].ID}}
+	cyclic.Actions[1].Children = map[string]ActionSelector{"./action-" + leftPadHex(0): {Lock: cyclic.Actions[0].ID}}
 	if err := cyclic.Validate(); err == nil || !strings.Contains(err.Error(), "contains a cycle") {
 		t.Fatalf("cycle error = %v", err)
 	}
