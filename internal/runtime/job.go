@@ -44,9 +44,10 @@ type postRegistry struct {
 }
 
 type preparedInvocation struct {
-	action JavaScriptAction
-	state  map[string]string
-	node   string
+	action         JavaScriptAction
+	state          map[string]string
+	node           string
+	postRegistered bool
 }
 
 type remotePreparations map[string]*preparedInvocation
@@ -541,7 +542,6 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, node: node}
 		prepared[invocationID] = invocation
-		posts.register(postForInvocation(invocation, action.Runs.PostIf))
 		if javascript.Pre != "" && runPre {
 			if inheritedEvalErr != nil {
 				return result, inheritedEvalErr
@@ -561,6 +561,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
 			invocation.action = javascript
+			posts.register(postForInvocation(invocation, action.Runs.PostIf))
+			invocation.postRegistered = true
 			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
 				return result, err
 			}
@@ -751,6 +753,9 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		if !wasPrepared {
 			posts.register(postFor(javascript, state, node, action.Runs.PostIf))
+		} else if invocation := prepared[invocationID]; !invocation.postRegistered {
+			posts.register(postForInvocation(invocation, action.Runs.PostIf))
+			invocation.postRegistered = true
 		}
 		if javascript.Pre != "" && !wasPrepared {
 			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)

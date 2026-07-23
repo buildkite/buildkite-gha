@@ -1844,11 +1844,15 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	}
 }
 
-func TestRemoteActionPostsArePreparedWhenMainAndPreAreSkipped(t *testing.T) {
+func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: skipped remote lifecycle\n")
 	remote := t.TempDir()
+	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "with-pre/"+phase+".js", "")
+	}
 	writeFixtureFile(t, remote, "without-pre/action.yml", "name: without pre\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, remote, "without-pre/main.js", "")
 	writeFixtureFile(t, remote, "without-pre/post.js", "")
@@ -1856,39 +1860,50 @@ func TestRemoteActionPostsArePreparedWhenMainAndPreAreSkipped(t *testing.T) {
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "pre-if-false/"+phase+".js", "")
 	}
+	writeFixtureFile(t, remote, "main-fails/action.yml", "name: main fails\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "main-fails/main.js", "")
+	writeFixtureFile(t, remote, "main-fails/post.js", "")
 	lifecycle := filepath.Join(workspace, "lifecycle.log")
 	fakeNode := filepath.Join(workspace, "node24")
 	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
-printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIFECYCLE_LOG"
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	digest := digestTree(t, remote)
-	withoutPreID, falsePreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	withPreID, withoutPreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	falsePreID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}},
 		{ID: "without-pre", Kind: "uses", Uses: remoteLifecycleUses("without-pre"), Action: &plan.ActionSelector{Lock: withoutPreID}, Condition: "failure()"},
 		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()"},
+		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
 	})
 	job.Schema = plan.SchemaV3
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(withPreID, "with-pre", digest, nil),
 		remoteLifecycleLock(withoutPreID, "without-pre", digest, nil),
 		remoteLifecycleLock(falsePreID, "pre-if-false", digest, nil),
+		remoteLifecycleLock(mainFailsID, "main-fails", digest, nil),
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
+	if err == nil || result.Conclusion != "failure" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	events, err := os.ReadFile(lifecycle)
-	if err != nil {
-		t.Fatal(err)
+	events, readErr := os.ReadFile(lifecycle)
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
-	if got, want := string(events), "pre-if-false:post\nwithout-pre:post\n"; got != want {
+	if got, want := string(events), "with-pre:pre\nwith-pre:main\nmain-fails:main\nmain-fails:post\nwith-pre:post\n"; got != want {
 		t.Fatalf("lifecycle = %q, want %q", got, want)
 	}
 }
@@ -2021,7 +2036,7 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if got, want := string(events), "fails:pre\nafter:pre\non-failure:pre\non-success:post\non-failure:post\nafter:post\nfails:post\n"; got != want {
+	if got, want := string(events), "fails:pre\nafter:pre\non-failure:pre\non-failure:post\nafter:post\nfails:post\n"; got != want {
 		t.Fatalf("lifecycle = %q, want %q", got, want)
 	}
 }
