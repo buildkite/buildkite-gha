@@ -89,6 +89,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
+		NodeRuntimeDigests: options.NodeRuntimeDigests,
 		Jobs:               jobs,
 	})
 	if err != nil {

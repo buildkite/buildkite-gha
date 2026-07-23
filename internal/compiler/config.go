@@ -37,10 +37,11 @@ type RunnerPolicy struct {
 // Options are the complete non-secret graph-construction inputs beyond the
 // workflow and canonical event snapshot.
 type Options struct {
-	Vars         VariableSources
-	Runners      RunnerPolicy
-	EventTrust   EventTrust
-	ActionSource ActionSource
+	Vars               VariableSources
+	Runners            RunnerPolicy
+	EventTrust         EventTrust
+	ActionSource       ActionSource
+	NodeRuntimeDigests map[int]string
 }
 
 func defaultOptions() Options {
