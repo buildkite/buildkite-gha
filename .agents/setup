@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mise_bin="$HOME/.local/bin/mise"
+
+echo "Installing mise if needed..."
+if [[ ! -x "$mise_bin" ]]; then
+  curl -fsSL https://mise.run | sh
+fi
+
+profile_marker="# buildkite-gha mise activation"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# buildkite-gha mise activation
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+if [[ -x "$HOME/.local/bin/mise" ]]; then
+  eval "$("$HOME/.local/bin/mise" activate bash)"
+fi
+EOF
+fi
+
+echo "Installing pinned development tools..."
+"$mise_bin" trust "$repo_root/mise.toml"
+"$mise_bin" install
+
+echo "Downloading Go modules..."
+"$mise_bin" exec -- go mod download
+
+echo "Orb setup complete."
