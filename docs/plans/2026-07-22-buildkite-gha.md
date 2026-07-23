@@ -1132,9 +1132,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 Phase 2 live evidence:
 
-- [Buildkite build 35](https://buildkite.com/buildkite/buildkite-gha/builds/35)
+- [Buildkite build 40](https://buildkite.com/buildkite/buildkite-gha/builds/40)
   ran exact implementation commit
-  `258683ceb29086bb2a0f6ba50907308844ac0ab7`. The producer and both consumer
+  `e93298085ffef96e1cb0982e7a0b88f3558b11da`. The producer and both consumer
   matrix jobs passed on ephemeral hosted Agent `4.0.0-beta.6`, followed by the
   native Buildkite continuation and the full repository check.
 - The consumer logs emitted the normalized observations
@@ -1144,6 +1144,9 @@ Phase 2 live evidence:
 - The producer raw log contained `MASKED_CANARY=***` and did not contain the
   registered canary value. Protected secret, provider-token, and privileged
   capabilities remain unavailable to the unsigned upload path.
+- The native continuation started only after both generated consumers had
+  finished, proving the separate continuation loader does not rely on the
+  reverse insertion order of sequential dynamic uploads.
 - Runtime conformance tests prove that post-actions run after main failure and
   cancellation, a cancelled process group cannot leave a child behind, and
   cleanup is bounded by the documented ten-second default grace period.
