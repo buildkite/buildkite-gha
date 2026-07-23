@@ -194,7 +194,11 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 		return err
 	}
 	finished := make(chan struct{})
-	go terminateProcessGroup(ctx, cmd.Process.Pid, r.interruptGrace(), r.terminateGrace(), finished)
+	terminationDone := make(chan struct{})
+	go func() {
+		defer close(terminationDone)
+		terminateProcessGroup(ctx, cmd.Process.Pid, r.interruptGrace(), r.terminateGrace(), finished)
+	}()
 
 	var wg sync.WaitGroup
 	streamErrs := make([]error, 2)
@@ -213,6 +217,7 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	wg.Wait()
 	waitErr := cmd.Wait()
 	close(finished)
+	<-terminationDone
 	if ctx.Err() != nil {
 		waitErr = ctx.Err()
 	}

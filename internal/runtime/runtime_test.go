@@ -694,6 +694,58 @@ while :; do sleep 1; done`)
 	}
 }
 
+func TestCancellationWaitsForProcessGroupCleanupAfterOutputCloses(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
+	}
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	ready := filepath.Join(dir, "ready")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	started := time.Now()
+	runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}
+	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile, "READY": ready}, "bash", "-c", `
+(trap '' INT TERM; exec >/dev/null 2>&1; while :; do sleep 1; done) &
+echo $! > "$PID_FILE"
+trap 'exit 0' INT
+touch "$READY"
+while :; do sleep 1; done`)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runStreaming() error = %v, want cancellation", err)
+	}
+	if elapsed := time.Since(started); elapsed < 90*time.Millisecond {
+		t.Fatalf("runStreaming() returned before process-group escalation completed: %s", elapsed)
+	}
+	contents, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(contents)))
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("child process %d survived completed cancellation", pid)
+}
+
 func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
