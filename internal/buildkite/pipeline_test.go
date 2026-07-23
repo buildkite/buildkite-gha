@@ -180,7 +180,6 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`--event-path testdata/smoke/events/push.json`,
 		`--runtime-queue hosted`,
 		`testdata/smoke/.github/workflows/shell.yml`,
-		`buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)
@@ -188,9 +187,10 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Key     string `yaml:"key"`
-			Command string `yaml:"command"`
-			Agents  struct {
+			Key       string `yaml:"key"`
+			Command   string `yaml:"command"`
+			DependsOn string `yaml:"depends_on"`
+			Agents    struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 		} `yaml:"steps"`
@@ -198,8 +198,11 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" {
+	if len(document.Steps) != 2 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" {
 		t.Fatalf("Phase 2 upload proof = %#v", document.Steps)
+	}
+	if document.Steps[1].Key != "phase-2-continuation-loader" || document.Steps[1].DependsOn != "phase-2-upload-importer" || document.Steps[1].Agents.Queue != "elastic-runners" || document.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml" {
+		t.Fatalf("Phase 2 continuation loader = %#v", document.Steps[1])
 	}
 
 	continuationSource, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-2-upload-continuation.yml"))

@@ -16,4 +16,10 @@ steps:
         --event-path testdata/smoke/events/push.json \
         --runtime-queue hosted \
         testdata/smoke/.github/workflows/shell.yml
-      buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml
+
+  - label: ":pipeline: Phase 2 continuation loader"
+    key: "phase-2-continuation-loader"
+    depends_on: "phase-2-upload-importer"
+    agents:
+      queue: "elastic-runners"
+    command: "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml"
