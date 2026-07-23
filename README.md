@@ -45,13 +45,15 @@ another queue. Trusted installation-specific queue policy remains deferred.
 This path is intentionally unsigned and does not claim the KMS-backed plan
 authority required for production use. It also rejects action steps because
 its generated jobs have empty, checkout-free workspaces; only shell steps are
-currently executable through this path.
+currently executable through this path, and any declared runtime capability
+causes the upload to fail closed.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The sequential runtime supports env and
 working-directory precedence, file commands, job and step conditions, bounded
 prerequisite results and outputs supplied by the transport layer, timeouts,
-process-tree cancellation, masking, and step `continue-on-error`. Secret names
+process-tree cancellation, `::add-mask` log and result protection, and step
+`continue-on-error`. Other workflow commands are not yet implemented. Secret names
 resolve only through the explicit `BUILDKITE_GHA_SECRET_` namespace and are
 registered with the Buildkite Agent redactor before execution. Remote action
 resolution, services, job containers, and concurrent steps remain outside the
@@ -60,7 +62,10 @@ require an explicitly materialized and source-bound workspace. In Buildkite,
 `run-job` verifies the exact build, job, step, and plan digest before resolving
 each prerequisite from its attributed producer artifact, then publishes the
 terminal result under a bounded cleanup context; metadata is only a best-effort
-mirror. Use `buildkite-gha help`, `buildkite-gha help <command>`, or
+mirror. Identity, plan-decode, and digest failures happen before a producer can
+publish a trusted manifest, and retrying a producer can make artifact selection
+ambiguous; consumers fail closed in both cases, so retry the whole build. Use
+`buildkite-gha help`, `buildkite-gha help <command>`, or
 `buildkite-gha --version` for exact usage.
 
 ## Development

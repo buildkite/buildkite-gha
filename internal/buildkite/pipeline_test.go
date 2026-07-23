@@ -222,6 +222,22 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		t.Fatalf("Phase 2 continuation = %#v", continuation.Steps)
 	}
 	wantDependencies := []string{"gha-consumer-5ebbc197d87b", "gha-consumer-91934b28b00f"}
+	generatedSource, err := os.ReadFile(filepath.Join("..", "compiler", "testdata", "shell.pipeline.golden.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated struct {
+		Steps []struct {
+			Key string `yaml:"key"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(generatedSource, &generated); err != nil {
+		t.Fatal(err)
+	}
+	generatedKeys := make(map[string]struct{}, len(generated.Steps))
+	for _, step := range generated.Steps {
+		generatedKeys[step.Key] = struct{}{}
+	}
 	if len(continuation.Steps[0].DependsOn) != len(wantDependencies) {
 		t.Fatalf("Phase 2 continuation dependencies = %#v", continuation.Steps[0].DependsOn)
 	}
@@ -229,6 +245,9 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		dependency := continuation.Steps[0].DependsOn[i]
 		if dependency.Step != want || !dependency.AllowFailure {
 			t.Fatalf("Phase 2 continuation dependency %d = %#v, want %q with allow_failure", i, dependency, want)
+		}
+		if _, ok := generatedKeys[dependency.Step]; !ok {
+			t.Fatalf("Phase 2 continuation dependency %q is absent from shell.pipeline.golden.yml", dependency.Step)
 		}
 	}
 }

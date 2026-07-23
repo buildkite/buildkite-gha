@@ -214,22 +214,15 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadRejectsProtectedCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container"} {
+func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
+	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "docker", "network"} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
 		}}}}
 		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), capability) {
-			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want protected-capability rejection", capability, err)
+			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
 		}
-	}
-	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-		Workflow:             plan.Workflow{LogicalJobID: "sandboxed"},
-		RequiredCapabilities: []string{"docker", "network"},
-	}}}}
-	if err := validateUnprivilegedBundle(bundle); err != nil {
-		t.Fatalf("validateUnprivilegedBundle() rejected unprotected capabilities: %v", err)
 	}
 }
 

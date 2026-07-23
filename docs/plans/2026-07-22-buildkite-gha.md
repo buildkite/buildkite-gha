@@ -588,6 +588,13 @@ the authoritative manifest. Consumers must have explicit dependencies on
 producers. Metadata has a 100 KB hard limit per value and values over 1 KB are
 discouraged, so larger outputs use namespaced artifacts directly.
 
+Failures before the runtime can establish its build, job, step, and plan
+identity cannot publish a trusted terminal manifest. Consumers diagnose that
+case as a missing producer result and fail closed. Retrying an individual
+producer can leave multiple attributed artifacts without an authoritative
+attempt selector, which also fails closed; the supported recovery for either
+case is to retry the whole build.
+
 Values that influence a trusted decision, including continuation inputs,
 native replacement validation, and retry state, must come from a
 producer-attributed artifact or carry a compiler-verifiable signature. A
@@ -607,6 +614,11 @@ execution and report the UI difference explicitly. In particular:
 - a false runtime job condition produces a short no-op Buildkite job, because a
   running command cannot currently mark itself as scheduler-skipped;
 - cancellation does not behave exactly like dependency failure in Buildkite;
+- an unavailable step reference in a condition fails closed instead of
+  coercing to an empty value;
+- a run step selected by `always()` or `cancelled()` after cancellation inherits
+  the cancelled execution context, while registered post-actions receive the
+  bounded cleanup grace period;
 - beta matrix fail-fast can prevent undispatched siblings from starting, but
   cannot cancel in-progress siblings until the bridge has a safely scoped
   cancel-own-matrix capability; and
@@ -781,6 +793,11 @@ Implement the observable Actions contracts for:
 - `::add-mask`;
 - `::stop-commands`; and
 - supported legacy command behavior and security restrictions.
+
+The Phase 2 shell runtime implements `::add-mask` only. It applies dynamically
+registered masks to subsequent log lines and rejects or scrubs them from the
+bounded job result before transport; annotations, groups, stop-commands, and
+legacy workflow commands remain later compatibility work.
 
 Map warnings and errors to Buildkite log output and annotations. Map dynamic
 mask values to `buildkite-agent redactor add` before subsequent output is
@@ -1071,7 +1088,8 @@ Explicitly defer from beta unless implementation evidence changes the order:
   now carry conditions, timeouts, `continue-on-error`, bounded event identity,
   and explicit secret requirements. `run-job` allocates a fresh workspace,
   applies standard and file-command environment changes, evaluates the owned
-  condition subset, masks registered secrets, propagates timeout/cancellation
+  condition subset, masks registered and dynamically derived values in logs
+  and results, propagates timeout/cancellation
   to process groups, and drains cleanup under a fixed deadline. Generated jobs
   hydrate exact producer results and publish bounded terminal manifests before
   exit; the live `shell.yml` proof passed with checkout suppressed on ephemeral

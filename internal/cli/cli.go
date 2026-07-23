@@ -510,10 +510,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			switch capability {
-			case "secrets", "provider-token-read", "provider-token-write", "privileged-container":
-				return fmt.Errorf("job %q requires protected capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
-			}
+			return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
 		}
 	}
 	return nil

@@ -411,6 +411,12 @@ func (p *commandProcessor) addMask(value string) {
 	p.mu.Unlock()
 }
 
+func (p *commandProcessor) maskValues() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.masks...)
+}
+
 func (p *commandProcessor) addMaskLocked(value string) {
 	if value == "" {
 		return

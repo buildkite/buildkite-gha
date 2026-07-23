@@ -599,6 +599,33 @@ func TestRunJobShellJavaScriptCompositeAndPost(t *testing.T) {
 	}
 }
 
+func TestRunJobRejectsDynamicallyMaskedJobOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:    "derive",
+		Kind:  "run",
+		Shell: "sh",
+		Command: `printf '%s\n' '::add-mask::derived-mask-value'
+printf '%s\n' 'secret=derived-mask-value' >> "$GITHUB_OUTPUT"
+printf '%s\n' 'DYNAMIC_VALUE=derived-mask-value' >> "$GITHUB_ENV"
+printf '%s\n' 'derived-mask-value' >> "$GITHUB_STEP_SUMMARY"`,
+	}})
+	job.Outputs = map[string]string{"secret": "${{ steps.derive.outputs.secret }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `job output "secret" contains a registered secret`) {
+		t.Fatalf("RunJob() error = %v, want dynamically masked output rejection", err)
+	}
+	if strings.Contains(logs.String(), "derived-mask-value") || strings.Contains(fmt.Sprintf("%#v", result), "derived-mask-value") {
+		t.Fatalf("RunJob() leaked dynamically masked value: result = %#v, logs = %q", result, logs.String())
+	}
+	if result.Env["DYNAMIC_VALUE"] != "***" || result.Summary != "***\n" {
+		t.Fatalf("RunJob() did not scrub dynamic mask from bounded result: %#v", result)
+	}
+}
+
 func TestCompositeExposesOnlyDeclaredOutputs(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

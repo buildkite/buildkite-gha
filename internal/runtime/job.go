@@ -203,18 +203,19 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		}
 	}
 
+	sensitiveValues := processor.maskValues()
 	for _, name := range sortedKeys(job.Outputs) {
 		template := job.Outputs[name]
 		value, err := expression.Evaluate(template, eval)
 		if err != nil {
-			return scrubJobResult(jobResult, secrets), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
 		}
 		if len(value) > maxJobOutputBytes {
-			return scrubJobResult(jobResult, secrets), errors.Join(runErr, fmt.Errorf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
+			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q exceeds the %d-byte limit", name, maxJobOutputBytes))
 		}
-		for _, secret := range secrets {
-			if secret != "" && strings.Contains(value, secret) {
-				return scrubJobResult(jobResult, secrets), errors.Join(runErr, fmt.Errorf("job output %q contains a registered secret", name))
+		for _, sensitive := range sensitiveValues {
+			if sensitive != "" && strings.Contains(value, sensitive) {
+				return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q contains a registered secret", name))
 			}
 		}
 		jobResult.Outputs[name] = value
@@ -224,17 +225,20 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	} else if runErr == nil {
 		jobResult.Conclusion = "success"
 	}
-	return scrubJobResult(jobResult, secrets), runErr
+	return scrubJobResult(jobResult, sensitiveValues), runErr
 }
 
-func scrubJobResult(result JobResult, secrets map[string]string) JobResult {
+func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
 	scrub := func(value string) string {
-		for _, secret := range secrets {
-			if secret != "" {
-				value = strings.ReplaceAll(value, secret, "***")
+		for _, sensitive := range sensitiveValues {
+			if sensitive != "" {
+				value = strings.ReplaceAll(value, sensitive, "***")
 			}
 		}
 		return value
+	}
+	for name, value := range result.Outputs {
+		result.Outputs[name] = scrub(value)
 	}
 	for name, value := range result.Env {
 		result.Env[name] = scrub(value)
