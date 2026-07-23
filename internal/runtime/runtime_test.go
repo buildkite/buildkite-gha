@@ -2156,6 +2156,41 @@ runs:
 	}
 }
 
+func TestCompositeChildConditionUsesActionInputs(t *testing.T) {
+	for _, enabled := range []string{"true", "false"} {
+		t.Run(enabled, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", `name: Input conditional composite
+inputs:
+  enabled:
+    required: true
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: sh
+      run: touch "$CONDITIONAL_RAN"
+`)
+			marker := filepath.Join(workspace, "conditional-ran")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
+			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
+			result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			_, statErr := os.Stat(marker)
+			if enabled == "true" && statErr != nil {
+				t.Fatalf("enabled child did not run: %v", statErr)
+			}
+			if enabled == "false" && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("disabled child ran: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
