@@ -69,7 +69,7 @@ func Parse(raw string) (Reference, error) {
 		return Reference{}, fmt.Errorf("invalid action reference")
 	}
 	parts := strings.Split(left, "/")
-	if len(parts) < 2 || !ownerRE.MatchString(parts[0]) || !repoRE.MatchString(parts[1]) || strings.HasSuffix(parts[1], ".git") {
+	if len(parts) < 2 || len(parts[0])+1+len(parts[1]) > 140 || !ownerRE.MatchString(parts[0]) || !repoRE.MatchString(parts[1]) || strings.HasSuffix(parts[1], ".git") {
 		return Reference{}, fmt.Errorf("invalid GitHub owner/repository")
 	}
 	for _, s := range append(parts[2:], strings.Split(ref, "/")...) {

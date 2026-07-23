@@ -9,11 +9,16 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 )
 
 const (
 	SchemaV1 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
 	SchemaV2 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
+	SchemaV3 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v3.schema.json"
 	Schema   = SchemaV2
 )
 
@@ -23,6 +28,23 @@ const MaxStepTargets = 256
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
+var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+type ActionSelector struct {
+	Lock string `json:"lock"`
+}
+
+type ActionLock struct {
+	ID           string                    `json:"id"`
+	Source       string                    `json:"source"`
+	Repository   string                    `json:"repository,omitempty"`
+	RequestedRef string                    `json:"requested_ref,omitempty"`
+	Commit       string                    `json:"commit,omitempty"`
+	Path         string                    `json:"path,omitempty"`
+	SourceDigest string                    `json:"source_digest"`
+	Children     map[string]ActionSelector `json:"children,omitempty"`
+}
 
 type Compiler struct {
 	Version            string `json:"version"`
@@ -81,6 +103,7 @@ type Step struct {
 	Targets          []string          `json:"targets,omitempty"`
 	Command          string            `json:"command,omitempty"`
 	Uses             string            `json:"uses,omitempty"`
+	Action           *ActionSelector   `json:"action,omitempty"`
 	Shell            string            `json:"shell,omitempty"`
 	WorkingDirectory string            `json:"working_directory,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
@@ -114,11 +137,15 @@ type Job struct {
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
 	Steps                   []Step            `json:"steps"`
+	Actions                 []ActionLock      `json:"actions,omitempty"`
 }
 
 // Decode rejects unknown fields and trailing JSON so schema drift fails closed.
 func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
+	if err := rejectLegacyActionFields(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var job Job
@@ -141,6 +168,26 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, err
 	}
 	return job, nil
+}
+
+func rejectLegacyActionFields(data []byte) error {
+	var envelope struct {
+		Schema string                       `json:"schema"`
+		Steps  []map[string]json.RawMessage `json:"steps"`
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil || json.Unmarshal(data, &envelope) != nil || envelope.Schema != SchemaV1 && envelope.Schema != SchemaV2 {
+		return nil
+	}
+	if _, ok := root["actions"]; ok {
+		return fmt.Errorf("field actions is not supported by legacy schemas")
+	}
+	for _, step := range envelope.Steps {
+		if _, ok := step["action"]; ok {
+			return fmt.Errorf("field action is not supported by legacy schemas")
+		}
+	}
+	return nil
 }
 
 func rejectDuplicateKeys(source []byte) error {
@@ -219,8 +266,11 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
+	}
+	if job.Schema != SchemaV3 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
@@ -347,7 +397,7 @@ func (job Job) Validate() error {
 			if strings.TrimSpace(step.Command) == "" {
 				return fmt.Errorf("run step %q has no command", step.ID)
 			}
-			if step.Uses != "" || len(step.Targets) != 0 {
+			if step.Uses != "" || step.Action != nil || len(step.Targets) != 0 {
 				return fmt.Errorf("run step %q contains incompatible action or control fields", step.ID)
 			}
 			if step.Background {
@@ -356,6 +406,9 @@ func (job Job) Validate() error {
 		case "uses":
 			if strings.TrimSpace(step.Uses) == "" {
 				return fmt.Errorf("action step %q has no action reference", step.ID)
+			}
+			if len(step.Uses) > 1024 {
+				return fmt.Errorf("action step %q reference exceeds 1024 bytes", step.ID)
 			}
 			if step.Command != "" || len(step.Targets) != 0 {
 				return fmt.Errorf("action step %q contains incompatible run or control fields", step.ID)
@@ -371,11 +424,196 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
+	if job.Schema == SchemaV3 {
+		if err := validateActionLocks(job); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
+func hasStepActions(steps []Step) bool {
+	for _, step := range steps {
+		if step.Action != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func validateActionLocks(job Job) error {
+	if len(job.Actions) > 1024 {
+		return fmt.Errorf("job plan has more than 1024 action locks")
+	}
+	locks := make(map[string]ActionLock, len(job.Actions))
+	for i, lock := range job.Actions {
+		if !actionLockIDPattern.MatchString(lock.ID) || i > 0 && job.Actions[i-1].ID >= lock.ID {
+			return fmt.Errorf("action locks must have valid, unique, sorted IDs")
+		}
+		if !digestPattern.MatchString(lock.SourceDigest) || len(lock.Children) > 1024 {
+			return fmt.Errorf("action lock %q has invalid digest or too many children", lock.ID)
+		}
+		if err := validateLockIdentity(lock); err != nil {
+			return fmt.Errorf("action lock %q: %w", lock.ID, err)
+		}
+		for uses, child := range lock.Children {
+			if len(uses) == 0 || len(uses) > 2048 || !utf8.ValidString(uses) || hasControl(uses) || !actionLockIDPattern.MatchString(child.Lock) {
+				return fmt.Errorf("action lock %q has invalid child selector", lock.ID)
+			}
+		}
+		locks[lock.ID] = lock
+	}
+	reachable := map[string]bool{}
+	state := map[string]uint8{}
+	heights := map[string]int{}
+	var visit func(string, int) (int, error)
+	visit = func(id string, depth int) (int, error) {
+		lock, ok := locks[id]
+		if !ok {
+			return 0, fmt.Errorf("action selector references missing lock %q", id)
+		}
+		if state[id] == 1 {
+			return 0, fmt.Errorf("action lock graph contains a cycle at %q", id)
+		}
+		if height, ok := heights[id]; ok {
+			if depth+height-1 > metadata.MaxNestedActionDepth {
+				return 0, fmt.Errorf("action lock graph exceeds maximum depth %d", metadata.MaxNestedActionDepth)
+			}
+			reachable[id] = true
+			return height, nil
+		}
+		if depth > metadata.MaxNestedActionDepth {
+			return 0, fmt.Errorf("action lock graph exceeds maximum depth %d", metadata.MaxNestedActionDepth)
+		}
+		reachable[id] = true
+		state[id] = 1
+		height := 1
+		for uses, selector := range lock.Children {
+			child, ok := locks[selector.Lock]
+			if !ok {
+				return 0, fmt.Errorf("action selector references missing lock %q", selector.Lock)
+			}
+			if err := validateChildIdentity(lock, uses, child); err != nil {
+				return 0, fmt.Errorf("action lock %q child %q: %w", id, uses, err)
+			}
+			childHeight, err := visit(selector.Lock, depth+1)
+			if err != nil {
+				return 0, err
+			}
+			if childHeight+1 > height {
+				height = childHeight + 1
+			}
+		}
+		state[id] = 0
+		heights[id] = height
+		return height, nil
+	}
+	for _, step := range job.Steps {
+		if step.Kind != "uses" {
+			if step.Action != nil {
+				return fmt.Errorf("non-action step %q has an action selector", step.ID)
+			}
+			continue
+		}
+		if step.Action == nil {
+			return fmt.Errorf("action step %q has no action selector", step.ID)
+		}
+		if !actionLockIDPattern.MatchString(step.Action.Lock) {
+			return fmt.Errorf("action step %q has malformed action selector lock %q", step.ID, step.Action.Lock)
+		}
+		lock, ok := locks[step.Action.Lock]
+		if !ok {
+			return fmt.Errorf("action selector references missing lock %q", step.Action.Lock)
+		}
+		if err := validateTopLevelIdentity(step.Uses, lock); err != nil {
+			return fmt.Errorf("action step %q: %w", step.ID, err)
+		}
+		if _, err := visit(lock.ID, 1); err != nil {
+			return err
+		}
+	}
+	if len(reachable) != len(locks) {
+		return fmt.Errorf("job plan contains unused action locks")
+	}
+	return nil
+}
+
+func validateLockIdentity(lock ActionLock) error {
+	switch lock.Source {
+	case "workspace":
+		if lock.Repository != "" || lock.RequestedRef != "" || lock.Commit != "" || lock.Path != "" && !cleanActionPath(lock.Path) {
+			return fmt.Errorf("invalid workspace identity")
+		}
+	case "github":
+		if lock.Repository == "" || len(lock.Repository) > 140 || lock.Repository != strings.ToLower(lock.Repository) || lock.RequestedRef == "" || len(lock.RequestedRef) > 1024 || !utf8.ValidString(lock.RequestedRef) || hasControl(lock.RequestedRef) || !commitPattern.MatchString(lock.Commit) || lock.Path != "" && !cleanActionPath(lock.Path) {
+			return fmt.Errorf("invalid GitHub identity")
+		}
+		r, err := source.Parse(lock.Repository + "@x")
+		if err != nil || r.Owner+"/"+r.Repository != lock.Repository {
+			return fmt.Errorf("invalid canonical GitHub repository")
+		}
+	default:
+		return fmt.Errorf("unsupported source %q", lock.Source)
+	}
+	return nil
+}
+
+func validateTopLevelIdentity(uses string, lock ActionLock) error {
+	if strings.HasPrefix(uses, "./") {
+		path := strings.TrimPrefix(uses, "./")
+		if lock.Source != "workspace" || path != "" && !cleanActionPath(path) || lock.Path != path {
+			return fmt.Errorf("local action reference does not match lock identity")
+		}
+		return nil
+	}
+	r, err := source.Parse(uses)
+	if err != nil || lock.Source != "github" || !strings.EqualFold(lock.Repository, r.Owner+"/"+r.Repository) || lock.Path != r.Path || lock.RequestedRef != r.Ref {
+		return fmt.Errorf("remote action reference does not match lock identity")
+	}
+	return nil
+}
+
+func validateChildIdentity(parent ActionLock, uses string, child ActionLock) error {
+	if strings.HasPrefix(uses, "./") {
+		path := strings.TrimPrefix(uses, "./")
+		if path != "" && !cleanActionPath(path) || child.Source != parent.Source {
+			return fmt.Errorf("local child leaves parent source domain")
+		}
+		if parent.Source == "github" && (child.Repository != parent.Repository || child.Commit != parent.Commit || child.RequestedRef != parent.RequestedRef || child.SourceDigest != parent.SourceDigest) {
+			return fmt.Errorf("local child changes parent source identity")
+		}
+		return nil
+	}
+	r, err := source.Parse(uses)
+	if err != nil || child.Source != "github" || !strings.EqualFold(child.Repository, r.Owner+"/"+r.Repository) || child.Path != r.Path || child.RequestedRef != r.Ref {
+		return fmt.Errorf("remote child does not match lock identity")
+	}
+	return nil
+}
+
+func cleanActionPath(value string) bool {
+	if value == "" || len(value) > 1024 || !utf8.ValidString(value) || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") || hasControl(value) {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." || len(segment) > 255 {
+			return false
+		}
+	}
+	return true
+}
+
+func hasControl(value string) bool {
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.TimeoutMinutes != 0 {
+	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.TimeoutMinutes != 0 {
 		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
 	}
 	switch step.Kind {
