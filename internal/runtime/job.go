@@ -58,13 +58,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return JobResult{}, err
 	}
 	for _, step := range job.Steps {
-		if step.Background || step.Kind == "wait" || step.Kind == "wait-all" || step.Kind == "cancel" {
-			return JobResult{}, fmt.Errorf("step %q requires the concurrent-step supervisor, which is not active in this runtime", step.ID)
+		if step.Kind == "cancel" {
+			return JobResult{}, fmt.Errorf("step %q requires concurrent-step cancellation, which is not active in this runtime", step.ID)
 		}
 	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" {
-			return JobResult{}, fmt.Errorf("capability %q is unsupported in the sequential runtime", capability)
+			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
 	}
 	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
@@ -144,9 +144,39 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	defer cancelJob()
 	posts := make([]registeredPost, 0)
 	statuses := make(map[string]expression.StepStatus, len(job.Steps))
+	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
 	var runErr error
 	for _, step := range job.Steps {
+		if step.Kind == "wait" || step.Kind == "wait-all" {
+			var completed []stepExecution
+			if step.Kind == "wait" {
+				completed = supervisor.wait(step.Targets)
+			} else {
+				completed = supervisor.waitAll()
+			}
+			var barrierErr error
+			for _, execution := range completed {
+				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
+			}
+			outcome, conclusion := "success", "success"
+			if barrierErr != nil {
+				outcome = "failure"
+				if ctx.Err() != nil {
+					outcome = "cancelled"
+				}
+				conclusion = outcome
+				if step.ContinueOnError && outcome == "failure" {
+					conclusion = "success"
+				} else {
+					runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, barrierErr))
+				}
+			}
+			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
+			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			continue
+		}
+
 		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
@@ -158,36 +188,21 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
-		stepCtx := runCtx
-		cancelStep := func() {}
-		if step.TimeoutMinutes > 0 {
-			stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
+
+		jobEnv := cloneStrings(jobResult.Env)
+		evalSnapshot := cloneExpressionContext(eval)
+		if step.Background {
+			step := step
+			supervisor.start(step.ID, func() stepExecution {
+				return r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
+			})
+			continue
 		}
-		result, post, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobResult.Env, eval)
-		cancelStep()
-		eval.Steps[strings.ToLower(step.ID)] = result.Outputs
-		mergeInto(jobResult.Env, result.Env)
-		applyPaths(jobResult.Env, result.Paths)
-		eval.Env = jobResult.Env
-		mergeInto(jobResult.State, result.State)
-		jobResult.Summary += result.Summary
-		if post != nil {
-			posts = append(posts, *post)
-		}
-		outcome, conclusion := "success", "success"
-		if err != nil {
-			outcome = "failure"
-			if ctx.Err() != nil {
-				outcome = "cancelled"
-			}
-			conclusion = outcome
-			if step.ContinueOnError && outcome == "failure" {
-				conclusion = "success"
-			} else {
-				runErr = errors.Join(runErr, fmt.Errorf("step %q: %w", step.ID, err))
-			}
-		}
-		statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: result.Outputs}
+		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
+	}
+	for _, execution := range supervisor.waitAll() {
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
 	}
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())

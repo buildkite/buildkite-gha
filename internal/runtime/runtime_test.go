@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -126,23 +128,263 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	}
 }
 
-func TestConcurrentPlansFailClosedBeforeProcessExecution(t *testing.T) {
+func TestCancelPlansFailClosedBeforeProcessExecution(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	marker := filepath.Join(workspace, "must-not-exist")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID:         "background",
-		Kind:       "run",
-		Command:    "touch " + marker,
-		Background: true,
-	}})
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Command: "touch " + marker, Background: true},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+	})
 	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "requires the concurrent-step supervisor") {
-		t.Fatalf("RunJob() result = %#v, error = %v, want supervisor rejection", result, err)
+	if err == nil || !strings.Contains(err.Error(), "requires concurrent-step cancellation") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want cancellation rejection", result, err)
 	}
 	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("concurrent plan reached process execution: %v", statErr)
+		t.Fatalf("cancel plan reached process execution: %v", statErr)
+	}
+}
+
+func TestBackgroundEffectsCommitAtCoveringBarriers(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	oneDone := filepath.Join(workspace, "one.done")
+	twoDone := filepath.Join(workspace, "two.done")
+	pathEntry := filepath.Join(workspace, "from-background")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "one", Kind: "run", Background: true, Command: `
+echo "ONE=committed-one" >> "$GITHUB_ENV"
+echo "value=output-one" >> "$GITHUB_OUTPUT"
+echo "$PATH_ENTRY" >> "$GITHUB_PATH"
+echo one-summary >> "$GITHUB_STEP_SUMMARY"
+touch "$ONE_DONE"`},
+		{ID: "two", Kind: "run", Background: true, Command: `
+echo "TWO=committed-two" >> "$GITHUB_ENV"
+echo "value=output-two" >> "$GITHUB_OUTPUT"
+touch "$TWO_DONE"`},
+		{ID: "before-wait", Kind: "run", Command: `
+while [ ! -f "$ONE_DONE" ] || [ ! -f "$TWO_DONE" ]; do sleep 0.01; done
+test -z "$ONE"
+test -z "$TWO"
+case "$PATH" in "$PATH_ENTRY"*) exit 1 ;; esac`},
+		{ID: "wait-one", Kind: "wait", Targets: []string{"one"}},
+		{ID: "after-targeted-wait", Kind: "run", Command: `
+test "$ONE" = committed-one
+test -z "$TWO"
+test "${{ steps.one.outputs.value }}" = output-one
+case "$PATH" in "$PATH_ENTRY"*) ;; *) exit 1 ;; esac`},
+		{ID: "wait-all", Kind: "wait-all"},
+		{ID: "after-wait-all", Kind: "run", Command: `
+test "$ONE" = committed-one
+test "$TWO" = committed-two
+test "${{ steps.two.outputs.value }}" = output-two`},
+	})
+	job.Env = map[string]string{"ONE_DONE": oneDone, "TWO_DONE": twoDone, "PATH_ENTRY": pathEntry}
+	job.Outputs = map[string]string{"one": "${{ steps.one.outputs.value }}", "two": "${{ steps.two.outputs.value }}"}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" || result.Outputs["one"] != "output-one" || result.Outputs["two"] != "output-two" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+	if result.Summary != "one-summary\n" {
+		t.Fatalf("RunJob() summary = %q", result.Summary)
+	}
+}
+
+func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "failed.done")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "failure", Kind: "run", Background: true, Command: `echo "FAILED_EFFECT=visible" >> "$GITHUB_ENV"; touch "$FAILURE_DONE"; exit 9`},
+		{ID: "before-wait", Kind: "run", Command: `while [ ! -f "$FAILURE_DONE" ]; do sleep 0.01; done; test -z "$FAILED_EFFECT"; echo before-barrier`},
+		{ID: "wait", Kind: "wait", Targets: []string{"failure"}},
+		{ID: "default-after-wait", Kind: "run", Command: "echo must-not-run"},
+		{ID: "recover", Kind: "run", Condition: "failure() && steps.failure.outcome == 'failure'", Command: `test "$FAILED_EFFECT" = visible; echo recovered`},
+	})
+	job.Env = map[string]string{"FAILURE_DONE": marker}
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(logs.String(), "before-barrier") || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestBackgroundAndBarrierContinueOnError(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "soft-background", Kind: "run", Background: true, ContinueOnError: true, Command: "exit 7"},
+		{ID: "wait-soft", Kind: "wait", Targets: []string{"soft-background"}},
+		{ID: "after-soft", Kind: "run", Condition: "steps.soft-background.outcome == 'failure' && steps.soft-background.conclusion == 'success'", Command: "echo after-soft"},
+		{ID: "hard-background", Kind: "run", Background: true, Command: "exit 8"},
+		{ID: "soft-barrier", Kind: "wait", Targets: []string{"hard-background"}, ContinueOnError: true},
+		{ID: "after-barrier", Kind: "run", Condition: "steps.soft-barrier.outcome == 'failure' && steps.soft-barrier.conclusion == 'success'", Command: "echo after-barrier"},
+	})
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(logs.String(), "after-soft") || !strings.Contains(logs.String(), "after-barrier") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "skipped", Kind: "run", Background: true, Condition: "false", Command: "exit 1"},
+		{ID: "wait-skipped", Kind: "wait", Targets: []string{"skipped"}},
+		{ID: "completed", Kind: "run", Background: true, Command: `echo once >> "$GITHUB_STEP_SUMMARY"`},
+		{ID: "first-wait", Kind: "wait", Targets: []string{"completed"}},
+		{ID: "second-wait", Kind: "wait", Targets: []string{"completed"}},
+		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped'", Command: "true"},
+	})
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Summary != "once\n" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Background: true, Command: `echo "value=private" >> "$GITHUB_OUTPUT"`},
+		{ID: "premature-reader", Kind: "run", Command: `echo "${{ steps.background.outputs.value }}"`},
+	})
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "unavailable step") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output", result, err)
+	}
+}
+
+func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
+	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var started atomic.Int32
+	for i := 0; i < maxActiveBackgroundSteps+2; i++ {
+		supervisor.start(strconv.Itoa(i), func() stepExecution {
+			current := active.Add(1)
+			for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
+			}
+			started.Add(1)
+			<-release
+			active.Add(-1)
+			return stepExecution{}
+		})
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for started.Load() != maxActiveBackgroundSteps && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := started.Load(); got != maxActiveBackgroundSteps {
+		t.Fatalf("started = %d, want %d before release", got, maxActiveBackgroundSteps)
+	}
+	close(release)
+	if got := len(supervisor.waitAll()); got != maxActiveBackgroundSteps+2 {
+		t.Fatalf("completed = %d, want %d", got, maxActiveBackgroundSteps+2)
+	}
+	if got := maximum.Load(); got != maxActiveBackgroundSteps {
+		t.Fatalf("maximum active = %d, want %d", got, maxActiveBackgroundSteps)
+	}
+
+	fifo := newBackgroundSupervisor(1)
+	firstRelease := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	start := func(id string, wait <-chan struct{}) {
+		fifo.start(id, func() stepExecution {
+			mu.Lock()
+			order = append(order, id)
+			mu.Unlock()
+			if wait != nil {
+				<-wait
+			}
+			return stepExecution{}
+		})
+	}
+	start("first", firstRelease)
+	start("second", nil)
+	start("third", nil)
+	close(firstRelease)
+	fifo.waitAll()
+	mu.Lock()
+	gotOrder := strings.Join(order, ",")
+	mu.Unlock()
+	if gotOrder != "first,second,third" {
+		t.Fatalf("start order = %q, want FIFO", gotOrder)
+	}
+}
+
+func TestImplicitWaitAllPrecedesPostCleanup(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/background/action.yml", "name: Background lifecycle\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/background/main.js", `
+const fs = require('fs')
+setTimeout(() => {
+  fs.appendFileSync(process.env.GITHUB_ENV, 'BACKGROUND_READY=true\n')
+  fs.appendFileSync(process.env.GITHUB_OUTPUT, 'value=implicit\n')
+}, 50)
+`)
+	writeFixtureFile(t, workspace, ".github/actions/background/post.js", `
+if (process.env.BACKGROUND_READY !== 'true') process.exit(9)
+console.log('post-after-implicit-wait')
+`)
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "background", Kind: "uses", Uses: "./.github/actions/background", Background: true}})
+	job.Outputs = map[string]string{"value": "${{ steps.background.outputs.value }}"}
+
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["value"] != "implicit" || result.Env["BACKGROUND_READY"] != "true" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if !strings.Contains(logs.String(), "post-after-implicit-wait") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "mask.ready")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "masker", Kind: "run", Background: true, Command: `echo '::add-mask::cross-stream-secret'; sleep 0.05; touch "$MASK_READY"`},
+		{ID: "other-stream", Kind: "run", Command: `while [ ! -f "$MASK_READY" ]; do sleep 0.01; done; echo 'probe cross-stream-secret'`},
+		{ID: "wait", Kind: "wait-all"},
+	})
+	job.Env = map[string]string{"MASK_READY": marker}
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(logs.String(), "cross-stream-secret") || !strings.Contains(logs.String(), "probe ***") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
 	}
 }
 
