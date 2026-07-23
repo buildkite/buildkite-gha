@@ -98,6 +98,8 @@ type Step struct {
 	ID               string            `json:"id,omitempty"`
 	Name             string            `json:"name,omitempty"`
 	Kind             string            `json:"kind"`
+	Background       bool              `json:"background,omitempty"`
+	Targets          []string          `json:"targets,omitempty"`
 	Run              string            `json:"run,omitempty"`
 	Uses             string            `json:"uses,omitempty"`
 	Shell            string            `json:"shell,omitempty"`

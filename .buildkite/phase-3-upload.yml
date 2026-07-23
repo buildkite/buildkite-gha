@@ -1,0 +1,25 @@
+steps:
+  - label: ":pipeline: Phase 3 concurrent importer"
+    key: "phase-3-upload-importer"
+    agents:
+      queue: "elastic-runners"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      scripts/phase-0-shell-oracle-checkout "$$PHASE3_COMMIT"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase3.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runtime-queue hosted \
+        testdata/smoke/.github/workflows/concurrent.yml
+
+  - label: ":pipeline: Phase 3 continuation loader"
+    key: "phase-3-continuation-loader"
+    depends_on: "phase-3-upload-importer"
+    agents:
+      queue: "elastic-runners"
+    command: "buildkite-agent pipeline upload .buildkite/phase-3-upload-continuation.yml"

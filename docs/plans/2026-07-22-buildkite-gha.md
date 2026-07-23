@@ -733,8 +733,9 @@ process execution:
 - perform an implicit `wait-all` before post-job cleanup;
 - preserve wait/cancel behavior even though wait controls do not use normal
   step `if` evaluation;
-- send termination followed by forced termination after the documented grace
-  period for `cancel`; and
+- send `SIGINT`, then `SIGTERM` after 7.5 seconds, then force termination after
+  another 2.5 seconds for `cancel`; unlike GitHub's direct-process signaling,
+  apply each signal to the complete process group; and
 - reject parallel/background controls inside composite actions where GitHub
   does not permit them.
 
@@ -1331,8 +1332,8 @@ contract:
 - barrier-scoped visibility for outputs, environment changes, paths, and
   failures;
 - implicit `wait-all` before post-job cleanup;
-- graceful cancellation followed by forced process-tree termination after the
-  documented grace period;
+- `SIGINT` cancellation followed by `SIGTERM` after 7.5 seconds and forced
+  process-tree termination after another 2.5 seconds;
 - serialized workflow-command and mask registration across concurrent output
   streams.
 

@@ -58,6 +58,27 @@ func TestShellOracleRejectsCommitAndCaptureDrift(t *testing.T) {
 	}
 }
 
+func TestConcurrentOracleMaterializesAndComparesExactFixture(t *testing.T) {
+	source := smokeFixturePath()
+	repository, err := MaterializeShellFixture(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := repository.Commit
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output := strings.NewReader(`prefix PHASE3_OBSERVATION={"targeted":"targeted-and-full","queue_max":10,"parallel":"parallel","implicit":"implicit-wait-all","failure":"failure-at-wait","cancel":"graceful"}`)
+	got, err := CompareConcurrentOracle(context.Background(), source, commit, "test", output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"observations":[{"identity":"concurrent","document":{"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}}],"lifecycle":[]}`
+	if string(got) != want {
+		t.Fatalf("CompareConcurrentOracle() = %s, want %s", got, want)
+	}
+}
+
 func smokeFixturePath() string {
 	return "../../testdata/smoke"
 }

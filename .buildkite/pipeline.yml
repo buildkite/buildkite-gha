@@ -20,6 +20,13 @@ steps:
     agents:
       queue: "elastic-runners"
 
+  - label: ":pipeline: Load Phase 3 concurrent proof"
+    key: "phase-3-upload-loader"
+    if: build.env("PHASE3_PROBE") == "concurrent"
+    command: "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml"
+    agents:
+      queue: "elastic-runners"
+
   - label: ":go: Repository checks"
     key: "checks"
     plugins:

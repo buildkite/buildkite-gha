@@ -54,7 +54,7 @@ func TestCompileShellGoldenGraph(t *testing.T) {
 
 func TestCompileIsByteIdenticalAndCoversSmokeCorpus(t *testing.T) {
 	eventSource := readFile(t, smokePath("events", "push.json"))
-	for _, name := range []string{"shell.yml", "ci.yml", "artifact.yml"} {
+	for _, name := range []string{"shell.yml", "concurrent.yml", "ci.yml", "artifact.yml"} {
 		t.Run(name, func(t *testing.T) {
 			path := smokePath(".github", "workflows", name)
 			source := readFile(t, path)
@@ -826,6 +826,73 @@ jobs:
 	}
 }
 
+func TestCompilePlansOwnsConcurrentStepControls(t *testing.T) {
+	path := smokePath(".github", "workflows", "concurrent.yml")
+	source := []byte(`name: concurrent plan
+on: push
+jobs:
+  concurrent:
+    runs-on: ubuntu-latest
+    steps:
+      - id: first
+        run: echo first
+        background: true
+      - id: second
+        run: echo second
+        background: true
+        continue-on-error: true
+      - wait: [first, second]
+      - wait-all:
+      - cancel: first
+      - parallel:
+          - run: echo ${{ secrets.PARALLEL_TOKEN }}
+            env:
+              PARALLEL_SECRET: ${{ secrets.PARALLEL_TOKEN }}
+          - id: named-parallel
+            run: echo named
+`)
+	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV2 {
+		t.Fatalf("plans = %#v, want one v2 plan", plans)
+	}
+	steps := plans[0].Steps
+	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
+		t.Fatalf("background plan steps = %#v", steps)
+	}
+	if !steps[1].ContinueOnError || steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || steps[2].ContinueOnError {
+		t.Fatalf("targeted plan barrier = %#v", steps[2])
+	}
+	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
+		t.Fatalf("plan controls = %#v", steps[3:])
+	}
+	if !steps[5].Background || !steps[6].Background || steps[5].ID == "" || steps[6].ID != "named-parallel" {
+		t.Fatalf("lowered parallel members = %#v", steps[5:7])
+	}
+	if steps[7].Kind != "wait" || !reflect.DeepEqual(steps[7].Targets, []string{steps[5].ID, "named-parallel"}) {
+		t.Fatalf("lowered parallel barrier = %#v", steps[7])
+	}
+	if !reflect.DeepEqual(plans[0].RequiredSecrets, []string{"PARALLEL_TOKEN"}) || !plans[0].HasCapability("secrets") {
+		t.Fatalf("parallel secrets = %#v, capabilities = %#v", plans[0].RequiredSecrets, plans[0].RequiredCapabilities)
+	}
+}
+
+func TestConcurrentSmokeTerminalKeyMatchesNativeContinuation(t *testing.T) {
+	path := smokePath(".github", "workflows", "concurrent.yml")
+	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[0].Target.StepKey != "gha-concurrent" || plans[1].Target.StepKey != "gha-observe" {
+		t.Fatalf("concurrent smoke targets = %#v", plans)
+	}
+	if !reflect.DeepEqual(plans[1].Dependencies, []string{"gha-concurrent"}) {
+		t.Fatalf("observer dependencies = %#v", plans[1].Dependencies)
+	}
+}
+
 func TestCompilePlansRecordsStaticDependenciesWithVerifiedNeedSources(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
@@ -998,7 +1065,7 @@ func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v1.schema.json"))
+	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v2.schema.json"))
 	var schemaDocument any
 	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
 		t.Fatal(err)

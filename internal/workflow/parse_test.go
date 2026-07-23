@@ -72,6 +72,159 @@ func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
 	}
 }
 
+func TestParseRetainsConcurrentRuntimeControls(t *testing.T) {
+	source := []byte(`name: concurrent runtime
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Background producer
+        id: producer
+        run: echo ok
+        background: true
+        continue-on-error: true
+      - name: Targeted barrier
+        wait: [producer]
+      - name: Full barrier
+        wait-all:
+      - name: Stop producer
+        cancel: producer
+      - parallel:
+          - name: Parallel shell
+            run: echo shell
+            env:
+              MEMBER: shell
+          - id: parallel-action
+            uses: ./action
+            with:
+              Message: hello
+`)
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := parsed.Jobs[0].Steps
+	if len(steps) != 7 {
+		t.Fatalf("steps = %#v, want seven lowered steps", steps)
+	}
+	if steps[0].Kind != "run" || !steps[0].Background || steps[0].ID != "producer" || !steps[0].ContinueOnError {
+		t.Fatalf("background step = %#v", steps[0])
+	}
+	if steps[1].Kind != "wait" || len(steps[1].Targets) != 1 || steps[1].Targets[0] != "producer" || steps[1].ContinueOnError {
+		t.Fatalf("targeted wait = %#v", steps[1])
+	}
+	if steps[2].Kind != "wait-all" || len(steps[2].Targets) != 0 {
+		t.Fatalf("wait-all = %#v", steps[2])
+	}
+	if steps[3].Kind != "cancel" || len(steps[3].Targets) != 1 || steps[3].Targets[0] != "producer" {
+		t.Fatalf("cancel = %#v", steps[3])
+	}
+	if steps[4].Kind != "run" || !steps[4].Background || steps[4].ID == "" || steps[4].Env["MEMBER"] != "shell" {
+		t.Fatalf("parallel shell member = %#v", steps[4])
+	}
+	if steps[5].Kind != "uses" || !steps[5].Background || steps[5].ID != "parallel-action" || steps[5].With["message"] != "hello" {
+		t.Fatalf("parallel action member = %#v", steps[5])
+	}
+	if steps[6].Kind != "wait" || len(steps[6].Targets) != 2 || steps[6].Targets[0] != steps[4].ID || steps[6].Targets[1] != steps[5].ID {
+		t.Fatalf("parallel barrier = %#v", steps[6])
+	}
+}
+
+func TestParseParallelMembersRetainEnclosingExpressionContext(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.produce.outputs.artifact }}
+    steps:
+      - id: produce
+        run: echo "artifact=ready" >> "$GITHUB_OUTPUT"
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - id: prior
+        run: echo "ready=true" >> "$GITHUB_OUTPUT"
+      - parallel:
+          - if: steps.prior.outputs.ready == 'true'
+            env:
+              MATRIX_OS: ${{ matrix.os }}
+              NEED_VALUE: ${{ needs.prepare.outputs.artifact }}
+            run: test "$MATRIX_OS" = ubuntu-latest && test "$NEED_VALUE" = ready
+`)
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := parsed.Jobs[1].Steps
+	if len(steps) != 3 || steps[1].If != "steps.prior.outputs.ready == 'true'" || steps[1].Env["MATRIX_OS"] != "${{ matrix.os }}" || steps[1].Env["NEED_VALUE"] != "${{ needs.prepare.outputs.artifact }}" {
+		t.Fatalf("parallel member context expressions = %#v", steps)
+	}
+}
+
+func TestParseParallelOwnsBooleanSpellingsAndDeterministicIDs(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - run: echo one
+            continue-on-error: True
+          - run: echo two
+            continue-on-error: False
+`)
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := parsed.Jobs[0].Steps
+	if len(steps) != 3 || steps[0].ID != "__parallel_6_9_1" || steps[1].ID != "__parallel_6_9_2" || steps[2].ID != "__parallel_6_9_wait" {
+		t.Fatalf("parallel ids = %#v", steps)
+	}
+	if !steps[0].ContinueOnError || steps[1].ContinueOnError {
+		t.Fatalf("parallel continue-on-error values = %v, %v", steps[0].ContinueOnError, steps[1].ContinueOnError)
+	}
+	if steps[2].Span.End.Line < steps[1].Span.End.Line {
+		t.Fatalf("parallel barrier span = %#v, final member span = %#v", steps[2].Span, steps[1].Span)
+	}
+}
+
+func TestParseConcurrentControlsFailClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps string
+		want  string
+	}{
+		{name: "background false", steps: "      - run: true\n        background: false\n", want: "background must be the literal true"},
+		{name: "unknown target", steps: "      - wait: future\n      - id: future\n        run: true\n        background: true\n", want: `wait target "future" is not a prior background step`},
+		{name: "duplicate target", steps: "      - id: work\n        run: true\n        background: true\n      - wait: [work, WORK]\n", want: `wait repeats background step "WORK"`},
+		{name: "conditional control", steps: "      - wait-all:\n        if: always()\n", want: `wait-all control does not support "if"`},
+		{name: "continue-on-error control", steps: "      - wait-all:\n        continue-on-error: true\n", want: `wait-all control does not support "continue-on-error"`},
+		{name: "empty parallel", steps: "      - parallel: []\n", want: "parallel requires a non-empty list"},
+		{name: "nested background", steps: "      - parallel:\n          - run: true\n            background: true\n", want: `parallel member does not support "background"`},
+		{name: "parallel member execution", steps: "      - parallel:\n          - run: true\n            uses: ./action\n", want: "parallel member must declare exactly one"},
+		{name: "parallel outer field", steps: "      - name: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "name"`},
+		{name: "parallel outer fields deterministic", steps: "      - name: group\n        id: group\n        parallel:\n          - run: true\n", want: `parallel control does not support "id"`},
+		{name: "parallel docker overrides", steps: "      - parallel:\n          - uses: docker://example/image\n            with:\n              Entrypoint: /bin/sh\n", want: "unsupported entrypoint or args overrides"},
+		{name: "unmatched actionlint error", steps: "      - run: true\n        background: true\n        unexpected: true\n", want: `unexpected key "unexpected"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + test.steps
+			_, err := Parse("workflow.yml", []byte(source))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseMatrixPreservesDeclarationOrderAndCombinationSpans(t *testing.T) {
 	source := []byte(`on: push
 jobs:

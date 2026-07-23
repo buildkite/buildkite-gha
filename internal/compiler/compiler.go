@@ -229,7 +229,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			}
 			span := planSpan(step.Span)
 			steps[i] = plan.Step{
-				ID: id, Name: step.Name, Kind: step.Kind, Command: step.Run, Uses: step.Uses,
+				ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
 				Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
 				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
 				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -108,11 +109,47 @@ func TestGitHubShellOracleDefinitionIsManualAndPinned(t *testing.T) {
 	if required := yamlMap(t, sourceCommit, "source_commit")["required"]; required != true {
 		t.Fatalf("source_commit required = %#v, want true", required)
 	}
+	target := yamlMap(t, inputs["target"], "target")
+	if target["default"] != "shell" || !reflect.DeepEqual(target["options"], []any{"shell", "concurrent"}) {
+		t.Fatalf("target input = %#v, want shell default and exact target choices", target)
+	}
 	assertDefinitionText(t, path, []string{
 		"internal/harness/cmd/shell-oracle materialize",
 		"internal/harness/cmd/shell-oracle compare",
 		"--provider github",
 		"scripts/phase-0-shell-oracle-checkout",
+	})
+}
+
+func TestGitHubConcurrentOracleMatchesSmokeFixture(t *testing.T) {
+	fixturePath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml")
+	fixture := readYAMLMap(t, fixturePath)
+	fixtureJob := yamlMap(t, yamlMap(t, fixture["jobs"], "fixture jobs")["concurrent"], "fixture concurrent job")
+
+	oraclePath := filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml")
+	oracle := readYAMLMap(t, oraclePath)
+	oracleJobs := yamlMap(t, oracle["jobs"], "oracle jobs")
+	oracleJob := yamlMap(t, oracleJobs["concurrent"], "oracle concurrent job")
+	for _, field := range []string{"outputs", "steps"} {
+		if !reflect.DeepEqual(oracleJob[field], fixtureJob[field]) {
+			t.Fatalf("concurrent oracle %s differs from smoke fixture", field)
+		}
+	}
+	if oracleJob["if"] != "inputs.target == 'concurrent'" || oracleJob["needs"] != "prepare" {
+		t.Fatalf("concurrent oracle selection or preparation edge = %#v", oracleJob)
+	}
+	if _, ok := oracleJobs["concurrent-observe"]; !ok {
+		t.Fatal("concurrent oracle has no observation job")
+	}
+	if _, ok := oracleJobs["concurrent-compare"]; !ok {
+		t.Fatal("concurrent oracle has no comparison job")
+	}
+	assertDefinitionText(t, oraclePath, []string{
+		"PHASE3_OBSERVATION=",
+		"github-concurrent-observation",
+		"--target concurrent",
+		"needs: [prepare, concurrent]",
+		"needs: [prepare, concurrent-observe]",
 	})
 }
 

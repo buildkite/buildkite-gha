@@ -25,6 +25,12 @@ type commandFiles struct {
 	path    string
 }
 
+type fileCommandEffects struct {
+	paths    []string
+	pathBase string
+	pathSet  bool
+}
+
 func newCommandFiles() (commandFiles, error) {
 	dir, err := os.MkdirTemp("", "buildkite-gha-files-")
 	if err != nil {
@@ -46,9 +52,9 @@ func newCommandFiles() (commandFiles, error) {
 	return files, nil
 }
 
-func (files commandFiles) apply(result *Result, state map[string]string) error {
+func (files commandFiles) apply(result *Result, state map[string]string) (fileCommandEffects, error) {
 	if err := files.checkSizeBudget(); err != nil {
-		return err
+		return fileCommandEffects{}, err
 	}
 	outputs, outputErr := parseCommandFile(files.output)
 	env, envErr := parseCommandFile(files.env)
@@ -56,16 +62,24 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 	summary, summaryErr := readBoundedFile(files.summary, maxCommandFileBytes)
 	paths, pathErr := parsePathFile(files.path)
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
-		return errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
+		return fileCommandEffects{}, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
 	for name := range env {
 		if strings.EqualFold(name, "NODE_OPTIONS") {
-			return errors.New("GITHUB_ENV may not set NODE_OPTIONS")
+			return fileCommandEffects{}, errors.New("GITHUB_ENV may not set NODE_OPTIONS")
 		}
 		upper := strings.ToUpper(name)
 		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
-			return fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
+			return fileCommandEffects{}, fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
 		}
+	}
+	effects := fileCommandEffects{paths: paths}
+	if pathBase, ok := env["PATH"]; ok {
+		effects.pathBase = pathBase
+		effects.pathSet = true
+		result.pathBase = pathBase
+		result.pathBaseSet = true
+		result.Paths = result.Paths[:0]
 	}
 	for name, value := range outputs {
 		result.Outputs[name] = value
@@ -81,7 +95,7 @@ func (files commandFiles) apply(result *Result, state map[string]string) error {
 	}
 	result.Summary += string(summary)
 	result.Paths = append(result.Paths, paths...)
-	return nil
+	return effects, nil
 }
 
 func (files commandFiles) checkSizeBudget() error {

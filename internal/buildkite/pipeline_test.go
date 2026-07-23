@@ -140,8 +140,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 4 {
-		t.Fatalf("default pipeline = %#v, want three gated probe loaders and repository checks", document.Steps)
+	if len(document.Steps) != 5 {
+		t.Fatalf("default pipeline = %#v, want four gated probe loaders and repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -164,6 +164,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["phase-2-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml" || got.condition != `build.env("PHASE2_PROBE") == "upload"` {
 		t.Fatalf("Phase 2 upload loader = %#v", got)
+	}
+	if got := steps["phase-3-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml" || got.condition != `build.env("PHASE3_PROBE") == "concurrent"` {
+		t.Fatalf("Phase 3 upload loader = %#v", got)
 	}
 }
 
@@ -260,6 +263,66 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	if len(generatedConsumers) != 0 {
 		t.Fatalf("Phase 2 continuation omits generated consumers: %#v", generatedConsumers)
+	}
+}
+
+func TestPhase3UploadProofPreservesSeparateContinuationLoader(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-3-upload.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		`scripts/phase-0-shell-oracle-checkout "$$PHASE3_COMMIT"`,
+		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
+		`mise exec -- go build -trimpath -buildvcs=false`,
+		`--event-path testdata/smoke/events/push.json`,
+		`--runtime-queue hosted`,
+		`testdata/smoke/.github/workflows/concurrent.yml`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Phase 3 upload proof lacks %q:\n%s", required, source)
+		}
+	}
+	var upload struct {
+		Steps []struct {
+			Key       string `yaml:"key"`
+			Command   string `yaml:"command"`
+			DependsOn string `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-3-upload-importer" {
+		t.Fatalf("Phase 3 upload proof = %#v", upload.Steps)
+	}
+	if upload.Steps[1].Key != "phase-3-continuation-loader" || upload.Steps[1].DependsOn != "phase-3-upload-importer" || upload.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-3-upload-continuation.yml" {
+		t.Fatalf("Phase 3 continuation loader = %#v", upload.Steps[1])
+	}
+
+	continuationSource, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-3-upload-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var continuation struct {
+		Steps []struct {
+			Key       string `yaml:"key"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(continuation.Steps) != 1 || continuation.Steps[0].Key != "phase-3-native-after-concurrent" || len(continuation.Steps[0].DependsOn) != 1 {
+		t.Fatalf("Phase 3 continuation = %#v", continuation.Steps)
+	}
+	dependency := continuation.Steps[0].DependsOn[0]
+	if dependency.Step != "gha-observe" || !dependency.AllowFailure {
+		t.Fatalf("Phase 3 continuation dependency = %#v", dependency)
 	}
 }
 
