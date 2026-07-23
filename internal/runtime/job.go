@@ -506,6 +506,12 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			return result, err
 		}
 		mergeInto(result.Env, stepResult.Env)
+		if stepResult.pathBaseSet {
+			result.pathBase = stepResult.pathBase
+			result.pathBaseSet = true
+			result.Paths = result.Paths[:0]
+		}
+		result.Paths = append(result.Paths, stepResult.Paths...)
 		mergeInto(result.State, stepResult.State)
 		result.Summary += stepResult.Summary
 		if step.ID != "" {

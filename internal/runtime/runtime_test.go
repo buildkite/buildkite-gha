@@ -256,6 +256,113 @@ test "${{ steps.two.outputs.value }}" = output-two`},
 	}
 }
 
+func TestConcurrentPathEffectsComposeWithLiveBarrierState(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	oneDone := filepath.Join(workspace, "one.done")
+	twoDone := filepath.Join(workspace, "two.done")
+	onePath := filepath.Join(workspace, "background-one")
+	twoPath := filepath.Join(workspace, "background-two")
+	foregroundPath := filepath.Join(workspace, "foreground")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "one", Kind: "run", Background: true, Command: `echo "$ONE_PATH" >> "$GITHUB_PATH"; touch "$ONE_DONE"`},
+		{ID: "two", Kind: "run", Background: true, Command: `echo "$TWO_PATH" >> "$GITHUB_PATH"; touch "$TWO_DONE"`},
+		{ID: "foreground", Kind: "run", Command: `
+while [ ! -f "$ONE_DONE" ] || [ ! -f "$TWO_DONE" ]; do sleep 0.01; done
+echo "$FOREGROUND_PATH" >> "$GITHUB_PATH"`},
+		{ID: "wait-all", Kind: "wait-all"},
+		{ID: "verify", Kind: "run", Command: `
+want="$TWO_PATH:$ONE_PATH:$FOREGROUND_PATH:"
+case "$PATH" in "$want"*) ;; *) exit 1 ;; esac
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$ONE_PATH")" -eq 1
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$TWO_PATH")" -eq 1
+test "$(printf '%s' "$PATH" | tr ':' '\n' | grep -Fxc "$FOREGROUND_PATH")" -eq 1`},
+	})
+	job.Env = map[string]string{
+		"ONE_DONE": oneDone, "TWO_DONE": twoDone,
+		"ONE_PATH": onePath, "TWO_PATH": twoPath, "FOREGROUND_PATH": foregroundPath,
+	}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
+func TestBackgroundCompositePathEffectsComposeAtBarrier(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/path/action.yml", `name: Path writer
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "$COMPOSITE_PATH" >> "$GITHUB_PATH"
+`)
+	compositePath := filepath.Join(workspace, "composite")
+	foregroundPath := filepath.Join(workspace, "foreground")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/path", Background: true},
+		{ID: "foreground", Kind: "run", Command: `echo "$FOREGROUND_PATH" >> "$GITHUB_PATH"`},
+		{ID: "wait", Kind: "wait", Targets: []string{"composite"}},
+		{ID: "verify", Kind: "run", Command: `case "$PATH" in "$COMPOSITE_PATH:$FOREGROUND_PATH:"*) ;; *) exit 1 ;; esac`},
+	})
+	job.Env = map[string]string{"COMPOSITE_PATH": compositePath, "FOREGROUND_PATH": foregroundPath}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
+func TestJavaScriptMainSeesPrePathEffects(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/path/action.yml", `name: JavaScript path writer
+runs:
+  using: node24
+  pre: pre.js
+  main: main.js
+`)
+	writeFixtureFile(t, workspace, ".github/actions/path/pre.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/path/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+  echo v24.0.0
+  exit 0
+fi
+case "${1##*/}" in
+  pre.js) printf '%s\n' "$PATH_ENTRY" >> "$GITHUB_PATH" ;;
+  main.js) case ":$PATH:" in *":$PATH_ENTRY:"*) ;; *) exit 9 ;; esac ;;
+esac
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pathEntry := filepath.Join(workspace, "from-pre")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
+	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
+
+	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	if result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v", result)
+	}
+}
+
 func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -773,7 +880,7 @@ func TestFileCommandParsing(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := newResult()
-	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
+	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
 		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
 	}
 }
@@ -806,7 +913,7 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := newResult()
-	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "entry limit") {
+	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "entry limit") {
 		t.Fatalf("apply() error = %v, want entry limit", err)
 	}
 
@@ -817,7 +924,7 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result = newResult()
-	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "summary exceeds") {
+	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "summary exceeds") {
 		t.Fatalf("apply() error = %v, want summary size limit", err)
 	}
 
@@ -830,7 +937,7 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result = newResult()
-	if err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "aggregate limit") {
+	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "aggregate limit") {
 		t.Fatalf("apply() error = %v, want aggregate size limit", err)
 	}
 }

@@ -194,7 +194,16 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) step
 func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus, posts *[]registeredPost) error {
 	id := strings.ToLower(execution.step.ID)
 	eval.Steps[id] = execution.result.Outputs
-	mergeInto(jobResult.Env, execution.result.Env)
+	env := execution.result.Env
+	if len(execution.result.Paths) > 0 {
+		env = cloneStrings(env)
+		if execution.result.pathBaseSet {
+			env["PATH"] = execution.result.pathBase
+		} else {
+			delete(env, "PATH")
+		}
+	}
+	mergeInto(jobResult.Env, env)
 	applyPaths(jobResult.Env, execution.result.Paths)
 	eval.Env = jobResult.Env
 	mergeInto(jobResult.State, execution.result.State)
