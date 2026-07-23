@@ -238,8 +238,12 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	generatedKeys := make(map[string]struct{}, len(generated.Steps))
+	generatedConsumers := make(map[string]struct{})
 	for _, step := range generated.Steps {
 		generatedKeys[step.Key] = struct{}{}
+		if strings.HasPrefix(step.Key, "gha-consumer-") {
+			generatedConsumers[step.Key] = struct{}{}
+		}
 	}
 	if len(continuation.Steps[0].DependsOn) != len(wantDependencies) {
 		t.Fatalf("Phase 2 continuation dependencies = %#v", continuation.Steps[0].DependsOn)
@@ -252,6 +256,10 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		if _, ok := generatedKeys[dependency.Step]; !ok {
 			t.Fatalf("Phase 2 continuation dependency %q is absent from shell.pipeline.golden.yml", dependency.Step)
 		}
+		delete(generatedConsumers, dependency.Step)
+	}
+	if len(generatedConsumers) != 0 {
+		t.Fatalf("Phase 2 continuation omits generated consumers: %#v", generatedConsumers)
 	}
 }
 
