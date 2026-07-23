@@ -38,7 +38,7 @@ func TestDecodeFailsClosed(t *testing.T) {
 	}{
 		{name: "unknown field", source: strings.Replace(string(encoded), `"steps":`, `"unexpected":true,"steps":`, 1), want: "unknown field"},
 		{name: "duplicate key", source: strings.Replace(string(encoded), `"schema":`, `"schema":"duplicate","schema":`, 1), want: "duplicate JSON key"},
-		{name: "unknown schema", source: strings.Replace(string(encoded), Schema, "job-plan-v2", 1), want: "unsupported job plan schema"},
+		{name: "unknown schema", source: strings.Replace(string(encoded), Schema, "job-plan-v3", 1), want: "unsupported job plan schema"},
 		{name: "trailing JSON", source: string(encoded) + `{}`, want: "multiple JSON values"},
 	}
 	for _, test := range tests {
@@ -69,6 +69,45 @@ func TestValidateRejectsOutOfRangeTimeouts(t *testing.T) {
 	job.Steps[0].TimeoutMinutes = -1
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "step-1") {
 		t.Fatalf("Validate() error = %v, want step timeout error", err)
+	}
+}
+
+func TestValidateConcurrentStepTopology(t *testing.T) {
+	job := validJob()
+	job.Steps = []Step{
+		{ID: "producer", Kind: "run", Command: "true", Background: true},
+		{ID: "barrier", Kind: "wait", Targets: []string{"PRODUCER"}},
+		{ID: "all", Kind: "wait-all"},
+		{ID: "stop", Kind: "cancel", Targets: []string{"producer"}},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		step Step
+		want string
+	}{
+		{name: "forward target", step: Step{ID: "wait", Kind: "wait", Targets: []string{"later"}}, want: "not a prior background step"},
+		{name: "duplicate target", step: Step{ID: "wait", Kind: "wait", Targets: []string{"producer", "PRODUCER"}}, want: "repeats target"},
+		{name: "wait all target", step: Step{ID: "wait", Kind: "wait-all", Targets: []string{"producer"}}, want: "cannot target"},
+		{name: "control payload", step: Step{ID: "wait", Kind: "wait-all", Command: "true"}, want: "incompatible execution fields"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := validJob()
+			if test.name == "duplicate target" || test.name == "wait all target" {
+				job.Steps[0].ID = "producer"
+				job.Steps[0].Background = true
+				job.Steps = append(job.Steps, test.step)
+			} else {
+				job.Steps = []Step{test.step, {ID: "later", Kind: "run", Command: "true", Background: true}}
+			}
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

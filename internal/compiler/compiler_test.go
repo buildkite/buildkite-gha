@@ -826,6 +826,44 @@ jobs:
 	}
 }
 
+func TestCompilePlansOwnsConcurrentStepControls(t *testing.T) {
+	path := smokePath(".github", "workflows", "concurrent.yml")
+	source := []byte(`name: concurrent plan
+on: push
+jobs:
+  concurrent:
+    runs-on: ubuntu-latest
+    steps:
+      - id: first
+        run: echo first
+        background: true
+      - id: second
+        run: echo second
+        background: true
+      - wait: [first, second]
+        continue-on-error: true
+      - wait-all:
+      - cancel: first
+`)
+	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV2 {
+		t.Fatalf("plans = %#v, want one v2 plan", plans)
+	}
+	steps := plans[0].Steps
+	if len(steps) != 5 || !steps[0].Background || !steps[1].Background {
+		t.Fatalf("background plan steps = %#v", steps)
+	}
+	if steps[2].Kind != "wait" || !reflect.DeepEqual(steps[2].Targets, []string{"first", "second"}) || !steps[2].ContinueOnError {
+		t.Fatalf("targeted plan barrier = %#v", steps[2])
+	}
+	if steps[3].Kind != "wait-all" || steps[4].Kind != "cancel" || !reflect.DeepEqual(steps[4].Targets, []string{"first"}) {
+		t.Fatalf("plan controls = %#v", steps[3:])
+	}
+}
+
 func TestCompilePlansRecordsStaticDependenciesWithVerifiedNeedSources(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
@@ -998,7 +1036,7 @@ func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v1.schema.json"))
+	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v2.schema.json"))
 	var schemaDocument any
 	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
 		t.Fatal(err)

@@ -126,6 +126,26 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	}
 }
 
+func TestConcurrentPlansFailClosedBeforeProcessExecution(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	marker := filepath.Join(workspace, "must-not-exist")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:         "background",
+		Kind:       "run",
+		Command:    "touch " + marker,
+		Background: true,
+	}})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "requires the concurrent-step supervisor") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want supervisor rejection", result, err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("concurrent plan reached process execution: %v", statErr)
+	}
+}
+
 func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")

@@ -3,21 +3,47 @@ package workflow
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/rhysd/actionlint"
 	"go.yaml.in/yaml/v4"
 )
 
+const missingStepExecutionDiagnostic = "step must run script with \"run\" section or run action with \"uses\" section"
+
+type stepConcurrency struct {
+	Kind       string
+	Background bool
+	Targets    []string
+}
+
+type expectedActionlintDiagnostic struct {
+	Position Position
+	Prefix   string
+}
+
+type concurrencySyntax struct {
+	Steps       map[Position]stepConcurrency
+	Diagnostics []expectedActionlintDiagnostic
+}
+
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
 // into the owned workflow model.
 func Parse(path string, source []byte) (*Workflow, error) {
-	parsed, errs := actionlint.Parse(source)
-	if len(errs) != 0 {
-		err := errs[0]
-		return nil, fmt.Errorf("%s:%d:%d: %s", path, err.Line, err.Column, err.Message)
+	var document yaml.Node
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		return nil, fmt.Errorf("%s: parse workflow YAML: %w", path, err)
 	}
-	scalars, err := scalarValues(source)
+	concurrency, err := parseConcurrencySyntax(path, &document)
+	if err != nil {
+		return nil, err
+	}
+	parsed, errs := actionlint.Parse(source)
+	if err := filterActionlintDiagnostics(path, errs, concurrency.Diagnostics); err != nil {
+		return nil, err
+	}
+	scalars, err := scalarValues(&document)
 	if err != nil {
 		return nil, fmt.Errorf("%s: parse scalar values: %w", path, err)
 	}
@@ -68,7 +94,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		job, err := adaptJob(path, parsed.Jobs[id], scalars)
+		job, err := adaptJob(path, parsed.Jobs[id], scalars, concurrency.Steps)
 		if err != nil {
 			return nil, err
 		}
@@ -81,10 +107,24 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		}
 		owned.Jobs = append(owned.Jobs, job)
 	}
+	if len(concurrency.Steps) != 0 {
+		positions := make([]Position, 0, len(concurrency.Steps))
+		for position := range concurrency.Steps {
+			positions = append(positions, position)
+		}
+		sort.Slice(positions, func(i, j int) bool {
+			if positions[i].Line != positions[j].Line {
+				return positions[i].Line < positions[j].Line
+			}
+			return positions[i].Column < positions[j].Column
+		})
+		position := positions[0]
+		return nil, fmt.Errorf("%s:%d:%d: concurrent step did not match the pinned actionlint syntax tree", path, position.Line, position.Column)
+	}
 	return owned, nil
 }
 
-func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, error) {
+func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.WorkflowCall != nil {
 		call := in.WorkflowCall
@@ -186,7 +226,12 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 	}
 
 	for _, step := range in.Steps {
-		owned := Step{Span: pointSpan(step.Pos)}
+		stepPosition := Position{Line: step.Pos.Line, Column: step.Pos.Col}
+		control, hasConcurrency := concurrency[stepPosition]
+		if hasConcurrency {
+			delete(concurrency, stepPosition)
+		}
+		owned := Step{Background: control.Background, Targets: append([]string(nil), control.Targets...), Span: pointSpan(step.Pos)}
 		if step.ID != nil {
 			owned.ID = step.ID.Value
 		}
@@ -236,11 +281,19 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any) (Job, e
 				}
 			}
 			owned.Span = spanFrom(step.Pos, exec.Uses.Value)
+		case nil:
+			if control.Kind == "" {
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, "unsupported step execution kind")
+			}
+			owned.Kind = control.Kind
 		default:
 			return Job{}, locatedError(path, step.Pos, in.ID.Value, "unsupported step execution kind")
 		}
 		out.Steps = append(out.Steps, owned)
 		out.Span.End = owned.Span.End
+	}
+	if err := validateStepConcurrency(path, in.ID.Value, out.Steps); err != nil {
+		return Job{}, err
 	}
 	return out, nil
 }
@@ -415,14 +468,10 @@ func adaptValue(in actionlint.RawYAMLValue, scalars map[Position]any) any {
 	}
 }
 
-func scalarValues(source []byte) (map[Position]any, error) {
+func scalarValues(document *yaml.Node) (map[Position]any, error) {
 	// actionlint's raw scalar model intentionally discards YAML scalar tags.
 	// Join a YAML node tree by source position so quoted strings remain distinct
 	// from the booleans, numbers, and nulls used in matrix contexts.
-	var document yaml.Node
-	if err := yaml.Unmarshal(source, &document); err != nil {
-		return nil, err
-	}
 	values := make(map[Position]any)
 	var walk func(*yaml.Node) error
 	walk = func(node *yaml.Node) error {
@@ -443,10 +492,233 @@ func scalarValues(source []byte) (map[Position]any, error) {
 		}
 		return nil
 	}
-	if err := walk(&document); err != nil {
+	if err := walk(document); err != nil {
 		return nil, err
 	}
 	return values, nil
+}
+
+func parseConcurrencySyntax(path string, document *yaml.Node) (concurrencySyntax, error) {
+	syntax := concurrencySyntax{Steps: map[Position]stepConcurrency{}}
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	jobs := mappingValue(root, "jobs")
+	if jobs == nil || jobs.Kind != yaml.MappingNode {
+		return syntax, nil
+	}
+	for i := 0; i+1 < len(jobs.Content); i += 2 {
+		job := jobs.Content[i+1]
+		steps := mappingValue(job, "steps")
+		if steps == nil || steps.Kind != yaml.SequenceNode {
+			continue
+		}
+		for _, step := range steps.Content {
+			if step.Kind != yaml.MappingNode {
+				continue
+			}
+			parsed, diagnostic, ok, err := parseStepConcurrency(path, step)
+			if err != nil {
+				return concurrencySyntax{}, err
+			}
+			if !ok {
+				continue
+			}
+			position := nodePosition(step)
+			syntax.Steps[position] = parsed
+			syntax.Diagnostics = append(syntax.Diagnostics, diagnostic)
+		}
+	}
+	return syntax, nil
+}
+
+func parseStepConcurrency(path string, step *yaml.Node) (stepConcurrency, expectedActionlintDiagnostic, bool, error) {
+	entries := mappingEntries(step)
+	background, hasBackground := entries["background"]
+	controlKinds := make([]string, 0, 3)
+	for _, kind := range []string{"wait", "wait-all", "cancel", "parallel"} {
+		if _, ok := entries[kind]; ok {
+			controlKinds = append(controlKinds, kind)
+		}
+	}
+	if !hasBackground && len(controlKinds) == 0 {
+		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, nil
+	}
+	if len(controlKinds) > 1 || len(controlKinds) != 0 && (hasBackground || entries["run"] != nil || entries["uses"] != nil) {
+		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, step, "concurrent step must declare exactly one execution or control kind")
+	}
+	if hasBackground {
+		if entries["run"] == nil && entries["uses"] == nil {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, background, "background is only valid on run or uses steps")
+		}
+		if background.ShortTag() != "!!bool" || background.Value != "true" {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, background, "background must be the literal true")
+		}
+		key := mappingKey(step, "background")
+		return stepConcurrency{Background: true}, expectedActionlintDiagnostic{
+			Position: nodePosition(key),
+			Prefix:   "unexpected key \"background\" for step to ",
+		}, true, nil
+	}
+
+	kind := controlKinds[0]
+	if kind == "parallel" {
+		return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "parallel steps are not yet supported by the Phase 3 runtime")
+	}
+	allowed := map[string]bool{"name": true, kind: true}
+	if kind == "wait" || kind == "wait-all" {
+		allowed["continue-on-error"] = true
+	}
+	for name := range entries {
+		if !allowed[name] {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, mappingKey(step, name), fmt.Sprintf("%s control does not support %q", kind, name))
+		}
+	}
+	control := stepConcurrency{Kind: kind}
+	switch kind {
+	case "wait":
+		targets, err := stringList(entries[kind])
+		if err != nil || len(targets) == 0 {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "wait requires one step id or a non-empty list of step ids")
+		}
+		control.Targets = targets
+	case "wait-all":
+		if entries[kind].ShortTag() != "!!null" {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "wait-all does not accept a value")
+		}
+	case "cancel":
+		targets, err := stringList(entries[kind])
+		if err != nil || len(targets) != 1 || entries[kind].Kind != yaml.ScalarNode {
+			return stepConcurrency{}, expectedActionlintDiagnostic{}, false, yamlNodeError(path, entries[kind], "cancel requires exactly one step id")
+		}
+		control.Targets = targets
+	}
+	return control, expectedActionlintDiagnostic{Position: nodePosition(step), Prefix: missingStepExecutionDiagnostic}, true, nil
+}
+
+func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected []expectedActionlintDiagnostic) error {
+	matched := make([]bool, len(expected))
+	for _, actionlintErr := range errs {
+		match := -1
+		for i, diagnostic := range expected {
+			if !matched[i] && diagnostic.Position.Line == actionlintErr.Line && diagnostic.Position.Column == actionlintErr.Column && strings.HasPrefix(actionlintErr.Message, diagnostic.Prefix) {
+				match = i
+				break
+			}
+		}
+		if match >= 0 {
+			matched[match] = true
+			continue
+		}
+		return fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, actionlintErr.Message)
+	}
+	for i, ok := range matched {
+		if !ok {
+			diagnostic := expected[i]
+			return fmt.Errorf("%s:%d:%d: actionlint concurrency diagnostic changed; pinned parser contract must be reviewed", path, diagnostic.Position.Line, diagnostic.Position.Column)
+		}
+	}
+	return nil
+}
+
+func validateStepConcurrency(path, jobID string, steps []Step) error {
+	background := make(map[string]struct{})
+	for _, step := range steps {
+		if step.Background && step.ID != "" {
+			background[strings.ToLower(step.ID)] = struct{}{}
+		}
+		if step.Kind != "wait" && step.Kind != "cancel" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(step.Targets))
+		for _, target := range step.Targets {
+			key := strings.ToLower(target)
+			if _, duplicate := seen[key]; duplicate {
+				return workflowSpanError(path, step.Span, jobID, fmt.Sprintf("%s repeats background step %q", step.Kind, target))
+			}
+			seen[key] = struct{}{}
+			if _, ok := background[key]; !ok {
+				return workflowSpanError(path, step.Span, jobID, fmt.Sprintf("%s target %q is not a prior background step with an id", step.Kind, target))
+			}
+		}
+	}
+	return nil
+}
+
+func mappingEntries(node *yaml.Node) map[string]*yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return map[string]*yaml.Node{}
+	}
+	entries := make(map[string]*yaml.Node, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		entries[node.Content[i].Value] = node.Content[i+1]
+	}
+	return entries
+}
+
+func mappingValue(node *yaml.Node, name string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == name {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func mappingKey(node *yaml.Node, name string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == name {
+			return node.Content[i]
+		}
+	}
+	return nil
+}
+
+func stringList(node *yaml.Node) ([]string, error) {
+	if node == nil {
+		return nil, fmt.Errorf("missing value")
+	}
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.ShortTag() != "!!str" || node.Value == "" {
+			return nil, fmt.Errorf("value is not a step id")
+		}
+		return []string{node.Value}, nil
+	case yaml.SequenceNode:
+		values := make([]string, 0, len(node.Content))
+		for _, child := range node.Content {
+			if child.Kind != yaml.ScalarNode || child.ShortTag() != "!!str" || child.Value == "" {
+				return nil, fmt.Errorf("value is not a step id")
+			}
+			values = append(values, child.Value)
+		}
+		return values, nil
+	default:
+		return nil, fmt.Errorf("value is not a string or list")
+	}
+}
+
+func nodePosition(node *yaml.Node) Position {
+	if node == nil {
+		return Position{}
+	}
+	return Position{Line: node.Line, Column: node.Column}
+}
+
+func yamlNodeError(path string, node *yaml.Node, message string) error {
+	position := nodePosition(node)
+	return fmt.Errorf("%s:%d:%d: %s", path, position.Line, position.Column, message)
+}
+
+func workflowSpanError(path string, span Span, jobID, message string) error {
+	return fmt.Errorf("%s:%d:%d: job %q: %s", path, span.Start.Line, span.Start.Column, jobID, message)
 }
 
 func adaptExpression(in *actionlint.String) (expression.Expression, error) {

@@ -72,6 +72,71 @@ func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
 	}
 }
 
+func TestParseRetainsConcurrentRuntimeControls(t *testing.T) {
+	source := []byte(`name: concurrent runtime
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Background producer
+        id: producer
+        run: echo ok
+        background: true
+      - name: Targeted barrier
+        wait: [producer]
+        continue-on-error: true
+      - name: Full barrier
+        wait-all:
+      - name: Stop producer
+        cancel: producer
+`)
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := parsed.Jobs[0].Steps
+	if len(steps) != 4 {
+		t.Fatalf("steps = %#v, want four steps", steps)
+	}
+	if steps[0].Kind != "run" || !steps[0].Background || steps[0].ID != "producer" {
+		t.Fatalf("background step = %#v", steps[0])
+	}
+	if steps[1].Kind != "wait" || len(steps[1].Targets) != 1 || steps[1].Targets[0] != "producer" || !steps[1].ContinueOnError {
+		t.Fatalf("targeted wait = %#v", steps[1])
+	}
+	if steps[2].Kind != "wait-all" || len(steps[2].Targets) != 0 {
+		t.Fatalf("wait-all = %#v", steps[2])
+	}
+	if steps[3].Kind != "cancel" || len(steps[3].Targets) != 1 || steps[3].Targets[0] != "producer" {
+		t.Fatalf("cancel = %#v", steps[3])
+	}
+}
+
+func TestParseConcurrentControlsFailClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		steps string
+		want  string
+	}{
+		{name: "background false", steps: "      - run: true\n        background: false\n", want: "background must be the literal true"},
+		{name: "unknown target", steps: "      - wait: future\n      - id: future\n        run: true\n        background: true\n", want: `wait target "future" is not a prior background step`},
+		{name: "duplicate target", steps: "      - id: work\n        run: true\n        background: true\n      - wait: [work, WORK]\n", want: `wait repeats background step "WORK"`},
+		{name: "conditional control", steps: "      - wait-all:\n        if: always()\n", want: `wait-all control does not support "if"`},
+		{name: "parallel deferred", steps: "      - parallel:\n          - run: true\n", want: "parallel steps are not yet supported"},
+		{name: "unmatched actionlint error", steps: "      - run: true\n        background: true\n        unexpected: true\n", want: `unexpected key "unexpected"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n" + test.steps
+			_, err := Parse("workflow.yml", []byte(source))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseMatrixPreservesDeclarationOrderAndCombinationSpans(t *testing.T) {
 	source := []byte(`on: push
 jobs:

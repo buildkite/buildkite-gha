@@ -11,9 +11,14 @@ import (
 	"strings"
 )
 
-const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
+const (
+	SchemaV1 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
+	SchemaV2 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
+	Schema   = SchemaV2
+)
 
 const MaxNeedProducers = 256
+const MaxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -72,6 +77,8 @@ type Step struct {
 	ID               string            `json:"id"`
 	Name             string            `json:"name,omitempty"`
 	Kind             string            `json:"kind"`
+	Background       bool              `json:"background,omitempty"`
+	Targets          []string          `json:"targets,omitempty"`
 	Command          string            `json:"command,omitempty"`
 	Uses             string            `json:"uses,omitempty"`
 	Shell            string            `json:"shell,omitempty"`
@@ -212,7 +219,7 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != Schema {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
@@ -313,6 +320,7 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan contains no steps")
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
+	backgroundIDs := make(map[string]struct{})
 	for i, step := range job.Steps {
 		if step.ID == "" {
 			return fmt.Errorf("job plan step %d has no deterministic id", i+1)
@@ -331,17 +339,75 @@ func (job Job) Validate() error {
 		if len(step.Condition) > 65536 {
 			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
 		}
+		if job.Schema == SchemaV1 && (step.Background || len(step.Targets) != 0 || step.Kind != "run" && step.Kind != "uses") {
+			return fmt.Errorf("job plan v1 step %q contains concurrent-step fields", step.ID)
+		}
 		switch step.Kind {
 		case "run":
 			if strings.TrimSpace(step.Command) == "" {
 				return fmt.Errorf("run step %q has no command", step.ID)
 			}
+			if step.Uses != "" || len(step.Targets) != 0 {
+				return fmt.Errorf("run step %q contains incompatible action or control fields", step.ID)
+			}
+			if step.Background {
+				backgroundIDs[id] = struct{}{}
+			}
 		case "uses":
 			if strings.TrimSpace(step.Uses) == "" {
 				return fmt.Errorf("action step %q has no action reference", step.ID)
 			}
+			if step.Command != "" || len(step.Targets) != 0 {
+				return fmt.Errorf("action step %q contains incompatible run or control fields", step.ID)
+			}
+			if step.Background {
+				backgroundIDs[id] = struct{}{}
+			}
+		case "wait", "wait-all", "cancel":
+			if err := validateControlStep(step, backgroundIDs); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
+		}
+	}
+	return nil
+}
+
+func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
+	if step.Background || step.Command != "" || step.Uses != "" || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.TimeoutMinutes != 0 {
+		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
+	}
+	switch step.Kind {
+	case "wait":
+		if len(step.Targets) == 0 || len(step.Targets) > MaxStepTargets {
+			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, MaxStepTargets)
+		}
+	case "wait-all":
+		if len(step.Targets) != 0 {
+			return fmt.Errorf("wait-all step %q cannot target individual steps", step.ID)
+		}
+		return nil
+	case "cancel":
+		if len(step.Targets) != 1 {
+			return fmt.Errorf("cancel step %q must target exactly one background step", step.ID)
+		}
+		if step.ContinueOnError {
+			return fmt.Errorf("cancel step %q cannot continue on error", step.ID)
+		}
+	}
+	seen := make(map[string]struct{}, len(step.Targets))
+	for _, target := range step.Targets {
+		if !targetPattern.MatchString(target) {
+			return fmt.Errorf("control step %q has invalid target %q", step.ID, target)
+		}
+		key := strings.ToLower(target)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("control step %q repeats target %q", step.ID, target)
+		}
+		seen[key] = struct{}{}
+		if _, exists := backgroundIDs[key]; !exists {
+			return fmt.Errorf("control step %q target %q is not a prior background step", step.ID, target)
 		}
 	}
 	return nil

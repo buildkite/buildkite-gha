@@ -241,6 +241,23 @@ func TestUnprivilegedUploadRejectsActionSteps(t *testing.T) {
 	}
 }
 
+func TestUnprivilegedUploadRejectsConcurrentStepsUntilSupervisorIsActive(t *testing.T) {
+	for _, step := range []plan.Step{
+		{ID: "background", Kind: "run", Command: "true", Background: true},
+		{ID: "wait", Kind: "wait", Targets: []string{"background"}},
+		{ID: "wait-all", Kind: "wait-all"},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+	} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
+			Steps:    []plan.Step{step},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "concurrent step") {
+			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v, want concurrent-step rejection", step, err)
+		}
+	}
+}
+
 type cliCommand struct {
 	dir   string
 	name  string
