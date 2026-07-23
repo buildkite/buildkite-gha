@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -446,6 +447,44 @@ func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "cross-stream-secret") || !strings.Contains(logs.String(), "probe ***") {
 		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
+	workspace := fixturePath(t, "smoke")
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "concurrent.yml")
+	source, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(filepath.Join(workspace, "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlans(workflowPath, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %#v, want concurrent and observer", plans)
+	}
+	var logs bytes.Buffer
+	runner := Runner{Stdout: &logs, Stderr: &logs}
+	concurrent, err := runner.RunJob(context.Background(), plans[0], workspace)
+	if err != nil || concurrent.Conclusion != "success" {
+		t.Fatalf("concurrent result = %#v, error = %v, logs = %q", concurrent, err, logs.String())
+	}
+	plans[1].Needs = map[string]plan.Need{"concurrent": {Result: concurrent.Conclusion, Outputs: concurrent.Outputs}}
+	observer, err := runner.RunJob(context.Background(), plans[1], workspace)
+	if err != nil || observer.Conclusion != "success" {
+		t.Fatalf("observer result = %#v, error = %v, logs = %q", observer, err, logs.String())
+	}
+	if strings.Contains(logs.String(), "phase3-cross-stream-secret") || !strings.Contains(logs.String(), "PHASE3_MASK_PROBE=***") {
+		t.Fatalf("concurrent masking logs = %q", logs.String())
+	}
+	want := `PHASE3_OBSERVATION={"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`
+	if !strings.Contains(logs.String(), want) {
+		t.Fatalf("concurrent observation missing from logs = %q", logs.String())
 	}
 }
 

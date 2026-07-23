@@ -41,13 +41,23 @@ func run(ctx context.Context, args []string) error {
 	case "compare":
 		commit := flags.String("commit", "", "exact materialized fixture commit")
 		provider := flags.String("provider", "", "provider that produced standard input")
+		target := flags.String("target", "shell", "fixture target to compare: shell or concurrent")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
 		if flags.NArg() != 0 {
 			return fmt.Errorf("compare accepts observations on standard input only")
 		}
-		normalized, err := harness.CompareShellOracle(ctx, *source, *commit, *provider, os.Stdin)
+		var normalized []byte
+		var err error
+		switch *target {
+		case "shell":
+			normalized, err = harness.CompareShellOracle(ctx, *source, *commit, *provider, os.Stdin)
+		case "concurrent":
+			normalized, err = harness.CompareConcurrentOracle(ctx, *source, *commit, *provider, os.Stdin)
+		default:
+			return fmt.Errorf("unknown compare target %q", *target)
+		}
 		if err != nil {
 			return err
 		}

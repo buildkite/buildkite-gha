@@ -242,6 +242,36 @@ func CaptureShellOutput(provider string, output io.Reader) (Capture, error) {
 	return capture, nil
 }
 
+// CaptureConcurrentOutput extracts the single portable observation emitted by
+// concurrent.yml after all Phase 3 assertions have passed.
+func CaptureConcurrentOutput(provider string, output io.Reader) (Capture, error) {
+	const marker = "PHASE3_OBSERVATION="
+	capture := Capture{Provider: provider}
+	scanner := bufio.NewScanner(output)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		index := strings.Index(line, marker)
+		if index < 0 {
+			continue
+		}
+		document := json.RawMessage(strings.TrimSpace(line[index+len(marker):]))
+		var value map[string]any
+		if err := decodeJSON(document, &value); err != nil {
+			return Capture{}, fmt.Errorf("decode concurrent observation: %w", err)
+		}
+		capture.Observations = append(capture.Observations, Record{Identity: "concurrent", Document: document})
+	}
+	if err := scanner.Err(); err != nil {
+		return Capture{}, fmt.Errorf("read concurrent output: %w", err)
+	}
+	expected := Capture{Observations: []Record{{Identity: "concurrent", Document: json.RawMessage(`{"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`)}}}
+	if err := Compare(expected, capture); err != nil {
+		return Capture{}, fmt.Errorf("capture concurrent target: %w", err)
+	}
+	return capture, nil
+}
+
 // ReadObservation reads a JSON observation below root. Absolute paths, parent
 // traversal, and symlinks that resolve outside root are rejected.
 func ReadObservation(root, identity, path string) (Record, error) {

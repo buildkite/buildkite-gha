@@ -10,12 +10,15 @@ workflow is executable:
 
 1. `shell.yml` is the first runtime target. It has two logical jobs, a static
    consumer matrix, shell steps, and a bounded `needs` output.
-2. `ci.yml` adds checkout plus local JavaScript and composite actions, including
+2. `concurrent.yml` adds background, targeted and full waits, cancellation,
+   bounded queueing, parallel lowering, implicit cleanup, and concurrent
+   masking probes.
+3. `ci.yml` adds checkout plus local JavaScript and composite actions, including
    output, environment-file, masking, summary, and post-action events.
-3. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
+4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
 
-All three workflows are compiler fixtures from Phase 1 onward. Only promote a
+All four workflows are compiler fixtures from Phase 1 onward. Only promote a
 workflow into a required runtime lane when its owning phase is implemented.
 
 `events/push.json` is a deterministic compile fixture, so its repository SHA is

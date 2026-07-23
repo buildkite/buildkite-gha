@@ -11,6 +11,7 @@ import (
 )
 
 const shellExpectedCapturePath = "expected/shell-capture.json"
+const concurrentExpectedCapturePath = "expected/concurrent-capture.json"
 
 var shellFixtureIdentity = CommitIdentity{
 	Name:  "buildkite-gha shell oracle",
@@ -28,6 +29,16 @@ func MaterializeShellFixture(ctx context.Context, source string) (*Repository, e
 // fixture commit, captures provider output, and compares its normalized form
 // with the checked-in portable expectation.
 func CompareShellOracle(ctx context.Context, source, expectedCommit, provider string, output io.Reader) (result []byte, err error) {
+	return compareFixtureOracle(ctx, source, expectedCommit, provider, shellExpectedCapturePath, output, CaptureShellOutput)
+}
+
+// CompareConcurrentOracle compares the Phase 3 concurrent-step observation
+// with the portable expectation in the same exact materialized fixture.
+func CompareConcurrentOracle(ctx context.Context, source, expectedCommit, provider string, output io.Reader) (result []byte, err error) {
+	return compareFixtureOracle(ctx, source, expectedCommit, provider, concurrentExpectedCapturePath, output, CaptureConcurrentOutput)
+}
+
+func compareFixtureOracle(ctx context.Context, source, expectedCommit, provider, expectedPath string, output io.Reader, captureOutput func(string, io.Reader) (Capture, error)) (result []byte, err error) {
 	if expectedCommit == "" {
 		return nil, errors.New("expected fixture commit is required")
 	}
@@ -46,7 +57,7 @@ func CompareShellOracle(ctx context.Context, source, expectedCommit, provider st
 		return nil, fmt.Errorf("fixture commit differs: expected %s, got %s", expectedCommit, repository.Commit)
 	}
 
-	capture, err := CaptureShellOutput(provider, output)
+	capture, err := captureOutput(provider, output)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +70,7 @@ func CompareShellOracle(ctx context.Context, source, expectedCommit, provider st
 	if err != nil {
 		return nil, fmt.Errorf("open materialized fixture: %w", err)
 	}
-	expected, readErr := root.ReadFile(shellExpectedCapturePath)
+	expected, readErr := root.ReadFile(expectedPath)
 	if err := errors.Join(readErr, root.Close()); err != nil {
 		return nil, fmt.Errorf("read expected shell capture: %w", err)
 	}

@@ -508,9 +508,6 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			if step.Kind == "uses" || step.Uses != "" {
 				return fmt.Errorf("job %q contains action step %q, unavailable to checkout-free unprivileged upload", artifact.Job.Workflow.LogicalJobID, step.ID)
 			}
-			if step.Background || step.Kind == "wait" || step.Kind == "wait-all" || step.Kind == "cancel" {
-				return fmt.Errorf("job %q contains concurrent step %q, unavailable until the Phase 3 supervisor is active", artifact.Job.Workflow.LogicalJobID, step.ID)
-			}
 		}
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)

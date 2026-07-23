@@ -199,6 +199,50 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	}
 }
 
+func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "phase-3-upload-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 2 jobs") || stderr.Len() != 0 {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+	if len(runner.commands) != 4 {
+		t.Fatalf("commands = %#v, want distribution, two plans, and pipeline", runner.commands)
+	}
+
+	var pipeline struct {
+		Steps []struct {
+			Key    string `yaml:"key"`
+			Agents struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
+		t.Fatalf("uploaded pipeline YAML: %v", err)
+	}
+	if len(pipeline.Steps) != 2 {
+		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
+	}
+	if pipeline.Steps[0].Key != "gha-concurrent" || pipeline.Steps[0].Agents.Queue != "hosted" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "phase-3-upload-importer" || pipeline.Steps[0].DependsOn[0].AllowFailure {
+		t.Fatalf("concurrent step = %#v", pipeline.Steps[0])
+	}
+	observer := pipeline.Steps[1]
+	if observer.Key != "gha-observe" || observer.Agents.Queue != "hosted" || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "phase-3-upload-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
+		t.Fatalf("observer step = %#v", observer)
+	}
+}
+
 func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -241,20 +285,18 @@ func TestUnprivilegedUploadRejectsActionSteps(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadRejectsConcurrentStepsUntilSupervisorIsActive(t *testing.T) {
-	for _, step := range []plan.Step{
-		{ID: "background", Kind: "run", Command: "true", Background: true},
-		{ID: "wait", Kind: "wait", Targets: []string{"background"}},
-		{ID: "wait-all", Kind: "wait-all"},
-		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
-	} {
-		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-			Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
-			Steps:    []plan.Step{step},
-		}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "concurrent step") {
-			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v, want concurrent-step rejection", step, err)
-		}
+func TestUnprivilegedUploadAllowsCapabilityFreeConcurrentShellSteps(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow: plan.Workflow{LogicalJobID: "concurrent-job"},
+		Steps: []plan.Step{
+			{ID: "background", Kind: "run", Command: "true", Background: true},
+			{ID: "wait", Kind: "wait", Targets: []string{"background"}},
+			{ID: "wait-all", Kind: "wait-all"},
+			{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+		},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 	}
 }
 
