@@ -128,21 +128,80 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 	}
 }
 
-func TestCancelPlansFailClosedBeforeProcessExecution(t *testing.T) {
+func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	marker := filepath.Join(workspace, "must-not-exist")
+	ready := filepath.Join(workspace, "background.ready")
+	terminated := filepath.Join(workspace, "background.terminated")
+	var logs bytes.Buffer
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "background", Kind: "run", Command: "touch " + marker, Background: true},
+		{ID: "background", Kind: "run", Background: true, Command: `
+echo "CANCEL_EFFECT=visible" >> "$GITHUB_ENV"
+trap 'touch "$TERMINATED"; exit 0' TERM
+touch "$READY"
+while :; do sleep 1; done`},
+		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "cancel-again", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "after-cancel", Kind: "run", Condition: "steps.background.outcome == 'cancelled' && steps.cancel.conclusion == 'success' && steps.cancel-again.conclusion == 'success'", Command: `test "$CANCEL_EFFECT" = visible; test -f "$TERMINATED"; echo after-cancel`},
 	})
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "requires concurrent-step cancellation") {
-		t.Fatalf("RunJob() result = %#v, error = %v, want cancellation rejection", result, err)
+	job.Env = map[string]string{"READY": ready, "TERMINATED": terminated}
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Env["CANCEL_EFFECT"] != "visible" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("cancel plan reached process execution: %v", statErr)
+	if !strings.Contains(logs.String(), "after-cancel") {
+		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	release := filepath.Join(workspace, "release")
+	queuedMarker := filepath.Join(workspace, "queued-started")
+	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+4)
+	for i := 0; i < maxActiveBackgroundSteps; i++ {
+		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		plan.Step{ID: "queued", Kind: "run", Background: true, Command: `touch "$QUEUED_MARKER"`},
+		plan.Step{ID: "cancel-queued", Kind: "cancel", Targets: []string{"queued"}},
+		plan.Step{ID: "release", Kind: "run", Command: `test ! -e "$QUEUED_MARKER"; touch "$RELEASE"`},
+		plan.Step{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, statErr := os.Stat(queuedMarker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("queued canceled step ran: %v", statErr)
+	}
+}
+
+func TestFailureBeforeCancelStillFailsJob(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	failedPID := filepath.Join(workspace, "failed.pid")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Background: true, Command: `echo $$ > "$FAILED_PID"; exit 7`},
+		{ID: "await-failure", Kind: "run", Command: `while [ ! -f "$FAILED_PID" ]; do sleep 0.01; done; while kill -0 "$(cat "$FAILED_PID")" 2>/dev/null; do sleep 0.01; done; sleep 0.05`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+		{ID: "default-after-cancel", Kind: "run", Command: "echo must-not-run"},
+		{ID: "recover", Kind: "run", Condition: "failure()", Command: "echo recovered"},
+	})
+	job.Env = map[string]string{"FAILED_PID": failedPID}
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(logs.String(), "recovered") || strings.Contains(logs.String(), "must-not-run") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 }
 
@@ -249,11 +308,13 @@ func TestSkippedBackgroundAndRepeatedWaitAreCommittedAtMostOnce(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "skipped", Kind: "run", Background: true, Condition: "false", Command: "exit 1"},
+		{ID: "cancel-skipped", Kind: "cancel", Targets: []string{"skipped"}},
 		{ID: "wait-skipped", Kind: "wait", Targets: []string{"skipped"}},
 		{ID: "completed", Kind: "run", Background: true, Command: `echo once >> "$GITHUB_STEP_SUMMARY"`},
 		{ID: "first-wait", Kind: "wait", Targets: []string{"completed"}},
+		{ID: "cancel-completed", Kind: "cancel", Targets: []string{"completed"}},
 		{ID: "second-wait", Kind: "wait", Targets: []string{"completed"}},
-		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped'", Command: "true"},
+		{ID: "verify", Kind: "run", Condition: "steps.skipped.conclusion == 'skipped' && steps.cancel-skipped.conclusion == 'success' && steps.cancel-completed.conclusion == 'success'", Command: "true"},
 	})
 
 	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
@@ -284,7 +345,7 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	var maximum atomic.Int32
 	var started atomic.Int32
 	for i := 0; i < maxActiveBackgroundSteps+2; i++ {
-		supervisor.start(strconv.Itoa(i), func() stepExecution {
+		supervisor.start(context.Background(), strconv.Itoa(i), func(context.Context) stepExecution {
 			current := active.Add(1)
 			for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
 			}
@@ -292,7 +353,7 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 			<-release
 			active.Add(-1)
 			return stepExecution{}
-		})
+		}, func(context.Context) stepExecution { return stepExecution{} })
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for started.Load() != maxActiveBackgroundSteps && time.Now().Before(deadline) {
@@ -314,7 +375,7 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	var mu sync.Mutex
 	var order []string
 	start := func(id string, wait <-chan struct{}) {
-		fifo.start(id, func() stepExecution {
+		fifo.start(context.Background(), id, func(context.Context) stepExecution {
 			mu.Lock()
 			order = append(order, id)
 			mu.Unlock()
@@ -322,7 +383,7 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 				<-wait
 			}
 			return stepExecution{}
-		})
+		}, func(context.Context) stepExecution { return stepExecution{} })
 	}
 	start("first", firstRelease)
 	start("second", nil)
@@ -415,6 +476,44 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("child process %d survived cancellation", pid)
+}
+
+func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
+	}
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	pidFile := filepath.Join(workspace, "child.pid")
+	ready := filepath.Join(workspace, "background.ready")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Background: true, Command: `(trap '' TERM; sleep 30) & echo $! > "$PID_FILE"; touch "$READY"; wait`},
+		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+	})
+	job.Env = map[string]string{"PID_FILE": pidFile, "READY": ready}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	contents, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(contents)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("explicitly canceled child process %d survived", pid)
 }
 
 func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
@@ -562,6 +661,28 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	defer cancel()
 	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+func TestExplicitBackgroundCancelStillRunsRegisteredPostAction(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: Explicit cancellation cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "require('fs').writeFileSync(process.env.READY, 'ready')\nsetInterval(() => {}, 30000)\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "console.log('post-after-explicit-cancel')\n")
+	ready := filepath.Join(workspace, "action.ready")
+	var logs bytes.Buffer
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "background", Kind: "uses", Uses: "./.github/actions/cancel", Background: true},
+		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+	})
+	job.Env = map[string]string{"READY": ready}
+
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || !strings.Contains(logs.String(), "post-after-explicit-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
 }

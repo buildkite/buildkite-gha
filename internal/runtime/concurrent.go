@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,6 +12,8 @@ import (
 )
 
 const maxActiveBackgroundSteps = 10
+
+var errExplicitBackgroundCancel = errors.New("background step explicitly cancelled")
 
 type stepExecution struct {
 	step       plan.Step
@@ -22,10 +25,16 @@ type stepExecution struct {
 }
 
 type backgroundTask struct {
-	id        string
-	done      chan struct{}
-	run       func() stepExecution
+	id     string
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	done   chan struct{}
+	run    func(context.Context) stepExecution
+	// cancelled may run while the supervisor mutex is held and must not block.
+	cancelled func(context.Context) stepExecution
 	execution stepExecution
+	started   bool
+	finished  bool
 	committed bool
 }
 
@@ -45,8 +54,9 @@ func newBackgroundSupervisor(limit int) *backgroundSupervisor {
 	return &backgroundSupervisor{limit: limit, tasks: make(map[string]*backgroundTask)}
 }
 
-func (s *backgroundSupervisor) start(id string, run func() stepExecution) {
-	task := &backgroundTask{id: strings.ToLower(id), done: make(chan struct{}), run: run}
+func (s *backgroundSupervisor) start(parent context.Context, id string, run, cancelled func(context.Context) stepExecution) {
+	ctx, cancel := context.WithCancelCause(parent)
+	task := &backgroundTask{id: strings.ToLower(id), ctx: ctx, cancel: cancel, done: make(chan struct{}), run: run, cancelled: cancelled}
 	s.mu.Lock()
 	s.tasks[task.id] = task
 	s.order = append(s.order, task)
@@ -59,17 +69,49 @@ func (s *backgroundSupervisor) dispatchLocked() {
 	for s.active < s.limit && len(s.queue) != 0 {
 		task := s.queue[0]
 		s.queue = s.queue[1:]
+		if task.ctx.Err() != nil {
+			s.finishLocked(task, task.cancelled(task.ctx))
+			continue
+		}
+		task.started = true
 		s.active++
 		go func() {
-			execution := task.run()
+			execution := task.run(task.ctx)
 			s.mu.Lock()
-			task.execution = execution
 			s.active--
-			close(task.done)
+			s.finishLocked(task, execution)
 			s.dispatchLocked()
 			s.mu.Unlock()
 		}()
 	}
+}
+
+func (s *backgroundSupervisor) finishLocked(task *backgroundTask, execution stepExecution) {
+	task.execution = execution
+	task.finished = true
+	task.cancel(nil)
+	close(task.done)
+}
+
+func (s *backgroundSupervisor) cancel(target string) []stepExecution {
+	s.mu.Lock()
+	task := s.tasks[strings.ToLower(target)]
+	if task == nil || task.committed {
+		s.mu.Unlock()
+		return nil
+	}
+	task.cancel(errExplicitBackgroundCancel)
+	if !task.started && !task.finished {
+		for i, queued := range s.queue {
+			if queued == task {
+				s.queue = append(s.queue[:i], s.queue[i+1:]...)
+				break
+			}
+		}
+		s.finishLocked(task, task.cancelled(task.ctx))
+	}
+	s.mu.Unlock()
+	return s.commitCompleted([]*backgroundTask{task})
 }
 
 func (s *backgroundSupervisor) wait(targets []string) []stepExecution {
@@ -122,13 +164,16 @@ func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *comma
 	}
 	result, post, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval)
 	cancelStep()
+	return classifyStepExecution(jobCtx, runCtx, step, result, post, err)
+}
 
+func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, post *registeredPost, err error) stepExecution {
 	execution := stepExecution{step: step, result: result, post: post, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution
 	}
 	execution.outcome = "failure"
-	if jobCtx.Err() != nil {
+	if jobCtx.Err() != nil || errors.Is(context.Cause(runCtx), errExplicitBackgroundCancel) {
 		execution.outcome = "cancelled"
 	}
 	execution.conclusion = execution.outcome
@@ -136,6 +181,14 @@ func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *comma
 		execution.conclusion = "success"
 	}
 	return execution
+}
+
+func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) stepExecution {
+	err := context.Cause(runCtx)
+	if err == nil {
+		err = context.Canceled
+	}
+	return classifyStepExecution(jobCtx, runCtx, step, newResult(), nil, err)
 }
 
 func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus, posts *[]registeredPost) error {

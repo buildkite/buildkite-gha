@@ -57,11 +57,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
-	for _, step := range job.Steps {
-		if step.Kind == "cancel" {
-			return JobResult{}, fmt.Errorf("step %q requires concurrent-step cancellation, which is not active in this runtime", step.ID)
-		}
-	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
@@ -148,6 +143,17 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 
 	var runErr error
 	for _, step := range job.Steps {
+		if step.Kind == "cancel" {
+			for _, execution := range supervisor.cancel(step.Targets[0]) {
+				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses, &posts)
+				if execution.conclusion != "cancelled" {
+					runErr = errors.Join(runErr, targetErr)
+				}
+			}
+			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "success", Conclusion: "success", Outputs: map[string]string{}}
+			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			continue
+		}
 		if step.Kind == "wait" || step.Kind == "wait-all" {
 			var completed []stepExecution
 			if step.Kind == "wait" {
@@ -193,9 +199,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		evalSnapshot := cloneExpressionContext(eval)
 		if step.Background {
 			step := step
-			supervisor.start(step.ID, func() stepExecution {
-				return r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
-			})
+			supervisor.start(runCtx, step.ID,
+				func(stepCtx context.Context) stepExecution {
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
+				},
+				func(stepCtx context.Context) stepExecution {
+					return cancelledStepExecution(ctx, stepCtx, step)
+				},
+			)
 			continue
 		}
 		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
