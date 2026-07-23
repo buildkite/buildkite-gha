@@ -57,8 +57,12 @@ cancellation, `::add-mask` log and result protection, and step
 `continue-on-error`. Background steps, targeted and full barriers, explicit
 cancellation, and parallel groups share a ten-active-step supervisor. Their
 effects and failures become visible only at the covering barrier, and an
-implicit final barrier runs before bounded cleanup. Other workflow commands are
-not yet implemented. Secret names resolve only through the explicit
+implicit final barrier runs before bounded cleanup. On Unix, cancellation sends
+`SIGINT` to the complete step process group, escalates to `SIGTERM` after 7.5
+seconds, then uses `SIGKILL` after another 2.5 seconds. GitHub uses the same
+timing against only the direct process; the bridge intentionally terminates the
+complete process tree. Other workflow commands are not yet implemented. Secret
+names resolve only through the explicit
 `BUILDKITE_GHA_SECRET_` namespace and are registered with the Buildkite Agent
 redactor before execution. Remote action resolution, services, and job
 containers remain outside the executable subset; local Node 24, composite, and

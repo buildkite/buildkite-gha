@@ -181,7 +181,7 @@ jobs:
       - id: cancellable
         shell: bash
         run: |
-          trap 'echo graceful > "$RUNNER_TEMP/phase3-cancelled"; exit 0' TERM
+          trap 'echo graceful > "$RUNNER_TEMP/phase3-cancelled"; exit 0' INT
           touch "$RUNNER_TEMP/phase3-cancel-ready"
           while :; do sleep 1; done
         background: true

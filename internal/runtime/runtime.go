@@ -18,9 +18,11 @@ import (
 )
 
 const (
-	defaultCleanupTimeout   = 10 * time.Second
-	defaultTerminationGrace = 2 * time.Second
-	maxStreamLineBytes      = 1024 * 1024
+	defaultCleanupTimeout = 10 * time.Second
+	// Match actions/runner ProcessInvoker's graceful cancellation windows.
+	defaultInterruptGrace = 7500 * time.Millisecond
+	defaultTerminateGrace = 2500 * time.Millisecond
+	maxStreamLineBytes    = 1024 * 1024
 )
 
 // Runner executes local actions using explicitly configured host tools.
@@ -31,6 +33,8 @@ type Runner struct {
 	ManagedNodeRoot string
 	Docker          string
 	CleanupTimeout  time.Duration
+	InterruptGrace  time.Duration
+	TerminateGrace  time.Duration
 	Secrets         SecretResolver
 	Redactor        Redactor
 }
@@ -123,7 +127,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
 		image,
 	)
-	if err := runStreaming(ctx, processor, "", nil, docker, args...); err != nil {
+	if err := r.runStreaming(ctx, processor, "", nil, docker, args...); err != nil {
 		return result, fmt.Errorf("run Docker action %q: %w", action.Name, err)
 	}
 	if _, err := files.apply(&result, nil); err != nil {
@@ -160,7 +164,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		"GITHUB_STATE":        files.state,
 		"GITHUB_STEP_SUMMARY": files.summary,
 	})
-	runErr := runStreaming(ctx, processor, dir, env, name, args...)
+	runErr := r.runStreaming(ctx, processor, dir, env, name, args...)
 	effects, fileErr := files.apply(result, state)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
 		pathEnv := map[string]string{"PATH": env["PATH"]}
@@ -173,7 +177,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 	return errors.Join(runErr, fileErr)
 }
 
-func runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
+func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
@@ -190,7 +194,7 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 		return err
 	}
 	finished := make(chan struct{})
-	go terminateProcessGroup(ctx, cmd.Process.Pid, defaultTerminationGrace, finished)
+	go terminateProcessGroup(ctx, cmd.Process.Pid, r.interruptGrace(), r.terminateGrace(), finished)
 
 	var wg sync.WaitGroup
 	streamErrs := make([]error, 2)
@@ -216,6 +220,20 @@ func runStreaming(ctx context.Context, processor *commandProcessor, dir string, 
 		waitErr = fmt.Errorf("process %s: %w", name, waitErr)
 	}
 	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
+}
+
+func (r Runner) interruptGrace() time.Duration {
+	if r.InterruptGrace > 0 {
+		return r.InterruptGrace
+	}
+	return defaultInterruptGrace
+}
+
+func (r Runner) terminateGrace() time.Duration {
+	if r.TerminateGrace > 0 {
+		return r.TerminateGrace
+	}
+	return defaultTerminateGrace
 }
 
 func streamLines(reader io.Reader, process func(string), suppress func()) error {

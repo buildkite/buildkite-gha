@@ -139,7 +139,7 @@ func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "background", Kind: "run", Background: true, Command: `
 echo "CANCEL_EFFECT=visible" >> "$GITHUB_ENV"
-trap 'touch "$TERMINATED"; exit 0' TERM
+trap 'touch "$TERMINATED"; exit 0' INT
 touch "$READY"
 while :; do sleep 1; done`},
 		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
@@ -599,7 +599,7 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err := runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
+	err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"PID_FILE": pidFile}, "sh", "-c", `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; wait`)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("runStreaming() error = %v, want deadline", err)
 	}
@@ -621,6 +621,47 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 	t.Fatalf("child process %d survived cancellation", pid)
 }
 
+func TestCancellationEscalatesFromInterruptToTermination(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	signals := filepath.Join(dir, "signals")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelled := make(chan struct{})
+	go func() {
+		defer close(cancelled)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	runner := Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 500 * time.Millisecond}
+	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "SIGNALS": signals}, "bash", "-c", `
+trap 'printf "INT\n" >> "$SIGNALS"' INT
+trap 'printf "TERM\n" >> "$SIGNALS"; exit 0' TERM
+touch "$READY"
+while :; do sleep 1; done`)
+	<-cancelled
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runStreaming() error = %v, want cancellation", err)
+	}
+	contents, readErr := os.ReadFile(signals)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got := string(contents); got != "INT\nTERM\n" {
+		t.Fatalf("signal order = %q, want SIGINT then SIGTERM", got)
+	}
+}
+
 func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
@@ -631,13 +672,13 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	pidFile := filepath.Join(workspace, "child.pid")
 	ready := filepath.Join(workspace, "background.ready")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "background", Kind: "run", Background: true, Command: `(trap '' TERM; sleep 30) & echo $! > "$PID_FILE"; touch "$READY"; wait`},
+		{ID: "background", Kind: "run", Background: true, Command: `(trap '' INT TERM; sleep 30) & echo $! > "$PID_FILE"; touch "$READY"; wait`},
 		{ID: "await-start", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
 	})
 	job.Env = map[string]string{"PID_FILE": pidFile, "READY": ready}
 
-	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -961,7 +1002,7 @@ func TestRunStreamingDrainsOversizedLineAndPreservesMasking(t *testing.T) {
 	processor := newCommandProcessor(&logs, &logs)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = runStreaming(ctx, processor, "", map[string]string{"GO_WANT_RUNTIME_LONG_LINE": "1"}, executable, "-test.run=^TestLongLineChildProcess$")
+	err = (Runner{}).runStreaming(ctx, processor, "", map[string]string{"GO_WANT_RUNTIME_LONG_LINE": "1"}, executable, "-test.run=^TestLongLineChildProcess$")
 	if err == nil || !strings.Contains(err.Error(), "stdout stream: line exceeds 1048576-byte limit and was discarded") {
 		t.Fatalf("runStreaming() error = %v, want oversized-line diagnostic", err)
 	}
@@ -1007,7 +1048,7 @@ func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
 	command := `test -n "$PATH" && test -n "$HOME" && test -n "$TMPDIR" && test "$DECLARED" = visible && test -z "${BUILDKITE_AGENT_ACCESS_TOKEN:-}" && printf '%s\n' environment-ok`
-	if err := runStreaming(context.Background(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
+	if err := (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"DECLARED": "visible"}, "sh", "-c", command); err != nil {
 		t.Fatalf("runStreaming() error = %v", err)
 	}
 	if logs.String() != "environment-ok\n" {
