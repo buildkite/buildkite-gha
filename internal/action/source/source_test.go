@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
 
 const testSHA = "0123456789abcdef0123456789abcdef01234567"
@@ -278,21 +280,21 @@ func TestDigestTreeIsCanonicalAndFailsClosed(t *testing.T) {
 
 func TestDigestTreeExcludesGitMetadata(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: index.js\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "action.yml"), []byte("runs:\n  using: node24\n  main: .git/index.js\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	metadata := filepath.Join(root, ".git", "config")
-	if err := os.WriteFile(metadata, []byte("first"), 0o600); err != nil {
+	entrypoint := filepath.Join(root, ".git", "index.js")
+	if err := os.WriteFile(entrypoint, []byte("first"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	first, err := DigestTree(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(metadata, []byte("second"), 0o600); err != nil {
+	if err := os.WriteFile(entrypoint, []byte("second"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	second, err := DigestTree(root)
@@ -301,6 +303,13 @@ func TestDigestTreeExcludesGitMetadata(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("digest includes Git metadata: %q != %q", first, second)
+	}
+	action, err := metadata.Load(root, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := action.ValidateEntrypoints(metadata.RuntimeNode24); err == nil || !strings.Contains(err.Error(), "excluded from verified action source") {
+		t.Fatalf("ValidateEntrypoints() error = %v, want verified-source exclusion", err)
 	}
 }
 

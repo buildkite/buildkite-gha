@@ -302,6 +302,10 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 		if path.IsAbs(entry) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(entry, "\\") {
 			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
 		}
+		folded := strings.ToLower(clean)
+		if folded == ".git" || strings.HasPrefix(folded, ".git/") {
+			return fmt.Errorf("JavaScript action %s entry point %q is excluded from verified action source", phase, entry)
+		}
 		candidate := filepath.Join(metadata.Path, filepath.FromSlash(clean))
 		info, err := os.Stat(candidate)
 		if err != nil {

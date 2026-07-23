@@ -181,6 +181,63 @@ runs:
 	}
 }
 
+func TestValidateEntrypointsRejectsNestedGitMetadata(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"index.js", ".gitignore"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("entry"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "index.js"), []byte("entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "index.js"), []byte("unverified"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name      string
+		phase     string
+		configure func(*Runs)
+	}{
+		{name: "pre", phase: "pre", configure: func(r *Runs) { r.Pre = ".git/index.js" }},
+		{name: "main", phase: "main", configure: func(r *Runs) { r.Main = "other/../.git/index.js" }},
+		{name: "case-insensitive main", phase: "main", configure: func(r *Runs) { r.Main = ".GIT/index.js" }},
+		{name: "post", phase: "post", configure: func(r *Runs) { r.Post = ".git" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runs := Runs{Main: "index.js"}
+			test.configure(&runs)
+			err := (Metadata{Path: root, Runs: runs}).ValidateEntrypoints(RuntimeNode24)
+			if err == nil || !strings.Contains(err.Error(), test.phase+" entry point") || !strings.Contains(err.Error(), "excluded from verified action source") {
+				t.Fatalf("ValidateEntrypoints() error = %v, want %s exclusion", err, test.phase)
+			}
+		})
+	}
+
+	for _, entry := range []string{".github/index.js", ".gitignore", "index.js"} {
+		t.Run("allows "+entry, func(t *testing.T) {
+			metadata := Metadata{Path: root, Runs: Runs{Main: entry}}
+			if err := metadata.ValidateEntrypoints(RuntimeNode24); err != nil {
+				t.Fatalf("ValidateEntrypoints() = %v, want nil", err)
+			}
+		})
+	}
+
+	t.Run("action root beneath repository git directory", func(t *testing.T) {
+		metadata := Metadata{Path: filepath.Join(root, ".git"), Runs: Runs{Main: "index.js"}}
+		if err := metadata.ValidateEntrypoints(RuntimeNode24); err != nil {
+			t.Fatalf("ValidateEntrypoints() = %v, want nil", err)
+		}
+	})
+}
+
 func writeAction(t *testing.T, root, name, contents string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
