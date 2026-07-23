@@ -185,6 +185,38 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	}
 }
 
+func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/action.yml", "name: Queued lifecycle\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/main.js", "console.log('queued-main-must-not-run')\n")
+	writeFixtureFile(t, workspace, ".github/actions/queued/post.js", "console.log('queued-post-must-not-run')\n")
+	release := filepath.Join(workspace, "release")
+	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+4)
+	for i := 0; i < maxActiveBackgroundSteps; i++ {
+		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		plan.Step{ID: "queued", Kind: "uses", Uses: "./.github/actions/queued", Background: true},
+		plan.Step{ID: "cancel-queued", Kind: "cancel", Targets: []string{"queued"}},
+		plan.Step{ID: "release", Kind: "run", Command: `touch "$RELEASE"`},
+		plan.Step{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release}
+	var logs bytes.Buffer
+
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(logs.String(), "queued-main-must-not-run") || strings.Contains(logs.String(), "queued-post-must-not-run") {
+		t.Fatalf("queued cancelled action ran lifecycle phase: %q", logs.String())
+	}
+}
+
 func TestFailureBeforeCancelStillFailsJob(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -810,6 +842,38 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	two := strings.Index(logs.String(), "lifecycle:post:two")
 	if two < 0 || one < 0 || two > one {
 		t.Errorf("post logs are not LIFO: %q", logs.String())
+	}
+}
+
+func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/background/action.yml", "name: Background lifecycle\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/background/main.js", "require('fs').writeFileSync(process.env.READY, 'ready')\nsetTimeout(() => {}, 100)\n")
+	writeFixtureFile(t, workspace, ".github/actions/background/post.js", "console.log('post:background')\n")
+	writeFixtureFile(t, workspace, ".github/actions/foreground/action.yml", "name: Foreground lifecycle\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/foreground/main.js", "console.log('main:foreground')\n")
+	writeFixtureFile(t, workspace, ".github/actions/foreground/post.js", "console.log('post:foreground')\n")
+	ready := filepath.Join(workspace, "background.ready")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "uses", Uses: "./.github/actions/background", Background: true},
+		{ID: "await-background", Kind: "run", Command: `while [ ! -f "$READY" ]; do sleep 0.01; done`},
+		{ID: "foreground", Kind: "uses", Uses: "./.github/actions/foreground"},
+		{ID: "wait-background", Kind: "wait", Targets: []string{"background"}},
+	})
+	job.Env = map[string]string{"READY": ready}
+	var logs bytes.Buffer
+
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	background := strings.Index(logs.String(), "post:background")
+	foreground := strings.Index(logs.String(), "post:foreground")
+	if foreground < 0 || background < 0 || foreground > background {
+		t.Fatalf("concurrent post logs are not registration-order LIFO: %q", logs.String())
 	}
 }
 

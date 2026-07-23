@@ -18,7 +18,6 @@ var errExplicitBackgroundCancel = errors.New("background step explicitly cancell
 type stepExecution struct {
 	step       plan.Step
 	result     Result
-	post       *registeredPost
 	err        error
 	outcome    string
 	conclusion string
@@ -156,19 +155,19 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context) stepExecution {
+func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) stepExecution {
 	stepCtx := runCtx
 	cancelStep := func() {}
 	if step.TimeoutMinutes > 0 {
 		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
 	}
-	result, post, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval)
+	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval, posts)
 	cancelStep()
-	return classifyStepExecution(jobCtx, runCtx, step, result, post, err)
+	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }
 
-func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, post *registeredPost, err error) stepExecution {
-	execution := stepExecution{step: step, result: result, post: post, err: err, outcome: "success", conclusion: "success"}
+func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, err error) stepExecution {
+	execution := stepExecution{step: step, result: result, err: err, outcome: "success", conclusion: "success"}
 	if err == nil {
 		return execution
 	}
@@ -188,10 +187,10 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) step
 	if err == nil {
 		err = context.Canceled
 	}
-	return classifyStepExecution(jobCtx, runCtx, step, newResult(), nil, err)
+	return classifyStepExecution(jobCtx, runCtx, step, newResult(), err)
 }
 
-func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus, posts *[]registeredPost) error {
+func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus) error {
 	id := strings.ToLower(execution.step.ID)
 	eval.Steps[id] = execution.result.Outputs
 	env := execution.result.Env
@@ -208,9 +207,6 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	eval.Env = jobResult.Env
 	mergeInto(jobResult.State, execution.result.State)
 	jobResult.Summary += execution.result.Summary
-	if execution.post != nil {
-		*posts = append(*posts, *execution.post)
-	}
 	statuses[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)

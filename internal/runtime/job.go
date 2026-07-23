@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
@@ -32,6 +33,26 @@ type registeredPost struct {
 	action JavaScriptAction
 	state  map[string]string
 	node   string
+}
+
+type postRegistry struct {
+	mu    sync.Mutex
+	posts []registeredPost
+}
+
+func (r *postRegistry) register(post *registeredPost) {
+	if post == nil {
+		return
+	}
+	r.mu.Lock()
+	r.posts = append(r.posts, *post)
+	r.mu.Unlock()
+}
+
+func (r *postRegistry) snapshot() []registeredPost {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]registeredPost(nil), r.posts...)
 }
 
 // VerifyWorkflow binds a plan to the workflow bytes in the supplied workspace.
@@ -137,7 +158,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
 	}
 	defer cancelJob()
-	posts := make([]registeredPost, 0)
+	var posts postRegistry
 	statuses := make(map[string]expression.StepStatus, len(job.Steps))
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
@@ -145,7 +166,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	for _, step := range job.Steps {
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
-				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses, &posts)
+				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses)
 				if execution.conclusion != "cancelled" {
 					runErr = errors.Join(runErr, targetErr)
 				}
@@ -163,7 +184,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			}
 			var barrierErr error
 			for _, execution := range completed {
-				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
+				barrierErr = errors.Join(barrierErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 			}
 			outcome, conclusion := "success", "success"
 			if barrierErr != nil {
@@ -197,7 +218,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			step := step
 			supervisor.start(runCtx, step.ID,
 				func(stepCtx context.Context) stepExecution {
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(ctx, stepCtx, step)
@@ -205,11 +226,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			)
 			continue
 		}
-		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot)
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
+		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
 	for _, execution := range supervisor.waitAll() {
-		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses, &posts))
+		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
 	if runCtx.Err() != nil {
 		runErr = errors.Join(runErr, runCtx.Err())
@@ -217,8 +238,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
 	defer cancel()
-	for i := len(posts) - 1; i >= 0; i-- {
-		post := posts[i]
+	registeredPosts := posts.snapshot()
+	for i := len(registeredPosts) - 1; i >= 0; i-- {
+		post := registeredPosts[i]
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
 		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
@@ -352,20 +374,20 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 	return out
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context) (Result, *registeredPost, error) {
+func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) (Result, error) {
 	stepEnv, err := evaluateMap(step.Env, eval)
 	if err != nil {
-		return newResult(), nil, err
+		return newResult(), err
 	}
 	result := newResult()
 	if step.Kind == "run" {
 		script, err := expression.Evaluate(step.Command, eval)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		shell, err := expression.Evaluate(step.Shell, eval)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		if shell == "" {
 			shell = job.DefaultShell
@@ -375,95 +397,96 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		}
 		workingDirectory, err := expression.Evaluate(step.WorkingDirectory, eval)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		if workingDirectory == "" {
 			workingDirectory = job.DefaultWorkingDirectory
 		}
 		dir, err := workspacePath(workspace, workingDirectory)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		args, err := shellCommand(shell, script)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		runEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		err = r.runProcess(ctx, processor, dir, runEnv, &result, nil, args[0], args[1:]...)
-		return result, nil, err
+		return result, err
 	}
 
 	if !strings.HasPrefix(step.Uses, "./") {
-		return result, nil, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
+		return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
 	}
 	if err := VerifyWorkflow(job, workspace); err != nil {
-		return result, nil, err
+		return result, err
 	}
 	action, err := metadata.Load(workspace, step.Uses)
 	if err != nil {
-		return result, nil, err
+		return result, err
 	}
 	actionRuntime, err := action.Runtime()
 	if err != nil {
-		return result, nil, fmt.Errorf("action %q uses %w", step.Uses, err)
+		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
 	}
 	actionPath := action.Path
 	inputs, err := evaluateMap(step.With, eval)
 	if err != nil {
-		return result, nil, err
+		return result, err
 	}
 	inputs, err = resolveActionInputs(action, inputs, eval)
 	if err != nil {
-		return result, nil, err
+		return result, err
 	}
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
 	case metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
-			return result, nil, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
+			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
 		if !supportedLifecycleCondition(action.Runs.PreIf) || !supportedLifecycleCondition(action.Runs.PostIf) {
-			return result, nil, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
+			return result, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
 		}
 		node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv}
 		state := map[string]string{}
 		post := postFor(javascript, state, node)
+		posts.register(post)
 		if javascript.Pre != "" {
 			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
-				return result, post, err
+				return result, err
 			}
 		}
 		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
-			return result, post, err
+			return result, err
 		}
-		return result, post, nil
+		return result, nil
 	case metadata.RuntimeComposite:
 		composite, err := r.runCompositeMetadata(ctx, processor, workspace, actionPath, action, inputs, jobEnv, stepEnv, actionEval)
-		return composite, nil, err
+		return composite, err
 	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
-			return result, nil, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
+			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
 		if action.Runs.PreEntrypoint != "" || action.Runs.PostEntrypoint != "" || action.Runs.Entrypoint != "" || len(action.Runs.Args) != 0 {
-			return result, nil, fmt.Errorf("docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
+			return result, fmt.Errorf("docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
 		}
 		if action.Runs.Image != "Dockerfile" {
-			return result, nil, fmt.Errorf("docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
+			return result, fmt.Errorf("docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
 		}
 		dockerEnv, err := evaluateMap(action.Runs.Env, actionEval)
 		if err != nil {
-			return result, nil, err
+			return result, err
 		}
 		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
-		return result, nil, err
+		return result, err
 	}
-	return result, nil, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
+	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
 func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {

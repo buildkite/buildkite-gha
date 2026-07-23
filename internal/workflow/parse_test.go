@@ -131,6 +131,42 @@ jobs:
 	}
 }
 
+func TestParseParallelMembersRetainEnclosingExpressionContext(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.produce.outputs.artifact }}
+    steps:
+      - id: produce
+        run: echo "artifact=ready" >> "$GITHUB_OUTPUT"
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - id: prior
+        run: echo "ready=true" >> "$GITHUB_OUTPUT"
+      - parallel:
+          - if: steps.prior.outputs.ready == 'true'
+            env:
+              MATRIX_OS: ${{ matrix.os }}
+              NEED_VALUE: ${{ needs.prepare.outputs.artifact }}
+            run: test "$MATRIX_OS" = ubuntu-latest && test "$NEED_VALUE" = ready
+`)
+	parsed, err := Parse("workflow.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := parsed.Jobs[1].Steps
+	if len(steps) != 3 || steps[1].If != "steps.prior.outputs.ready == 'true'" || steps[1].Env["MATRIX_OS"] != "${{ matrix.os }}" || steps[1].Env["NEED_VALUE"] != "${{ needs.prepare.outputs.artifact }}" {
+		t.Fatalf("parallel member context expressions = %#v", steps)
+	}
+}
+
 func TestParseParallelOwnsBooleanSpellingsAndDeterministicIDs(t *testing.T) {
 	source := []byte(`on: push
 jobs:
