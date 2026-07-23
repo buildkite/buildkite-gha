@@ -155,13 +155,13 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) stepExecution {
+func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver) stepExecution {
 	stepCtx := runCtx
 	cancelStep := func() {}
 	if step.TimeoutMinutes > 0 {
 		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
 	}
-	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval, posts)
+	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval, posts, actions)
 	cancelStep()
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }

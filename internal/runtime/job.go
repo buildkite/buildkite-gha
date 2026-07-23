@@ -152,6 +152,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		jobResult.Env["PATH"] = path
 	}
 	eval.Env = jobResult.Env
+	actions := newActionLockResolver(job, workspace, r.Actions)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
@@ -218,7 +219,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			step := step
 			supervisor.start(runCtx, step.ID,
 				func(stepCtx context.Context) stepExecution {
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts, actions)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(ctx, stepCtx, step)
@@ -226,7 +227,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			)
 			continue
 		}
-		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
+		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts, actions)
 		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
 	for _, execution := range supervisor.waitAll() {
@@ -374,11 +375,11 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 	return out
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) (Result, error) {
-	return r.runActionStep(ctx, processor, workspace, job, step, jobEnv, eval, posts, nil)
+func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver) (Result, error) {
+	return r.runActionStep(ctx, processor, workspace, job, step, jobEnv, eval, posts, actions, nil)
 }
 
-func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actionStack []string) (Result, error) {
+func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, actionStack []string) (Result, error) {
 	stepEnv, err := evaluateMap(step.Env, eval)
 	if err != nil {
 		return newResult(), err
@@ -421,30 +422,51 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		return result, err
 	}
 
-	if !strings.HasPrefix(step.Uses, "./") {
-		return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
-	}
-	if err := VerifyWorkflow(job, workspace); err != nil {
-		return result, err
-	}
-	action, err := metadata.Load(workspace, step.Uses)
-	if err != nil {
-		return result, err
+	var action metadata.Metadata
+	var actionLock *plan.ActionLock
+	if job.Schema == plan.SchemaV3 {
+		if step.Action == nil {
+			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
+		}
+		resolvedAction, lock, err := actions.resolve(ctx, *step.Action)
+		if err != nil {
+			return result, err
+		}
+		action, actionLock = resolvedAction, &lock
+	} else {
+		if !strings.HasPrefix(step.Uses, "./") {
+			return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
+		}
+		if err := VerifyWorkflow(job, workspace); err != nil {
+			return result, err
+		}
+		var err error
+		action, err = metadata.Load(workspace, step.Uses)
+		if err != nil {
+			return result, err
+		}
 	}
 	actionRuntime, err := action.Runtime()
 	if err != nil {
 		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
 	}
+	if err := action.ValidateEntrypoints(actionRuntime); err != nil {
+		return result, fmt.Errorf("action %q: %w", step.Uses, err)
+	}
 	actionPath := action.Path
+	actionIdentity := actionPath
+	if actionLock != nil {
+		actionIdentity = actionLock.ID
+	}
 	for _, ancestor := range actionStack {
-		if ancestor == actionPath {
-			return result, fmt.Errorf("local action recursion detected at %q", actionPath)
+		if ancestor == actionIdentity {
+			return result, fmt.Errorf("action recursion detected at %q", step.Uses)
 		}
 	}
 	if len(actionStack) >= metadata.MaxNestedActionDepth {
 		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
 	}
-	actionStack = append(append([]string(nil), actionStack...), actionPath)
+	actionStack = append(append([]string(nil), actionStack...), actionIdentity)
 	inputs, err := evaluateMap(step.With, eval)
 	if err != nil {
 		return result, err
@@ -486,7 +508,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, jobEnv, stepEnv, actionEval, posts, actionStack)
+		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, jobEnv, stepEnv, actionEval, posts, actions, actionLock, actionStack)
 		return composite, err
 	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
@@ -508,7 +530,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actionStack []string) (Result, error) {
+func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
 	result := newResult()
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
@@ -543,7 +565,17 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			// runActionStep owns template evaluation for an action invocation.
 			// Passing env (the evaluated map) here would evaluate expressions twice.
 			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
-			stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childJobEnv, eval, posts, actionStack)
+			if actionLock != nil {
+				selector, ok := actionLock.Children[step.Uses]
+				if !ok {
+					childErr = fmt.Errorf("composite action child %q has no immutable selector", step.Uses)
+				} else {
+					child.Action = &plan.ActionSelector{Lock: selector.Lock}
+				}
+			}
+			if childErr == nil {
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, childJobEnv, eval, posts, actions, actionStack)
+			}
 		} else if strings.TrimSpace(step.Run) == "" {
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
 		} else {

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -120,7 +119,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	if err != nil {
 		return nil, err
 	}
-	if err := validateActionEntrypoints(m, runtime); err != nil {
+	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
 	}
 	for _, capability := range runtime.RequiredCapabilities() {
@@ -206,36 +205,4 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 	}
 	s.cache[key] = memoizedAction{resolved: resolved, materialized: materialized}
 	return resolved, materialized, nil
-}
-
-func validateActionEntrypoints(action metadata.Metadata, runtime metadata.Runtime) error {
-	if runtime != metadata.RuntimeNode20 && runtime != metadata.RuntimeNode24 {
-		return nil
-	}
-	if action.Runs.Main == "" {
-		return fmt.Errorf("JavaScript action has no main entry point")
-	}
-	for _, lifecycle := range []struct{ phase, entry string }{
-		{phase: "pre", entry: action.Runs.Pre},
-		{phase: "main", entry: action.Runs.Main},
-		{phase: "post", entry: action.Runs.Post},
-	} {
-		phase, entry := lifecycle.phase, lifecycle.entry
-		if entry == "" {
-			continue
-		}
-		clean := path.Clean(entry)
-		if path.IsAbs(entry) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(entry, "\\") {
-			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
-		}
-		candidate := filepath.Join(action.Path, filepath.FromSlash(clean))
-		info, err := os.Stat(candidate)
-		if err != nil {
-			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("JavaScript action %s entry point %q is not a regular file", phase, entry)
-		}
-	}
-	return nil
 }

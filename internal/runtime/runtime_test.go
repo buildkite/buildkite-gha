@@ -1612,6 +1612,32 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
 		t.Fatalf("lifecycle = %q, want %q", got, want)
 	}
+
+	if err := os.Remove(lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	topID, compositeID, nestedID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
+	job.Schema = plan.SchemaV3
+	job.Steps[0].Action = &plan.ActionSelector{Lock: topID}
+	job.Steps[1].Action = &plan.ActionSelector{Lock: compositeID}
+	job.Actions = []plan.ActionLock{
+		{ID: topID, Source: "workspace", Path: ".github/actions/top", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "top"))},
+		{
+			ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "composite")),
+			Children: map[string]plan.ActionSelector{"./.github/actions/nested": {Lock: nestedID}},
+		},
+		{ID: nestedID, Source: "workspace", Path: ".github/actions/nested", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "nested"))},
+	}
+	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("v3 RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err = os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
+		t.Fatalf("v3 lifecycle = %q, want %q", got, want)
+	}
 }
 
 func TestCompositeConditionsRunAfterFailureAndPreserveFailure(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -275,6 +276,41 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	default:
 		return "", fmt.Errorf("unsupported runtime %q", metadata.Runs.Using)
 	}
+}
+
+// ValidateEntrypoints confines JavaScript lifecycle programs to the verified
+// action source tree and requires each declared entry point to be a regular
+// file. Callers should invoke this after Runtime.
+func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
+	if runtime != RuntimeNode20 && runtime != RuntimeNode24 {
+		return nil
+	}
+	if metadata.Runs.Main == "" {
+		return fmt.Errorf("JavaScript action has no main entry point")
+	}
+	for _, lifecycle := range []struct{ phase, entry string }{
+		{phase: "pre", entry: metadata.Runs.Pre},
+		{phase: "main", entry: metadata.Runs.Main},
+		{phase: "post", entry: metadata.Runs.Post},
+	} {
+		phase, entry := lifecycle.phase, lifecycle.entry
+		if entry == "" {
+			continue
+		}
+		clean := path.Clean(entry)
+		if path.IsAbs(entry) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(entry, "\\") {
+			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
+		}
+		candidate := filepath.Join(metadata.Path, filepath.FromSlash(clean))
+		info, err := os.Stat(candidate)
+		if err != nil {
+			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("JavaScript action %s entry point %q is not a regular file", phase, entry)
+		}
+	}
+	return nil
 }
 
 // RequiredCapabilities returns the plan capabilities needed by the runtime.

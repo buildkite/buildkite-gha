@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -175,6 +176,21 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
+	var actionMaterializer gharuntime.ActionMaterializer
+	if job.Schema == plan.SchemaV3 && hasGitHubActionLocks(job.Actions) {
+		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(actionCache) }()
+		store, err := actionsource.NewStore(actionCache, nil)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure action cache: %v\n", err)
+			return 1
+		}
+		actionMaterializer = store
+	}
 	runner := gharuntime.Runner{
 		Stdout:          stdout,
 		Stderr:          stderr,
@@ -184,6 +200,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
 		Secrets:         gharuntime.EnvironmentSecrets{},
 		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:         actionMaterializer,
 	}
 	var result gharuntime.JobResult
 	var runErr error
@@ -219,6 +236,15 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+func hasGitHubActionLocks(locks []plan.ActionLock) bool {
+	for _, lock := range locks {
+		if lock.Source == "github" {
+			return true
+		}
+	}
+	return false
 }
 
 func resultProducer(job plan.Job, planDigest string) (transport.Producer, bool, error) {

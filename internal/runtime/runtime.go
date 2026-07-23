@@ -1,4 +1,4 @@
-// Package runtime executes explicitly resolved local GitHub Actions action steps.
+// Package runtime executes explicitly resolved GitHub Actions action steps.
 package runtime
 
 import (
@@ -25,7 +25,7 @@ const (
 	maxStreamLineBytes    = 1024 * 1024
 )
 
-// Runner executes local actions using explicitly configured host tools.
+// Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
 	Stdout          io.Writer
 	Stderr          io.Writer
@@ -38,6 +38,7 @@ type Runner struct {
 	TerminateGrace  time.Duration
 	Secrets         SecretResolver
 	Redactor        Redactor
+	Actions         ActionMaterializer
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
