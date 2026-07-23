@@ -54,6 +54,20 @@ func newActionLockResolver(job plan.Job, workspace string, materializer ActionMa
 	return r
 }
 
+func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {
+	if r == nil || selector.Lock == "" {
+		return "", fmt.Errorf("resolve action lock: selector is missing")
+	}
+	entry, ok := r.locks[selector.Lock]
+	if !ok || entry == nil {
+		return "", fmt.Errorf("resolve action lock %q: lock is missing", selector.Lock)
+	}
+	if entry.duplicate || entry.lock.ID != selector.Lock {
+		return "", fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
+	}
+	return entry.lock.Source, nil
+}
+
 func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (metadata.Metadata, plan.ActionLock, error) {
 	if r == nil || selector.Lock == "" {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock: selector is missing")

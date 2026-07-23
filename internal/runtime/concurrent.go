@@ -155,13 +155,13 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver) stepExecution {
+func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	stepCtx := runCtx
 	cancelStep := func() {}
 	if step.TimeoutMinutes > 0 {
 		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
 	}
-	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, jobEnv, eval, posts, actions)
+	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared)
 	cancelStep()
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }
@@ -193,17 +193,7 @@ func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) step
 func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *expression.Context, statuses map[string]expression.StepStatus) error {
 	id := strings.ToLower(execution.step.ID)
 	eval.Steps[id] = execution.result.Outputs
-	env := execution.result.Env
-	if len(execution.result.Paths) > 0 {
-		env = cloneStrings(env)
-		if execution.result.pathBaseSet {
-			env["PATH"] = execution.result.pathBase
-		} else {
-			delete(env, "PATH")
-		}
-	}
-	mergeInto(jobResult.Env, env)
-	applyPaths(jobResult.Env, execution.result.Paths)
+	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
 	mergeInto(jobResult.State, execution.result.State)
 	jobResult.Summary += execution.result.Summary
@@ -212,6 +202,20 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)
 	}
 	return nil
+}
+
+func commitResultEnvironment(env map[string]string, result Result) {
+	effects := result.Env
+	if len(result.Paths) > 0 {
+		effects = cloneStrings(effects)
+		if result.pathBaseSet {
+			effects["PATH"] = result.pathBase
+		} else {
+			delete(effects, "PATH")
+		}
+	}
+	mergeInto(env, effects)
+	applyPaths(env, result.Paths)
 }
 
 func cloneExpressionContext(in expression.Context) expression.Context {
