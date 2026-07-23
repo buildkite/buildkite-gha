@@ -20,6 +20,7 @@ type Metadata struct {
 	Path        string            `yaml:"-"`
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description"`
+	Author      string            `yaml:"author"`
 	Inputs      map[string]Input  `yaml:"inputs"`
 	Outputs     map[string]Output `yaml:"outputs"`
 	Runs        Runs              `yaml:"runs"`

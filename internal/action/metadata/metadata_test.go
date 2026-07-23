@@ -52,6 +52,18 @@ func TestLoadAndClassify(t *testing.T) {
 }
 
 func TestLoadIsStrictAndConfined(t *testing.T) {
+	t.Run("official declarative fields", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\nauthor: GitHub\nruns:\n  using: node24\n  main: dist/index.js\n")
+		action, err := Load(root, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action.Author != "GitHub" {
+			t.Fatalf("Load() author = %q, want GitHub", action.Author)
+		}
+	})
+
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")

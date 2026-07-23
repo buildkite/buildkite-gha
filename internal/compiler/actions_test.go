@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -282,5 +283,62 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CompilePlansContext() error = %v, want context cancellation", err)
+	}
+}
+
+func TestLivePublicActionCompatibility(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
+		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to query and download public GitHub actions anonymously")
+	}
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "public-actions.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+`)
+	resolver, err := source.NewResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(filepath.Join(t.TempDir(), "actions"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	plans, err := CompilePlansContext(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
+		EventTrust:   EventTrusted,
+		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
+		ActionSource: PublicActionSource{Resolver: resolver, Store: store},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV3 || len(plans[0].Actions) != 3 {
+		t.Fatalf("public action plan = %#v", plans)
+	}
+	wantCommits := map[string]string{
+		"actions/checkout":   "3d3c42e5aac5ba805825da76410c181273ba90b1",
+		"actions/setup-node": "249970729cb0ef3589644e2896645e5dc5ba9c38",
+		"actions/setup-go":   "924ae3a1cded613372ab5595356fb5720e22ba16",
+	}
+	for _, lock := range plans[0].Actions {
+		if want := wantCommits[lock.Repository]; lock.Commit != want || lock.SourceDigest == "" {
+			t.Fatalf("public action lock = %#v, want commit %q", lock, want)
+		}
 	}
 }
