@@ -201,13 +201,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			if source != "github" {
 				continue
 			}
-			allRemote, err := r.isAllGitHubActionTree(runCtx, actions, *step.Action, nil)
-			if err != nil {
+			if err := r.verifyRemoteActionTree(runCtx, actions, *step.Action, nil); err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
 				break
-			}
-			if !allRemote {
-				continue
 			}
 			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
@@ -449,34 +445,35 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared, nil)
 }
 
-// isAllGitHubActionTree verifies and materializes an entire candidate tree.
-// Workspace descendants deliberately make the tree ineligible for hoisting.
-func (r Runner) isAllGitHubActionTree(ctx context.Context, actions *actionLockResolver, selector plan.ActionSelector, stack []string) (bool, error) {
+// verifyRemoteActionTree materializes and verifies every remote subtree before
+// any of its pre hooks run. Workspace subtrees remain lazy and keep their
+// existing main-traversal compatibility behavior.
+func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockResolver, selector plan.ActionSelector, stack []string) error {
 	source, err := actions.source(selector)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if source != "github" {
-		return false, nil
+		return nil
 	}
 	action, lock, err := actions.resolve(ctx, selector)
 	if err != nil {
-		return false, err
+		return err
 	}
 	for _, ancestor := range stack {
 		if ancestor == lock.ID {
-			return false, fmt.Errorf("action recursion detected at lock %q", lock.ID)
+			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
 		}
 	}
 	runtime, err := action.Runtime()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if err := action.ValidateEntrypoints(runtime); err != nil {
-		return false, err
+		return err
 	}
 	if runtime != metadata.RuntimeComposite {
-		return true, nil
+		return nil
 	}
 	stack = append(append([]string(nil), stack...), lock.ID)
 	for i, child := range action.Runs.Steps {
@@ -485,18 +482,24 @@ func (r Runner) isAllGitHubActionTree(ctx context.Context, actions *actionLockRe
 		}
 		childSelector, ok := lock.Children[child.Uses]
 		if !ok || childSelector.Lock == "" {
-			return false, fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses)
+			return fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses)
 		}
-		remote, err := r.isAllGitHubActionTree(ctx, actions, childSelector, stack)
-		if err != nil || !remote {
-			return remote, err
+		if err := r.verifyRemoteActionTree(ctx, actions, childSelector, stack); err != nil {
+			return err
 		}
 	}
-	return true, nil
+	return nil
 }
 
 func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
 	result := newResult()
+	source, err := actions.source(*step.Action)
+	if err != nil {
+		return result, err
+	}
+	if source != "github" {
+		return result, nil
+	}
 	action, lock, err := actions.resolve(ctx, *step.Action)
 	if err != nil {
 		return result, err

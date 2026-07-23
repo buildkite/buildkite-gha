@@ -1728,8 +1728,16 @@ func TestRemoteActionPreHooksRunBeforeJobMainInDepthFirstOrder(t *testing.T) {
 runs:
   using: composite
   steps:
+    - uses: ./local
     - uses: owner/repo/first@v1
     - uses: owner/repo/nested@v1
+`)
+	writeFixtureFile(t, workspace, "local/action.yml", `name: local
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: printf '%s\n' 'local:main' >> "$LIFECYCLE_LOG"
 `)
 	writeFixtureFile(t, remote, "nested/action.yml", `name: nested
 runs:
@@ -1783,6 +1791,7 @@ esac
 	digest := digestTree(t, remote)
 	rootID, firstID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	nestedID, skippedID, secondID := remoteLifecycleLockID(3), remoteLifecycleLockID(4), remoteLifecycleLockID(5)
+	localID := remoteLifecycleLockID(6)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "ordinary", Kind: "run", Command: `test "$PRE_ENV" = visible
 test "$(command -v pre-tool)" = "$PRE_BIN/pre-tool"
@@ -1794,6 +1803,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "PRE_BIN": preBin}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{
+			"./local":                     {Lock: localID},
 			remoteLifecycleUses("first"):  {Lock: firstID},
 			remoteLifecycleUses("nested"): {Lock: nestedID},
 		}),
@@ -1804,6 +1814,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 		}),
 		remoteLifecycleLock(skippedID, "skipped", digest, nil),
 		remoteLifecycleLock(secondID, "second", digest, nil),
+		{ID: localID, Source: "workspace", Path: "local", SourceDigest: digestTree(t, filepath.Join(workspace, "local"))},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	var logs bytes.Buffer
@@ -1815,7 +1826,7 @@ printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "first:pre\nskipped:pre\nsecond:pre\njob:main\nfirst:main\nsecond:main\nsecond:post\nskipped:post\nfirst:post\n"
+	want := "first:pre\nskipped:pre\nsecond:pre\njob:main\nlocal:main\nfirst:main\nsecond:main\nsecond:post\nskipped:post\nfirst:post\n"
 	if got := string(events); got != want {
 		t.Fatalf("lifecycle = %q, want %q", got, want)
 	}
