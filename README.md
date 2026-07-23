@@ -5,10 +5,11 @@ Actions workflows as native Buildkite builds. It will compile workflow jobs
 into Buildkite pipeline jobs and execute each job's Actions steps inside a
 compatibility runtime, without creating a GitHub Actions run.
 
-The Phase 0 semantic foundation, Phase 1 static compiler, and unprivileged
-event-file upload path are implemented. The compiler validates the supported
-graph, expands local reusable workflows and matrices, applies queue policy,
-produces immutable job plans, and emits a Buildkite pipeline.
+The Phase 0 semantic foundation, Phase 1 static compiler, Phase 2 shell
+runtime, and Phase 3 concurrent-step runtime are implemented. The compiler
+validates the supported graph, expands local reusable workflows and matrices,
+applies queue policy, produces immutable job plans, and emits a Buildkite
+pipeline.
 
 ## Commands
 
@@ -44,29 +45,32 @@ are fixed independently of the flag value, so CLI input cannot grant access to
 another queue. Trusted installation-specific queue policy remains deferred.
 This path is intentionally unsigned and does not claim the KMS-backed plan
 authority required for production use. It also rejects action steps because
-its generated jobs have empty, checkout-free workspaces; only shell steps are
-currently executable through this path, and any declared runtime capability
-causes the upload to fail closed.
+its generated jobs have empty, checkout-free workspaces; only shell steps and
+their concurrent control primitives are currently executable through this
+path, and any declared runtime capability causes the upload to fail closed.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
-a fresh checkout-free workspace. The sequential runtime supports env and
-working-directory precedence, file commands, job and step conditions, bounded
-prerequisite results and outputs supplied by the transport layer, timeouts,
-process-tree cancellation, `::add-mask` log and result protection, and step
-`continue-on-error`. Other workflow commands are not yet implemented. Secret names
-resolve only through the explicit `BUILDKITE_GHA_SECRET_` namespace and are
-registered with the Buildkite Agent redactor before execution. Remote action
-resolution, services, job containers, and concurrent steps remain outside the
-executable subset; local Node 24, composite, and Docker action spikes still
-require an explicitly materialized and source-bound workspace. In Buildkite,
-`run-job` verifies the exact build, job, step, and plan digest before resolving
-each prerequisite from its attributed producer artifact, then publishes the
-terminal result under a bounded cleanup context; metadata is only a best-effort
-mirror. Identity, plan-decode, and digest failures happen before a producer can
-publish a trusted manifest, and retrying a producer can make artifact selection
-ambiguous; consumers fail closed in both cases, so retry the whole build. Use
-`buildkite-gha help`, `buildkite-gha help <command>`, or
-`buildkite-gha --version` for exact usage.
+a fresh checkout-free workspace. The runtime supports env and working-directory
+precedence, file commands, job and step conditions, bounded prerequisite
+results and outputs supplied by the transport layer, timeouts, process-tree
+cancellation, `::add-mask` log and result protection, and step
+`continue-on-error`. Background steps, targeted and full barriers, explicit
+cancellation, and parallel groups share a ten-active-step supervisor. Their
+effects and failures become visible only at the covering barrier, and an
+implicit final barrier runs before bounded cleanup. Other workflow commands are
+not yet implemented. Secret names resolve only through the explicit
+`BUILDKITE_GHA_SECRET_` namespace and are registered with the Buildkite Agent
+redactor before execution. Remote action resolution, services, and job
+containers remain outside the executable subset; local Node 24, composite, and
+Docker action spikes still require an explicitly materialized and source-bound
+workspace. In Buildkite, `run-job` verifies the exact build, job, step, and plan
+digest before resolving each prerequisite from its attributed producer
+artifact, then publishes the terminal result under a bounded cleanup context;
+metadata is only a best-effort mirror. Identity, plan-decode, and digest
+failures happen before a producer can publish a trusted manifest, and retrying
+a producer can make artifact selection ambiguous; consumers fail closed in
+both cases, so retry the whole build. Use `buildkite-gha help`,
+`buildkite-gha help <command>`, or `buildkite-gha --version` for exact usage.
 
 ## Development
 
@@ -94,6 +98,12 @@ checks. Start an exact-commit build with `PHASE2_PROBE=upload` and
 trusted importer runs on `elastic-runners`; generated checkout-free jobs run on
 the ephemeral `hosted` queue, whose Agent version supports native checkout
 suppression.
+
+The Phase 3 proof uses the same importer boundary. Start an exact-commit build
+with `PHASE3_PROBE=concurrent` and `PHASE3_COMMIT=<full commit>` to load
+`.buildkite/phase-3-upload.yml`. To run the matching GitHub-hosted differential,
+dispatch `.github/workflows/phase-0-shell-oracle.yml` on that ref with the same
+`source_commit` and `target=concurrent`.
 
 ## License
 
