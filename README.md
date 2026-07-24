@@ -6,10 +6,11 @@ into Buildkite pipeline jobs and execute each job's Actions steps inside a
 compatibility runtime, without creating a GitHub Actions run.
 
 The Phase 0 semantic foundation, Phase 1 static compiler, Phase 2 shell
-runtime, Phase 3 concurrent-step runtime, and Phase 4 JavaScript/composite
-action runtime are implemented. The compiler validates the supported graph,
-expands local reusable workflows and matrices, applies queue policy, produces
-immutable job plans, and emits a Buildkite pipeline.
+runtime, Phase 3 concurrent-step runtime, Phase 4 JavaScript/composite action
+runtime, and the Dockerfile-action entry slice of Phase 5 are implemented. The
+compiler validates the supported graph, expands local reusable workflows and
+matrices, applies queue policy, produces immutable job plans, and emits a
+Buildkite pipeline.
 
 ## Commands
 
@@ -44,9 +45,12 @@ This tokenless development path requires `--runtime-queue hosted` and rejects
 every other queue. Its supported Linux label mapping and queue allowlist are
 fixed independently of the flag value, so CLI input cannot grant access to
 another queue. The path remains `EventUntrusted`, ambient-clean, and tokenless;
-only capability-free jobs and jobs whose sole declared capability is `network`
-are accepted. Private remote action or repository source, provider tokens,
-secrets, Docker, privileged queues, and all other protected capabilities fail
+only capability-free jobs, jobs whose sole declared capability is `network`,
+and jobs whose `docker` capability was derived by the same compiler invocation
+solely from supported Dockerfile actions are accepted. Local and anonymously
+resolved public Dockerfile actions may run through that last boundary. Private
+remote action or repository source, provider tokens, secrets, job or service
+containers, privileged queues, and all other protected capabilities fail
 closed.
 The path is intentionally unsigned: ordinary Buildkite dynamic uploads do not
 need plan signing merely to run public, tokenless code.
@@ -86,8 +90,13 @@ SHA, the workspace root, and a credential-free shallow fetch; private checkout,
 provider tokens, alternate repositories or refs, and credential persistence
 remain deferred. Action resolution is independent of event trust. Normal
 `upload` accepts capability-free local actions and anonymous public actions
-whose sole declared capability is network access. Docker actions, services, and
-job containers remain outside the executable subset. In Buildkite,
+that require only network access, plus the supported Dockerfile-action subset
+when its `docker` capability has same-process compiler provenance. Dockerfile
+actions run from a private staged copy of the verified source, require the local
+Buildx `default` Docker driver, use fixed workspace and file-command mounts,
+and receive runtime-owned names and labels with bounded cleanup. `docker://`
+images, Docker lifecycle overrides, arbitrary Docker options, services, and job
+containers remain outside the executable subset. In Buildkite,
 `run-job` verifies the exact build, job, step, and plan digest before resolving
 each prerequisite from its attributed producer artifact, then publishes the
 terminal result under a bounded cleanup context; metadata is only a best-effort
@@ -159,6 +168,15 @@ both against exact implementation commit
 `c5b9c56762e94ce2084a7fe7223c5f18a432e2bc`. Historical
 [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
 remains evidence for the former proof importer.
+
+The Phase 5 Dockerfile-action proof uses the same policy-controlled importer
+and pinned public action as its GitHub-hosted differential. Start an exact-commit
+build with `PHASE5_PROBE=docker-action` and `PHASE5_COMMIT=<full commit>` to
+load `.buildkite/phase-5-docker-action.yml`. The generated checkout-free job
+builds and runs the verified action on `hosted`, propagates its output, and must
+settle before the separately uploaded native Buildkite continuation. The
+matching differential is
+`.github/workflows/phase-5-docker-action-oracle.yml`.
 
 ## License
 
