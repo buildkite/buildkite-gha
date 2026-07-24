@@ -173,10 +173,10 @@ record "$@"
 if [[ "$1" == buildx && "$2" == inspect ]]; then
   case "$scenario" in
     inspect-fail) exit 31 ;;
-    remote) printf 'remote\n'; exit 0 ;;
-    multiline) printf 'docker\nremote\n'; exit 0 ;;
+    remote) printf 'Name: default\nDriver: remote\n'; exit 0 ;;
+    multiline) printf 'Name: default\nDriver: docker\nDriver: remote\n'; exit 0 ;;
     oversized) i=0; while (( i < 5000 )); do printf x; (( i += 1 )); done; exit 0 ;;
-    *) printf 'docker\n'; exit 0 ;;
+    *) printf 'Name: default\nDriver: docker\n'; exit 0 ;;
   esac
 fi
 
@@ -374,7 +374,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 
 	calls := fake.calls(t)
 	wantCommands := [][]string{
-		{"buildx", "inspect", "default", "--format", "{{.Driver}}"},
+		{"buildx", "inspect", "default"},
 		{"buildx", "build"},
 		{"run"},
 		{"ps", "--all", "--quiet"},
@@ -465,7 +465,7 @@ func TestRunDockerRejectsUntrustedBuilderBeforeExecution(t *testing.T) {
 				t.Fatal("untrusted builder was accepted")
 			}
 			calls := fake.calls(t)
-			if len(calls) != 1 || !slices.Equal(calls[0].args, []string{"buildx", "inspect", "default", "--format", "{{.Driver}}"}) {
+			if len(calls) != 1 || !slices.Equal(calls[0].args, []string{"buildx", "inspect", "default"}) {
 				t.Fatalf("Docker calls after rejected driver = %#v", calls)
 			}
 		})

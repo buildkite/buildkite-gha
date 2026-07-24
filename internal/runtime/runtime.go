@@ -123,12 +123,16 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	}
 	defer func() { _ = os.RemoveAll(dockerConfig) }()
 	dockerEnv := map[string]string{"DOCKER_CONFIG": dockerConfig}
-	driver, inspectErr := boundedDockerOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default", "--format", "{{.Driver}}")
-	if inspectErr != nil || driver != "docker\n" {
+	inspection, inspectErr := boundedDockerOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default")
+	driver := dockerBuilderDriver(inspection)
+	if inspectErr != nil || driver != "docker" {
 		if inspectErr != nil {
 			return result, fmt.Errorf("inspect default Docker builder: %w", inspectErr)
 		}
-		return result, fmt.Errorf("default Docker builder has non-local driver %q", strings.TrimSpace(driver))
+		if driver == "" {
+			return result, fmt.Errorf("could not determine default Docker builder driver from inspect output")
+		}
+		return result, fmt.Errorf("default Docker builder has non-local driver %q", driver)
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -300,6 +304,21 @@ func validateDockerMountPath(path string) error {
 		return fmt.Errorf("docker mount path must be an existing directory")
 	}
 	return nil
+}
+
+func dockerBuilderDriver(inspection string) string {
+	var driver string
+	for _, line := range strings.Split(inspection, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "Driver:" {
+			continue
+		}
+		if driver != "" && driver != fields[1] {
+			return ""
+		}
+		driver = fields[1]
+	}
+	return driver
 }
 
 func boundedDockerOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
