@@ -1,0 +1,9 @@
+steps:
+  - label: ":docker: Phase 5 hosted Docker capabilities"
+    key: "phase-5-hosted-docker-probe"
+    agents:
+      queue: "hosted"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    command: "scripts/phase-5-hosted-docker-probe"

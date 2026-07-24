@@ -1204,6 +1204,20 @@ Explicitly defer from beta unless implementation evidence changes the order:
   JavaScript/composite fixture. This does not claim a same-workflow private
   checkout proof on Buildkite. The migrated normal path now has separate exact
   Buildkite and GitHub-hosted evidence below.
+- Phase 5 entry evidence is implemented without yet authorizing Docker in the
+  production upload path. An exact-commit, fixed-`hosted` probe demonstrates a
+  runnable local Docker daemon, bind mounts and ownership, private-network DNS,
+  health checks, dynamic loopback port publication, observable TERM handling,
+  and exact-label cleanup. Buildkite Hosted Agents provide a disposable,
+  isolated virtualized environment for each job and destroy it regardless of
+  exit status. The queue's active Buildx builder is remote and cluster-scoped,
+  however, so anonymous Dockerfile builds must select the local `default`
+  Docker driver explicitly rather than execute untrusted `RUN` instructions in
+  the remote builder's persistent shared cache. The first production slice
+  remains limited to Dockerfile-backed local and anonymous public actions;
+  `docker://`, Docker pre/post entrypoints, job containers, services, private
+  registries, arbitrary options, protected capabilities, and privileged queues
+  continue to fail closed until their owning slices land.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1253,6 +1267,21 @@ Phase 4 live evidence:
 - [GitHub Actions run 30069516646](https://github.com/buildkite/buildkite-gha/actions/runs/30069516646)
   ran the same implementation commit against the private repository. Its
   producer and consumer passed the JavaScript/composite differential fixture.
+
+Phase 5 entry evidence:
+
+- [Buildkite build 102](https://buildkite.com/buildkite/buildkite-gha/builds/102)
+  ran exact implementation commit
+  `b3a4c4c96d97812e5c087057cda0fdaf1a79bb19`. The checked-in probe observed the
+  hosted queue's active remote Buildx driver, selected and verified the local
+  `default` Docker driver, then passed pinned pull, build-and-load, execution,
+  requested UID/GID bind ownership, private-network HTTP by alias, container
+  health, dynamic loopback publication, TERM observation, and exact-label
+  cleanup. The separate continuation settled only after the hosted probe.
+- This establishes capability and queue-isolation evidence, not production
+  Docker authorization. Normal `buildkite-gha upload` still rejects the
+  `docker` capability until the staged-source, cancellation, bounded cleanup,
+  and policy work below is implemented and reviewed.
 
 - [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
   ran exact implementation commit
@@ -1527,7 +1556,7 @@ Definition of done:
 - Private action authentication is either implemented safely or rejected
   clearly.
 
-### Phase 5 — Containers and services
+### Phase 5 — Containers and services (entry capability proven)
 
 Implement the Linux Docker execution backend for:
 
@@ -1538,6 +1567,31 @@ Implement the Linux Docker execution backend for:
 - health checks and service failure logs;
 - host/container path translation; and
 - orphan cleanup.
+
+Implementation order and fixed boundaries:
+
+1. Harden Dockerfile-backed actions first. Build only a private staged copy of
+   the verified action tree, select `buildx build --builder default --load`, use
+   fixed structured mounts and bridge-owned labels, and stop/remove containers
+   and images under an independent bounded cleanup context.
+2. Admit only local and anonymously resolved public Dockerfile actions on the
+   fixed tokenless `hosted` queue. Continue rejecting `docker://` images,
+   Docker pre/post entrypoints, arbitrary Docker options, private registries,
+   credentials, provider tokens, host namespaces, devices, socket mounts, and
+   privileged capabilities.
+3. Add persistent job containers and path translation only after Docker action
+   lifecycle, command-file processing, masking, cancellation, and cleanup pass
+   differential and exact-commit evidence.
+4. Add services, aliases, port context, health diagnostics, and startup/orphan
+   reconciliation on the same runtime-owned backend. Do not translate imported
+   container definitions into workflow-controlled Buildkite plugins.
+
+The hosted default remote builder is not an authorization boundary for
+anonymous Dockerfiles: it has cluster-scoped persistent caching. The tokenless
+path must use the probed local `default` Docker driver so Dockerfile execution
+remains inside the disposable job environment. Any future use of remote
+builders for untrusted plans, or any elevated Docker option, is a separate
+product and security decision.
 
 Definition of done:
 
@@ -1979,16 +2033,21 @@ them in the phase that first needs the capability:
 1. Phase 6 control-plane work will determine which authenticated GitHub event
    payload Buildkite exposes, whether the service must receive GitHub App
    webhooks directly, and whether a small Buildkite platform API is missing.
-2. Phase 5 container work will choose direct Hosted Agent execution versus a
-   compatibility image from measured tool-cache and Docker behavior.
+2. Phase 5 uses direct Hosted Agent execution for the tokenless Dockerfile
+   action slice. Exact-commit build 102 proved the local `default` Docker driver,
+   bind/path behavior, private networking, health, loopback publication,
+   signals, and cleanup. A compatibility image remains deferred until job
+   containers or tool-cache differences demonstrate a concrete need.
 3. Phase 6 will choose job-local protocol adapters versus recognized built-ins
    for cache and artifact actions.
 4. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
 5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
-6. Phases 5 and 9 will define the queue capabilities and trust properties
-   required for Docker and privileged workloads.
+6. The fixed Buildkite `hosted` queue's documented per-job disposable isolation
+   and the Phase 5 probe are sufficient for tokenless, non-privileged Dockerfile
+   actions built on the local driver. Phases 6 and 9 still own authorization and
+   queue policy for protected Docker capabilities and privileged workloads.
 7. Phase 6 will define the GitHub App installation-token compatibility contract
    for `github.token` and `GITHUB_TOKEN`, including repository/permission
    narrowing and documented differences from native Actions tokens. Tokenless
