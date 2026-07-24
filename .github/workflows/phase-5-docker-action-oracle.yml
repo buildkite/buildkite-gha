@@ -1,0 +1,34 @@
+name: Phase 5 Dockerfile action differential oracle
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker-action:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Prepare workspace mount observation
+        shell: bash
+        run: printf '%s\n' phase5-workspace > phase5-marker
+
+      - name: Run local Dockerfile action
+        id: docker
+        uses: ./testdata/actions/docker
+        with:
+          expected_file: phase5-marker
+
+      - name: Verify Dockerfile action effects
+        shell: bash
+        env:
+          CONTAINER_RESULT: ${{ steps.docker.outputs.container }}
+        run: |
+          test "$CONTAINER_RESULT" = ran
+          test "$DOCKER_RUNTIME_SEEN" = true
+          printf '%s\n' 'PHASE5_DOCKER_OBSERVATION={"container":"ran","environment":"propagated","workspace":"mounted"}'

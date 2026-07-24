@@ -365,6 +365,43 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 	}
 }
 
+func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, filepath.Join("testdata", "actions", "docker"), "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
+	workflowPath := filepath.Join("..", "..", "testdata", "phase5", ".github", "workflows", "docker-action.yml")
+	templatePath := workflowPath + ".tmpl"
+	workflow := strings.ReplaceAll(string(readFile(t, templatePath)), "__PHASE5_COMMIT__", strings.Repeat("a", 40))
+	plans, err := CompilePlansWithOptions(workflowPath, []byte(workflow), pushEvent(t), "phase5-test", testDistributionDigest, Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" {
+		t.Fatalf("Phase 5 Dockerfile action plans = %#v", plans)
+	}
+	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "phase-5-docker-action-continuation.yml"))
+	var continuation struct {
+		Steps []struct {
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != plans[0].Target.StepKey {
+		t.Fatalf("Phase 5 continuation dependencies = %#v, compiled terminal = %q", continuation.Steps, plans[0].Target.StepKey)
+	}
+}
+
 func TestCompilePlansRemoteActionRequiresSource(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "remote.yml")

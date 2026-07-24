@@ -1993,6 +1993,7 @@ func TestDockerAction(t *testing.T) {
 	runner := Runner{Stdout: &logs, Stderr: &logs, Docker: docker}
 	result, err := runner.RunDocker(context.Background(), DockerAction{
 		Name: "local Docker", Path: fixturePath(t, "actions", "docker"), Workspace: fixturePath(t),
+		Env: map[string]string{"INPUT_EXPECTED_FILE": "smoke/.github/workflows/ci.yml"},
 	})
 	if err != nil {
 		t.Fatalf("RunDocker() error = %v", err)

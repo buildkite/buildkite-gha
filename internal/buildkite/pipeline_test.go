@@ -208,8 +208,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 7 {
-		t.Fatalf("default pipeline = %#v, want six gated loaders plus repository checks", document.Steps)
+	if len(document.Steps) != 8 {
+		t.Fatalf("default pipeline = %#v, want seven gated loaders plus repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -241,6 +241,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["phase-5-capabilities-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml" || got.condition != `build.env("PHASE5_PROBE") == "capabilities"` {
 		t.Fatalf("Phase 5 capability loader = %#v", got)
+	}
+	if got := steps["phase-5-docker-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml" || got.condition != `build.env("PHASE5_PROBE") == "docker-action"` {
+		t.Fatalf("Phase 5 Dockerfile action loader = %#v", got)
 	}
 }
 
@@ -560,6 +563,74 @@ func TestPhase5HostedDockerCapabilityProbeContract(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("Phase 5 probe contains forbidden %q", forbidden)
 		}
+	}
+}
+
+func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	importerBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-5-docker-action.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(importerBody)
+	for _, fragment := range []string{
+		`scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"`,
+		`test -z "$$(git status --porcelain --untracked-files=all)"`,
+		`automatic: false`,
+		`sed "s/__PHASE5_COMMIT__/$$PHASE5_COMMIT/g"`,
+		`runtime_version="0.0.0-phase5.$${PHASE5_COMMIT}"`,
+		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
+		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
+		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
+		`"$$proof_root/buildkite-gha" upload`,
+		`--runtime-queue hosted`,
+		`"$$proof_root/.github/workflows/docker-action.yml"`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("Phase 5 Dockerfile action proof lacks %q:\n%s", fragment, importerBody)
+		}
+	}
+	var upload struct {
+		Steps []struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+			Agents                 struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(importerBody, &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-5-docker-action-importer" || upload.Steps[0].Agents.Queue != "elastic-runners" {
+		t.Fatalf("Phase 5 Dockerfile action importer = %#v", upload.Steps)
+	}
+	loader := upload.Steps[1]
+	if loader.Key != "phase-5-docker-action-continuation-loader" || loader.DependsOn != "phase-5-docker-action-importer" || !loader.AllowDependencyFailure || loader.Agents.Queue != "elastic-runners" || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-5-docker-action-continuation.yml" {
+		t.Fatalf("Phase 5 Dockerfile action continuation loader = %#v", loader)
+	}
+
+	continuationBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-5-docker-action-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(continuationBody), `step: "gha-docker-action"`) || !strings.Contains(string(continuationBody), `allow_failure: true`) {
+		t.Fatalf("Phase 5 Dockerfile action continuation is not failure-tolerant: %s", continuationBody)
+	}
+
+	templateBody, err := os.ReadFile(filepath.Join(root, "testdata", "phase5", ".github", "workflows", "docker-action.yml.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	githubBody, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "phase-5-docker-action-oracle.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := `PHASE5_DOCKER_OBSERVATION={"container":"ran","environment":"propagated","workspace":"mounted"}`
+	if strings.Count(string(templateBody), "__PHASE5_COMMIT__") != 1 || !strings.Contains(string(templateBody), "uses: buildkite/buildkite-gha/testdata/actions/docker@__PHASE5_COMMIT__") || !strings.Contains(string(githubBody), "uses: ./testdata/actions/docker") || !strings.Contains(string(templateBody), observation) || !strings.Contains(string(githubBody), observation) {
+		t.Fatalf("Phase 5 Dockerfile differential fixtures drifted:\ntemplate:\n%s\nGitHub:\n%s", templateBody, githubBody)
 	}
 }
 
