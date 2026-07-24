@@ -201,6 +201,12 @@ if [[ "$1" == buildx && "$2" == build ]]; then
   printf '%s' "$owner" > "$state/owner"
   cp "$dockerfile" "$state/staged-Dockerfile"
   touch "$state/image"
+  if [[ "$scenario" == replace-workspace ]]; then
+    original="$(cat "$state/original-workspace")"
+    replacement="$(cat "$state/replacement-workspace")"
+    mv "$original" "$original.moved"
+    ln -s "$replacement" "$original"
+  fi
   [[ "$scenario" != build-fail ]] || exit 32
   exit 0
 fi
@@ -208,6 +214,7 @@ fi
 if [[ "$1" == run ]]; then
   files=''
   workspace=''
+  runner_temp=''
   workdir=''
   args=("$@")
   name=''
@@ -225,10 +232,18 @@ if [[ "$1" == run ]]; then
         workspace="${arg#type=bind,source=}"
         workspace="${workspace%,target=/github/workspace}"
         ;;
+      type=bind,source=*,target=/github/runner_temp)
+        runner_temp="${arg#type=bind,source=}"
+        runner_temp="${runner_temp%,target=/github/runner_temp}"
+        ;;
       --workdir) workdir="${args[$((i + 1))]}" ;;
     esac
   done
-  [[ -n "$files" && -n "$workspace" && "$workdir" == /github/workspace ]] || exit 33
+  [[ -n "$files" && -n "$workspace" && -n "$runner_temp" && "$workdir" == /github/workspace ]] || exit 33
+  [[ -d "$workspace" && -d "$runner_temp" ]] || exit 41
+  if [[ "$scenario" == replace-workspace ]]; then
+    [[ "$(cat "$workspace/original-marker")" == original && ! -e "$workspace/replacement-marker" ]] || exit 42
+  fi
   [[ "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
   [[ "$owner" == "$(cat "$state/owner")" && "${args[$((${#args[@]} - 1))]}" == "$(cat "$state/image-name")" ]] || exit 39
   printf '%s' "$files" > "$state/command-files-path"
@@ -376,7 +391,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	fake := newFakeDocker(t, "success")
 	action := fakeDockerAction(t)
 	t.Setenv("DOCKER_CONFIG", filepath.Join(t.TempDir(), "ambient-config"))
-	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2375")
+	t.Setenv("DOCKER_HOST", "")
 	t.Setenv("DOCKER_CONTEXT", "ambient-context")
 	t.Setenv("BUILDX_BUILDER", "ambient-builder")
 	t.Setenv("BUILDKIT_HOST", "tcp://ambient.invalid:1234")
@@ -446,8 +461,12 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 			mounts = append(mounts, run[i+1])
 		}
 	}
-	if len(mounts) != 2 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" {
+	fdPrefix := "type=bind,source=/proc/" + strconv.Itoa(os.Getpid()) + "/fd/"
+	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || !strings.HasPrefix(mounts[1], fdPrefix) || !strings.HasSuffix(mounts[1], ",target=/github/workspace") || !strings.HasPrefix(mounts[2], fdPrefix) || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
+	}
+	if strings.Contains(strings.Join(mounts[1:], "\x00"), action.Workspace) {
+		t.Fatalf("Docker mounts expose mutable workspace path: %#v", mounts)
 	}
 	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
 		t.Fatalf("Docker working directory = %q", workdir)
@@ -460,6 +479,24 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	first, last := strings.Index(runText, "A_FIRST=a"), strings.Index(runText, "Z_LAST=z")
 	if first < 0 || last < 0 || first > last {
 		t.Fatalf("Docker environment is not sorted: %#v", run)
+	}
+	for _, prefix := range []string{"PATH=", "RUNNER_TOOL_CACHE="} {
+		for _, argument := range run {
+			if strings.HasPrefix(argument, prefix) {
+				t.Fatalf("Docker environment contains implicit host value %q: %#v", argument, run)
+			}
+		}
+	}
+	for name, want := range map[string]string{"GITHUB_WORKSPACE=/github/workspace": "one fixed workspace", "RUNNER_TEMP=/github/runner_temp": "one translated runner temp"} {
+		count := 0
+		for _, argument := range run {
+			if argument == name {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("Docker environment has %d copies of %s, want %s: %#v", count, name, want, run)
+		}
 	}
 	for _, value := range []string{"GITHUB_ENV=/github/file_commands/env", "GITHUB_OUTPUT=/github/file_commands/output", "GITHUB_PATH=/github/file_commands/path", "GITHUB_STATE=/github/file_commands/state", "GITHUB_STEP_SUMMARY=/github/file_commands/summary"} {
 		if !slices.Contains(run, value) {
@@ -477,6 +514,79 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 				t.Fatalf("Docker call contains forbidden option %q: %s", forbidden, text)
 			}
 		}
+	}
+}
+
+func TestRunDockerPinsWorkspaceBeforeDockerInvocation(t *testing.T) {
+	fake := newFakeDocker(t, "replace-workspace")
+	action := fakeDockerAction(t)
+	replacement := t.TempDir()
+	if err := os.WriteFile(filepath.Join(action.Workspace, "original-marker"), []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(replacement, "replacement-marker"), []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fake.root, "original-workspace"), []byte(action.Workspace), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fake.root, "replacement-workspace"), []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunDockerPreservesExplicitPath(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		jobPATH    string
+		stepPATH   string
+		actionPATH string
+	}{
+		{name: "job", jobPATH: "/job/bin"},
+		{name: "step", stepPATH: "/step/bin"},
+		{name: "action", actionPATH: "/action/bin"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeDocker(t, "success")
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker PATH test\n")
+			actionMetadata := "name: Docker PATH test\nruns:\n  using: docker\n  image: Dockerfile\n"
+			if test.actionPATH != "" {
+				actionMetadata += "  env:\n    PATH: " + test.actionPATH + "\n"
+			}
+			writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", actionMetadata)
+			writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
+			step := plan.Step{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"}
+			if test.stepPATH != "" {
+				step.Env = map[string]string{"PATH": test.stepPATH}
+			}
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{step})
+			job.RequiredCapabilities = []string{"docker", "network"}
+			if test.jobPATH != "" {
+				job.Env = map[string]string{"PATH": test.jobPATH}
+			}
+			if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+				t.Fatal(err)
+			}
+			calls := fake.calls(t)
+			runIndex := callIndex(calls, "run")
+			if runIndex < 0 {
+				t.Fatalf("Docker run absent: %#v", calls)
+			}
+			want := test.jobPATH
+			if test.stepPATH != "" {
+				want = test.stepPATH
+			}
+			if test.actionPATH != "" {
+				want = test.actionPATH
+			}
+			if !slices.Contains(calls[runIndex].args, "PATH="+want) {
+				t.Fatalf("Docker environment does not preserve explicit PATH %q: %#v", want, calls[runIndex].args)
+			}
+		})
 	}
 }
 
@@ -2078,6 +2188,66 @@ func TestDockerAction(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "masked docker probe: ***") {
 		t.Errorf("Docker logs = %q, want masked probe", logs.String())
+	}
+}
+
+func TestDockerActionSupportsImageDefaultNonRootUser(t *testing.T) {
+	docker := requireDocker(t)
+	action := t.TempDir()
+	writeFixtureFile(t, action, "main.go", `package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	workspace := os.Getenv("GITHUB_WORKSPACE")
+	if workspace != "/github/workspace" || os.Getenv("RUNNER_TEMP") != "/github/runner_temp" {
+		panic("container paths were not translated")
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "nonroot-workspace"), []byte("written"), 0o600); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(os.Getenv("RUNNER_TEMP"), "nonroot-temp"), []byte("written"), 0o600); err != nil {
+		panic(err)
+	}
+	output, err := os.OpenFile(os.Getenv("GITHUB_OUTPUT"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		panic(err)
+	}
+	defer output.Close()
+	if _, err := fmt.Fprintln(output, "nonroot=written"); err != nil {
+		panic(err)
+	}
+}
+`)
+	binary := filepath.Join(action, "entrypoint")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, filepath.Join(action, "main.go"))
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build non-root action entrypoint: %v: %s", err, output)
+	}
+	writeFixtureFile(t, action, "Dockerfile", "FROM scratch\nCOPY entrypoint /entrypoint\nUSER 65534:65534\nENTRYPOINT [\"/entrypoint\"]\n")
+	workspace := t.TempDir()
+	before, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{Docker: docker}).RunDocker(context.Background(), DockerAction{Name: "non-root Docker", Path: action, Workspace: workspace})
+	if err != nil {
+		t.Fatalf("RunDocker() error = %v", err)
+	}
+	if result.Outputs["nonroot"] != "written" {
+		t.Fatalf("Docker result = %#v", result)
+	}
+	if contents, err := os.ReadFile(filepath.Join(workspace, "nonroot-workspace")); err != nil || string(contents) != "written" {
+		t.Fatalf("non-root workspace write = %q, %v", contents, err)
+	}
+	after, err := os.Stat(workspace)
+	if err != nil || after.Mode().Perm() != before.Mode().Perm() {
+		t.Fatalf("workspace mode after Docker action = %v, %v; want %v", after, err, before.Mode().Perm())
 	}
 }
 

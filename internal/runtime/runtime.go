@@ -44,6 +44,9 @@ type Runner struct {
 	Secrets         SecretResolver
 	Redactor        Redactor
 	Actions         ActionMaterializer
+	workspacePin    *pinnedDirectory
+	runnerTempPin   *pinnedDirectory
+	explicitJobPATH bool
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -59,13 +62,16 @@ type JavaScriptAction struct {
 
 // DockerAction is an already-resolved local Docker action.
 type DockerAction struct {
-	Name         string
-	Path         string
-	SourceRoot   string
-	SourceDigest string
-	Dockerfile   string
-	Workspace    string
-	Env          map[string]string
+	Name          string
+	Path          string
+	SourceRoot    string
+	SourceDigest  string
+	Dockerfile    string
+	Workspace     string
+	Env           map[string]string
+	workspacePin  *pinnedDirectory
+	runnerTempPin *pinnedDirectory
+	explicitPATH  bool
 }
 
 // Result contains file-command effects produced by an action or lifecycle.
@@ -82,11 +88,53 @@ type Result struct {
 
 // RunDocker builds and executes an explicitly resolved local Docker action.
 func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
+	callerWorkspace := action.Workspace != ""
+	if !callerWorkspace {
+		action.Workspace, err = os.MkdirTemp("", "buildkite-gha-workspace-")
+		if err != nil {
+			return newResult(), fmt.Errorf("create workspace: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(action.Workspace) }()
+	}
+	abs, e := filepath.Abs(action.Workspace)
+	if e != nil {
+		return newResult(), fmt.Errorf("resolve workspace: %w", e)
+	}
+	action.Workspace = abs
+	_, action.explicitPATH = action.Env["PATH"]
+	action.workspacePin, e = pinDirectory(abs)
+	if e != nil {
+		return newResult(), e
+	}
+	defer func() { err = errors.Join(err, action.workspacePin.close()) }()
+	if callerWorkspace {
+		defer func() { err = errors.Join(err, action.workspacePin.restore()) }()
+	}
+	temp, e := os.MkdirTemp("", "buildkite-gha-runner-")
+	if e != nil {
+		return newResult(), e
+	}
+	defer func() { _ = os.RemoveAll(temp) }()
+	action.runnerTempPin, e = pinDirectory(temp)
+	if e != nil {
+		return newResult(), e
+	}
+	defer func() { err = errors.Join(err, action.runnerTempPin.close()) }()
 	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
 }
 
 func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action DockerAction) (result Result, err error) {
 	result = newResult()
+	if action.workspacePin == nil {
+		action.workspacePin = r.workspacePin
+	}
+	if action.runnerTempPin == nil {
+		action.runnerTempPin = r.runnerTempPin
+	}
+	action.explicitPATH = action.explicitPATH || r.explicitJobPATH
+	if action.workspacePin == nil || action.runnerTempPin == nil {
+		return result, errors.New("docker workspace and runner temp are not pinned")
+	}
 	docker := r.Docker
 	if docker == "" {
 		docker, err = exec.LookPath("docker")
@@ -202,20 +250,35 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	if err := validateDockerMountPath(files.dir); err != nil {
 		return result, err
 	}
-	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
 	if action.Workspace != "" {
-		if err := validateDockerMountPath(action.Workspace); err != nil {
+		if err := validateDockerMountPath(action.workspacePin.source()); err != nil {
 			return result, err
 		}
-		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--workdir", "/github/workspace")
+		if err := validateDockerMountPath(action.runnerTempPin.source()); err != nil {
+			return result, err
+		}
+	}
+	if err := action.workspacePin.widen(); err != nil {
+		return result, fmt.Errorf("make pinned workspace container-writable: %w", err)
+	}
+	if err := action.runnerTempPin.widen(); err != nil {
+		return result, fmt.Errorf("make pinned runner temp container-writable: %w", err)
+	}
+	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
+	if action.Workspace != "" {
+		args = append(args, "--mount", "type=bind,source="+action.workspacePin.source()+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTempPin.source()+",target=/github/runner_temp", "--workdir", "/github/workspace")
 	}
 	for _, name := range sortedKeys(action.Env) {
+		if name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
+			continue
+		}
 		args = append(args, "--env", name+"="+action.Env[name])
 	}
 	if action.Workspace != "" {
 		args = append(args, "--env", "GITHUB_WORKSPACE=/github/workspace")
 	}
 	args = append(args,
+		"--env", "RUNNER_TEMP=/github/runner_temp",
 		"--env", "GITHUB_OUTPUT=/github/file_commands/output",
 		"--env", "GITHUB_ENV=/github/file_commands/env",
 		"--env", "GITHUB_PATH=/github/file_commands/path",
