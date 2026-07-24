@@ -93,9 +93,10 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/phase5-probe.XXXXXXXX")"
 printf 'phase5\n' > "$work/marker"
 cat > "$work/Dockerfile" <<'EOF'
 FROM alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
-COPY marker /phase5-marker
+RUN mkdir /www
+COPY marker /www/phase5-marker
 HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD busybox wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1
-CMD ["busybox", "httpd", "-f", "-p", "8080", "-h", "/"]
+CMD ["busybox", "httpd", "-f", "-p", "8080", "-h", "/www"]
 EOF
 if timeout 10s docker buildx version >/dev/null 2>&1; then
   build=(docker buildx build --load)
@@ -103,7 +104,7 @@ else
   build=(docker build)
 fi
 if timeout 180s "${build[@]}" --label "${label_key}=${owner}" -t "$image" "$work" >/dev/null 2>&1; then created=1; record build pass loaded-marker-layer; else record build fail loaded-marker-layer; exit 1; fi
-if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" test -f /phase5-marker >/dev/null 2>&1; then record run pass marker-present; else record run fail marker-missing; fi
+if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" test -f /www/phase5-marker >/dev/null 2>&1; then record run pass marker-present; else record run fail marker-missing; fi
 
 mkdir "$work/mount"; printf x > "$work/mount/owned"; uid="$(id -u)"; gid="$(id -g)"
 if timeout 30s docker run --rm --label "${label_key}=${owner}" -v "$work/mount:/probe" --user "$uid:$gid" "$image" sh -c 'printf y > /probe/requested' >/dev/null 2>&1; then
