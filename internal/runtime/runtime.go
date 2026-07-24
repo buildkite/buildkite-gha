@@ -195,7 +195,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	if err != nil {
 		return result, err
 	}
-	defer func() { _ = os.RemoveAll(files.dir) }()
+	defer func() { _ = files.cleanup() }()
 	if err := files.allowContainerWrites(); err != nil {
 		return result, err
 	}
@@ -207,7 +207,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		if err := validateDockerMountPath(action.Workspace); err != nil {
 			return result, err
 		}
-		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace")
+		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--workdir", "/github/workspace")
 	}
 	for _, name := range sortedKeys(action.Env) {
 		args = append(args, "--env", name+"="+action.Env[name])
@@ -224,13 +224,15 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		image,
 	)
 	ran = true
-	if err := r.runStreaming(ctx, processor, "", dockerEnv, docker, args...); err != nil {
-		return result, fmt.Errorf("run Docker action %q: %w", action.Name, err)
+	runErr := r.runStreaming(ctx, processor, "", dockerEnv, docker, args...)
+	if runErr != nil {
+		runErr = fmt.Errorf("run Docker action %q: %w", action.Name, runErr)
 	}
-	if _, err := files.apply(&result, nil); err != nil {
-		return result, fmt.Errorf("process Docker action %q file commands: %w", action.Name, err)
+	_, fileErr := files.apply(&result, nil)
+	if fileErr != nil {
+		fileErr = fmt.Errorf("process Docker action %q file commands: %w", action.Name, fileErr)
 	}
-	return result, nil
+	return result, errors.Join(runErr, fileErr)
 }
 
 type stagedDockerSource struct{ root, action string }
@@ -376,7 +378,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(files.dir) }()
+	defer func() { _ = files.cleanup() }()
 	env = mergeStringMaps(env, map[string]string{
 		"GITHUB_OUTPUT":       files.output,
 		"GITHUB_ENV":          files.env,

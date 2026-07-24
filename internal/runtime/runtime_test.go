@@ -207,6 +207,8 @@ fi
 
 if [[ "$1" == run ]]; then
   files=''
+  workspace=''
+  workdir=''
   args=("$@")
   name=''
   owner=''
@@ -219,9 +221,15 @@ if [[ "$1" == run ]]; then
         files="${arg#type=bind,source=}"
         files="${files%,target=/github/file_commands}"
         ;;
+      type=bind,source=*,target=/github/workspace)
+        workspace="${arg#type=bind,source=}"
+        workspace="${workspace%,target=/github/workspace}"
+        ;;
+      --workdir) workdir="${args[$((i + 1))]}" ;;
     esac
   done
-  [[ -n "$files" && "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
+  [[ -n "$files" && -n "$workspace" && "$workdir" == /github/workspace ]] || exit 33
+  [[ "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
   [[ "$owner" == "$(cat "$state/owner")" && "${args[$((${#args[@]} - 1))]}" == "$(cat "$state/image-name")" ]] || exit 39
   printf '%s' "$files" > "$state/command-files-path"
   touch "$state/container"
@@ -232,10 +240,22 @@ if [[ "$1" == run ]]; then
   printf 'docker action summary\n' > "$files/summary"
   printf '::add-mask::fake-docker-secret\n'
   printf 'masked fake probe: fake-docker-secret\n'
+  if [[ "$scenario" == replace-files ]]; then
+    printf 'poison=followed\n' > "$state/poison"
+    rm -f "$files/output" && ln -s "$state/poison" "$files/output"
+    rm -f "$files/env" && mkfifo "$files/env"
+    rm -f "$files/state" && printf 'poison=replaced\n' > "$files/state"
+    rm -f "$files/summary" && mkdir "$files/summary"
+    rm -f "$files/path" && ln -s "$state/missing" "$files/path"
+  fi
   if [[ "$scenario" == cancel ]]; then
     touch "$state/ready"
     trap 'exit 130' INT TERM
     while :; do sleep 0.1; done
+  fi
+  if [[ "$scenario" == run-fail-invalid-files ]]; then
+    printf '=invalid\n' > "$files/output"
+    exit 34
   fi
   [[ "$scenario" != run-fail ]] || exit 34
   exit 0
@@ -429,6 +449,9 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	if len(mounts) != 2 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
 	}
+	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
+		t.Fatalf("Docker working directory = %q", workdir)
+	}
 	commandFiles := strings.TrimSuffix(strings.TrimPrefix(mounts[0], "type=bind,source="), ",target=/github/file_commands")
 	if _, statErr := os.Stat(commandFiles); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("command-file directory remains: %v", statErr)
@@ -497,6 +520,36 @@ func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
 				t.Fatalf("private Docker config remains after %s: %v", scenario, err)
 			}
 		})
+	}
+}
+
+func TestRunDockerProcessesFileCommandsAfterFailure(t *testing.T) {
+	fake := newFakeDocker(t, "run-fail")
+	result, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) {
+		t.Fatalf("RunDocker() error = %v", err)
+	}
+	if result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.Summary != "docker action summary\n" || !slices.Equal(result.Paths, []string{"/fake/action/bin"}) {
+		t.Fatalf("Docker failure result = %#v", result)
+	}
+}
+
+func TestRunDockerJoinsRunAndFileCommandFailures(t *testing.T) {
+	fake := newFakeDocker(t, "run-fail-invalid-files")
+	_, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) || !strings.Contains(err.Error(), `process Docker action "fake Docker" file commands`) || !strings.Contains(err.Error(), "invalid file command") {
+		t.Fatalf("RunDocker() error = %v", err)
+	}
+}
+
+func TestRunDockerReadsOnlyOriginalCommandFiles(t *testing.T) {
+	fake := newFakeDocker(t, "replace-files")
+	result, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outputs["container"] != "ran" || result.Outputs["poison"] != "" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.State["poison"] != "" || result.Summary != "docker action summary\n" || !slices.Equal(result.Paths, []string{"/fake/action/bin"}) {
+		t.Fatalf("Docker result from replaced command paths = %#v", result)
 	}
 }
 
@@ -1749,22 +1802,18 @@ func TestFileCommandParsing(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "commands")
-			if err := os.WriteFile(path, []byte(test.contents), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			got, err := parseCommandFile(path)
+			got, err := parseCommandReader("commands", strings.NewReader(test.contents))
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("parseCommandFile() error = %v, want %q", err, test.wantErr)
+					t.Fatalf("parseCommandReader() error = %v, want %q", err, test.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("parseCommandFile() error = %v", err)
+				t.Fatalf("parseCommandReader() error = %v", err)
 			}
 			if !maps.Equal(got, test.want) {
-				t.Fatalf("parseCommandFile() = %#v, want %#v", got, test.want)
+				t.Fatalf("parseCommandReader() = %#v, want %#v", got, test.want)
 			}
 		})
 	}
@@ -1773,7 +1822,7 @@ func TestFileCommandParsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = os.RemoveAll(files.dir) }()
+	defer func() { _ = files.cleanup() }()
 	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1784,18 +1833,11 @@ func TestFileCommandParsing(t *testing.T) {
 }
 
 func TestFileCommandLineLimitIsExplicit(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "output")
-	if err := os.WriteFile(path, []byte("value="+strings.Repeat("x", 70*1024)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if values, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", 70*1024)+"\n")); err != nil || len(values["value"]) != 70*1024 {
+		t.Fatalf("parseCommandReader() value length = %d, error = %v", len(values["value"]), err)
 	}
-	if values, err := parseCommandFile(path); err != nil || len(values["value"]) != 70*1024 {
-		t.Fatalf("parseCommandFile() value length = %d, error = %v", len(values["value"]), err)
-	}
-	if err := os.WriteFile(path, []byte("value="+strings.Repeat("x", maxStreamLineBytes)+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parseCommandFile(path); err == nil || !strings.Contains(err.Error(), "parse file command output") {
-		t.Fatalf("parseCommandFile() error = %v, want attributed size failure", err)
+	if _, err := parseCommandReader("output", strings.NewReader("value="+strings.Repeat("x", maxStreamLineBytes)+"\n")); err == nil || !strings.Contains(err.Error(), "parse file command output") {
+		t.Fatalf("parseCommandReader() error = %v, want attributed size failure", err)
 	}
 }
 
@@ -1804,7 +1846,7 @@ func TestDockerCommandFilesAreWritableWithoutExposingDirectoryEntries(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = os.RemoveAll(files.dir) }()
+	defer func() { _ = files.cleanup() }()
 	if err := files.allowContainerWrites(); err != nil {
 		t.Fatal(err)
 	}
@@ -1831,7 +1873,7 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = os.RemoveAll(files.dir) }()
+	defer func() { _ = files.cleanup() }()
 
 	many := strings.Repeat("value=x\n", maxCommandEntries+1)
 	if err := os.WriteFile(files.output, []byte(many), 0o600); err != nil {
