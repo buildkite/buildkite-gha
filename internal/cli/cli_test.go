@@ -459,10 +459,20 @@ func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testin
 			Workflow:             plan.Workflow{LogicalJobID: "action-job"},
 			RequiredCapabilities: capabilities,
 			Steps:                []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/example@commit"}},
-		}}}}
+		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySource: "dockerfile-actions"}}}}
 		if err := validateUnprivilegedBundle(bundle); err != nil {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", capabilities, err)
 		}
+	}
+}
+
+func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow:             plan.Workflow{LogicalJobID: "unproven-docker"},
+		RequiredCapabilities: []string{"docker"},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "without compiler-verified Dockerfile action provenance") {
+		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
 

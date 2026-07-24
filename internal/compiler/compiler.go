@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -200,12 +201,18 @@ func CompilePlansContext(ctx context.Context, path string, source, eventSource [
 }
 
 func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
+	plans, _, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	return plans, err
+}
+
+func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
-		return nil, fmt.Errorf("encode event payload: %w", err)
+		return nil, nil, fmt.Errorf("encode event payload: %w", err)
 	}
 	eventDigest := sha256.Sum256(payload)
 	plans := make([]plan.Job, 0, len(ir.Jobs))
+	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
 	planDigests := make(map[string]string, len(ir.Jobs))
 	logicalByKey := make(map[string]string, len(ir.Jobs))
 	for _, instance := range ir.Jobs {
@@ -249,18 +256,19 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 		jobSchema := plan.Schema
 		var actions []plan.ActionLock
 		var capabilities []string
+		var authorization PlanAuthorization
 		if options.ResolveActions && len(actionRefs) != 0 {
 			for _, i := range actionIndexes {
 				if strings.HasPrefix(strings.ToLower(instance.Steps[i].Uses), "actions/checkout@") {
 					if err := validateCheckoutInputs(instance.Steps[i].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
 						span := instance.Steps[i].Span.Start
-						return nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						return nil, nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
 				}
 			}
 			selectors, locks, actionCapabilities, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
 			if err != nil {
-				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
 			for i, selector := range selectors {
 				steps[actionIndexes[i]].Action = &plan.ActionSelector{Lock: selector.Lock}
@@ -268,11 +276,14 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 			jobSchema = plan.SchemaV3
 			actions = locks
 			capabilities = actionCapabilities
+			if slices.Contains(actionCapabilities, "docker") {
+				authorization.DockerCapabilitySource = "dockerfile-actions"
+			}
 		} else {
 			var err error
 			capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
 			if err != nil {
-				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
 		}
 		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
@@ -283,14 +294,14 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 				}
 				digest, ok := planDigests[dependency]
 				if !ok {
-					return nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+					return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
 				}
 				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
 			}
 		}
 		secrets, err := requiredSecrets(instance)
 		if err != nil {
-			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
 		if len(secrets) != 0 {
 			capabilities = append(capabilities, "secrets")
@@ -328,17 +339,18 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 			Actions:                 actions,
 		}
 		if err := job.Validate(); err != nil {
-			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
 		encoded, err := plan.Encode(job)
 		if err != nil {
-			return nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
 		}
 		digest := sha256.Sum256(encoded)
 		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
 		plans = append(plans, job)
+		authorizations = append(authorizations, authorization)
 	}
-	return plans, nil
+	return plans, authorizations, nil
 }
 
 func validateCheckoutInputs(inputs map[string]string, repository, sha string) error {

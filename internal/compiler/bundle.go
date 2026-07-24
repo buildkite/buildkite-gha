@@ -12,10 +12,18 @@ import (
 
 // PlanArtifact is one immutable encoded job plan and its content-addressed path.
 type PlanArtifact struct {
-	Job      plan.Job
-	Digest   string
-	Path     string
-	Contents []byte
+	Job           plan.Job
+	Digest        string
+	Path          string
+	Contents      []byte
+	Authorization PlanAuthorization
+}
+
+// PlanAuthorization is same-process compiler evidence for upload admission.
+// It is deliberately not part of the encoded plan: runtimes independently
+// enforce capabilities, while upload policy relies only on fresh compilation.
+type PlanAuthorization struct {
+	DockerCapabilitySource string
 }
 
 // Bundle is the complete deterministic output of static compilation.
@@ -50,12 +58,12 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 	if err != nil {
 		return Bundle{}, err
 	}
-	plans, err := compilePlans(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	plans, authorizations, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
 	if err != nil {
 		return Bundle{}, err
 	}
-	if len(plans) != len(ir.Jobs) {
-		return Bundle{}, fmt.Errorf("compiler produced %d plans for %d job instances", len(plans), len(ir.Jobs))
+	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
+		return Bundle{}, fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs))
 	}
 
 	artifacts := make([]PlanArtifact, len(plans))
@@ -73,7 +81,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		if err != nil {
 			return Bundle{}, fmt.Errorf("locate plan for job %q: %w", job.Workflow.LogicalJobID, err)
 		}
-		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents}
+		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
 		jobs[i] = buildkitepipeline.Job{
 			Key:          ir.Jobs[i].Key,
 			Label:        ir.Jobs[i].Label,

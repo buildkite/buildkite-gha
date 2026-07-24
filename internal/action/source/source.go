@@ -221,6 +221,9 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	if !shaRE.MatchString(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
 	}
+	if shaRE.MatchString(ref.Ref) && v.SHA != ref.Ref {
+		return Resolved{}, fmt.Errorf("GitHub resolved exact commit %s to different commit %s", ref.Ref, v.SHA)
+	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
 func (r *Resolver) peel(ctx context.Context, ref Reference, typ, sha string) (string, error) {
