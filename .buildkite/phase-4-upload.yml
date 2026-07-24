@@ -14,13 +14,11 @@ steps:
       trap 'rm -rf -- "$$distribution_root"' EXIT
       runtime_version="0.0.0-phase4.$${PHASE4_COMMIT}"
       mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
-      mise exec -- go run ./internal/harness/cmd/phase4-upload \
+      BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node" \
+      BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node" \
+      "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/phase4/events/public-checkout.json \
-        --runtime "$$distribution_root/buildkite-gha" \
-        --runtime-version "$$runtime_version" \
         --runtime-queue hosted \
-        --node24 "$$(mise where node@24)/bin/node" \
-        --commit 3d3c42e5aac5ba805825da76410c181273ba90b1 \
         testdata/phase4/.github/workflows/public-actions.yml
 
   - label: ":pipeline: Phase 4 continuation loader"

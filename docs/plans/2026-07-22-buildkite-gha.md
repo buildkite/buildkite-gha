@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-23
+Last reviewed: 2026-07-24
 Target repository: `buildkite/buildkite-gha`
 
 ## Summary
@@ -824,8 +824,13 @@ at barriers, and the cross-stream masking race.
 - managed Node distributions rather than assuming the host's `node` is
   compatible.
 
-The released project may therefore be a distribution containing the Go binary
-and versioned Node runtimes rather than literally one standalone executable.
+The distribution contains the Go binary and exactly Node 20.20.2 and 24.18.0
+under its fixed managed `runtimes/` layout. `BUILDKITE_GHA_NODE20` and
+`BUILDKITE_GHA_NODE24` are controlled explicit overrides, followed by
+`BUILDKITE_GHA_RUNTIME_ROOT`; otherwise runtime discovery uses the sibling
+`runtimes/` directory. Runtime bytes are copied, version-checked,
+deterministically archived and digested, uploaded, and reverified. There is no
+ambient PATH or network runtime fallback.
 
 #### Composite actions
 
@@ -1001,11 +1006,11 @@ Publish signed, checksummed releases with SBOMs. The initial supported
 distribution is Linux x86-64; Linux arm64 can follow once action/runtime
 compatibility is measured.
 
-Hosted Agents should eventually include the bridge distribution and managed
-Node runtimes. Customer-managed agents can install a pinned version through a
-small Buildkite plugin. Every generated job must execute the same bridge version
-that produced its plan unless the plan schema explicitly permits a compatible
-newer runtime.
+Distributions provide both pinned managed Node runtimes under the fixed layout.
+Hosted Agents may include that complete bridge distribution; customer-managed
+agents can install a pinned version through a small Buildkite plugin. Every
+generated job must execute the same bridge version that produced its plan
+unless the plan schema explicitly permits a compatible newer runtime.
 
 Protected capability-grant validity must cover the intended exchange window and
 remain short-lived. Once a grant expires, the service re-evaluates current
@@ -1183,14 +1188,22 @@ Explicitly defer from beta unless implementation evidence changes the order:
   complete source trees, transport exact managed Node 20/24 runtimes, execute
   nested composites and JavaScript pre/main/post lifecycle, and fail closed on
   private sources or provider-dependent authentication. Action resolution is
-  independent of event trust; the current general `upload` command remains
-  shell-only because managed Node provisioning has not yet moved out of the
-  Phase 4 proof importer, not because public actions require plan signing.
-  Because this repository is private, live evidence is split: a synthetic
-  public event proves anonymous checkout and portable setup actions on
-  Buildkite, while the GitHub-hosted oracle and local conformance suite cover the
-  private repository's JavaScript/composite fixture. This does not claim a
-  same-workflow private checkout proof on Buildkite.
+  independent of event trust. Normal `upload` now resolves local and anonymous
+  public JavaScript/composite actions and transports exact, major-validated Node
+  20 and 24 executable bytes for action workflows; the repository distribution
+  pins these runtimes to 20.20.2 and 24.18.0. Shell-only uploads remain
+  unchanged and require no Node runtime. This path remains `EventUntrusted`,
+  fixed to the ambient-clean, tokenless hosted queue, and accepts only no
+  capability or `network`; private remote action or repository source, provider
+  tokens, secrets, Docker, privileged queues, and other protected capabilities
+  fail closed.
+  Because this repository is private, the historical live evidence is split:
+  the former proof importer used a synthetic public event to prove anonymous
+  checkout and portable setup actions on Buildkite, while the GitHub-hosted
+  oracle and local conformance suite cover the private repository's
+  JavaScript/composite fixture. This does not claim a same-workflow private
+  checkout proof on Buildkite. The migrated normal path now has separate exact
+  Buildkite and GitHub-hosted evidence below.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1231,6 +1244,16 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 Phase 4 live evidence:
 
+- [Buildkite build 79](https://buildkite.com/buildkite/buildkite-gha/builds/79)
+  ran exact implementation commit
+  `c5b9c56762e94ce2084a7fe7223c5f18a432e2bc`. The policy-controlled importer
+  invoked the exact built production `buildkite-gha upload` CLI with pinned
+  managed Node 20/24 runtimes. The repository check, generated hosted public
+  action job, separate continuation loader, and native continuation all passed.
+- [GitHub Actions run 30069516646](https://github.com/buildkite/buildkite-gha/actions/runs/30069516646)
+  ran the same implementation commit against the private repository. Its
+  producer and consumer passed the JavaScript/composite differential fixture.
+
 - [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
   ran exact implementation commit
   `9ec7df250e2e3f3afc05489b02d04ff48647df3a`. Its policy-controlled importer
@@ -1239,6 +1262,8 @@ Phase 4 live evidence:
   that exact SHA anonymously, then pinned `setup-node` and `setup-go` installed
   and verified Node 24.18.0 and Go 1.26.5. The repository check, generated job,
   separate continuation loader, and native continuation all passed.
+  This remains valid evidence for the former proof importer; build 72 did not
+  exercise the newly migrated normal `upload` path.
 - [GitHub Actions run 30059944969](https://github.com/buildkite/buildkite-gha/actions/runs/30059944969)
   ran the same implementation commit against the private repository. Its
   producer and consumer proved the local JavaScript/composite output chain,
@@ -1956,17 +1981,15 @@ them in the phase that first needs the capability:
    webhooks directly, and whether a small Buildkite platform API is missing.
 2. Phase 5 container work will choose direct Hosted Agent execution versus a
    compatibility image from measured tool-cache and Docker behavior.
-3. Phase 4 action work will define how the distribution supplies Node 20 and
-   Node 24 on hosted and self-hosted agents.
-4. Phase 6 will choose job-local protocol adapters versus recognized built-ins
+3. Phase 6 will choose job-local protocol adapters versus recognized built-ins
    for cache and artifact actions.
-5. Phase 4 will set the customer-beta event and expression subset from the
+4. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
-6. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
+5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
-7. Phases 5 and 9 will define the queue capabilities and trust properties
+6. Phases 5 and 9 will define the queue capabilities and trust properties
    required for Docker and privileged workloads.
-8. Phase 6 will define the GitHub App installation-token compatibility contract
+7. Phase 6 will define the GitHub App installation-token compatibility contract
    for `github.token` and `GITHUB_TOKEN`, including repository/permission
    narrowing and documented differences from native Actions tokens. Tokenless
    workflows remain the default until then.
