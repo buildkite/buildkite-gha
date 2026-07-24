@@ -13,29 +13,21 @@ func configureProcessGroup(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func terminateProcessGroup(ctx context.Context, pid int, interruptGrace, terminateGrace time.Duration, processDone, finished <-chan struct{}) {
+func terminateProcessGroup(ctx context.Context, pid int, interruptGrace, terminateGrace time.Duration, finished <-chan struct{}) {
 	select {
 	case <-ctx.Done():
 	case <-finished:
 		return
 	}
-	select {
-	case <-processDone:
-		terminateRemainingProcessGroup(pid, terminateGrace)
-		return
-	default:
-	}
 	// Signal children before the shell so its foreground command is interrupted
 	// before the shell dispatches its own trap. A single group signal leaves a
 	// fork/exit race where the shell can terminate without running that trap.
 	signalProcessGroup(pid, syscall.SIGINT)
-	if waitForProcessExit(processDone, interruptGrace) {
-		terminateRemainingProcessGroup(pid, terminateGrace)
+	if waitForProcessGroupExit(pid, interruptGrace) {
 		return
 	}
 	signalProcessGroup(pid, syscall.SIGTERM)
-	if waitForProcessExit(processDone, terminateGrace) {
-		terminateRemainingProcessGroup(pid, terminateGrace)
+	if waitForProcessGroupExit(pid, terminateGrace) {
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
@@ -60,28 +52,6 @@ func signalProcessGroupMember(pid, group int, signal syscall.Signal) bool {
 		return syscall.Kill(pid, signal) == nil
 	}
 	return false
-}
-
-func waitForProcessExit(processDone <-chan struct{}, grace time.Duration) bool {
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-	select {
-	case <-processDone:
-		return true
-	case <-timer.C:
-		return false
-	}
-}
-
-func terminateRemainingProcessGroup(pid int, terminateGrace time.Duration) {
-	if err := syscall.Kill(-pid, 0); err == syscall.ESRCH {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	if waitForProcessGroupExit(pid, terminateGrace) {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
 }
 
 func waitForProcessGroupExit(pid int, grace time.Duration) bool {

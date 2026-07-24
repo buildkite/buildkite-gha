@@ -218,7 +218,7 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	terminationDone := make(chan struct{})
 	go func() {
 		defer close(terminationDone)
-		terminateProcessGroup(ctx, cmd.Process.Pid, r.interruptGrace(), r.terminateGrace(), processDone, finished)
+		terminateProcessGroup(ctx, cmd.Process.Pid, r.interruptGrace(), r.terminateGrace(), finished)
 	}()
 
 	var wg sync.WaitGroup
