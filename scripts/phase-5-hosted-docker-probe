@@ -94,8 +94,8 @@ printf 'phase5\n' > "$work/marker"
 cat > "$work/Dockerfile" <<'EOF'
 FROM alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
 COPY marker /phase5-marker
-HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1
-CMD ["httpd", "-f", "-p", "8080", "-h", "/"]
+HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD busybox wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1
+CMD ["busybox", "httpd", "-f", "-p", "8080", "-h", "/"]
 EOF
 if timeout 10s docker buildx version >/dev/null 2>&1; then
   build=(docker buildx build --load)
