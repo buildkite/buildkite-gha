@@ -10,6 +10,7 @@ readonly image="buildkite-gha-phase5-${safe_suffix:0:24}-$$"
 readonly network="buildkite-gha-phase5-${safe_suffix:0:24}-$$"
 readonly server="buildkite-gha-phase5-server-${safe_suffix:0:24}-$$"
 readonly client="buildkite-gha-phase5-client-${safe_suffix:0:24}-$$"
+readonly publisher="buildkite-gha-phase5-publisher-${safe_suffix:0:24}-$$"
 readonly signal="buildkite-gha-phase5-signal-${safe_suffix:0:24}-$$"
 work=''
 created=0
@@ -39,10 +40,10 @@ cleanup() {
   # Positional parameters are intentionally expanded by the bounded child shell.
   # shellcheck disable=SC2016
   timeout 30s bash -c '
-    docker rm -f "$1" "$2" "$3" >/dev/null 2>&1 || true
-    docker network rm "$4" >/dev/null 2>&1 || true
-    docker image rm -f "$5" >/dev/null 2>&1 || true
-  ' _ "$server" "$client" "$signal" "$network" "$image"
+    docker rm -f "$1" "$2" "$3" "$4" >/dev/null 2>&1 || true
+    docker network rm "$5" >/dev/null 2>&1 || true
+    docker image rm -f "$6" >/dev/null 2>&1 || true
+  ' _ "$server" "$client" "$publisher" "$signal" "$network" "$image"
   for kind in container network image; do
     if ! result="$(timeout 10s docker "$kind" ls -q --filter "label=${label_key}=${owner}" 2>/dev/null)"; then
       verification_failed=1
@@ -120,19 +121,25 @@ fi
 
 if timeout 30s docker network create --label "${label_key}=${owner}" "$network" >/dev/null 2>&1; then
   created=1
-  if timeout 30s docker run -d --label "${label_key}=${owner}" --name "$server" --network "$network" --network-alias phase5-server -p 127.0.0.1::8080 "$image" >/dev/null 2>&1; then
+  if timeout 30s docker run -d --label "${label_key}=${owner}" --name "$server" --network "$network" --network-alias phase5-server "$image" >/dev/null 2>&1; then
     created=1
     if timeout 30s docker run --rm --label "${label_key}=${owner}" --name "$client" --network "$network" "$image_base" sh -c 'wget -qO- http://phase5-server:8080/phase5-marker | grep -qx phase5' >/dev/null 2>&1; then record bridge-dns pass alias-http-reachable; else record bridge-dns fail alias-http-unreachable; fi
-    port="$(timeout 10s docker port "$server" 8080/tcp 2>/dev/null || true)"
-    # The single-quoted child script intentionally reads its positional argument.
-    # shellcheck disable=SC2016
-    if [[ "$port" =~ ^127\.0\.0\.1:([0-9]+)$ ]] && timeout 10s bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; printf "GET /phase5-marker HTTP/1.0\r\n\r\n" >&3; grep -q phase5 <&3' _ "${BASH_REMATCH[1]}" >/dev/null 2>&1; then record host-port pass dynamic-loopback-reachable; else record host-port not-applicable endpoint-publication-model; fi
     health=starting
     for _ in {1..20}; do health="$(timeout 5s docker inspect --format '{{.State.Health.Status}}' "$server" 2>/dev/null || true)"; [[ "$health" == healthy ]] && break; sleep 1; done
     if [[ "$health" == healthy ]]; then record health pass healthy; else record health fail not-healthy; fi
     if timeout 15s docker stop --time 5 "$server" >/dev/null 2>&1; then record server-stop pass bounded; else record server-stop fail timeout; fi
   else record server-run fail unavailable; fi
 else record bridge-network fail unavailable; fi
+
+if timeout 30s docker run -d --label "${label_key}=${owner}" --name "$publisher" -p 127.0.0.1::8080 "$image" >/dev/null 2>&1; then
+  created=1
+  port="$(timeout 10s docker port "$publisher" 8080/tcp 2>/dev/null || true)"
+  # The single-quoted child script intentionally reads its positional argument.
+  # shellcheck disable=SC2016
+  if [[ "$port" =~ ^127\.0\.0\.1:([0-9]+)$ ]] && timeout 10s bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; printf "GET /phase5-marker HTTP/1.0\r\n\r\n" >&3; grep -q phase5 <&3' _ "${BASH_REMATCH[1]}" >/dev/null 2>&1; then record host-port pass dynamic-loopback-reachable; else record host-port fail endpoint-publication-unreachable; fi
+else
+  record host-port fail publication-unavailable
+fi
 
 if (( bind_supported )); then
   mkdir "$work/signal"
