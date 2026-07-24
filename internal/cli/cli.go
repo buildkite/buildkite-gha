@@ -583,7 +583,10 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			if capability != "network" {
+			// The compiler derives docker only from action metadata that passed the
+			// exact Dockerfile-only boundary. If another Docker-backed feature is
+			// added, this admission rule must be split before that feature ships.
+			if capability != "network" && capability != "docker" {
 				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
 			}
 		}
