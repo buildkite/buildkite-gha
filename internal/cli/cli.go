@@ -2,6 +2,8 @@
 package cli
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -476,24 +479,69 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	bundle, err := compiler.CompileBundleWithOptions(
+	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
+	var ir compiler.IR
+	if err := json.Unmarshal(preflight, &ir); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: decode compiler preflight: %v\n", err)
+		return 1
+	}
+	hasActions := irUsesActions(ir)
+	options := compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels: map[string]string{
+				"ubuntu-latest": unprivilegedRuntimeQueue,
+				"ubuntu-24.04":  unprivilegedRuntimeQueue,
+				"ubuntu-22.04":  unprivilegedRuntimeQueue,
+			},
+			UntrustedQueues: []string{unprivilegedRuntimeQueue},
+		},
+	}
+	artifacts := make([]transport.Artifact, 0)
+	var nodeArtifacts []transport.Artifact
+	if hasActions {
+		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: create action source store: %v\n", err)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(actionRoot) }()
+		resolver, err := actionsource.NewResolver(nil)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: configure public action resolver: %v\n", err)
+			return 1
+		}
+		store, err := actionsource.NewStore(actionRoot, nil)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: configure action source store: %v\n", err)
+			return 1
+		}
+		options.ResolveActions = true
+		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
+		var digests map[int]string
+		nodeArtifacts, digests, err = managedNodeArtifacts(executablePath)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+			return 1
+		}
+		options.NodeRuntimeDigests = digests
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	bundle, err := compiler.CompileBundleContext(
+		ctx,
 		workflowPath,
 		workflowSource,
 		eventSource,
 		version,
 		distributionDigest,
 		importerStep,
-		compiler.Options{
-			EventTrust: compiler.EventUntrusted,
-			Runners: compiler.RunnerPolicy{
-				Labels: map[string]string{
-					"ubuntu-latest": unprivilegedRuntimeQueue,
-					"ubuntu-24.04":  unprivilegedRuntimeQueue,
-					"ubuntu-22.04":  unprivilegedRuntimeQueue,
-				},
-				UntrustedQueues: []string{unprivilegedRuntimeQueue},
-			},
-		},
+		options,
 	)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -503,13 +551,17 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	if !hasActions && bundleUsesActions(bundle) {
+		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: final compilation introduced actions absent from preflight")
+		return 1
+	}
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	artifacts := make([]transport.Artifact, 0, len(bundle.Plans)+1)
 	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
+	artifacts = append(artifacts, nodeArtifacts...)
 	for _, jobPlan := range bundle.Plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
@@ -520,8 +572,6 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	defer func() { _ = os.RemoveAll(root) }()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, bundle.Pipeline); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -532,16 +582,108 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
-		for _, step := range artifact.Job.Steps {
-			if step.Kind == "uses" || step.Uses != "" {
-				return fmt.Errorf("job %q contains action step %q, unavailable to checkout-free unprivileged upload", artifact.Job.Workflow.LogicalJobID, step.ID)
-			}
-		}
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
+			if capability != "network" {
+				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
+			}
 		}
 	}
 	return nil
+}
+
+func irUsesActions(ir compiler.IR) bool {
+	for _, job := range ir.Jobs {
+		for _, step := range job.Steps {
+			if step.Uses != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func bundleUsesActions(bundle compiler.Bundle) bool {
+	for _, artifact := range bundle.Plans {
+		if len(artifact.Job.Actions) != 0 {
+			return true
+		}
+		for _, step := range artifact.Job.Steps {
+			if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func managedNodeArtifacts(executablePath string) ([]transport.Artifact, map[int]string, error) {
+	root := os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT")
+	if root == "" {
+		realExecutable, err := filepath.EvalSymlinks(executablePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve real compiler executable: %w", err)
+		}
+		root = filepath.Join(filepath.Dir(realExecutable), "runtimes")
+	}
+	artifacts := make([]transport.Artifact, 0, 2)
+	digests := make(map[int]string, 2)
+	for _, major := range []int{20, 24} {
+		node, err := gharuntime.DiscoverNode(major, os.Getenv(fmt.Sprintf("BUILDKITE_GHA_NODE%d", major)), root)
+		if err != nil {
+			return nil, nil, err
+		}
+		contents, err := os.ReadFile(node)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read Node %d executable: %w", major, err)
+		}
+		if err := validateNodeBytes(major, contents); err != nil {
+			return nil, nil, err
+		}
+		archive, err := deterministicGzip(contents)
+		if err != nil {
+			return nil, nil, fmt.Errorf("archive Node %d executable: %w", major, err)
+		}
+		digest := transport.Digest(archive)
+		path, err := buildkitepipeline.NodeRuntimePath(major, digest)
+		if err != nil {
+			return nil, nil, err
+		}
+		digests[major] = digest
+		artifacts = append(artifacts, transport.Artifact{Path: path, Digest: digest, Contents: archive})
+	}
+	return artifacts, digests, nil
+}
+
+func validateNodeBytes(major int, contents []byte) error {
+	dir, err := os.MkdirTemp("", fmt.Sprintf("buildkite-gha-node%d-validation-", major))
+	if err != nil {
+		return fmt.Errorf("create Node %d validation directory: %w", major, err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	copyPath := filepath.Join(dir, "node")
+	if err := os.WriteFile(copyPath, contents, 0o700); err != nil {
+		return fmt.Errorf("materialize Node %d executable for validation: %w", major, err)
+	}
+	if _, err := gharuntime.DiscoverNode(major, copyPath, ""); err != nil {
+		return fmt.Errorf("validate exact Node %d executable bytes: %w", major, err)
+	}
+	return nil
+}
+
+func deterministicGzip(source []byte) ([]byte, error) {
+	var out bytes.Buffer
+	w, err := gzip.NewWriterLevel(&out, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	w.OS = 255
+	if _, err := w.Write(source); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, err error) {

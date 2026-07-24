@@ -2,12 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -243,6 +245,140 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	}
 }
 
+func TestRunUploadLocalJavaScriptActionUploadsExactManagedNodes(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
+	actionRoot := filepath.Join(root, ".github", "actions", "local")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "main.js"), []byte("console.log('local')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	node20 := writeFakeNode(t, root, 20)
+	node24 := writeFakeNode(t, root, 24)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
+	t.Setenv("BUILDKITE_GHA_NODE20", node20)
+	t.Setenv("BUILDKITE_GHA_NODE24", node24)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(runner.commands) != 5 {
+		t.Fatalf("commands = %d, want compiler, plan, two Node artifacts, and pipeline", len(runner.commands))
+	}
+	wantPaths := make([]string, 0, 2)
+	for i, major := range []int{20, 24} {
+		source, err := os.ReadFile([]string{node20, node24}[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		archive, err := deterministicGzip(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := transport.Digest(archive)
+		path := fmt.Sprintf(".buildkite-gha/runtimes/node%d/%s/node.gz", major, strings.TrimPrefix(digest, "sha256:"))
+		wantPaths = append(wantPaths, path)
+		if !bytes.Equal(runner.uploaded[path], archive) || transport.Digest(runner.uploaded[path]) != digest {
+			t.Fatalf("uploaded Node %d archive path/digest/contents mismatch", major)
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(runner.uploaded[path]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		uncompressed, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil || !bytes.Equal(uncompressed, source) {
+			t.Fatalf("uploaded Node %d bytes = %q, %v", major, uncompressed, err)
+		}
+	}
+	var planPath string
+	for path := range runner.uploaded {
+		if strings.HasSuffix(path, ".json") {
+			planPath = path
+			break
+		}
+	}
+	if planPath == "" {
+		t.Fatalf("uploaded artifacts contain no plan: %#v", runner.uploaded)
+	}
+	job, err := plan.Decode(runner.uploaded[planPath])
+	if err != nil {
+		t.Fatalf("decode uploaded action plan: %v", err)
+	}
+	if job.Schema != plan.SchemaV3 || len(job.Actions) == 0 || len(job.Steps) != 1 || job.Steps[0].Action == nil {
+		t.Fatalf("uploaded action plan does not contain v3 action locks/selectors: %#v", job)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[4].stdin, &pipeline); err != nil || len(pipeline.Steps) != 1 {
+		t.Fatalf("uploaded action pipeline = %#v, %v", pipeline, err)
+	}
+	for _, path := range wantPaths {
+		if !strings.Contains(pipeline.Steps[0].Command, "artifact download '"+path+"'") {
+			t.Fatalf("pipeline does not fetch exact managed Node artifact %q:\n%s", path, pipeline.Steps[0].Command)
+		}
+	}
+}
+
+func TestRunUploadWrongNodeFailsBeforeAgentSideEffects(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
+	actionRoot := filepath.Join(root, ".github", "actions", "local")
+	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
+	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, root, 24))
+	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, root, 24))
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, want 1", code)
+	}
+	if len(runner.commands) != 0 || !strings.Contains(stderr.String(), `reported "v24.0.0"`) {
+		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+	}
+}
+
+func writeFakeNode(t *testing.T, root string, major int) string {
+	t.Helper()
+	path := filepath.Join(root, fmt.Sprintf("node-%d-%d", major, len(root)))
+	contents := fmt.Sprintf("#!/bin/sh\nprintf 'v%d.0.0\\n'\n", major)
+	if err := os.WriteFile(path, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -259,7 +395,7 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "docker", "network"} {
+	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "docker", "future-capability"} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
@@ -270,18 +406,49 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadRejectsActionSteps(t *testing.T) {
-	for _, step := range []plan.Step{
-		{ID: "remote", Kind: "uses", Uses: "actions/checkout@v4"},
-		{ID: "malformed", Kind: "run", Uses: "./.github/actions/local"},
+func TestUnprivilegedUploadAllowsNetworkOnlyActions(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow:             plan.Workflow{LogicalJobID: "action-job"},
+		RequiredCapabilities: []string{"network"},
+		Steps:                []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/example@commit"}},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
+	}
+}
+
+func TestDeterministicGzip(t *testing.T) {
+	source := []byte("exact node executable bytes\n")
+	first, err := deterministicGzip(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := deterministicGzip(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("gzip output changed between calls")
+	}
+}
+
+func TestValidateNodeBytesRejectsWrongExactBytes(t *testing.T) {
+	if err := validateNodeBytes(20, []byte("#!/bin/sh\nprintf 'v24.0.0\\n'\n")); err == nil || !strings.Contains(err.Error(), `reported "v24.0.0"`) {
+		t.Fatalf("validateNodeBytes() error = %v, want exact-byte major rejection", err)
+	}
+}
+
+func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
+	for _, job := range []plan.Job{
+		{Steps: []plan.Step{{Kind: "uses"}}},
+		{Actions: []plan.ActionLock{{ID: "a-deadbeefdeadbeef"}}},
 	} {
-		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-			Workflow: plan.Workflow{LogicalJobID: "action-job"},
-			Steps:    []plan.Step{step},
-		}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "action step") {
-			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v, want action-step rejection", step, err)
+		if !bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job}}}) {
+			t.Fatalf("bundleUsesActions() = false for %#v", job)
 		}
+	}
+	if bundleUsesActions(compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}}}}) {
+		t.Fatal("bundleUsesActions() = true for shell-only plan")
 	}
 }
 
