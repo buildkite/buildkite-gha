@@ -185,17 +185,38 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
 	configureProcessGroup(cmd)
-	stdout, err := cmd.StdoutPipe()
+	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	stderr, err := cmd.StderrPipe()
+	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
 		return err
 	}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
+		_ = stdoutWriter.Close()
+		_ = stderr.Close()
+		_ = stderrWriter.Close()
 		return err
 	}
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
+	defer func() {
+		_ = stdout.Close()
+		_ = stderr.Close()
+	}()
+
+	processDone := make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(processDone)
+	}()
 	finished := make(chan struct{})
 	terminationDone := make(chan struct{})
 	go func() {
@@ -218,7 +239,7 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	go stream(0, "stdout", stdout, processor.stdout)
 	go stream(1, "stderr", stderr, processor.stderr)
 	wg.Wait()
-	waitErr := cmd.Wait()
+	<-processDone
 	close(finished)
 	<-terminationDone
 	if ctx.Err() != nil {

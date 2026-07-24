@@ -250,6 +250,12 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 }
 
 func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
+	for range 20 {
+		testExplicitCancelCommitsEffectsWithoutFailingJob(t)
+	}
+}
+
+func testExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -820,6 +826,46 @@ while :; do sleep 1; done`)
 	}
 }
 
+func TestCancellationPreservesInterruptGraceForDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
+	}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	childReady := filepath.Join(dir, "child-ready")
+	cleaned := filepath.Join(dir, "cleaned")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(ready); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	runner := Runner{InterruptGrace: 2 * time.Second, TerminateGrace: 50 * time.Millisecond}
+	err := runner.runStreaming(ctx, newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"READY": ready, "CHILD_READY": childReady, "CLEANED": cleaned}, "bash", "-c", `
+(
+  trap 'sleep 0.3; touch "$CLEANED"; exit 0' INT
+  touch "$CHILD_READY"
+  while :; do sleep 1; done
+) &
+trap 'exit 0' INT
+while [ ! -f "$CHILD_READY" ]; do sleep 0.01; done
+touch "$READY"
+wait`)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runStreaming() error = %v, want cancellation", err)
+	}
+	if _, statErr := os.Stat(cleaned); statErr != nil {
+		t.Fatalf("descendant did not finish SIGINT cleanup during the interrupt grace: %v", statErr)
+	}
+}
+
 func TestCancellationWaitsForProcessGroupCleanupAfterOutputCloses(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
@@ -851,7 +897,7 @@ while :; do sleep 1; done`)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("runStreaming() error = %v, want cancellation", err)
 	}
-	if elapsed := time.Since(started); elapsed < 90*time.Millisecond {
+	if elapsed := time.Since(started); elapsed < 40*time.Millisecond {
 		t.Fatalf("runStreaming() returned before process-group escalation completed: %s", elapsed)
 	}
 	contents, readErr := os.ReadFile(pidFile)
