@@ -1799,6 +1799,33 @@ func TestFileCommandLineLimitIsExplicit(t *testing.T) {
 	}
 }
 
+func TestDockerCommandFilesAreWritableWithoutExposingDirectoryEntries(t *testing.T) {
+	files, err := newCommandFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(files.dir) }()
+	if err := files.allowContainerWrites(); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.Stat(files.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dir.Mode().Perm(); got != 0o711 {
+		t.Fatalf("container file-command directory mode = %o, want 711", got)
+	}
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
+		file, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := file.Mode().Perm(); got != 0o666 {
+			t.Fatalf("container file command %s mode = %o, want 666", filepath.Base(path), got)
+		}
+	}
+}
+
 func TestFileCommandAggregateLimits(t *testing.T) {
 	files, err := newCommandFiles()
 	if err != nil {

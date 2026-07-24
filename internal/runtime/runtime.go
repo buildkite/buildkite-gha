@@ -196,6 +196,9 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		return result, err
 	}
 	defer func() { _ = os.RemoveAll(files.dir) }()
+	if err := files.allowContainerWrites(); err != nil {
+		return result, err
+	}
 	if err := validateDockerMountPath(files.dir); err != nil {
 		return result, err
 	}

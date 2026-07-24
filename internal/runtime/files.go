@@ -52,6 +52,20 @@ func newCommandFiles() (commandFiles, error) {
 	return files, nil
 }
 
+func (files commandFiles) allowContainerWrites() error {
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
+		if err := os.Chmod(path, 0o666); err != nil {
+			return fmt.Errorf("make container file command writable: %w", err)
+		}
+	}
+	// Container images may declare any USER. Permit traversal to the fixed,
+	// pre-created files without permitting directory listing or new entries.
+	if err := os.Chmod(files.dir, 0o711); err != nil {
+		return fmt.Errorf("make container file-command directory traversable: %w", err)
+	}
+	return nil
+}
+
 func (files commandFiles) apply(result *Result, state map[string]string) (fileCommandEffects, error) {
 	if err := files.checkSizeBudget(); err != nil {
 		return fileCommandEffects{}, err
