@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,123 @@ echo after-soft`},
 	}
 	if strings.Contains(logs.String(), "mask-me") || !strings.Contains(logs.String(), "secret=***") || !strings.Contains(logs.String(), "after-soft") {
 		t.Fatalf("RunJob() logs = %q", logs.String())
+	}
+}
+
+func TestCompiledRunDefaultsEvaluateAtRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/defaults.yml"
+	source := `on: push
+jobs:
+  matrix-defaults:
+    strategy:
+      matrix:
+        shell: [bash]
+        dir: [matrix]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - run: test "$(basename "$PWD")" = matrix
+  env-defaults:
+    runs-on: ubuntu-latest
+    env:
+      DEFAULT_SHELL: bash
+      DEFAULT_DIR: env
+    defaults:
+      run:
+        shell: ${{ env.DEFAULT_SHELL }}
+        working-directory: ${{ env.DEFAULT_DIR }}
+    steps:
+      - run: test "$(basename "$PWD")" = env
+  vars-defaults:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: ${{ vars.DEFAULT_SHELL }}
+        working-directory: ${{ vars.DEFAULT_DIR }}
+    steps:
+      - run: test "$(basename "$PWD")" = vars
+  explicit-precedence:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: unsupported-default
+        working-directory: missing-default
+    steps:
+      - shell: sh
+        working-directory: ${{ vars.OVERRIDE_DIR }}
+        run: test "$(basename "$PWD")" = override
+`
+	writeFixtureFile(t, workspace, workflowPath, source)
+	for _, directory := range []string{"matrix", "env", "vars", "override"} {
+		if err := os.Mkdir(filepath.Join(workspace, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlansWithOptions(
+		filepath.Join(workspace, workflowPath),
+		[]byte(source),
+		event,
+		"0.0.0-test",
+		"sha256:"+strings.Repeat("2", 64),
+		compiler.Options{
+			EventTrust: compiler.EventUntrusted,
+			Vars: compiler.VariableSources{Bridge: map[string]string{
+				"DEFAULT_SHELL": "bash",
+				"DEFAULT_DIR":   "vars",
+				"OVERRIDE_DIR":  "override",
+			}},
+			Runners: compiler.RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "gha-untrusted"},
+				UntrustedQueues: []string{"gha-untrusted"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 4 {
+		t.Fatalf("plans = %d, want four defaults cases", len(plans))
+	}
+	for _, job := range plans {
+		result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+		if err != nil || result.Conclusion != "success" {
+			t.Fatalf("RunJob(%s) result = %#v, error = %v", job.Workflow.LogicalJobID, result, err)
+		}
+	}
+}
+
+func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/secrets.yml"
+	source := "on: push\njobs:\n  secrets:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo \"secret=${{ secrets['TOKEN'] }}\"\n"
+	writeFixtureFile(t, workspace, workflowPath, source)
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !slices.Equal(plans[0].RequiredSecrets, []string{"TOKEN"}) || !plans[0].HasCapability("secrets") {
+		t.Fatalf("compiled secret boundary = %#v", plans)
+	}
+	var logs bytes.Buffer
+	redactor := &testRedactor{}
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, Secrets: testSecretResolver{"TOKEN": "secret-value"}, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if strings.Contains(logs.String(), "secret-value") || !strings.Contains(logs.String(), "secret=***") || !slices.Equal(redactor.values, []string{"secret-value"}) {
+		t.Fatalf("logs = %q, redactions = %#v", logs.String(), redactor.values)
 	}
 }
 

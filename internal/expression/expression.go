@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -142,6 +143,117 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 			return "", fmt.Errorf("expression in runner label resolved to %T, want a scalar", value)
 		}
 		remaining = remaining[end+len(close):]
+	}
+}
+
+// SecretReferences returns the statically named secrets referenced by a
+// template. Dynamic indexes fail closed because the runtime cannot determine
+// which values to resolve and register with the log redactor before execution.
+func SecretReferences(template string) ([]string, error) {
+	found := map[string]struct{}{}
+	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
+		var referenceErr error
+		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+			if !entering || referenceErr != nil {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, err := referencePath(node)
+			if !strings.EqualFold(root, "secrets") {
+				return
+			}
+			if err != nil {
+				referenceErr = fmt.Errorf("secret reference: %w", err)
+				return
+			}
+			if len(path) == 0 {
+				switch parent := parent.(type) {
+				case *actionlint.ObjectDerefNode:
+					if parent.Receiver == node {
+						return
+					}
+				case *actionlint.IndexAccessNode:
+					if parent.Operand == node {
+						return
+					}
+				}
+				referenceErr = fmt.Errorf("secret reference must name exactly one secret")
+				return
+			}
+			if len(path) != 1 {
+				referenceErr = fmt.Errorf("secret reference must name exactly one secret")
+				return
+			}
+			found[strings.ToUpper(path[0])] = struct{}{}
+		})
+		return referenceErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// ConditionUsesContext reports whether a condition references a named context.
+// Conditions may omit the normal ${{ ... }} delimiters.
+func ConditionUsesContext(source, contextName string) (bool, error) {
+	condition := strings.TrimSpace(source)
+	if condition == "" {
+		return false, nil
+	}
+	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
+		condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(condition + "}}"))
+	if parseErr != nil {
+		return false, fmt.Errorf("parse condition: %w", parseErr)
+	}
+	found := false
+	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
+		if !entering || found {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, _, _ := referencePath(node)
+		found = strings.EqualFold(root, contextName)
+	})
+	return found, nil
+}
+
+func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) error) error {
+	const open = "${{"
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			return nil
+		}
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		node, err := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(source[:consumed]))
+		if err != nil {
+			return fmt.Errorf("invalid expression: %w", err)
+		}
+		if err := visit(node); err != nil {
+			return err
+		}
+		remaining = source[consumed:]
 	}
 }
 
@@ -431,11 +543,11 @@ func referencePath(node actionlint.ExprNode) (string, []string, error) {
 		}
 		index, ok := node.Index.(*actionlint.StringNode)
 		if !ok {
-			return "", nil, fmt.Errorf("compile-time index must be a string literal")
+			return root, nil, fmt.Errorf("expression index must be a string literal")
 		}
 		return root, append(path, index.Value), nil
 	default:
-		return "", nil, fmt.Errorf("unsupported compile-time reference")
+		return "", nil, fmt.Errorf("unsupported expression reference")
 	}
 }
 
@@ -547,47 +659,55 @@ func Evaluate(template string, context Context) (string, error) {
 }
 
 func evaluateReference(reference string, context Context) (string, error) {
-	parts := strings.Split(reference, ".")
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(reference + "}}"))
+	if parseErr != nil {
+		return "", fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	root, path, err := referencePath(node)
+	if err != nil {
+		return "", err
+	}
 	switch {
-	case len(parts) >= 2 && parts[0] == "github":
-		value, ok := lookupRuntimeValue(context.GitHub, parts[1:])
+	case len(path) >= 1 && strings.EqualFold(root, "github"):
+		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(parts[1:], "."))
+			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 		}
 		return fmt.Sprint(value), nil
-	case len(parts) == 2 && parts[0] == "inputs":
-		return context.Inputs[parts[1]], nil
-	case len(parts) == 2 && parts[0] == "matrix":
-		value, ok := context.Matrix[parts[1]]
-		if !ok {
-			return "", fmt.Errorf("expression references unavailable matrix value %q", parts[1])
+	case len(path) == 1 && strings.EqualFold(root, "inputs"):
+		return findString(context.Inputs, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+		for name, value := range context.Matrix {
+			if strings.EqualFold(name, path[0]) {
+				return fmt.Sprint(value), nil
+			}
 		}
-		return fmt.Sprint(value), nil
-	case len(parts) == 2 && parts[0] == "secrets":
-		return findString(context.Secrets, parts[1]), nil
-	case len(parts) == 2 && parts[0] == "vars":
-		return findString(context.Vars, parts[1]), nil
-	case len(parts) == 2 && parts[0] == "env":
-		return findString(context.Env, parts[1]), nil
-	case len(parts) == 4 && parts[0] == "steps" && parts[2] == "outputs":
-		outputs, ok := findOutputs(context.Steps, parts[1])
+		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
+	case len(path) == 1 && strings.EqualFold(root, "secrets"):
+		return findString(context.Secrets, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "vars"):
+		return findString(context.Vars, path[0]), nil
+	case len(path) == 1 && strings.EqualFold(root, "env"):
+		return findString(context.Env, path[0]), nil
+	case len(path) == 3 && strings.EqualFold(root, "steps") && strings.EqualFold(path[1], "outputs"):
+		outputs, ok := findOutputs(context.Steps, path[0])
 		if !ok {
-			return "", fmt.Errorf("expression references unavailable step %q", parts[1])
+			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
-		return outputs[parts[3]], nil
-	case len(parts) == 4 && parts[0] == "needs" && parts[2] == "outputs":
-		outputs, ok := findOutputs(context.Needs, parts[1])
+		return findString(outputs, path[2]), nil
+	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
+		outputs, ok := findOutputs(context.Needs, path[0])
 		if !ok {
-			return "", fmt.Errorf("expression references unavailable need %q", parts[1])
+			return "", fmt.Errorf("expression references unavailable need %q", path[0])
 		}
-		return outputs[parts[3]], nil
-	case len(parts) == 3 && parts[0] == "needs" && parts[2] == "result":
+		return findString(outputs, path[2]), nil
+	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
 		for candidate, result := range context.NeedResults {
-			if strings.EqualFold(candidate, parts[1]) {
+			if strings.EqualFold(candidate, path[0]) {
 				return result, nil
 			}
 		}
-		return "", fmt.Errorf("expression references unavailable need %q", parts[1])
+		return "", fmt.Errorf("expression references unavailable need %q", path[0])
 	default:
 		return "", fmt.Errorf("unsupported expression %q", reference)
 	}

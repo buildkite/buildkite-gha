@@ -385,22 +385,24 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		if err != nil {
 			return result, err
 		}
-		shell, err := expression.Evaluate(step.Shell, eval)
-		if err != nil {
-			return result, err
-		}
+		shell := step.Shell
 		if shell == "" {
 			shell = job.DefaultShell
+		}
+		shell, err = expression.Evaluate(shell, eval)
+		if err != nil {
+			return result, err
 		}
 		if shell == "" {
 			shell = "bash"
 		}
-		workingDirectory, err := expression.Evaluate(step.WorkingDirectory, eval)
-		if err != nil {
-			return result, err
-		}
+		workingDirectory := step.WorkingDirectory
 		if workingDirectory == "" {
 			workingDirectory = job.DefaultWorkingDirectory
+		}
+		workingDirectory, err = expression.Evaluate(workingDirectory, eval)
+		if err != nil {
+			return result, err
 		}
 		dir, err := workspacePath(workspace, workingDirectory)
 		if err != nil {

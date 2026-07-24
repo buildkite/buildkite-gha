@@ -19,7 +19,8 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputExpression = regexp.MustCompile(`\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+var staticInputExpression = regexp.MustCompile(`(?i)\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}|inputs\.([A-Za-z_][A-Za-z0-9_-]*))\s*$`)
 var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
 
 type sourcedJob struct {
@@ -387,6 +388,7 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		return job
 	}
 	job.Name = replaceStaticInputs(job.Name, inputs)
+	job.If = replaceStaticInputCondition(job.If, inputs)
 	job.DefaultShell = replaceStaticInputs(job.DefaultShell, inputs)
 	job.DefaultWorkingDirectory = replaceStaticInputs(job.DefaultWorkingDirectory, inputs)
 	job.Env = replaceMapInputs(job.Env, inputs)
@@ -417,6 +419,7 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		step.Uses = replaceStaticInputs(step.Uses, inputs)
 		step.Shell = replaceStaticInputs(step.Shell, inputs)
 		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
+		step.If = replaceStaticInputCondition(step.If, inputs)
 		step.Env = replaceMapInputs(step.Env, inputs)
 		step.With = replaceMapInputs(step.With, inputs)
 	}
@@ -424,6 +427,11 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
+	if usesInputs, err := expression.ConditionUsesContext(job.If, "inputs"); err != nil {
+		return jobError(path, job, fmt.Sprintf("parse reusable-workflow job condition: %v", err))
+	} else if usesInputs {
+		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+	}
 	jobValues := []string{job.Name, job.DefaultShell, job.DefaultWorkingDirectory}
 	jobValues = append(jobValues, job.RunsOn...)
 	jobValues = appendMapValues(jobValues, job.Env)
@@ -461,7 +469,12 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		}
 	}
 	for _, step := range job.Steps {
-		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.If}
+		if usesInputs, err := expression.ConditionUsesContext(step.If, "inputs"); err != nil {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse reusable-workflow step condition: %v", err))
+		} else if usesInputs {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+		}
+		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {
@@ -587,6 +600,26 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 		out[name] = replaceStaticInputs(value, inputs)
 	}
 	return out
+}
+
+func replaceStaticInputCondition(value string, inputs map[string]any) string {
+	match := staticInputCondition.FindStringSubmatch(value)
+	if match == nil {
+		return value
+	}
+	inputName := match[1]
+	if inputName == "" {
+		inputName = match[2]
+	}
+	for name, input := range inputs {
+		if strings.EqualFold(name, inputName) {
+			if text, ok := input.(string); ok {
+				return "'" + strings.ReplaceAll(text, "'", "''") + "'"
+			}
+			return fmt.Sprint(input)
+		}
+	}
+	return value
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {
