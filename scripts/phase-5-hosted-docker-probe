@@ -15,8 +15,12 @@ work=''
 created=0
 cleanup_ran=0
 bind_supported=0
+probe_failed=0
 
-record() { printf 'PHASE5|%s|%s|%s\n' "$1" "$2" "$3"; }
+record() {
+  printf 'PHASE5|%s|%s|%s\n' "$1" "$2" "$3"
+  [[ "$2" != fail ]] || probe_failed=1
+}
 safe_detail() {
   local value="$1"
   [[ "$value" =~ ^[A-Za-z0-9._:/@+-]{1,128}$ ]] && printf '%s' "$value" || printf 'unsafe-detail-redacted'
@@ -92,7 +96,12 @@ COPY marker /phase5-marker
 HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1
 CMD ["httpd", "-f", "-p", "8080", "-h", "/"]
 EOF
-if timeout 120s docker build --label "${label_key}=${owner}" -t "$image" "$work" >/dev/null 2>&1; then created=1; record build pass marker-layer; else record build fail marker-layer; exit 1; fi
+if timeout 10s docker buildx version >/dev/null 2>&1; then
+  build=(docker buildx build --load)
+else
+  build=(docker build)
+fi
+if timeout 180s "${build[@]}" --label "${label_key}=${owner}" -t "$image" "$work" >/dev/null 2>&1; then created=1; record build pass loaded-marker-layer; else record build fail loaded-marker-layer; exit 1; fi
 if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" test -f /phase5-marker >/dev/null 2>&1; then record run pass marker-present; else record run fail marker-missing; fi
 
 mkdir "$work/mount"; printf x > "$work/mount/owned"; uid="$(id -u)"; gid="$(id -g)"
@@ -138,3 +147,4 @@ fi
 
 rm -rf -- "$work"
 work=''
+(( probe_failed == 0 ))
