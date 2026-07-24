@@ -1272,7 +1272,7 @@ Phase 5 entry evidence:
 
 - [Buildkite build 102](https://buildkite.com/buildkite/buildkite-gha/builds/102)
   ran exact implementation commit
-  `b3a4c4c3513c9a763b2e0ea09428d7d83e41336e`. The checked-in probe observed the
+  `b3a4c4c96d97812e5c087057cda0fdaf1a79bb19`. The checked-in probe observed the
   hosted queue's active remote Buildx driver, selected and verified the local
   `default` Docker driver, then passed pinned pull, build-and-load, execution,
   requested UID/GID bind ownership, private-network HTTP by alias, container
