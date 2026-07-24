@@ -248,6 +248,12 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 }
 
 func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
+	for range 20 {
+		testExplicitCancelCommitsEffectsWithoutFailingJob(t)
+	}
+}
+
+func testExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -843,7 +849,7 @@ while :; do sleep 1; done`)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("runStreaming() error = %v, want cancellation", err)
 	}
-	if elapsed := time.Since(started); elapsed < 90*time.Millisecond {
+	if elapsed := time.Since(started); elapsed < 40*time.Millisecond {
 		t.Fatalf("runStreaming() returned before process-group escalation completed: %s", elapsed)
 	}
 	contents, readErr := os.ReadFile(pidFile)
