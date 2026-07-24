@@ -33,7 +33,11 @@ func (contextActionSource) Fetch(ctx context.Context, _ source.Reference) (sourc
 func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
-	return source.Resolved{Reference: r, Commit: strings.Repeat("a", 40)}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
+	commit := strings.Repeat("a", 40)
+	if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
+		commit = strings.ToLower(r.Ref)
+	}
+	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
 }
 
 func writeAction(t *testing.T, root, name, body string) {
@@ -367,11 +371,10 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 
 func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.T) {
 	remote := t.TempDir()
-	writeAction(t, remote, filepath.Join("testdata", "actions", "docker"), "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, remote, "", "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
 	workflowPath := filepath.Join("..", "..", "testdata", "phase5", ".github", "workflows", "docker-action.yml")
 	templatePath := workflowPath + ".tmpl"
-	workflow := strings.ReplaceAll(string(readFile(t, templatePath)), "__PHASE5_COMMIT__", strings.Repeat("a", 40))
-	plans, err := CompilePlansWithOptions(workflowPath, []byte(workflow), pushEvent(t), "phase5-test", testDistributionDigest, Options{
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, templatePath), pushEvent(t), "phase5-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},

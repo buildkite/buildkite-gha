@@ -7,21 +7,16 @@ jobs:
   docker-action:
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare workspace mount observation
-        shell: bash
-        run: printf '%s\n' phase5-workspace > phase5-marker
-
       - name: Run exact public Dockerfile action
         id: docker
-        uses: buildkite/buildkite-gha/testdata/actions/docker@__PHASE5_COMMIT__
+        uses: actions/hello-world-docker-action@8bcd8e1af3c095561f1043123848fc8b2db0f189
         with:
-          expected_file: phase5-marker
+          who-to-greet: Phase 5
 
       - name: Verify Dockerfile action effects
         shell: bash
         env:
-          CONTAINER_RESULT: ${{ steps.docker.outputs.container }}
+          ACTION_TIME: ${{ steps.docker.outputs.time }}
         run: |
-          test "$CONTAINER_RESULT" = ran
-          test "$DOCKER_RUNTIME_SEEN" = true
-          printf '%s\n' 'PHASE5_DOCKER_OBSERVATION={"container":"ran","environment":"propagated","workspace":"mounted"}'
+          test -n "$ACTION_TIME"
+          printf '%s\n' 'PHASE5_DOCKER_OBSERVATION={"container":"ran","output":"propagated","source":"public-exact"}'

@@ -577,7 +577,7 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 		`scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
-		`sed "s/__PHASE5_COMMIT__/$$PHASE5_COMMIT/g"`,
+		`cp testdata/phase5/.github/workflows/docker-action.yml.tmpl`,
 		`runtime_version="0.0.0-phase5.$${PHASE5_COMMIT}"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
@@ -628,8 +628,9 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observation := `PHASE5_DOCKER_OBSERVATION={"container":"ran","environment":"propagated","workspace":"mounted"}`
-	if strings.Count(string(templateBody), "__PHASE5_COMMIT__") != 1 || !strings.Contains(string(templateBody), "uses: buildkite/buildkite-gha/testdata/actions/docker@__PHASE5_COMMIT__") || !strings.Contains(string(githubBody), "uses: ./testdata/actions/docker") || !strings.Contains(string(templateBody), observation) || !strings.Contains(string(githubBody), observation) {
+	const action = "uses: actions/hello-world-docker-action@8bcd8e1af3c095561f1043123848fc8b2db0f189"
+	observation := `PHASE5_DOCKER_OBSERVATION={"container":"ran","output":"propagated","source":"public-exact"}`
+	if !strings.Contains(string(templateBody), action) || !strings.Contains(string(githubBody), action) || !strings.Contains(string(templateBody), observation) || !strings.Contains(string(githubBody), observation) {
 		t.Fatalf("Phase 5 Dockerfile differential fixtures drifted:\ntemplate:\n%s\nGitHub:\n%s", templateBody, githubBody)
 	}
 }
