@@ -4,6 +4,8 @@ package runtime
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 )
 
 const (
@@ -55,11 +59,13 @@ type JavaScriptAction struct {
 
 // DockerAction is an already-resolved local Docker action.
 type DockerAction struct {
-	Name       string
-	Path       string
-	Dockerfile string
-	Workspace  string
-	Env        map[string]string
+	Name         string
+	Path         string
+	SourceRoot   string
+	SourceDigest string
+	Dockerfile   string
+	Workspace    string
+	Env          map[string]string
 }
 
 // Result contains file-command effects produced by an action or lifecycle.
@@ -88,33 +94,113 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 			return result, fmt.Errorf("discover Docker: %w", err)
 		}
 	}
-	dockerfile := action.Dockerfile
-	if dockerfile == "" {
-		dockerfile = "Dockerfile"
+	if action.Dockerfile != "" && action.Dockerfile != "Dockerfile" {
+		return result, fmt.Errorf("docker action requires fixed Dockerfile")
 	}
-	image := fmt.Sprintf("buildkite-gha-runtime-%d-%d", os.Getpid(), time.Now().UnixNano())
-	build := exec.CommandContext(ctx, docker, "build", "--quiet", "--tag", image, "--file", filepath.Join(action.Path, dockerfile), action.Path)
-	build.Env = processEnv(nil)
-	imageOutput, err := build.CombinedOutput()
-	if err != nil {
-		return result, fmt.Errorf("build Docker action %q: %w: %s", action.Name, err, strings.TrimSpace(string(imageOutput)))
+	sourceRoot := action.SourceRoot
+	if sourceRoot == "" {
+		sourceRoot = action.Path
 	}
-	defer func() {
-		remove := exec.Command(docker, "image", "rm", image)
-		remove.Env = processEnv(nil)
-		if output, removeErr := remove.CombinedOutput(); removeErr != nil {
-			err = errors.Join(err, fmt.Errorf("remove Docker action image: %w: %s", removeErr, strings.TrimSpace(string(output))))
+	expected := action.SourceDigest
+	if expected == "" {
+		expected, err = source.DigestTree(sourceRoot)
+		if err != nil {
+			return result, fmt.Errorf("digest Docker action source: %w", err)
 		}
+	}
+	stage, err := stageDockerSource(sourceRoot, action.Path, expected)
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = os.RemoveAll(stage.root) }()
+	dockerConfig, err := os.MkdirTemp("", "buildkite-gha-docker-config-")
+	if err != nil {
+		return result, fmt.Errorf("create private Docker configuration: %w", err)
+	}
+	if err := os.Chmod(dockerConfig, 0o700); err != nil {
+		_ = os.RemoveAll(dockerConfig)
+		return result, err
+	}
+	defer func() { _ = os.RemoveAll(dockerConfig) }()
+	dockerEnv := map[string]string{"DOCKER_CONFIG": dockerConfig}
+	driver, inspectErr := boundedDockerOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default", "--format", "{{.Driver}}")
+	if inspectErr != nil || driver != "docker\n" {
+		if inspectErr != nil {
+			return result, fmt.Errorf("inspect default Docker builder: %w", inspectErr)
+		}
+		return result, fmt.Errorf("default Docker builder has non-local driver %q", strings.TrimSpace(driver))
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return result, fmt.Errorf("create Docker invocation identity: %w", err)
+	}
+	id := hex.EncodeToString(nonce[:])
+	owner := "com.buildkite.gha.owner=" + id
+	image, container := "buildkite-gha-image-"+id, "buildkite-gha-container-"+id
+	built, ran := false, false
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
+		defer cancel()
+		var cleanupErr error
+		if ran {
+			out, queryErr := boundedDockerOutput(cleanupCtx, dockerEnv, docker, "ps", "--all", "--quiet", "--filter", "label="+owner, "--filter", "name=^/"+container+"$")
+			containerMayExist := strings.TrimSpace(out) != ""
+			if queryErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("query owned Docker container: %w", queryErr))
+				containerMayExist = true
+			}
+			if containerMayExist {
+				if _, e := boundedDockerOutput(cleanupCtx, dockerEnv, docker, "stop", "--time", "2", container); e != nil {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("stop owned Docker container: %w", e))
+				}
+				if _, e := boundedDockerOutput(cleanupCtx, dockerEnv, docker, "rm", "--force", container); e != nil {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove owned Docker container: %w", e))
+				}
+			}
+		}
+		if built {
+			out, queryErr := boundedDockerOutput(cleanupCtx, dockerEnv, docker, "image", "ls", "--all", "--quiet", "--filter", "label="+owner, image)
+			imageMayExist := strings.TrimSpace(out) != ""
+			if queryErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("query owned Docker image: %w", queryErr))
+				imageMayExist = true
+			}
+			if imageMayExist {
+				if _, e := boundedDockerOutput(cleanupCtx, dockerEnv, docker, "image", "rm", "--force", image); e != nil {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove owned Docker image: %w", e))
+				}
+			}
+		}
+		for _, query := range [][]string{{"ps", "--all", "--quiet", "--filter", "label=" + owner}, {"image", "ls", "--all", "--quiet", "--filter", "label=" + owner}} {
+			out, e := boundedDockerOutput(cleanupCtx, dockerEnv, docker, query...)
+			if e != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("verify owned Docker cleanup: %w", e))
+			} else if strings.TrimSpace(out) != "" {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("owned Docker resources remain after cleanup"))
+			}
+		}
+		err = errors.Join(err, cleanupErr)
 	}()
+	buildArgs := []string{"buildx", "build", "--builder", "default", "--load", "--tag", image, "--label", owner, "--file", filepath.Join(stage.action, "Dockerfile"), stage.action}
+	built = true // A failed build may still have created the tagged image.
+	if err := r.runStreaming(ctx, processor, "", dockerEnv, docker, buildArgs...); err != nil {
+		return result, fmt.Errorf("build Docker action %q: %w", action.Name, err)
+	}
 
 	files, err := newCommandFiles()
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = os.RemoveAll(files.dir) }()
-	args := []string{"run", "--rm", "--volume", files.dir + ":/github/file_commands"}
+	if err := validateDockerMountPath(files.dir); err != nil {
+		return result, err
+	}
+	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
 	if action.Workspace != "" {
-		args = append(args, "--volume", action.Workspace+":/github/workspace")
+		if err := validateDockerMountPath(action.Workspace); err != nil {
+			return result, err
+		}
+		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace")
 	}
 	for _, name := range sortedKeys(action.Env) {
 		args = append(args, "--env", name+"="+action.Env[name])
@@ -130,13 +216,122 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
 		image,
 	)
-	if err := r.runStreaming(ctx, processor, "", nil, docker, args...); err != nil {
+	ran = true
+	if err := r.runStreaming(ctx, processor, "", dockerEnv, docker, args...); err != nil {
 		return result, fmt.Errorf("run Docker action %q: %w", action.Name, err)
 	}
 	if _, err := files.apply(&result, nil); err != nil {
 		return result, fmt.Errorf("process Docker action %q file commands: %w", action.Name, err)
 	}
 	return result, nil
+}
+
+type stagedDockerSource struct{ root, action string }
+
+func stageDockerSource(sourceRoot, actionPath, expected string) (stagedDockerSource, error) {
+	before, err := source.DigestTree(sourceRoot)
+	if err != nil || before != expected {
+		return stagedDockerSource{}, fmt.Errorf("docker action source digest mismatch before staging")
+	}
+	rel, err := filepath.Rel(sourceRoot, actionPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return stagedDockerSource{}, fmt.Errorf("docker action path escapes verified source")
+	}
+	root, err := os.MkdirTemp("", "buildkite-gha-docker-source-")
+	if err != nil {
+		return stagedDockerSource{}, err
+	}
+	fail := func(e error) (stagedDockerSource, error) { _ = os.RemoveAll(root); return stagedDockerSource{}, e }
+	err = filepath.WalkDir(sourceRoot, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		r, _ := filepath.Rel(sourceRoot, p)
+		if r == ".git" {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		to := filepath.Join(root, r)
+		if d.IsDir() {
+			return os.MkdirAll(to, 0o755)
+		}
+		info, e := os.Lstat(p)
+		if e != nil {
+			return e
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("docker action source contains symlink or special file")
+		}
+		data, e := os.ReadFile(p)
+		if e != nil {
+			return e
+		}
+		mode := os.FileMode(0o644)
+		if info.Mode().Perm()&0o111 != 0 {
+			mode = 0o755
+		}
+		return os.WriteFile(to, data, mode)
+	})
+	if err != nil {
+		return fail(fmt.Errorf("stage Docker action source: %w", err))
+	}
+	stagedDigest, e := source.DigestTree(root)
+	if e != nil || stagedDigest != expected {
+		return fail(fmt.Errorf("staged Docker action digest mismatch"))
+	}
+	after, e := source.DigestTree(sourceRoot)
+	if e != nil || after != expected {
+		return fail(fmt.Errorf("docker action source mutated during staging"))
+	}
+	return stagedDockerSource{root: root, action: filepath.Join(root, rel)}, nil
+}
+
+func validateDockerMountPath(path string) error {
+	if path == "" || !filepath.IsAbs(path) || strings.ContainsAny(path, ",\"'\n\r\x00") {
+		return fmt.Errorf("path cannot be represented by Docker mount grammar")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("docker mount path must be an existing directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("docker mount path must be an existing directory")
+	}
+	return nil
+}
+
+func boundedDockerOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, docker, args...)
+	cmd.Env = processEnv(env)
+	var output strings.Builder
+	w := &limitedWriter{writer: &output, remaining: 4096}
+	cmd.Stdout, cmd.Stderr = w, io.Discard
+	err := cmd.Run()
+	if w.exceeded {
+		return output.String(), fmt.Errorf("docker output exceeds limit")
+	}
+	return output.String(), err
+}
+
+type limitedWriter struct {
+	writer    io.Writer
+	remaining int
+	exceeded  bool
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if len(p) > w.remaining {
+		w.exceeded = true
+		if w.remaining > 0 {
+			_, _ = w.writer.Write(p[:w.remaining])
+			w.remaining = 0
+		}
+		return len(p), nil
+	}
+	w.remaining -= len(p)
+	return w.writer.Write(p)
 }
 
 func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {

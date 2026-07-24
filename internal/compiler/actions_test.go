@@ -45,6 +45,11 @@ func writeAction(t *testing.T, root, name, body string) {
 	if err := os.WriteFile(filepath.Join(d, "action.yml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(body, "using: docker") {
+		if err := os.WriteFile(filepath.Join(d, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, entry := range []string{"index.js"} {
 		if strings.Contains(body, entry) {
 			if err := os.WriteFile(filepath.Join(d, entry), []byte("// fixture\n"), 0o644); err != nil {

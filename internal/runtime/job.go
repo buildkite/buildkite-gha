@@ -786,7 +786,14 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
+		sourceRoot, sourceDigest := action.Path, ""
+		if action.SourceRoot != "" {
+			sourceRoot = action.SourceRoot
+		}
+		if actionLock != nil {
+			sourceDigest = actionLock.SourceDigest
+		}
+		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)

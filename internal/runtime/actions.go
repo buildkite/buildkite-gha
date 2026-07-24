@@ -103,17 +103,32 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	if err := VerifyWorkflow(r.job, r.workspace); err != nil {
 		return metadata.Metadata{}, fmt.Errorf("workspace action workflow verification failed: %w", err)
 	}
-	m, err := metadata.Load(r.workspace, lock.Path)
+	resolved, err := metadata.Load(r.workspace, lock.Path)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("load workspace action: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("resolve workspace action before metadata load: %w", err)
 	}
-	digest, err := source.DigestTree(m.Path)
+	digest, err := source.DigestTree(resolved.Path)
 	if err != nil {
-		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree: %w", err)
+		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree before metadata load: %w", err)
 	}
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("workspace action digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
+	m, err := metadata.Load(r.workspace, lock.Path)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("load workspace action: %w", err)
+	}
+	if m.Path != resolved.Path {
+		return metadata.Metadata{}, fmt.Errorf("workspace action path mutated during metadata load")
+	}
+	digest, err = source.DigestTree(m.Path)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("digest workspace action tree after metadata load: %w", err)
+	}
+	if digest != lock.SourceDigest {
+		return metadata.Metadata{}, fmt.Errorf("workspace action mutated during metadata load: lock binds %s, tree has %s", lock.SourceDigest, digest)
+	}
+	m.SourceRoot = m.Path
 	return m, nil
 }
 
@@ -158,6 +173,14 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("load materialized action: %w", err)
 	}
+	digest, err = source.DigestTree(materialized.RepositoryRoot)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("digest materialized repository tree after metadata load: %w", err)
+	}
+	if digest != lock.SourceDigest {
+		return metadata.Metadata{}, fmt.Errorf("materialized repository tree mutated during metadata load: lock binds %s, tree has %s", lock.SourceDigest, digest)
+	}
+	m.SourceRoot = materialized.RepositoryRoot
 	return m, nil
 }
 

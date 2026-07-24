@@ -19,7 +19,7 @@ func TestLoadAndClassify(t *testing.T) {
 		{name: "Node 20", using: "node20", wantRuntime: RuntimeNode20},
 		{name: "Node 24", using: "node24", wantRuntime: RuntimeNode24},
 		{name: "composite", using: "composite", wantRuntime: RuntimeComposite},
-		{name: "Docker", using: "docker", wantRuntime: RuntimeDocker, wantCapacity: "docker"},
+		{name: "Docker", using: "docker", wantRuntime: RuntimeDocker, wantCapacity: "docker,network"},
 		{name: "unknown", using: "future", wantError: `unsupported runtime "future"`},
 	}
 	for _, test := range tests {
@@ -44,8 +44,65 @@ func TestLoadAndClassify(t *testing.T) {
 			if test.wantCapacity == "" && len(capabilities) != 0 {
 				t.Fatalf("RequiredCapabilities() = %#v, want none", capabilities)
 			}
-			if test.wantCapacity != "" && (len(capabilities) != 1 || capabilities[0] != test.wantCapacity) {
-				t.Fatalf("RequiredCapabilities() = %#v, want [%s]", capabilities, test.wantCapacity)
+			if test.wantCapacity != "" && strings.Join(capabilities, ",") != test.wantCapacity {
+				t.Fatalf("RequiredCapabilities() = %#v, want %s", capabilities, test.wantCapacity)
+			}
+		})
+	}
+}
+
+func TestValidateDockerEntrypoints(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Metadata)
+		setup  func(string)
+		ok     bool
+	}{
+		{name: "exact Dockerfile", ok: true},
+		{name: "non Dockerfile image", mutate: func(m *Metadata) { m.Runs.Image = "docker://alpine" }},
+		{name: "entrypoint", mutate: func(m *Metadata) { m.Runs.Entrypoint = "main.sh" }},
+		{name: "args", mutate: func(m *Metadata) { m.Runs.Args = []string{"x"} }},
+		{name: "main", mutate: func(m *Metadata) { m.Runs.Main = "main.sh" }},
+		{name: "pre", mutate: func(m *Metadata) { m.Runs.Pre = "pre.sh" }},
+		{name: "pre condition", mutate: func(m *Metadata) { m.Runs.PreIf = "always()" }},
+		{name: "pre entrypoint", mutate: func(m *Metadata) { m.Runs.PreEntrypoint = "pre.sh" }},
+		{name: "post", mutate: func(m *Metadata) { m.Runs.Post = "post.sh" }},
+		{name: "post condition", mutate: func(m *Metadata) { m.Runs.PostIf = "always()" }},
+		{name: "post entrypoint", mutate: func(m *Metadata) { m.Runs.PostEntrypoint = "post.sh" }},
+		{name: "missing Dockerfile", setup: func(dir string) { _ = os.Remove(filepath.Join(dir, "Dockerfile")) }},
+		{name: "directory Dockerfile", setup: func(dir string) {
+			_ = os.Remove(filepath.Join(dir, "Dockerfile"))
+			_ = os.Mkdir(filepath.Join(dir, "Dockerfile"), 0o700)
+		}},
+		{name: "symlink Dockerfile", setup: func(dir string) {
+			_ = os.Remove(filepath.Join(dir, "Dockerfile"))
+			_ = os.Symlink("target", filepath.Join(dir, "Dockerfile"))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			data, _ := os.ReadFile(filepath.Join(base, "Dockerfile"))
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			m := Metadata{Path: dir, Runs: Runs{Using: "docker", Image: "Dockerfile"}}
+			if test.mutate != nil {
+				test.mutate(&m)
+			}
+			if test.setup != nil {
+				test.setup(dir)
+			}
+			runtime, err := m.Runtime()
+			if err == nil {
+				err = m.ValidateEntrypoints(runtime)
+			}
+			if (err == nil) != test.ok {
+				t.Fatalf("validation error = %v, want success %v", err, test.ok)
 			}
 		})
 	}

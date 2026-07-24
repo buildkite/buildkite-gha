@@ -46,6 +46,506 @@ func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
 	return nil
 }
 
+func TestValidateDockerMountPath(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, path string
+		ok         bool
+	}{
+		{"directory", dir, true}, {"empty", "", false}, {"relative", ".", false},
+		{"missing", filepath.Join(t.TempDir(), "missing"), false}, {"file", file, false},
+		{"comma", dir + ",x", false}, {"double quote", dir + `"x`, false},
+		{"single quote", dir + "'x", false}, {"newline", dir + "\nx", false},
+		{"carriage return", dir + "\rx", false}, {"nul", dir + "\x00x", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateDockerMountPath(test.path)
+			if (err == nil) != test.ok {
+				t.Fatalf("validateDockerMountPath(%q) = %v, want success %v", test.path, err, test.ok)
+			}
+		})
+	}
+}
+
+func TestBoundedDockerOutputRejectsOversizedOutput(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ni=0; while [ $i -lt 5000 ]; do printf x; i=$((i+1)); done\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out, err := boundedDockerOutput(context.Background(), nil, script, "buildx", "inspect")
+	if err == nil || !strings.Contains(err.Error(), "exceeds limit") || len(out) != 4096 {
+		t.Fatalf("boundedDockerOutput() = %d bytes, %v", len(out), err)
+	}
+}
+
+func TestStageDockerSource(t *testing.T) {
+	root := t.TempDir()
+	action := filepath.Join(root, "action")
+	if err := os.Mkdir(action, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(action, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(action, "entrypoint.sh"), []byte("#!/bin/sh\n"), 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("unbound git metadata\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := source.DigestTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageDockerSource(root, action, "wrong"); err == nil {
+		t.Fatal("digest mismatch succeeded")
+	}
+	stage, err := stageDockerSource(root, action, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(stage.root) }()
+	if err := os.WriteFile(filepath.Join(action, "Dockerfile"), []byte("MUTATED\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(stage.action, "Dockerfile"))
+	if err != nil || string(got) != "FROM scratch\n" {
+		t.Fatalf("staged bytes = %q, %v", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(stage.action, "entrypoint.sh")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("staged executable mode = %v, %v, want 0755", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(stage.root, ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged source contains excluded .git metadata: %v", err)
+	}
+
+	symlinkRoot := t.TempDir()
+	if err := os.Symlink("missing", filepath.Join(symlinkRoot, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.DigestTree(symlinkRoot); err == nil {
+		t.Fatal("DigestTree unexpectedly accepted symlink")
+	}
+}
+
+type fakeDocker struct {
+	path       string
+	root       string
+	transcript string
+	ready      string
+}
+
+type fakeDockerCall struct {
+	config, metadata string
+	args             []string
+}
+
+func newFakeDocker(t *testing.T, scenario string) fakeDocker {
+	t.Helper()
+	root := t.TempDir()
+	script := strings.NewReplacer(
+		"__ROOT__", strconv.Quote(root),
+		"__SCENARIO__", strconv.Quote(scenario),
+	).Replace(`#!/usr/bin/env bash
+set -euo pipefail
+state=__ROOT__
+scenario=__SCENARIO__
+transcript="$state/transcript"
+record() {
+  local mode entries
+  mode="$(stat -c %a "$DOCKER_CONFIG")"
+  entries="$(find "$DOCKER_CONFIG" -mindepth 1 -maxdepth 1 -print -quit | wc -l)"
+  printf 'config=%s;mode=%s;entries=%s;host=%s;context=%s;builder=%s;buildkit=%s' \
+    "$DOCKER_CONFIG" "$mode" "$entries" "${DOCKER_HOST-unset}" "${DOCKER_CONTEXT-unset}" \
+    "${BUILDX_BUILDER-unset}" "${BUILDKIT_HOST-unset}" >> "$transcript"
+  printf '|%s' "$@" >> "$transcript"
+  printf '\n' >> "$transcript"
+}
+record "$@"
+
+if [[ "$1" == buildx && "$2" == inspect ]]; then
+  case "$scenario" in
+    inspect-fail) exit 31 ;;
+    remote) printf 'remote\n'; exit 0 ;;
+    multiline) printf 'docker\nremote\n'; exit 0 ;;
+    oversized) i=0; while (( i < 5000 )); do printf x; (( i += 1 )); done; exit 0 ;;
+    *) printf 'docker\n'; exit 0 ;;
+  esac
+fi
+
+if [[ "$1" == buildx && "$2" == build ]]; then
+  args=("$@")
+  dockerfile=''
+  image=''
+  owner=''
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      --file) dockerfile="${args[$((i + 1))]}" ;;
+      --tag) image="${args[$((i + 1))]}" ;;
+      --label) owner="${args[$((i + 1))]}" ;;
+    esac
+  done
+  [[ -n "$dockerfile" && -n "$image" && -n "$owner" ]] || exit 38
+  context="${args[$((${#args[@]} - 1))]}"
+  printf '%s' "$dockerfile" > "$state/dockerfile-path"
+  printf '%s' "$context" > "$state/context-path"
+  printf '%s' "$image" > "$state/image-name"
+  printf '%s' "$image" | sed 's/-image-/-container-/' > "$state/container-name"
+  printf '%s' "$owner" > "$state/owner"
+  cp "$dockerfile" "$state/staged-Dockerfile"
+  touch "$state/image"
+  [[ "$scenario" != build-fail ]] || exit 32
+  exit 0
+fi
+
+if [[ "$1" == run ]]; then
+  files=''
+  args=("$@")
+  name=''
+  owner=''
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    arg="${args[$i]}"
+    case "$arg" in
+      --name) name="${args[$((i + 1))]}" ;;
+      --label) owner="${args[$((i + 1))]}" ;;
+      type=bind,source=*,target=/github/file_commands)
+        files="${arg#type=bind,source=}"
+        files="${files%,target=/github/file_commands}"
+        ;;
+    esac
+  done
+  [[ -n "$files" && "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
+  [[ "$owner" == "$(cat "$state/owner")" && "${args[$((${#args[@]} - 1))]}" == "$(cat "$state/image-name")" ]] || exit 39
+  printf '%s' "$files" > "$state/command-files-path"
+  touch "$state/container"
+  printf 'container=ran\n' > "$files/output"
+  printf 'DOCKER_RUNTIME_SEEN=true\n' > "$files/env"
+  printf '/fake/action/bin\n' > "$files/path"
+  printf 'docker_state=seen\n' > "$files/state"
+  printf 'docker action summary\n' > "$files/summary"
+  printf '::add-mask::fake-docker-secret\n'
+  printf 'masked fake probe: fake-docker-secret\n'
+  if [[ "$scenario" == cancel ]]; then
+    touch "$state/ready"
+    trap 'exit 130' INT TERM
+    while :; do sleep 0.1; done
+  fi
+  [[ "$scenario" != run-fail ]] || exit 34
+  exit 0
+fi
+
+if [[ "$1" == ps ]]; then
+  [[ "$scenario" != query-fail ]] || exit 35
+  owner="$(cat "$state/owner")"
+  container="$(cat "$state/container-name")"
+  if (( $# == 7 )); then
+    [[ "$2" == --all && "$3" == --quiet && "$4" == --filter && "$5" == "label=$owner" && "$6" == --filter && "$7" == "name=^/$container$" ]] || exit 40
+  elif (( $# == 5 )); then
+    [[ "$2" == --all && "$3" == --quiet && "$4" == --filter && "$5" == "label=$owner" ]] || exit 41
+  else
+    exit 42
+  fi
+  [[ ! -e "$state/container" ]] || printf 'fake-container\n'
+  exit 0
+fi
+
+if [[ "$1" == stop ]]; then
+  [[ $# == 4 && "$2" == --time && "$3" == 2 && "$4" == "$(cat "$state/container-name")" ]] || exit 43
+  exit 0
+fi
+
+if [[ "$1" == rm ]]; then
+  [[ $# == 3 && "$2" == --force && "$3" == "$(cat "$state/container-name")" ]] || exit 44
+  rm -f "$state/container"
+  exit 0
+fi
+
+if [[ "$1" == image && "$2" == ls ]]; then
+  [[ "$scenario" != query-fail ]] || exit 36
+  owner="$(cat "$state/owner")"
+  image="$(cat "$state/image-name")"
+  if (( $# == 7 )); then
+    [[ "$3" == --all && "$4" == --quiet && "$5" == --filter && "$6" == "label=$owner" && "$7" == "$image" ]] || exit 45
+  elif (( $# == 6 )); then
+    [[ "$3" == --all && "$4" == --quiet && "$5" == --filter && "$6" == "label=$owner" ]] || exit 46
+  else
+    exit 47
+  fi
+  [[ ! -e "$state/image" ]] || printf 'fake-image\n'
+  exit 0
+fi
+
+if [[ "$1" == image && "$2" == rm ]]; then
+  [[ $# == 4 && "$3" == --force && "$4" == "$(cat "$state/image-name")" ]] || exit 48
+  [[ "$scenario" == leftover ]] || rm -f "$state/image"
+  exit 0
+fi
+
+exit 97
+`)
+	path := filepath.Join(root, "docker")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return fakeDocker{path: path, root: root, transcript: filepath.Join(root, "transcript"), ready: filepath.Join(root, "ready")}
+}
+
+func (fake fakeDocker) calls(t *testing.T) []fakeDockerCall {
+	t.Helper()
+	data, err := os.ReadFile(fake.transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls []fakeDockerCall
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Split(line, "|")
+		metadata := fields[0]
+		config, ok := strings.CutPrefix(strings.SplitN(metadata, ";", 2)[0], "config=")
+		if !ok {
+			t.Fatalf("malformed fake Docker transcript line %q", line)
+		}
+		calls = append(calls, fakeDockerCall{config: config, metadata: metadata, args: fields[1:]})
+	}
+	return calls
+}
+
+func fakeDockerAction(t *testing.T) DockerAction {
+	t.Helper()
+	path := fixturePath(t, "actions", "docker")
+	digest, err := source.DigestTree(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return DockerAction{
+		Name: "fake Docker", Path: path, SourceRoot: path, SourceDigest: digest,
+		Workspace: t.TempDir(), Env: map[string]string{"Z_LAST": "z", "A_FIRST": "a"},
+	}
+}
+
+func callIndex(calls []fakeDockerCall, command ...string) int {
+	for i, call := range calls {
+		if len(call.args) < len(command) {
+			continue
+		}
+		if slices.Equal(call.args[:len(command)], command) {
+			return i
+		}
+	}
+	return -1
+}
+
+func argumentAfter(t *testing.T, args []string, name string) string {
+	t.Helper()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("argument %q absent from %#v", name, args)
+	return ""
+}
+
+func TestRunDockerFakeLifecycle(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	action := fakeDockerAction(t)
+	t.Setenv("DOCKER_CONFIG", filepath.Join(t.TempDir(), "ambient-config"))
+	t.Setenv("DOCKER_HOST", "tcp://ambient.invalid:2375")
+	t.Setenv("DOCKER_CONTEXT", "ambient-context")
+	t.Setenv("BUILDX_BUILDER", "ambient-builder")
+	t.Setenv("BUILDKIT_HOST", "tcp://ambient.invalid:1234")
+	var logs bytes.Buffer
+	result, err := (Runner{Docker: fake.path, Stdout: &logs, Stderr: &logs}).RunDocker(context.Background(), action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.Summary != "docker action summary\n" {
+		t.Fatalf("Docker result = %#v", result)
+	}
+	if strings.Contains(logs.String(), "fake-docker-secret") || !strings.Contains(logs.String(), "masked fake probe: ***") {
+		t.Fatalf("Docker logs were not masked: %q", logs.String())
+	}
+
+	calls := fake.calls(t)
+	wantCommands := [][]string{
+		{"buildx", "inspect", "default", "--format", "{{.Driver}}"},
+		{"buildx", "build"},
+		{"run"},
+		{"ps", "--all", "--quiet"},
+		{"stop", "--time", "2"},
+		{"rm", "--force"},
+		{"image", "ls", "--all", "--quiet"},
+		{"image", "rm", "--force"},
+		{"ps", "--all", "--quiet"},
+		{"image", "ls", "--all", "--quiet"},
+	}
+	if len(calls) != len(wantCommands) {
+		t.Fatalf("Docker calls = %#v, want %d", calls, len(wantCommands))
+	}
+	for i, want := range wantCommands {
+		if !slices.Equal(calls[i].args[:len(want)], want) {
+			t.Fatalf("Docker call %d = %#v, want prefix %#v", i, calls[i].args, want)
+		}
+		if calls[i].config != calls[0].config || !strings.Contains(calls[i].metadata, ";mode=700;entries=0;host=unset;context=unset;builder=unset;buildkit=unset") {
+			t.Fatalf("Docker call %d did not use one empty private config: %q", i, calls[i].metadata)
+		}
+	}
+	if _, statErr := os.Stat(calls[0].config); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains: %v", statErr)
+	}
+
+	build := calls[1].args
+	if !slices.Equal(build[:6], []string{"buildx", "build", "--builder", "default", "--load", "--tag"}) {
+		t.Fatalf("build arguments = %#v", build)
+	}
+	dockerfile := argumentAfter(t, build, "--file")
+	contextPath := build[len(build)-1]
+	originalAction := fixturePath(t, "actions", "docker")
+	if strings.HasPrefix(dockerfile, originalAction) || filepath.Dir(dockerfile) != contextPath {
+		t.Fatalf("build did not use its private staged action: file %q, context %q", dockerfile, contextPath)
+	}
+	if _, statErr := os.Stat(contextPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("staged context remains: %v", statErr)
+	}
+	staged, err := os.ReadFile(filepath.Join(fake.root, "staged-Dockerfile"))
+	wantDockerfile, wantErr := os.ReadFile(filepath.Join(originalAction, "Dockerfile"))
+	if err != nil || wantErr != nil || !bytes.Equal(staged, wantDockerfile) {
+		t.Fatalf("staged Dockerfile = %q, %v", staged, err)
+	}
+
+	run := calls[2].args
+	var mounts []string
+	for i, arg := range run {
+		if arg == "--mount" && i+1 < len(run) {
+			mounts = append(mounts, run[i+1])
+		}
+	}
+	if len(mounts) != 2 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" {
+		t.Fatalf("fixed Docker mounts = %#v", mounts)
+	}
+	commandFiles := strings.TrimSuffix(strings.TrimPrefix(mounts[0], "type=bind,source="), ",target=/github/file_commands")
+	if _, statErr := os.Stat(commandFiles); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("command-file directory remains: %v", statErr)
+	}
+	runText := strings.Join(run, "\x00")
+	first, last := strings.Index(runText, "A_FIRST=a"), strings.Index(runText, "Z_LAST=z")
+	if first < 0 || last < 0 || first > last {
+		t.Fatalf("Docker environment is not sorted: %#v", run)
+	}
+	for _, value := range []string{"GITHUB_ENV=/github/file_commands/env", "GITHUB_OUTPUT=/github/file_commands/output", "GITHUB_PATH=/github/file_commands/path", "GITHUB_STATE=/github/file_commands/state", "GITHUB_STEP_SUMMARY=/github/file_commands/summary"} {
+		if !slices.Contains(run, value) {
+			t.Fatalf("Docker environment omits %q: %#v", value, run)
+		}
+	}
+	owner := argumentAfter(t, build, "--label")
+	if argumentAfter(t, run, "--label") != owner || !strings.Contains(strings.Join(calls[3].args, "\x00"), "label="+owner) || !strings.Contains(strings.Join(calls[8].args, "\x00"), "label="+owner) {
+		t.Fatalf("Docker ownership label is not stable across lifecycle")
+	}
+	for _, call := range calls {
+		text := strings.Join(call.args, " ")
+		for _, forbidden := range []string{"--privileged", "--network", "--device", "/var/run/docker.sock", " prune"} {
+			if strings.Contains(text, forbidden) {
+				t.Fatalf("Docker call contains forbidden option %q: %s", forbidden, text)
+			}
+		}
+	}
+}
+
+func TestRunDockerRejectsUntrustedBuilderBeforeExecution(t *testing.T) {
+	for _, scenario := range []string{"remote", "multiline", "oversized", "inspect-fail"} {
+		t.Run(scenario, func(t *testing.T) {
+			fake := newFakeDocker(t, scenario)
+			if _, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t)); err == nil {
+				t.Fatal("untrusted builder was accepted")
+			}
+			calls := fake.calls(t)
+			if len(calls) != 1 || !slices.Equal(calls[0].args, []string{"buildx", "inspect", "default", "--format", "{{.Driver}}"}) {
+				t.Fatalf("Docker calls after rejected driver = %#v", calls)
+			}
+		})
+	}
+}
+
+func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
+	for _, scenario := range []string{"build-fail", "run-fail", "leftover", "query-fail"} {
+		t.Run(scenario, func(t *testing.T) {
+			fake := newFakeDocker(t, scenario)
+			if _, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second}).RunDocker(context.Background(), fakeDockerAction(t)); err == nil {
+				t.Fatal("Docker failure returned success")
+			}
+			calls := fake.calls(t)
+			if callIndex(calls, "image", "ls") < 0 || callIndex(calls, "image", "rm", "--force") < 0 {
+				t.Fatalf("image cleanup was skipped: %#v", calls)
+			}
+			if scenario != "build-fail" && (callIndex(calls, "ps", "--all") < 0 || callIndex(calls, "rm", "--force") < 0) {
+				t.Fatalf("container cleanup was skipped: %#v", calls)
+			}
+			if scenario != "leftover" {
+				for _, resource := range []string{"image", "container"} {
+					if _, err := os.Stat(filepath.Join(fake.root, resource)); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("%s remains after %s cleanup: %v", resource, scenario, err)
+					}
+				}
+			}
+			if _, err := os.Stat(calls[0].config); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("private Docker config remains after %s: %v", scenario, err)
+			}
+		})
+	}
+}
+
+func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
+	fake := newFakeDocker(t, "cancel")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second, InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunDocker(ctx, fakeDockerAction(t))
+		done <- err
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(fake.ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fake Docker run did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunDocker() error = %v, want context cancellation", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("RunDocker cancellation exceeded bound")
+	}
+	calls := fake.calls(t)
+	for _, command := range [][]string{{"stop"}, {"rm", "--force"}, {"image", "rm", "--force"}, {"ps", "--all"}, {"image", "ls"}} {
+		if callIndex(calls, command...) < 0 {
+			t.Fatalf("cancellation omitted Docker command %#v: %#v", command, calls)
+		}
+	}
+}
+
+func TestRunJobLegacyDockerPlanUsesFakeBackend(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	workspace := fixturePath(t)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestSequentialRunControlsAndEnvironment(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2390,7 +2890,7 @@ func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	docker := requireDocker(t)
 	workspace := fixturePath(t)
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
-	job.RequiredCapabilities = []string{"docker"}
+	job.RequiredCapabilities = []string{"docker", "network"}
 	var logs bytes.Buffer
 	result, err := (Runner{Stdout: &logs, Stderr: &logs, Docker: docker}).RunJob(context.Background(), job, workspace)
 	if err != nil {
@@ -2519,6 +3019,9 @@ func requireDocker(t *testing.T) string {
 	defer cancel()
 	if output, err := exec.CommandContext(ctx, docker, "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
 		t.Skipf("Docker unavailable: daemon probe failed: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	if output, err := exec.CommandContext(ctx, docker, "buildx", "inspect", "default", "--format", "{{.Driver}}").CombinedOutput(); err != nil || string(output) != "docker\n" {
+		t.Skipf("Docker unavailable: default Buildx builder is not the local docker driver: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return docker
 }

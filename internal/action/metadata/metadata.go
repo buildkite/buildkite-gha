@@ -17,7 +17,11 @@ import (
 
 // Metadata is the supported subset of a local action.yml or action.yaml file.
 type Metadata struct {
-	Path        string            `yaml:"-"`
+	Path string `yaml:"-"`
+	// SourceRoot is the verified tree whose digest binds this action. For a
+	// workspace action it is Path; for a materialized GitHub action it is the
+	// repository root.
+	SourceRoot  string            `yaml:"-"`
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description"`
 	Author      string            `yaml:"author"`
@@ -283,6 +287,25 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 // action source tree and requires each declared entry point to be a regular
 // file. Callers should invoke this after Runtime.
 func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
+	if runtime == RuntimeDocker {
+		if metadata.Runs.Image != "Dockerfile" {
+			return fmt.Errorf("docker action requires exact runs.image %q", "Dockerfile")
+		}
+		if metadata.Runs.Main != "" || metadata.Runs.Entrypoint != "" || len(metadata.Runs.Args) != 0 ||
+			metadata.Runs.Pre != "" || metadata.Runs.PreIf != "" || metadata.Runs.PreEntrypoint != "" ||
+			metadata.Runs.Post != "" || metadata.Runs.PostIf != "" || metadata.Runs.PostEntrypoint != "" {
+			return fmt.Errorf("docker action may not declare entrypoint, arguments, or pre/post lifecycle")
+		}
+		dockerfile := filepath.Join(metadata.Path, "Dockerfile")
+		info, err := os.Lstat(dockerfile)
+		if err != nil {
+			return fmt.Errorf("docker action Dockerfile: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("docker action Dockerfile is not a regular non-symlink file")
+		}
+		return nil
+	}
 	if runtime != RuntimeNode20 && runtime != RuntimeNode24 {
 		return nil
 	}
@@ -321,7 +344,7 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 // RequiredCapabilities returns the plan capabilities needed by the runtime.
 func (runtime Runtime) RequiredCapabilities() []string {
 	if runtime == RuntimeDocker {
-		return []string{"docker"}
+		return []string{"docker", "network"}
 	}
 	return nil
 }
