@@ -432,14 +432,19 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		`version: "2026.5.12"`,
 		`runtime_version="0.0.0-phase4.$${PHASE4_COMMIT}"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
-		`mise exec -- go run ./internal/harness/cmd/phase4-upload`,
-		`--event-path testdata/phase4/events/public-checkout.json`, `--runtime "$$distribution_root/buildkite-gha"`,
-		`--runtime-version "$$runtime_version"`, `--runtime-queue hosted`,
-		`--node24 "$$(mise where node@24)/bin/node"`, `--commit ` + publicEvent.SHA,
+		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
+		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
+		`"$$distribution_root/buildkite-gha" upload`,
+		`--event-path testdata/phase4/events/public-checkout.json`, `--runtime-queue hosted`,
 		`testdata/phase4/.github/workflows/public-actions.yml`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 4 upload proof lacks %q:\n%s", required, source)
+		}
+	}
+	for _, forbidden := range []string{"go run", "--runtime ", "--runtime-version", "--node24", "--commit"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Phase 4 upload proof retains harness-only argument %q:\n%s", forbidden, source)
 		}
 	}
 	var upload struct {
