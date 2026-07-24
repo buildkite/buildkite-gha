@@ -1,6 +1,7 @@
 package expression
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,53 @@ func TestEvaluateIsSinglePass(t *testing.T) {
 	got, err := Evaluate("${{ inputs.value }}:${{ matrix.secret }}", context)
 	if err != nil || got != literal+":reevaluated" {
 		t.Fatalf("Evaluate() = %q, %v, want both original expressions evaluated once", got, err)
+	}
+}
+
+func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
+	context := Context{
+		Matrix:  map[string]any{"shell": "bash"},
+		Secrets: map[string]string{"TOKEN": "secret-value"},
+	}
+	got, err := Evaluate("${{ matrix['shell'] }}:${{ secrets['TOKEN'] }}", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "bash:secret-value" {
+		t.Fatalf("Evaluate() = %q, want static index references", got)
+	}
+	if _, err := Evaluate("${{ secrets[env.NAME] }}", context); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("Evaluate() dynamic index error = %v", err)
+	}
+}
+
+func TestSecretReferencesUsesExpressionAST(t *testing.T) {
+	template := "${{ secrets.dot_token }}:${{ secrets['BRACKET_TOKEN'] }}:${{ secrets.DOT_TOKEN }}:${{ matrix.value }}:${{ 'not }} a delimiter' }}"
+	got, err := SecretReferences(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"BRACKET_TOKEN", "DOT_TOKEN"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("SecretReferences() = %#v, want %#v", got, want)
+	}
+	if _, err := SecretReferences("${{ secrets[env.NAME] }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("SecretReferences() dynamic index error = %v", err)
+	}
+	if _, err := SecretReferences("${{ toJSON(secrets) }}"); err == nil || !strings.Contains(err.Error(), "must name exactly one secret") {
+		t.Fatalf("SecretReferences() whole-context error = %v", err)
+	}
+}
+
+func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
+	for _, condition := range []string{"inputs.enabled", "${{ inputs.enabled }}", "inputs.enabled && github.ref"} {
+		usesInputs, err := ConditionUsesContext(condition, "inputs")
+		if err != nil || !usesInputs {
+			t.Fatalf("ConditionUsesContext(%q) = %v, %v, want true", condition, usesInputs, err)
+		}
+	}
+	usesInputs, err := ConditionUsesContext("github.ref", "inputs")
+	if err != nil || usesInputs {
+		t.Fatalf("ConditionUsesContext(github.ref) = %v, %v, want false", usesInputs, err)
 	}
 }
 

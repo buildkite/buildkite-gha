@@ -435,6 +435,97 @@ jobs:
 	}
 }
 
+func TestCompileSubstitutesReusableInputsInConditions(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  enabled-call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: true
+      label: deploy
+  disabled-call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: false
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled:
+        type: boolean
+        required: true
+      label:
+        type: string
+jobs:
+  gated:
+    if: inputs.enabled
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ inputs.enabled }}
+        run: echo enabled
+  string-gated:
+    if: ${{ inputs.label }}
+    runs-on: ubuntu-latest
+    steps:
+      - if: inputs.label
+        run: echo non-empty
+`)
+
+	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 4 {
+		t.Fatalf("plans = %d, want boolean and string jobs for both calls", len(plans))
+	}
+	conditions := make(map[string][2]string, len(plans))
+	for _, job := range plans {
+		conditions[job.Workflow.LogicalJobID] = [2]string{job.Condition, job.Steps[0].Condition}
+	}
+	if got := conditions["enabled-call.gated"]; got != [2]string{"true", "true"} {
+		t.Fatalf("enabled conditions = %#v, want statically substituted true", got)
+	}
+	if got := conditions["disabled-call.gated"]; got != [2]string{"false", "false"} {
+		t.Fatalf("disabled conditions = %#v, want statically substituted false", got)
+	}
+	if got := conditions["enabled-call.string-gated"]; got != [2]string{"'deploy'", "'deploy'"} {
+		t.Fatalf("non-empty string conditions = %#v, want a quoted expression literal", got)
+	}
+	if got := conditions["disabled-call.string-gated"]; got != [2]string{"''", "''"} {
+		t.Fatalf("empty string conditions = %#v, want a falsy quoted expression literal", got)
+	}
+}
+
+func TestCompileRejectsComplexReusableInputConditions(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      enabled: true
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      enabled:
+        type: boolean
+        required: true
+jobs:
+  gated:
+    if: ${{ inputs.enabled && github.ref }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo enabled
+`)
+
+	_, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil || !strings.Contains(err.Error(), "reusable-workflow input expression is not statically resolvable") {
+		t.Fatalf("CompilePlans() error = %v, want complex input condition rejection", err)
+	}
+}
+
 func TestCompilePlansResolveReusableLocalActionsFromRepositoryRoot(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")

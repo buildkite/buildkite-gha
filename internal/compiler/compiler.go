@@ -11,7 +11,6 @@ import (
 	"math/big"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,8 +26,6 @@ const (
 	schema             = "buildkite-gha/compiler-ir/v0"
 	maxMatrixInstances = 256
 )
-
-var secretReferencePattern = regexp.MustCompile(`(?i)\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}`)
 
 // Event is the explicit provider event snapshot supplied to compilation.
 type Event struct {
@@ -252,7 +249,10 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
 			}
 		}
-		secrets := requiredSecrets(instance)
+		secrets, err := requiredSecrets(instance)
+		if err != nil {
+			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		}
 		if len(secrets) != 0 {
 			capabilities = append(capabilities, "secrets")
 			sort.Strings(capabilities)
@@ -301,30 +301,41 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 	return plans, nil
 }
 
-func requiredSecrets(instance JobInstance) []string {
+func requiredSecrets(instance JobInstance) ([]string, error) {
 	found := map[string]string{}
-	collect := func(value string) {
-		for _, match := range secretReferencePattern.FindAllStringSubmatch(value, -1) {
-			name := strings.ToUpper(match[1])
+	collect := func(value string) error {
+		names, err := expression.SecretReferences(value)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
 			found[name] = name
 		}
+		return nil
 	}
-	collect(instance.If)
-	collect(instance.DefaultShell)
-	collect(instance.DefaultWorkingDirectory)
-	for _, value := range instance.Env {
-		collect(value)
+	for _, value := range []string{instance.If, instance.DefaultShell, instance.DefaultWorkingDirectory} {
+		if err := collect(value); err != nil {
+			return nil, err
+		}
 	}
-	for _, value := range instance.Outputs {
-		collect(value)
+	for _, values := range []map[string]string{instance.Env, instance.Outputs} {
+		for _, name := range sortedValueKeys(values) {
+			if err := collect(values[name]); err != nil {
+				return nil, err
+			}
+		}
 	}
 	for _, step := range instance.Steps {
 		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
-			collect(value)
+			if err := collect(value); err != nil {
+				return nil, err
+			}
 		}
 		for _, values := range []map[string]string{step.Env, step.With} {
-			for _, value := range values {
-				collect(value)
+			for _, name := range sortedValueKeys(values) {
+				if err := collect(values[name]); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -333,7 +344,7 @@ func requiredSecrets(instance JobInstance) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
 
 func planSpan(span workflow.Span) plan.Span {
