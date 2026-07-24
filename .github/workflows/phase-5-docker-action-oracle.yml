@@ -13,7 +13,7 @@ jobs:
     steps:
       - name: Run exact public Dockerfile action
         id: docker
-        uses: actions/hello-world-docker-action@8bcd8e1af3c095561f1043123848fc8b2db0f189
+        uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
         with:
           who-to-greet: Phase 5
 

@@ -628,7 +628,7 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const action = "uses: actions/hello-world-docker-action@8bcd8e1af3c095561f1043123848fc8b2db0f189"
+	const action = "uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d"
 	observation := `PHASE5_DOCKER_OBSERVATION={"container":"ran","output":"propagated","source":"public-exact"}`
 	if !strings.Contains(string(templateBody), action) || !strings.Contains(string(githubBody), action) || !strings.Contains(string(templateBody), observation) || !strings.Contains(string(githubBody), observation) {
 		t.Fatalf("Phase 5 Dockerfile differential fixtures drifted:\ntemplate:\n%s\nGitHub:\n%s", templateBody, githubBody)
