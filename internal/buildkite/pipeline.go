@@ -1,4 +1,4 @@
-// Package buildkite emits deterministic Buildkite pipeline YAML from trusted,
+// Package buildkite emits deterministic Buildkite pipeline YAML from validated,
 // integration-neutral job descriptions.
 package buildkite
 
@@ -19,7 +19,7 @@ var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// Pipeline is the trusted input required to emit generated compatibility jobs.
+// Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string

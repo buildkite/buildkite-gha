@@ -62,7 +62,7 @@ func (a PlanArtifact) Path() string {
 	return fmt.Sprintf("buildkite-gha/v1/plans/%s/%s/plan.json", a.StepKey, strings.TrimPrefix(a.Digest, "sha256:"))
 }
 
-// BindingPath is the signed authorization artifact beside the inert plan.
+// BindingPath is the signed Phase 0 integrity artifact beside the inert plan.
 func (a PlanArtifact) BindingPath() string {
 	return fmt.Sprintf("buildkite-gha/v1/plans/%s/%s/binding.jws", a.StepKey, strings.TrimPrefix(a.Digest, "sha256:"))
 }
@@ -72,7 +72,7 @@ type Dependency struct {
 	StepKey string
 }
 
-// Job is the trusted subset needed to emit one generated Buildkite job.
+// Job is the validated subset needed to emit one generated Buildkite job.
 type Job struct {
 	Key          string
 	Label        string

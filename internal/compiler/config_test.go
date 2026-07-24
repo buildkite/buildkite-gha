@@ -93,11 +93,20 @@ func TestRunsOnPolicySeparatesTrustedAndUntrustedEvents(t *testing.T) {
 	}
 }
 
-func TestUntrustedOptionsRejectRemoteActionSource(t *testing.T) {
+func TestUntrustedOptionsPermitAnonymousPublicActionSource(t *testing.T) {
+	options := defaultOptions()
+	options.ResolveActions = true
+	options.ActionSource = &fakeActionSource{}
+	if err := options.validate(); err != nil {
+		t.Fatalf("Options.validate() error = %v", err)
+	}
+}
+
+func TestOptionsRejectActionConfigurationWithoutResolution(t *testing.T) {
 	options := defaultOptions()
 	options.ActionSource = &fakeActionSource{}
-	if err := options.validate(); err == nil || !strings.Contains(err.Error(), "untrusted compilation may not configure") {
-		t.Fatalf("Options.validate() error = %v, want untrusted action source rejection", err)
+	if err := options.validate(); err == nil || !strings.Contains(err.Error(), "requires ResolveActions") {
+		t.Fatalf("Options.validate() error = %v, want action-resolution configuration rejection", err)
 	}
 }
 

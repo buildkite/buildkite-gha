@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/buildkite"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -120,7 +121,7 @@ func TestBindCommitStrictlyRewritesSnapshot(t *testing.T) {
 	}
 }
 
-func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
+func TestRunUploadsTokenlessV3BundleWithManagedNode(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "test.yml")
 	actionPath := filepath.Join(repository, ".github", "actions", "javascript")
@@ -216,7 +217,7 @@ func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
 		}
 	}
 	if jobPlan.Schema != plan.SchemaV3 || jobPlan.Compiler.Version != "0.0.0-phase4.test" || jobPlan.Event.SHA != commit || len(jobPlan.Actions) != 1 || jobPlan.Actions[0].Source != "workspace" {
-		t.Fatalf("trusted plan = %#v", jobPlan)
+		t.Fatalf("tokenless plan = %#v", jobPlan)
 	}
 	nodeArchive, err := deterministicGzip(nodeBytes)
 	if err != nil {
@@ -242,6 +243,27 @@ func TestRunUploadsTrustedV3BundleWithManagedNode(t *testing.T) {
 	unchanged, err := os.ReadFile(eventPath)
 	if err != nil || !bytes.Equal(unchanged, event) {
 		t.Fatalf("event file changed: %v", err)
+	}
+}
+
+func TestValidateTokenlessBundleAllowsOnlyAnonymousNetwork(t *testing.T) {
+	for _, capabilities := range [][]string{nil, {}, {"network"}} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow:             plan.Workflow{LogicalJobID: "portable"},
+			RequiredCapabilities: capabilities,
+		}}}}
+		if err := validateTokenlessBundle(bundle); err != nil {
+			t.Fatalf("validateTokenlessBundle(%v) error = %v", capabilities, err)
+		}
+	}
+	for _, capability := range []string{"docker", "privileged-container", "provider-token-read", "provider-token-write", "secrets"} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow:             plan.Workflow{LogicalJobID: "protected"},
+			RequiredCapabilities: []string{capability},
+		}}}}
+		if err := validateTokenlessBundle(bundle); err == nil || !strings.Contains(err.Error(), capability) {
+			t.Fatalf("validateTokenlessBundle(%q) error = %v, want rejection", capability, err)
+		}
 	}
 }
 

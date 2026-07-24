@@ -175,7 +175,7 @@ func TestPublicActionSourceNil(t *testing.T) {
 	}
 }
 
-func TestCompilePlansTrustedActionsEmitV3Locks(t *testing.T) {
+func TestCompilePlansTokenlessActionsEmitV3Locks(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "actions.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -203,9 +203,13 @@ jobs:
 `)
 	fake := &fakeActionSource{root: remote, calls: map[string]int{}}
 	options := Options{
-		EventTrust:   EventTrusted,
-		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
-		ActionSource: fake,
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   fake,
 	}
 	first, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
@@ -216,7 +220,7 @@ jobs:
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(first, second) {
-		t.Fatal("trusted action plans are not deterministic")
+		t.Fatal("tokenless action plans are not deterministic")
 	}
 	if len(first) != 3 || first[0].Schema != plan.SchemaV3 || first[1].Schema != plan.SchemaV3 || first[2].Schema != plan.SchemaV2 {
 		t.Fatalf("plan schemas = %#v, want two action v3 plans and one shell v2 plan", []string{first[0].Schema, first[1].Schema, first[2].Schema})
@@ -253,27 +257,26 @@ jobs:
 	}
 }
 
-func TestTrustedCheckoutAdapterInputBoundary(t *testing.T) {
+func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
-	compile := func(with string, trust EventTrust) ([]plan.Job, error) {
+	compile := func(with string) ([]plan.Job, error) {
 		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		options := Options{
-			EventTrust: trust,
+			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
 				UntrustedQueues: []string{"hosted"},
 			},
-		}
-		if trust == EventTrusted {
-			options.ActionSource = &fakeActionSource{root: remote, calls: map[string]int{}}
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		}
 		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase4-test", testDistributionDigest, options)
 	}
@@ -283,12 +286,12 @@ func TestTrustedCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          repository: buildkite/buildkite-gha\n          ref: 1111111111111111111111111111111111111111\n          fetch-depth: '1'\n          persist-credentials: false\n          clean: true\n          set-safe-directory: true\n",
 	}
 	for _, with := range accepted {
-		plans, err := compile(with, EventTrusted)
+		plans, err := compile(with)
 		if err != nil {
-			t.Fatalf("trusted checkout with %q: %v", with, err)
+			t.Fatalf("tokenless checkout with %q: %v", with, err)
 		}
 		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
-			t.Fatalf("trusted checkout plans = %#v", plans)
+			t.Fatalf("tokenless checkout plans = %#v", plans)
 		}
 	}
 
@@ -304,15 +307,11 @@ func TestTrustedCheckoutAdapterInputBoundary(t *testing.T) {
 	}
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
-			_, err := compile("        with:\n"+input, EventTrusted)
+			_, err := compile("        with:\n" + input)
 			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "tokenless checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
 				t.Fatalf("CompilePlansWithOptions() error = %v", err)
 			}
 		})
-	}
-
-	if plans, err := compile("        with:\n          token: ''\n", EventUntrusted); err != nil || len(plans) != 1 || plans[0].Schema != plan.SchemaV2 {
-		t.Fatalf("untrusted checkout compilation = %#v, %v", plans, err)
 	}
 }
 
@@ -322,9 +321,13 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 	workflowPath := filepath.Join("..", "..", "testdata", "phase4", ".github", "workflows", "public-actions.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json")
 	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "phase4-test", testDistributionDigest, Options{
-		EventTrust:   EventTrusted,
-		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "hosted"}},
-		ActionSource: &fakeActionSource{root: remote, calls: map[string]int{}},
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +360,7 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 	}
 }
 
-func TestCompilePlansTrustedRemoteActionRequiresSource(t *testing.T) {
+func TestCompilePlansRemoteActionRequiresSource(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "remote.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -365,8 +368,12 @@ func TestCompilePlansTrustedRemoteActionRequiresSource(t *testing.T) {
 	}
 	workflow := []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/repo@v1\n")
 	_, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
-		EventTrust: EventTrusted,
-		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "remote action source is not configured") {
 		t.Fatalf("CompilePlansWithOptions() error = %v, want source configuration rejection", err)
@@ -383,9 +390,13 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := CompilePlansContext(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
-		EventTrust:   EventTrusted,
-		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
-		ActionSource: contextActionSource{},
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   contextActionSource{},
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("CompilePlansContext() error = %v, want context cancellation", err)
@@ -428,9 +439,13 @@ jobs:
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	plans, err := CompilePlansContext(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
-		EventTrust:   EventTrusted,
-		Runners:      RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
-		ActionSource: PublicActionSource{Resolver: resolver, Store: store},
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   PublicActionSource{Resolver: resolver, Store: store},
 	})
 	if err != nil {
 		t.Fatal(err)

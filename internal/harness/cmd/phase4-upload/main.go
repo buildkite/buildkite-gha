@@ -1,4 +1,4 @@
-// phase4-upload is the deliberately narrow, trusted Phase 4 proof importer.
+// phase4-upload is the deliberately narrow, tokenless Phase 4 proof importer.
 package main
 
 import (
@@ -84,13 +84,20 @@ func run(ctx context.Context, args []string, stdout io.Writer, agent transport.A
 		return fmt.Errorf("configure action store: %w", err)
 	}
 	bundle, err := compiler.CompileBundleContext(ctx, cfg.workflow, workflow, event, cfg.runtimeVersion, runtimeDigest, importer, compiler.Options{
-		EventTrust:         compiler.EventTrusted,
-		Runners:            compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": cfg.runtimeQueue, "ubuntu-24.04": cfg.runtimeQueue, "ubuntu-22.04": cfg.runtimeQueue}},
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": cfg.runtimeQueue, "ubuntu-24.04": cfg.runtimeQueue, "ubuntu-22.04": cfg.runtimeQueue},
+			UntrustedQueues: []string{cfg.runtimeQueue},
+		},
+		ResolveActions:     true,
 		ActionSource:       compiler.PublicActionSource{Resolver: resolver, Store: store},
 		NodeRuntimeDigests: map[int]string{24: nodeDigest},
 	})
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
+	}
+	if err := validateTokenlessBundle(bundle); err != nil {
+		return err
 	}
 	runtimeArtifactPath, err := buildkite.DistributionPath(runtimeDigest)
 	if err != nil {
@@ -114,6 +121,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, agent transport.A
 	}
 	_, err = fmt.Fprintf(stdout, "Uploaded %d jobs with importer %s.\n", len(bundle.Plans), importer)
 	return err
+}
+
+func validateTokenlessBundle(bundle compiler.Bundle) error {
+	for _, artifact := range bundle.Plans {
+		for _, capability := range artifact.Job.RequiredCapabilities {
+			if capability != "network" {
+				return fmt.Errorf("job %q requires capability %q, unavailable to tokenless Phase 4 upload", artifact.Job.Workflow.LogicalJobID, capability)
+			}
+		}
+	}
+	return nil
 }
 
 func parseArgs(args []string) (config, error) {

@@ -38,7 +38,7 @@ func CompileBundleWithOptions(path string, source, eventSource []byte, compilerV
 }
 
 // CompileBundleContext produces a complete bundle and permits cancellation
-// while trusted compilation resolves immutable public action source.
+// while compilation resolves immutable public action source.
 func CompileBundleContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")

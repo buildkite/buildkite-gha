@@ -2313,8 +2313,12 @@ jobs:
 		t.Fatal(err)
 	}
 	plans, err := compiler.CompilePlansContext(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
-		EventTrust: compiler.EventTrusted,
-		Runners:    compiler.RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "trusted"}},
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
 		ActionSource: compiler.PublicActionSource{
 			Resolver: resolver,
 			Store:    store,

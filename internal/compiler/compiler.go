@@ -184,7 +184,7 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 }
 
 // CompilePlansContext creates one plan per job and permits cancellation while
-// trusted compilation resolves immutable public action source.
+// compilation resolves immutable public action source.
 func CompilePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	if compilerVersion == "" {
 		return nil, fmt.Errorf("compiler version is required")
@@ -249,7 +249,7 @@ func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistribut
 		jobSchema := plan.Schema
 		var actions []plan.ActionLock
 		var capabilities []string
-		if ir.Event.Trust == EventTrusted && len(actionRefs) != 0 {
+		if options.ResolveActions && len(actionRefs) != 0 {
 			for _, i := range actionIndexes {
 				if strings.HasPrefix(strings.ToLower(instance.Steps[i].Uses), "actions/checkout@") {
 					if err := validateCheckoutInputs(instance.Steps[i].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {

@@ -39,15 +39,16 @@ and uploads the exact executable plus every content-addressed plan, then uses
 `buildkite-agent pipeline upload --no-interpolation --reject-secrets`. Generated
 jobs skip checkout, download both artifacts from the exact importer into a
 fresh temporary directory, verify the executable SHA-256, and run the plan.
-This Phase 2 development path requires `--runtime-queue hosted` and rejects
-every other queue. Its supported Linux label mapping and untrusted allowlist
-are fixed independently of the flag value, so CLI input cannot grant access to
-another queue. Trusted installation-specific queue policy remains deferred.
-This path is intentionally unsigned and does not claim the KMS-backed plan
-authority required for production use. It also rejects action steps because
-its generated jobs have empty, checkout-free workspaces; only shell steps and
-their concurrent control primitives are currently executable through this
-path, and any declared runtime capability causes the upload to fail closed.
+This tokenless development path requires `--runtime-queue hosted` and rejects
+every other queue. Its supported Linux label mapping and queue allowlist are
+fixed independently of the flag value, so CLI input cannot grant access to
+another queue. Protected queue and capability policy remains deferred. The path
+is intentionally unsigned: ordinary Buildkite dynamic uploads do not need plan
+signing merely to run public, tokenless code. It remains shell-only because the
+general importer does not yet package the exact managed Node 20/24 runtimes or
+configure immutable public action resolution. Shell steps and their concurrent
+control primitives are executable through this path; action steps and every
+declared runtime capability fail closed.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The runtime supports env and working-directory
@@ -64,24 +65,37 @@ timing against only the direct process; the bridge intentionally terminates the
 complete process tree. Other workflow commands are not yet implemented. Secret
 names resolve only through the explicit
 `BUILDKITE_GHA_SECRET_` namespace and are registered with the Buildkite Agent
-redactor before execution. Trusted v3 plans additionally support managed Node
-20/24 JavaScript actions, local and nested composite actions, global LIFO
+redactor before execution. Action-resolved v3 plans additionally support managed
+Node 20/24 JavaScript actions, local and nested composite actions, global LIFO
 pre/main/post lifecycle, and anonymous public GitHub action sources bound to
 exact commits and verified repository digests. The narrow tokenless checkout
 adapter accepts only github.com, the public event repository, its exact event
 SHA, the workspace root, and a credential-free shallow fetch; private checkout,
 provider tokens, alternate repositories or refs, and credential persistence
-remain deferred. These action capabilities are intentionally unavailable to
-the unsigned `upload` command. Docker actions, services, and job containers
-remain outside the executable subset. In Buildkite, `run-job` verifies the
-exact build, job, step, and plan digest before resolving each prerequisite from
-its attributed producer artifact, then publishes the terminal result under a
-bounded cleanup context; metadata is only a best-effort mirror. Identity,
-plan-decode, and digest failures happen before a producer can publish a trusted
-manifest, and retrying a producer can make artifact selection ambiguous;
+remain deferred. Action resolution is independent of event trust, but is not
+yet available through the general `upload` command because managed Node
+distribution remains in the Phase 4 proof importer. That proof importer accepts
+only capability-free local actions or anonymous public actions whose sole
+declared capability is network access. Docker actions, services, and job
+containers remain outside the executable subset. In Buildkite,
+`run-job` verifies the exact build, job, step, and plan digest before resolving
+each prerequisite from its attributed producer artifact, then publishes the
+terminal result under a bounded cleanup context; metadata is only a best-effort
+mirror. Identity, plan-decode, and digest failures happen before a producer can
+publish a verified manifest, and retrying a producer can make artifact selection
+ambiguous;
 consumers fail closed in both cases, so retry the whole build. Use
 `buildkite-gha help`, `buildkite-gha help <command>`, or
 `buildkite-gha --version` for exact usage.
+
+Public, anonymous, tokenless actions on the fixed hosted queue do not need a
+supporting service. Future protected capabilities—private source, GitHub tokens,
+secrets, environments, compatible OIDC, and privileged queues—will use a
+control-plane service authenticated with Buildkite Job OIDC. That service must
+independently verify GitHub event provenance and customer policy before issuing
+a narrow, expiring grant. Canonical plan digests protect transport integrity;
+they do not authorize those capabilities. Buildkite pipeline signing remains
+optional installation-specific defence in depth.
 
 ## Development
 
@@ -106,9 +120,9 @@ signed plan-envelope fixtures. `make check` remains as a convenience alias.
 The gated live development proof uses the same pinned mise plugin as repository
 checks. Start an exact-commit build with `PHASE2_PROBE=upload` and
 `PHASE2_COMMIT=<full commit>` to load `.buildkite/phase-2-upload.yml`. The
-trusted importer runs on `elastic-runners`; generated checkout-free jobs run on
-the ephemeral `hosted` queue, whose Agent version supports native checkout
-suppression.
+exact-commit importer runs on `elastic-runners`; generated checkout-free jobs
+run on the ephemeral `hosted` queue, whose Agent version supports native
+checkout suppression.
 
 The Phase 3 proof uses the same importer boundary. Start an exact-commit build
 with `PHASE3_PROBE=concurrent` and `PHASE3_COMMIT=<full commit>` to load
@@ -119,17 +133,17 @@ dispatch `.github/workflows/phase-0-shell-oracle.yml` on that ref with the same
 The Phase 4 proof is deliberately split because this repository is private and
 the implemented checkout boundary is public and tokenless. Start an exact-commit
 build with `PHASE4_PROBE=actions` and `PHASE4_COMMIT=<full commit>` to load
-`.buildkite/phase-4-upload.yml`. Its trusted importer compiles the synthetic
-public event in `testdata/phase4`: generated jobs anonymously check out the
-exact pinned `actions/checkout` commit, execute pinned `setup-node` and
-`setup-go`, verify exact tool versions, and settle before the native Buildkite
-continuation. `.github/workflows/phase-4-actions-oracle.yml` separately runs on
-GitHub against this private repository to exercise local JavaScript/composite
-outputs and lifecycle. The split does not claim that Buildkite executed those
-private local actions; Buildkite runtime coverage for them remains in the
-conformance suite. The exact-commit evidence is
-[Buildkite build 56](https://buildkite.com/buildkite/buildkite-gha/builds/56)
-and [GitHub Actions run 30045630660](https://github.com/buildkite/buildkite-gha/actions/runs/30045630660).
+`.buildkite/phase-4-upload.yml`. Its policy-controlled importer compiles an
+unattested synthetic public event in `testdata/phase4`: generated jobs
+anonymously check out the exact pinned `actions/checkout` commit, execute pinned
+`setup-node` and `setup-go`, verify exact tool versions, and settle before the
+native Buildkite continuation. `.github/workflows/phase-4-actions-oracle.yml`
+separately runs on GitHub against this private repository to exercise local
+JavaScript/composite outputs and lifecycle. The split does not claim that
+Buildkite executed those private local actions; Buildkite runtime coverage for
+them remains in the conformance suite. The exact-commit evidence is
+[Buildkite build 66](https://buildkite.com/buildkite/buildkite-gha/builds/66)
+and [GitHub Actions run 30052575655](https://github.com/buildkite/buildkite-gha/actions/runs/30052575655).
 
 ## License
 
