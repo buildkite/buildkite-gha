@@ -105,6 +105,10 @@ else
 fi
 if timeout 180s "${build[@]}" --label "${label_key}=${owner}" -t "$image" "$work" >/dev/null 2>&1; then created=1; record build pass loaded-marker-layer; else record build fail loaded-marker-layer; exit 1; fi
 if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" test -f /www/phase5-marker >/dev/null 2>&1; then record run pass marker-present; else record run fail marker-missing; fi
+if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" busybox --list 2>/dev/null | grep -qx httpd; then record httpd-applet pass available; else record httpd-applet fail unavailable; fi
+# The single-quoted container script intentionally expands its own process ID.
+# shellcheck disable=SC2016
+if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" sh -c 'busybox httpd -f -p 8080 -h /www & server=$!; trap "kill $server" EXIT; sleep 1; busybox wget -qO- http://127.0.0.1:8080/phase5-marker | busybox grep -qx phase5' >/dev/null 2>&1; then record http-selftest pass loopback-reachable; else record http-selftest fail loopback-unreachable; fi
 
 mkdir "$work/mount"; printf x > "$work/mount/owned"; uid="$(id -u)"; gid="$(id -g)"
 if timeout 30s docker run --rm --label "${label_key}=${owner}" -v "$work/mount:/probe" --user "$uid:$gid" "$image" sh -c 'printf y > /probe/requested' >/dev/null 2>&1; then
@@ -124,7 +128,7 @@ if timeout 30s docker network create --label "${label_key}=${owner}" "$network" 
   created=1
   if timeout 30s docker run -d --label "${label_key}=${owner}" --name "$server" --network "$network" --network-alias phase5-server "$image" >/dev/null 2>&1; then
     created=1
-    if timeout 30s docker run --rm --label "${label_key}=${owner}" --name "$client" --network "$network" "$image_base" sh -c 'wget -qO- http://phase5-server:8080/phase5-marker | grep -qx phase5' >/dev/null 2>&1; then record bridge-dns pass alias-http-reachable; else record bridge-dns fail alias-http-unreachable; fi
+    if timeout 30s docker run --rm --label "${label_key}=${owner}" --name "$client" --network "$network" "$image_base" sh -c 'busybox wget -qO- http://phase5-server:8080/phase5-marker | busybox grep -qx phase5' >/dev/null 2>&1; then record bridge-dns pass alias-http-reachable; else record bridge-dns fail alias-http-unreachable; fi
     health=starting
     for _ in {1..20}; do health="$(timeout 5s docker inspect --format '{{.State.Health.Status}}' "$server" 2>/dev/null || true)"; [[ "$health" == healthy ]] && break; sleep 1; done
     if [[ "$health" == healthy ]]; then record health pass healthy; else record health fail not-healthy; fi
