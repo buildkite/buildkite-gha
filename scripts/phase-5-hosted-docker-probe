@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly image_base='alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1'
+readonly image_base='busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028'
 readonly label_key='com.buildkite.buildkite-gha.phase5-owner'
 readonly suffix="${BUILDKITE_JOB_ID:-unknown}"
 readonly safe_suffix="${suffix//[^A-Za-z0-9]/}"
@@ -92,7 +92,7 @@ record pull pass pinned-image
 work="$(mktemp -d "${TMPDIR:-/tmp}/phase5-probe.XXXXXXXX")"
 printf 'phase5\n' > "$work/marker"
 cat > "$work/Dockerfile" <<'EOF'
-FROM alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+FROM busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
 RUN mkdir /www
 COPY marker /www/phase5-marker
 HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD busybox wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1

@@ -551,7 +551,7 @@ func TestPhase5HostedDockerCapabilityProbeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(probe)
-	for _, fragment := range []string{"set -euo pipefail", `${PHASE5_COMMIT:?}`, `scripts/phase-0-shell-oracle-checkout "$PHASE5_COMMIT"`, "alpine@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1", `buildx build --load`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `(( probe_failed == 0 ))`, "COPY marker"} {
+	for _, fragment := range []string{"set -euo pipefail", `${PHASE5_COMMIT:?}`, `scripts/phase-0-shell-oracle-checkout "$PHASE5_COMMIT"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx build --load`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `(( probe_failed == 0 ))`, "COPY marker"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("Phase 5 probe lacks %q", fragment)
 		}
