@@ -98,11 +98,11 @@ COPY marker /www/phase5-marker
 HEALTHCHECK --interval=1s --timeout=2s --retries=10 CMD busybox wget -q -O /dev/null http://127.0.0.1:8080/phase5-marker || exit 1
 CMD ["busybox", "httpd", "-f", "-p", "8080", "-h", "/www"]
 EOF
-if timeout 10s docker buildx version >/dev/null 2>&1; then
-  build=(docker buildx build --load)
-else
-  build=(docker build)
-fi
+if ! timeout 10s docker buildx version >/dev/null 2>&1; then record local-builder fail buildx-unavailable; exit 1; fi
+local_driver="$(timeout 10s docker buildx inspect default 2>/dev/null | awk '/^Driver:/ {print $2; exit}' || true)"
+if [[ "$local_driver" != docker ]]; then record local-builder fail default-is-not-local; exit 1; fi
+record local-builder pass default-docker-driver
+build=(docker buildx build --builder default --load)
 if timeout 180s "${build[@]}" --label "${label_key}=${owner}" -t "$image" "$work" >/dev/null 2>&1; then created=1; record build pass loaded-marker-layer; else record build fail loaded-marker-layer; exit 1; fi
 if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" test -f /www/phase5-marker >/dev/null 2>&1; then record run pass marker-present; else record run fail marker-missing; fi
 if timeout 30s docker run --rm --label "${label_key}=${owner}" "$image" busybox --list 2>/dev/null | grep -qx httpd; then record httpd-applet pass available; else record httpd-applet fail unavailable; fi
