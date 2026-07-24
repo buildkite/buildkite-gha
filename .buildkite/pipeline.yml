@@ -27,6 +27,13 @@ steps:
     agents:
       queue: "elastic-runners"
 
+  - label: ":pipeline: Load Phase 4 actions proof"
+    key: "phase-4-upload-loader"
+    if: build.env("PHASE4_PROBE") == "actions"
+    command: "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml"
+    agents:
+      queue: "elastic-runners"
+
   - label: ":go: Repository checks"
     key: "checks"
     plugins:

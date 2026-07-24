@@ -1,4 +1,4 @@
-name: buildkite-gha smoke
+name: Phase 4 actions differential oracle
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     outputs:
       result: ${{ steps.composite.outputs.result }}
     steps:
-      - name: Checkout fixture repository
+      - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node
@@ -43,13 +43,13 @@ jobs:
 
       - name: Run local JavaScript action
         id: javascript
-        uses: ./.github/actions/javascript
+        uses: ./.github/actions/phase4-javascript
         with:
           message: ${{ steps.shell.outputs.result }}
 
       - name: Run local composite action
         id: composite
-        uses: ./.github/actions/composite
+        uses: ./.github/actions/phase4-composite
         with:
           message: ${{ steps.javascript.outputs.result }}
 
@@ -61,14 +61,15 @@ jobs:
     needs: producer
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fixture repository
+      - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Verify output
+      - name: Verify output observation
         shell: bash
         env:
           EXPECTED_RESULT: ${{ needs.producer.outputs.result }}
         run: |
           test "$EXPECTED_RESULT" = "smoke-javascript-composite"
           printf '{"result":"%s"}\n' "$EXPECTED_RESULT" > observation.json
-          diff -u expected/observation.json observation.json
+          printf '%s\n' '{"result":"smoke-javascript-composite"}' > expected-observation.json
+          diff -u expected-observation.json observation.json

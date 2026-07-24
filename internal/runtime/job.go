@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,14 +31,29 @@ type JobResult struct {
 const maxJobOutputBytes = 1024
 
 type registeredPost struct {
-	action JavaScriptAction
-	state  map[string]string
-	node   string
+	action     JavaScriptAction
+	state      map[string]string
+	node       string
+	condition  string
+	invocation *preparedInvocation
 }
 
 type postRegistry struct {
 	mu    sync.Mutex
 	posts []registeredPost
+}
+
+type preparedInvocation struct {
+	action         JavaScriptAction
+	state          map[string]string
+	node           string
+	postRegistered bool
+}
+
+type remotePreparations map[string]*preparedInvocation
+
+type remotePreparationStatus struct {
+	unsuccessful bool
 }
 
 func (r *postRegistry) register(post *registeredPost) {
@@ -79,7 +95,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
-		if capability != "docker" && capability != "secrets" {
+		if capability != "docker" && capability != "secrets" && capability != "network" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
 	}
@@ -147,11 +163,15 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(runnerTemp) }()
+	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
+		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
 	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
 		jobResult.Env["PATH"] = path
 	}
 	eval.Env = jobResult.Env
+	actions := newActionLockResolver(job, workspace, r.Actions)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
@@ -163,7 +183,41 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
 	var runErr error
-	for _, step := range job.Steps {
+	prepared := remotePreparations{}
+	preStatus := remotePreparationStatus{}
+	if job.Schema == plan.SchemaV3 {
+		for stepIndex, step := range job.Steps {
+			if step.Kind != "uses" {
+				continue
+			}
+			if step.Action == nil {
+				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: immutable selector is missing", step.Uses))
+				break
+			}
+			source, err := actions.source(*step.Action)
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
+				break
+			}
+			if source != "github" {
+				continue
+			}
+			if err := r.verifyRemoteActionTree(runCtx, actions, *step.Action, nil); err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
+				break
+			}
+			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
+			commitResultEnvironment(jobResult.Env, preResult)
+			mergeInto(jobResult.State, preResult.State)
+			jobResult.Summary += preResult.Summary
+			eval.Env = jobResult.Env
+			if preErr != nil {
+				preStatus.unsuccessful = true
+				runErr = errors.Join(runErr, fmt.Errorf("action %q pre: %w", step.Uses, preErr))
+			}
+		}
+	}
+	for stepIndex, step := range job.Steps {
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
 				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses)
@@ -218,7 +272,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			step := step
 			supervisor.start(runCtx, step.ID,
 				func(stepCtx context.Context) stepExecution {
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, evalSnapshot, &posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(ctx, stepCtx, step)
@@ -226,7 +280,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 			)
 			continue
 		}
-		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, jobEnv, evalSnapshot, &posts)
+		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, evalSnapshot, &posts, actions, prepared)
 		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
 	for _, execution := range supervisor.waitAll() {
@@ -241,6 +295,19 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
+		if post.invocation != nil {
+			post.action = post.invocation.action
+			post.state = post.invocation.state
+			post.node = post.invocation.node
+		}
+		runPost, conditionErr := evaluateLifecycleCondition(post.condition, runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+		if conditionErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("post action %q condition: %w", post.action.Name, conditionErr))
+			continue
+		}
+		if !runPost {
+			continue
+		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
 		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
@@ -360,6 +427,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         "Linux",
 		"RUNNER_TEMP":       runnerTemp,
+		"RUNNER_TOOL_CACHE": filepath.Join(runnerTemp, "tool-cache"),
 	}
 }
 
@@ -374,7 +442,180 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 	return out
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, jobEnv map[string]string, eval expression.Context, posts *postRegistry) (Result, error) {
+func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
+	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared, nil)
+}
+
+// verifyRemoteActionTree materializes and verifies every remote subtree before
+// any of its pre hooks run. Workspace subtrees remain lazy and keep their
+// existing main-traversal compatibility behavior.
+func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockResolver, selector plan.ActionSelector, stack []string) error {
+	source, err := actions.source(selector)
+	if err != nil {
+		return err
+	}
+	if source != "github" {
+		return nil
+	}
+	action, lock, err := actions.resolve(ctx, selector)
+	if err != nil {
+		return err
+	}
+	for _, ancestor := range stack {
+		if ancestor == lock.ID {
+			return fmt.Errorf("action recursion detected at lock %q", lock.ID)
+		}
+	}
+	runtime, err := action.Runtime()
+	if err != nil {
+		return err
+	}
+	if err := action.ValidateEntrypoints(runtime); err != nil {
+		return err
+	}
+	if runtime != metadata.RuntimeComposite {
+		return nil
+	}
+	stack = append(append([]string(nil), stack...), lock.ID)
+	for i, child := range action.Runs.Steps {
+		if child.Uses == "" {
+			continue
+		}
+		childSelector, ok := lock.Children[child.Uses]
+		if !ok || childSelector.Lock == "" {
+			return fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses)
+		}
+		if err := r.verifyRemoteActionTree(ctx, actions, childSelector, stack); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
+	result := newResult()
+	source, err := actions.source(*step.Action)
+	if err != nil {
+		return result, err
+	}
+	if source != "github" {
+		return result, nil
+	}
+	action, lock, err := actions.resolve(ctx, *step.Action)
+	if err != nil {
+		return result, err
+	}
+	runtime, err := action.Runtime()
+	if err != nil {
+		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
+	}
+	if err := action.ValidateEntrypoints(runtime); err != nil {
+		return result, fmt.Errorf("action %q: %w", step.Uses, err)
+	}
+
+	switch runtime {
+	case metadata.RuntimeNode20, metadata.RuntimeNode24:
+		// The checkout adapter replaces the verified action's JavaScript
+		// lifecycle as one indivisible operation. Do not register upstream
+		// checkout cleanup for a main phase that this runtime never executes.
+		if lock.Source == "github" && lock.Repository == "actions/checkout" && lock.Path == "" {
+			return result, nil
+		}
+		runPre, err := evaluateLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
+		if err != nil {
+			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
+		}
+		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
+			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
+		}
+		if action.Runs.Pre == "" && action.Runs.Post == "" {
+			return result, nil
+		}
+		major, explicit := 24, r.Node24
+		if runtime == metadata.RuntimeNode20 {
+			major, explicit = 20, r.Node20
+		}
+		node, err := DiscoverNode(major, explicit, r.ManagedNodeRoot)
+		if err != nil {
+			return result, err
+		}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post}
+		invocation := &preparedInvocation{action: javascript, state: map[string]string{}, node: node}
+		prepared[invocationID] = invocation
+		if javascript.Pre != "" && runPre {
+			if inheritedEvalErr != nil {
+				return result, inheritedEvalErr
+			}
+			inputs, err := evaluateMap(step.With, eval)
+			if err != nil {
+				return result, err
+			}
+			inputs, err = resolveActionInputs(action, inputs, eval)
+			if err != nil {
+				return result, err
+			}
+			stepEnv, err := evaluateMap(step.Env, eval)
+			if err != nil {
+				return result, err
+			}
+			javascript.Inputs = inputs
+			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
+			invocation.action = javascript
+			posts.register(postForInvocation(invocation, action.Runs.PostIf))
+			invocation.postRegistered = true
+			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
+				return result, err
+			}
+		}
+		return result, nil
+	case metadata.RuntimeComposite:
+		inputs := map[string]string{}
+		stepEnv := map[string]string{}
+		compositeEvalErr := inheritedEvalErr
+		if compositeEvalErr == nil {
+			inputs, compositeEvalErr = evaluateMap(step.With, eval)
+		}
+		if compositeEvalErr == nil {
+			inputs, compositeEvalErr = resolveActionInputs(action, inputs, eval)
+		}
+		if compositeEvalErr == nil {
+			stepEnv, compositeEvalErr = evaluateMap(step.Env, eval)
+		}
+		eval.Inputs = inputs
+		compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		for i, childStep := range action.Runs.Steps {
+			if childStep.Uses == "" {
+				continue
+			}
+			selector, ok := lock.Children[childStep.Uses]
+			if !ok || selector.Lock == "" {
+				return result, fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses)
+			}
+			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
+			childEnv := mergeStepEnvironment(compositeEnv, result.Env)
+			eval.Env = childEnv
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, child, fmt.Sprintf("%s/%d", invocationID, i), childEnv, eval, posts, actions, prepared, status, compositeEvalErr)
+			mergeInto(result.Env, childResult.Env)
+			if childResult.pathBaseSet {
+				result.pathBase = childResult.pathBase
+				result.pathBaseSet = true
+				result.Paths = result.Paths[:0]
+			}
+			result.Paths = append(result.Paths, childResult.Paths...)
+			mergeInto(result.State, childResult.State)
+			result.Summary += childResult.Summary
+			if childErr != nil {
+				status.unsuccessful = true
+				err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
+			}
+		}
+		return result, err
+	default:
+		return result, nil
+	}
+}
+
+func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
 	stepEnv, err := evaluateMap(step.Env, eval)
 	if err != nil {
 		return newResult(), err
@@ -417,21 +658,58 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		return result, err
 	}
 
-	if !strings.HasPrefix(step.Uses, "./") {
-		return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
-	}
-	if err := VerifyWorkflow(job, workspace); err != nil {
-		return result, err
-	}
-	action, err := metadata.Load(workspace, step.Uses)
-	if err != nil {
-		return result, err
+	var action metadata.Metadata
+	var actionLock *plan.ActionLock
+	if job.Schema == plan.SchemaV3 {
+		if step.Action == nil {
+			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
+		}
+		resolvedAction, lock, err := actions.resolve(ctx, *step.Action)
+		if err != nil {
+			return result, err
+		}
+		action, actionLock = resolvedAction, &lock
+		if lock.Source == "github" && lock.Repository == "actions/checkout" && lock.Path == "" {
+			inputs, err := evaluateMap(step.With, eval)
+			if err != nil {
+				return result, err
+			}
+			return r.runCheckout(ctx, processor, workspace, job, inputs)
+		}
+	} else {
+		if !strings.HasPrefix(step.Uses, "./") {
+			return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
+		}
+		if err := VerifyWorkflow(job, workspace); err != nil {
+			return result, err
+		}
+		var err error
+		action, err = metadata.Load(workspace, step.Uses)
+		if err != nil {
+			return result, err
+		}
 	}
 	actionRuntime, err := action.Runtime()
 	if err != nil {
 		return result, fmt.Errorf("action %q uses %w", step.Uses, err)
 	}
+	if err := action.ValidateEntrypoints(actionRuntime); err != nil {
+		return result, fmt.Errorf("action %q: %w", step.Uses, err)
+	}
 	actionPath := action.Path
+	actionIdentity := actionPath
+	if actionLock != nil {
+		actionIdentity = actionLock.ID
+	}
+	for _, ancestor := range actionStack {
+		if ancestor == actionIdentity {
+			return result, fmt.Errorf("action recursion detected at %q", step.Uses)
+		}
+	}
+	if len(actionStack) >= metadata.MaxNestedActionDepth {
+		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
+	}
+	actionStack = append(append([]string(nil), actionStack...), actionIdentity)
 	inputs, err := evaluateMap(step.With, eval)
 	if err != nil {
 		return result, err
@@ -443,25 +721,48 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
-	case metadata.RuntimeNode24:
+	case metadata.RuntimeNode20, metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
-		if !supportedLifecycleCondition(action.Runs.PreIf) || !supportedLifecycleCondition(action.Runs.PostIf) {
-			return result, fmt.Errorf("JavaScript action %q uses unsupported pre-if or post-if", step.Uses)
+		if _, err := evaluateLifecycleCondition(action.Runs.PreIf, false, false); err != nil {
+			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}
-		node, err := DiscoverNode24(r.Node24, r.ManagedNodeRoot)
+		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
+			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
+		}
+		major, explicit := 24, r.Node24
+		if actionRuntime == metadata.RuntimeNode20 {
+			major, explicit = 20, r.Node20
+		}
+		node, err := DiscoverNode(major, explicit, r.ManagedNodeRoot)
 		if err != nil {
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv}
 		state := map[string]string{}
-		post := postFor(javascript, state, node)
-		posts.register(post)
-		if javascript.Pre != "" {
-			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
-				return result, err
+		wasPrepared := false
+		if invocation := prepared[invocationID]; invocation != nil {
+			javascript, state, node, wasPrepared = invocation.action, invocation.state, invocation.node, true
+			// Preserve invocation state while evaluating inputs and environment
+			// again with every main-visible effect committed.
+			javascript.Inputs = inputs
+			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
+			invocation.action = javascript
+		}
+		if !wasPrepared {
+			posts.register(postFor(javascript, state, node, action.Runs.PostIf))
+		} else if invocation := prepared[invocationID]; !invocation.postRegistered {
+			posts.register(postForInvocation(invocation, action.Runs.PostIf))
+			invocation.postRegistered = true
+		}
+		if javascript.Pre != "" && !wasPrepared {
+			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
+			if runPre {
+				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
+					return result, err
+				}
 			}
 		}
 		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
@@ -469,7 +770,7 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 		}
 		return result, nil
 	case metadata.RuntimeComposite:
-		composite, err := r.runCompositeMetadata(ctx, processor, workspace, actionPath, action, inputs, jobEnv, stepEnv, actionEval)
+		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, invocationID, jobEnv, stepEnv, actionEval, posts, actions, prepared, actionLock, actionStack)
 		return composite, err
 	case metadata.RuntimeDocker:
 		if !job.HasCapability("docker") {
@@ -491,40 +792,71 @@ func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, wor
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
 }
 
-func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace, actionPath string, action metadata.Metadata, inputs, jobEnv, stepEnv map[string]string, eval expression.Context) (Result, error) {
+func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
 	result := newResult()
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
+	statuses := make(map[string]expression.StepStatus)
+	compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
+	compositeEnv["GITHUB_ACTION_PATH"] = actionPath
+	var runErr error
 	for i, step := range action.Runs.Steps {
-		if step.Uses != "" {
-			return result, fmt.Errorf("composite action nested uses %q is unsupported", step.Uses)
-		}
-		if step.If != "" {
-			return result, fmt.Errorf("composite action step conditions are unsupported")
-		}
-		if strings.TrimSpace(step.Run) == "" {
-			return result, fmt.Errorf("composite action step %d has no run command", i+1)
-		}
-		script, err := expression.Evaluate(step.Run, eval)
+		// GITHUB_ENV effects are visible to subsequent children. Keep this
+		// composite's invocation environment in expression contexts, while
+		// rebuilding the map so a child's declared env cannot leak to siblings.
+		eval.Env = mergeStringMaps(compositeEnv, result.Env)
+		id := strings.ToLower(step.ID)
+		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
+		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
-			return result, err
+			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))
+			continue
 		}
-		env, err := evaluateMap(step.Env, eval)
-		if err != nil {
-			return result, err
-		}
-		dir, err := workspacePath(workspace, step.WorkingDirectory)
-		if err != nil {
-			return result, err
-		}
-		args, err := shellCommand(step.Shell, script)
-		if err != nil {
-			return result, err
+		if !run {
+			if id != "" {
+				eval.Steps[id] = map[string]string{}
+				statuses[id] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			}
+			continue
 		}
 		stepResult := newResult()
-		runEnv := mergeStepEnvironment(jobEnv, result.Env, stepEnv, env, actionInputEnv(inputs), map[string]string{"GITHUB_ACTION_PATH": actionPath})
-		if err := r.runProcess(ctx, processor, dir, runEnv, &stepResult, nil, args[0], args[1:]...); err != nil {
-			return result, err
+		childErr := error(nil)
+		childJobEnv := mergeStepEnvironment(compositeEnv, result.Env)
+		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
+		if step.Uses != "" {
+			// runActionStep owns template evaluation for an action invocation.
+			// Passing env (the evaluated map) here would evaluate expressions twice.
+			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
+			if actionLock != nil {
+				selector, ok := actionLock.Children[step.Uses]
+				if !ok {
+					childErr = fmt.Errorf("composite action child %q has no immutable selector", step.Uses)
+				} else {
+					child.Action = &plan.ActionSelector{Lock: selector.Lock}
+				}
+			}
+			if childErr == nil {
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, eval, posts, actions, prepared, actionStack)
+			}
+		} else if strings.TrimSpace(step.Run) == "" {
+			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
+		} else {
+			var script, dir string
+			var args []string
+			var env map[string]string
+			env, childErr = evaluateMap(step.Env, eval)
+			if childErr == nil {
+				script, childErr = expression.Evaluate(step.Run, eval)
+			}
+			if childErr == nil {
+				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
+			}
+			if childErr == nil {
+				args, childErr = shellCommand(step.Shell, script)
+			}
+			if childErr == nil {
+				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)
+			}
 		}
 		mergeInto(result.Env, stepResult.Env)
 		if stepResult.pathBaseSet {
@@ -535,19 +867,28 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		result.Paths = append(result.Paths, stepResult.Paths...)
 		mergeInto(result.State, stepResult.State)
 		result.Summary += stepResult.Summary
-		if step.ID != "" {
-			eval.Steps[strings.ToLower(step.ID)] = stepResult.Outputs
+		if id != "" {
+			eval.Steps[id] = stepResult.Outputs
+			outcome := "success"
+			if childErr != nil {
+				outcome = "failure"
+			}
+			statuses[id] = expression.StepStatus{Outcome: outcome, Conclusion: outcome, Outputs: stepResult.Outputs}
+		}
+		if childErr != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d: %w", i+1, childErr))
 		}
 	}
 	for _, name := range sortedKeys(action.Outputs) {
 		output := action.Outputs[name]
 		value, err := expression.Evaluate(output.Value, eval)
 		if err != nil {
-			return result, fmt.Errorf("composite output %q: %w", name, err)
+			runErr = errors.Join(runErr, fmt.Errorf("composite output %q: %w", name, err))
+			continue
 		}
 		result.Outputs[name] = value
 	}
-	return result, nil
+	return result, runErr
 }
 
 func evaluateMap(values map[string]string, context expression.Context) (map[string]string, error) {
@@ -653,16 +994,37 @@ func workspacePath(root, path string) (string, error) {
 	return resolved, nil
 }
 
-func postFor(action JavaScriptAction, state map[string]string, node string) *registeredPost {
+func postFor(action JavaScriptAction, state map[string]string, node, condition string) *registeredPost {
 	if action.Post == "" {
 		return nil
 	}
-	return &registeredPost{action: action, state: state, node: node}
+	return &registeredPost{action: action, state: state, node: node, condition: condition}
 }
 
-func supportedLifecycleCondition(value string) bool {
+func postForInvocation(invocation *preparedInvocation, condition string) *registeredPost {
+	if invocation == nil || invocation.action.Post == "" {
+		return nil
+	}
+	return &registeredPost{condition: condition, invocation: invocation}
+}
+
+func evaluateLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
 	value = strings.TrimSpace(value)
-	return value == "" || value == "always()" || value == "${{ always() }}"
+	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
+		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+	}
+	switch strings.ToLower(value) {
+	case "", "always()":
+		return true, nil
+	case "success()":
+		return !unsuccessful && !cancelled, nil
+	case "failure()":
+		return unsuccessful && !cancelled, nil
+	case "cancelled()":
+		return cancelled, nil
+	default:
+		return false, fmt.Errorf("condition %q is unsupported", value)
+	}
 }
 
 func actionName(action metadata.Metadata, step plan.Step) string {

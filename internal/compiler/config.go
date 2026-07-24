@@ -40,6 +40,11 @@ type Options struct {
 	Vars       VariableSources
 	Runners    RunnerPolicy
 	EventTrust EventTrust
+	// ResolveActions enables immutable v3 action locking independently of event
+	// trust. ActionSource is required only when a workflow uses remote actions.
+	ResolveActions     bool
+	ActionSource       ActionSource
+	NodeRuntimeDigests map[int]string
 }
 
 func defaultOptions() Options {
@@ -58,6 +63,9 @@ func defaultOptions() Options {
 func (options Options) validate() error {
 	if options.EventTrust != EventTrusted && options.EventTrust != EventUntrusted {
 		return fmt.Errorf("event trust must be %q or %q", EventTrusted, EventUntrusted)
+	}
+	if !options.ResolveActions && options.ActionSource != nil {
+		return fmt.Errorf("action source configuration requires ResolveActions")
 	}
 	if len(options.Runners.Labels) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")

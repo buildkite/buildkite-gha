@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -479,22 +481,25 @@ func TestJavaScriptMainSeesPrePathEffects(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/path/action.yml", `name: JavaScript path writer
 runs:
-  using: node24
+  using: node20
   pre: pre.js
   main: main.js
+  post: post.js
 `)
 	writeFixtureFile(t, workspace, ".github/actions/path/pre.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/path/main.js", "")
-	fakeNode := filepath.Join(workspace, "node24")
-	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+	writeFixtureFile(t, workspace, ".github/actions/path/post.js", "")
+	fakeNode := filepath.Join(workspace, "node20")
+	writeFixtureFile(t, workspace, "node20", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then
-  echo v24.0.0
+  echo v20.0.0
   exit 0
 fi
 case "${1##*/}" in
   pre.js) printf '%s\n' "$PATH_ENTRY" >> "$GITHUB_PATH" ;;
   main.js) case ":$PATH:" in *":$PATH_ENTRY:"*) ;; *) exit 9 ;; esac ;;
+  post.js) printf 'NODE20_POST=true\n' >> "$GITHUB_ENV" ;;
 esac
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -504,12 +509,15 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
 	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
 
-	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node20: fakeNode}).RunJob(context.Background(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
 	if result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v", result)
+	}
+	if result.Env["NODE20_POST"] != "true" {
+		t.Fatalf("RunJob() environment = %#v, want node20 post lifecycle effect", result.Env)
 	}
 }
 
@@ -1015,6 +1023,78 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	}
 }
 
+func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		condition   string
+		failMain    bool
+		wantPost    bool
+		wantFailure bool
+	}{
+		{name: "success after success", condition: "success()", wantPost: true},
+		{name: "success after failure", condition: "${{ success() }}", failMain: true, wantFailure: true},
+		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantFailure: true},
+		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantFailure: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", "name: Conditional post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: "+test.condition+"\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/main.js", "")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/post.js", "")
+			fakeNode := filepath.Join(workspace, "node24")
+			writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "${1##*/}" = post.js ]; then touch "$POST_MARKER"; fi
+if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
+`)
+			if err := os.Chmod(fakeNode, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(workspace, "post-ran")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "conditional", Kind: "uses", Uses: "./.github/actions/conditional"}})
+			job.Env = map[string]string{"POST_MARKER": marker, "FAIL_MAIN": strconv.FormatBool(test.failMain)}
+
+			result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+			if (err != nil) != test.wantFailure || (result.Conclusion == "failure") != test.wantFailure {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			_, statErr := os.Stat(marker)
+			if gotPost := statErr == nil; gotPost != test.wantPost {
+				t.Fatalf("post ran = %v, want %v (stat error %v)", gotPost, test.wantPost, statErr)
+			}
+		})
+	}
+}
+
+func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:      "tool-cache",
+		Kind:    "run",
+		Command: `test -d "$RUNNER_TOOL_CACHE"; case "$RUNNER_TOOL_CACHE" in "$RUNNER_TEMP"/*) ;; *) exit 9 ;; esac`,
+	}})
+	job.Env = map[string]string{"RUNNER_TOOL_CACHE": filepath.Join(workspace, "untrusted")}
+	if result, err := (Runner{}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
+	env := actionInputEnv(map[string]string{"node-version": "24", "two words": "value"})
+	if env["INPUT_NODE-VERSION"] != "24" || env["INPUT_TWO_WORDS"] != "value" {
+		t.Fatalf("actionInputEnv() = %#v", env)
+	}
+	if _, ok := env["INPUT_NODE_VERSION"]; ok {
+		t.Fatalf("actionInputEnv() rewrote a hyphen: %#v", env)
+	}
+}
+
 func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
@@ -1324,7 +1404,7 @@ runs:
 	}
 }
 
-func TestDiscoverNode24ManagedAndWrongExplicitVersion(t *testing.T) {
+func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	managed := t.TempDir()
 	node := filepath.Join(managed, "node24", "bin", "node")
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
@@ -1344,6 +1424,20 @@ func TestDiscoverNode24ManagedAndWrongExplicitVersion(t *testing.T) {
 	}
 	if _, err := DiscoverNode24(wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
 		t.Fatalf("DiscoverNode24() error = %v, want wrong-version detail", err)
+	}
+
+	node20 := filepath.Join(managed, "node", "20", "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node20), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(node20, []byte("#!/bin/sh\necho v20.99.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DiscoverNode(20, "", managed); err != nil || got != node20 {
+		t.Fatalf("DiscoverNode(20) = %q, %v, want %q, nil", got, err, node20)
+	}
+	if _, err := DiscoverNode(24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
+		t.Fatalf("DiscoverNode(24) error = %v, want exact-major rejection", err)
 	}
 }
 
@@ -1464,6 +1558,688 @@ runs:
 	}
 }
 
+func TestNestedCompositeEvaluatesEnvironmentOnceAndIsolatesStepScopes(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/js/action.yml", `name: Nested JavaScript
+inputs:
+  message:
+    required: true
+runs:
+  using: node24
+  main: main.js
+`)
+	writeFixtureFile(t, workspace, ".github/actions/js/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/inner/action.yml", `name: Inner
+outputs:
+  result:
+    value: ${{ steps.same.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: verify-path
+      shell: sh
+      run: test "$GITHUB_ACTION_PATH" = "$EXPECTED_INNER_PATH"
+    - id: same
+      uses: ./.github/actions/js
+      with:
+        message: nested-input
+      env:
+        VALUE: ${{ env.TEMPLATE }}
+        DYNAMIC_COPY: ${{ env.DYNAMIC }}
+        CHILD_ONLY: private
+`)
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+inputs:
+  parent-only:
+    required: true
+outputs:
+  result:
+    value: ${{ steps.nested.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: same
+      shell: sh
+      run: |
+        printf '%s\n' 'DYNAMIC=from-env-file' >> "$GITHUB_ENV"
+        printf 'TEMPLATE=$%s\n' '{{ inputs.not_evaluated }}' >> "$GITHUB_ENV"
+    - id: nested
+      uses: ./.github/actions/inner
+    - id: verify
+      shell: sh
+      run: test -z "${CHILD_ONLY:-}"
+`)
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+printf 'input=%s value=%s dynamic=%s path=%s expected=%s\n' "$INPUT_MESSAGE" "$VALUE" "$DYNAMIC_COPY" "$GITHUB_ACTION_PATH" "$EXPECTED_ACTION_PATH" >&2
+test "$INPUT_MESSAGE" = nested-input
+test -z "${INPUT_PARENT_ONLY:-}"
+test "$VALUE" = '${{ inputs.not_evaluated }}'
+test "$DYNAMIC_COPY" = from-env-file
+test "$GITHUB_ACTION_PATH" = "$EXPECTED_ACTION_PATH"
+printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", With: map[string]string{"parent-only": "private-to-parent"}}})
+	job.Env = map[string]string{
+		"EXPECTED_ACTION_PATH": filepath.Join(workspace, ".github", "actions", "js"),
+		"EXPECTED_INNER_PATH":  filepath.Join(workspace, ".github", "actions", "inner"),
+	}
+	job.Outputs = map[string]string{"result": "${{ steps.outer.outputs.result }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v\nlogs: %s", err, logs.String())
+	}
+	if result.Outputs["result"] != "nested-ok" {
+		t.Fatalf("result = %#v, want nested composite output chain", result.Outputs)
+	}
+}
+
+func TestNestedJavaScriptPostSharesJobLIFORegistry(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	for _, name := range []string{"top", "nested"} {
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/main.js", "")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/post.js", "")
+	}
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Nested lifecycle
+runs:
+  using: composite
+  steps:
+    - id: child
+      uses: ./.github/actions/nested
+`)
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "top", Kind: "uses", Uses: "./.github/actions/top"},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"},
+	})
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+
+	if err := os.Remove(lifecycle); err != nil {
+		t.Fatal(err)
+	}
+	topID, compositeID, nestedID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
+	job.Schema = plan.SchemaV3
+	job.Steps[0].Action = &plan.ActionSelector{Lock: topID}
+	job.Steps[1].Action = &plan.ActionSelector{Lock: compositeID}
+	job.Actions = []plan.ActionLock{
+		{ID: topID, Source: "workspace", Path: ".github/actions/top", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "top"))},
+		{
+			ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "composite")),
+			Children: map[string]plan.ActionSelector{"./.github/actions/nested": {Lock: nestedID}},
+		},
+		{ID: nestedID, Source: "workspace", Path: ".github/actions/nested", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "nested"))},
+	}
+	if result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("v3 RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err = os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
+		t.Fatalf("v3 lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteActionPreHooksRunBeforeJobMainInDepthFirstOrder(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: remote lifecycle ordering\n")
+	remote := t.TempDir()
+	for _, name := range []string{"first", "skipped", "second"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+		for _, phase := range []string{"pre", "main", "post"} {
+			writeFixtureFile(t, remote, name+"/"+phase+".js", "")
+		}
+	}
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+runs:
+  using: composite
+  steps:
+    - uses: ./local
+    - uses: owner/repo/first@v1
+    - uses: owner/repo/nested@v1
+`)
+	writeFixtureFile(t, workspace, "local/action.yml", `name: local
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: printf '%s\n' 'local:main' >> "$LIFECYCLE_LOG"
+`)
+	writeFixtureFile(t, remote, "nested/action.yml", `name: nested
+runs:
+  using: composite
+  steps:
+    - if: failure()
+      uses: owner/repo/skipped@v1
+    - uses: owner/repo/second@v1
+`)
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	preBin := filepath.Join(workspace, "pre-bin")
+	if err := os.Mkdir(preBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, preBin, "pre-tool", "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(preBin, "pre-tool"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+case "$phase" in
+  pre)
+    printf 'owner=%s\n' "$action" >> "$GITHUB_STATE"
+    if [ "$action" = first ]; then
+      printf '%s\n' 'PRE_ENV=visible' >> "$GITHUB_ENV"
+      printf '%s\n' "$PRE_BIN" >> "$GITHUB_PATH"
+      printf '%s\n' '::add-mask::remote-pre-secret'
+    fi
+    if [ "$action" = second ]; then printf '%s\n' 'remote-pre-secret'; fi
+    ;;
+  main)
+    test "$PRE_ENV" = visible
+    test "$(command -v pre-tool)" = "$PRE_BIN/pre-tool"
+    printf 'main=%s\n' "$action" >> "$GITHUB_STATE"
+    ;;
+  post)
+    test "$STATE_owner" = "$action"
+    if [ "$action" != skipped ]; then test "$STATE_main" = "$action"; fi
+    ;;
+esac
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	digest := digestTree(t, remote)
+	rootID, firstID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	nestedID, skippedID, secondID := remoteLifecycleLockID(3), remoteLifecycleLockID(4), remoteLifecycleLockID(5)
+	localID := remoteLifecycleLockID(6)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "ordinary", Kind: "run", Command: `test "$PRE_ENV" = visible
+test "$(command -v pre-tool)" = "$PRE_BIN/pre-tool"
+printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
+		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "PRE_BIN": preBin}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{
+			"./local":                     {Lock: localID},
+			remoteLifecycleUses("first"):  {Lock: firstID},
+			remoteLifecycleUses("nested"): {Lock: nestedID},
+		}),
+		remoteLifecycleLock(firstID, "first", digest, nil),
+		remoteLifecycleLock(nestedID, "nested", digest, map[string]plan.ActionSelector{
+			remoteLifecycleUses("skipped"): {Lock: skippedID},
+			remoteLifecycleUses("second"):  {Lock: secondID},
+		}),
+		remoteLifecycleLock(skippedID, "skipped", digest, nil),
+		remoteLifecycleLock(secondID, "second", digest, nil),
+		{ID: localID, Source: "workspace", Path: "local", SourceDigest: digestTree(t, filepath.Join(workspace, "local"))},
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: fakeNode, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "first:pre\nskipped:pre\nsecond:pre\njob:main\nlocal:main\nfirst:main\nsecond:main\nsecond:post\nskipped:post\nfirst:post\n"
+	if got := string(events); got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+	if strings.Contains(logs.String(), "remote-pre-secret") || !strings.Contains(logs.String(), "***") {
+		t.Fatalf("pre masking logs = %q", logs.String())
+	}
+	pathCount := 0
+	for _, entry := range filepath.SplitList(result.Env["PATH"]) {
+		if entry == preBin {
+			pathCount++
+		}
+	}
+	if result.Env["PRE_ENV"] != "visible" || pathCount != 1 {
+		t.Fatalf("pre environment = %#v, pre path count = %d", result.Env, pathCount)
+	}
+}
+
+func TestRemoteActionPostRegistrationFollowsStartedLifecycle(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped remote lifecycle\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "with-pre/action.yml", "name: with pre\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "with-pre/"+phase+".js", "")
+	}
+	writeFixtureFile(t, remote, "without-pre/action.yml", "name: without pre\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "without-pre/main.js", "")
+	writeFixtureFile(t, remote, "without-pre/post.js", "")
+	writeFixtureFile(t, remote, "pre-if-false/action.yml", "name: pre condition false\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: failure()\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, remote, "pre-if-false/"+phase+".js", "")
+	}
+	writeFixtureFile(t, remote, "main-fails/action.yml", "name: main fails\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "main-fails/main.js", "")
+	writeFixtureFile(t, remote, "main-fails/post.js", "")
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	withPreID, withoutPreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	falsePreID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}},
+		{ID: "without-pre", Kind: "uses", Uses: remoteLifecycleUses("without-pre"), Action: &plan.ActionSelector{Lock: withoutPreID}, Condition: "failure()"},
+		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()"},
+		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(withPreID, "with-pre", digest, nil),
+		remoteLifecycleLock(withoutPreID, "without-pre", digest, nil),
+		remoteLifecycleLock(falsePreID, "pre-if-false", digest, nil),
+		remoteLifecycleLock(mainFailsID, "main-fails", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, readErr := os.ReadFile(lifecycle)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(events), "with-pre:pre\nwith-pre:main\nmain-fails:main\nmain-fails:post\nwith-pre:post\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteActionMainAndPostEvaluateInputsAfterPriorSteps(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: deferred remote inputs\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", `name: root
+inputs:
+  message:
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/child@v1
+      with:
+        message: ${{ inputs.message }}
+`)
+	writeFixtureFile(t, remote, "child/action.yml", `name: child
+inputs:
+  message:
+    required: true
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+`)
+	writeFixtureFile(t, remote, "child/main.js", "")
+	writeFixtureFile(t, remote, "child/post.js", "")
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+test "$INPUT_MESSAGE" = from-producer
+printf 'child:%s:%s\n' "$(basename "$1" .js)" "$INPUT_MESSAGE" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "producer", Kind: "run", Command: `printf '%s\n' 'value=from-producer' >> "$GITHUB_OUTPUT"`},
+		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), With: map[string]string{"message": "${{ steps.producer.outputs.value }}"}, Action: &plan.ActionSelector{Lock: rootID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "child:main:from-producer\nchild:post:from-producer\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteActionPreFailureContinuesPreparationAndFailsJob(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: failed remote pre\n")
+	remote := t.TempDir()
+	for _, action := range []struct {
+		name  string
+		preIf string
+	}{
+		{name: "fails"},
+		{name: "after"},
+		{name: "on-failure", preIf: "failure()"},
+		{name: "on-success", preIf: "success()"},
+	} {
+		condition := ""
+		if action.preIf != "" {
+			condition = "  pre-if: " + action.preIf + "\n"
+		}
+		writeFixtureFile(t, remote, action.name+"/action.yml", "name: "+action.name+"\nruns:\n  using: node24\n  pre: pre.js\n"+condition+"  main: main.js\n  post: post.js\n")
+		for _, phase := range []string{"pre", "main", "post"} {
+			writeFixtureFile(t, remote, action.name+"/"+phase+".js", "")
+		}
+	}
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+if [ "$action:$phase" = fails:pre ]; then exit 7; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	failsID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	onFailureID, onSuccessID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "fails", Kind: "uses", Uses: remoteLifecycleUses("fails"), Action: &plan.ActionSelector{Lock: failsID}},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+		{ID: "on-failure", Kind: "uses", Uses: remoteLifecycleUses("on-failure"), Action: &plan.ActionSelector{Lock: onFailureID}},
+		{ID: "on-success", Kind: "uses", Uses: remoteLifecycleUses("on-success"), Action: &plan.ActionSelector{Lock: onSuccessID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(failsID, "fails", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+		remoteLifecycleLock(onFailureID, "on-failure", digest, nil),
+		remoteLifecycleLock(onSuccessID, "on-success", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), `action "owner/repo/fails@v1" pre`) {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, readErr := os.ReadFile(lifecycle)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(events), "fails:pre\nafter:pre\non-failure:pre\non-failure:post\nafter:post\nfails:post\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRemotePreparationErrorStillDrainsRegisteredPosts(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: remote preparation cleanup\n")
+	remote := t.TempDir()
+	for _, name := range []string{"first", "broken"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+		for _, phase := range []string{"pre", "main", "post"} {
+			writeFixtureFile(t, remote, name+"/"+phase+".js", "")
+		}
+	}
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	firstID, brokenID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "first", Kind: "uses", Uses: remoteLifecycleUses("first"), Action: &plan.ActionSelector{Lock: firstID}},
+		{ID: "broken", Kind: "uses", Uses: remoteLifecycleUses("broken"), Action: &plan.ActionSelector{Lock: brokenID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(firstID, "first", digest, nil),
+		remoteLifecycleLock(brokenID, "broken", "sha256:"+strings.Repeat("f", 64), nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, readErr := os.ReadFile(lifecycle)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if got, want := string(events), "first:pre\nfirst:post\n"; got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRemotePreparedInvocationIDsCannotAliasStepIDs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: remote invocation identity\n")
+	remote := t.TempDir()
+	for _, name := range []string{"child", "direct"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+		for _, phase := range []string{"pre", "main", "post"} {
+			writeFixtureFile(t, remote, name+"/"+phase+".js", "")
+		}
+	}
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n")
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID, directID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}},
+		{ID: "root/0", Kind: "uses", Uses: remoteLifecycleUses("direct"), Action: &plan.ActionSelector{Lock: directID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+		remoteLifecycleLock(directID, "direct", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "child:pre\ndirect:pre\nchild:main\ndirect:main\ndirect:post\nchild:post\n"
+	if got := string(events); got != want {
+		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestCompositeConditionsRunAfterFailureAndPreserveFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/conditions/action.yml", `name: Conditional composite
+runs:
+  using: composite
+  steps:
+    - id: failed
+      shell: sh
+      run: exit 7
+    - id: skipped
+      shell: sh
+      run: touch "$SHOULD_NOT_RUN"
+    - id: observed
+      if: failure() && steps.failed.outcome == 'failure'
+      shell: sh
+      run: touch "$STATUS_RAN"
+    - id: cleanup
+      if: always()
+      shell: sh
+      run: touch "$ALWAYS_RAN"
+`)
+	statusRan := filepath.Join(workspace, "status-ran")
+	alwaysRan := filepath.Join(workspace, "always-ran")
+	shouldNotRun := filepath.Join(workspace, "should-not-run")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditions"}})
+	job.Env = map[string]string{"STATUS_RAN": statusRan, "ALWAYS_RAN": alwaysRan, "SHOULD_NOT_RUN": shouldNotRun}
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v, want preserved composite failure", result, err)
+	}
+	for _, path := range []string{statusRan, alwaysRan} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("expected conditional child %q to run: %v", path, statErr)
+		}
+	}
+	if _, statErr := os.Stat(shouldNotRun); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("default child ran after failure: %v", statErr)
+	}
+}
+
+func TestCompositeChildConditionUsesActionInputs(t *testing.T) {
+	for _, enabled := range []string{"true", "false"} {
+		t.Run(enabled, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", `name: Input conditional composite
+inputs:
+  enabled:
+    required: true
+runs:
+  using: composite
+  steps:
+    - if: inputs.enabled == 'true'
+      shell: sh
+      run: touch "$CONDITIONAL_RAN"
+`)
+			marker := filepath.Join(workspace, "conditional-ran")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/conditional", With: map[string]string{"enabled": enabled}}})
+			job.Env = map[string]string{"CONDITIONAL_RAN": marker}
+			result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			_, statErr := os.Stat(marker)
+			if enabled == "true" && statErr != nil {
+				t.Fatalf("enabled child did not run: %v", statErr)
+			}
+			if enabled == "false" && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("disabled child ran: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRuntimeRejectsRecursiveAndOverDepthCompositeActions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/recursive/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/recursive\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "recursive", Kind: "uses", Uses: "./.github/actions/recursive"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "recursion detected") {
+		t.Fatalf("RunJob() recursion error = %v", err)
+	}
+
+	for i := 0; i <= metadata.MaxNestedActionDepth; i++ {
+		next := ""
+		if i < metadata.MaxNestedActionDepth {
+			next = fmt.Sprintf("  steps:\n    - uses: ./.github/actions/depth-%d\n", i+1)
+		}
+		writeFixtureFile(t, workspace, fmt.Sprintf(".github/actions/depth-%d/action.yml", i), "runs:\n  using: composite\n"+next)
+	}
+	job = runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "deep", Kind: "uses", Uses: "./.github/actions/depth-0"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", metadata.MaxNestedActionDepth)) {
+		t.Fatalf("RunJob() depth error = %v", err)
+	}
+}
+
 func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	_, err := evaluateMap(map[string]string{
 		"z-last":  "${{ unsupported.z }}",
@@ -1488,6 +2264,79 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 	if len(result.Outputs) != 0 {
 		t.Fatalf("RunJob() partial outputs = %#v, want none before first sorted error", result.Outputs)
+	}
+}
+
+func TestLivePortableSetupActions(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
+		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to execute public setup actions with anonymous downloads")
+	}
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "portable-setup.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+          token: ""
+      - run: node --version | grep '^v24\.'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+          token: ""
+      - run: go version | grep 'go1\.26\.5 '
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := source.NewResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(filepath.Join(t.TempDir(), "actions"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlansContext(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource: compiler.PublicActionSource{
+			Resolver: resolver,
+			Store:    store,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV3 || len(plans[0].Actions) != 2 {
+		t.Fatalf("portable setup plans = %#v", plans)
+	}
+	if got := plans[0].Steps[0].With["node-version"]; got != "24" {
+		t.Fatalf("setup-node plan input = %q, want 24", got)
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).RunJob(ctx, plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\nlogs:\n%s", result, err, logs.String())
 	}
 }
 
@@ -1518,7 +2367,7 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 		t.Fatalf("RunJob() error = %v, want explicit remote action error", err)
 	}
 
-	for _, using := range []string{"node20", "future"} {
+	for _, using := range []string{"future"} {
 		t.Run(using, func(t *testing.T) {
 			workspace := t.TempDir()
 			workflowPath := ".github/workflows/test.yml"
@@ -1529,6 +2378,27 @@ func TestRunJobRejectsWorkflowMismatchAndUnsupportedAction(t *testing.T) {
 				t.Fatalf("RunJob() error = %v, want %s fail-closed boundary", err, using)
 			}
 		})
+	}
+}
+
+func remoteLifecycleLockID(index int) string {
+	return fmt.Sprintf("a-%016x", index)
+}
+
+func remoteLifecycleUses(path string) string {
+	return "owner/repo/" + path + "@v1"
+}
+
+func remoteLifecycleLock(id, path, digest string, children map[string]plan.ActionSelector) plan.ActionLock {
+	return plan.ActionLock{
+		ID:           id,
+		Source:       "github",
+		Repository:   "owner/repo",
+		RequestedRef: "v1",
+		Commit:       strings.Repeat("a", 40),
+		Path:         path,
+		SourceDigest: digest,
+		Children:     children,
 	}
 }
 

@@ -2,6 +2,8 @@ package buildkite
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +95,72 @@ func TestEmitGolden(t *testing.T) {
 	}
 }
 
+func TestEmitManagedNodeRuntimes(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "trusted-importer",
+		DistributionDigest: testDigest("distribution"),
+		NodeRuntimeDigests: map[int]string{24: testDigest("node 24"), 20: testDigest("node 20")},
+		Jobs:               []Job{{Key: "job", Label: "Job", Queue: "queue", PlanDigest: testDigest("plan")}},
+	}
+	first, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("runtime emission was not deterministic")
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(first, &document); err != nil {
+		t.Fatal(err)
+	}
+	command := document.Steps[0].Command
+	path20, _ := NodeRuntimePath(20, pipeline.NodeRuntimeDigests[20])
+	path24, _ := NodeRuntimePath(24, pipeline.NodeRuntimeDigests[24])
+	if strings.Index(command, path20) >= strings.Index(command, path24) {
+		t.Fatalf("Node runtimes are not sorted by major:\n%s", first)
+	}
+	for major, path := range map[int]string{20: path20, 24: path24} {
+		archive := "node" + fmt.Sprint(major) + "_archive"
+		if !strings.Contains(command, "artifact download '"+path+`' "$bootstrap_dir" --step 'trusted-importer'`) ||
+			!strings.Contains(command, `sha256sum "$`+archive+`"`) ||
+			!strings.Contains(command, `gzip -dc "$`+archive+`" > "$node`+fmt.Sprint(major)+`"`) ||
+			!strings.Contains(command, `chmod 0500 "$node`+fmt.Sprint(major)+`"`) ||
+			!strings.Contains(command, `export BUILDKITE_GHA_NODE`+fmt.Sprint(major)+`="$node`+fmt.Sprint(major)+`"`) {
+			t.Fatalf("Node %d bootstrap is incomplete:\n%s", major, first)
+		}
+	}
+	if strings.Count(command, "--step 'trusted-importer'") != 4 {
+		t.Fatalf("all downloads are not attributed to the importer:\n%s", first)
+	}
+}
+
+func TestNodeRuntimePathValidation(t *testing.T) {
+	digest := testDigest("node")
+	path, err := NodeRuntimePath(24, digest)
+	if err != nil || path != ".buildkite-gha/runtimes/node24/"+strings.TrimPrefix(digest, "sha256:")+"/node.gz" {
+		t.Fatalf("NodeRuntimePath() = %q, %v", path, err)
+	}
+	for _, test := range []struct {
+		major  int
+		digest string
+	}{
+		{major: 18, digest: digest},
+		{major: 24, digest: "sha256:nope"},
+	} {
+		if _, err := NodeRuntimePath(test.major, test.digest); err == nil {
+			t.Fatalf("NodeRuntimePath(%d, %q) succeeded", test.major, test.digest)
+		}
+	}
+}
+
 func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 	digest := testDigest("plan")
 	tests := []struct {
@@ -140,8 +208,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 5 {
-		t.Fatalf("default pipeline = %#v, want four gated probe loaders and repository checks", document.Steps)
+	if len(document.Steps) != 6 {
+		t.Fatalf("default pipeline = %#v, want five gated probe loaders and repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -167,6 +235,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["phase-3-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml" || got.condition != `build.env("PHASE3_PROBE") == "concurrent"` {
 		t.Fatalf("Phase 3 upload loader = %#v", got)
+	}
+	if got := steps["phase-4-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml" || got.condition != `build.env("PHASE4_PROBE") == "actions"` {
+		t.Fatalf("Phase 4 upload loader = %#v", got)
 	}
 }
 
@@ -323,6 +394,96 @@ func TestPhase3UploadProofPreservesSeparateContinuationLoader(t *testing.T) {
 	dependency := continuation.Steps[0].DependsOn[0]
 	if dependency.Step != "gha-observe" || !dependency.AllowFailure {
 		t.Fatalf("Phase 3 continuation dependency = %#v", dependency)
+	}
+}
+
+func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-4-upload.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var publicEvent struct {
+		Repository struct {
+			Owner string `json:"owner"`
+			Name  string `json:"name"`
+		} `json:"repository"`
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(eventSource, &publicEvent); err != nil {
+		t.Fatal(err)
+	}
+	workflowSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "phase4", ".github", "workflows", "public-actions.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowText := string(workflowSource)
+	if publicEvent.Repository.Owner != "actions" || publicEvent.Repository.Name != "checkout" || !strings.Contains(workflowText, "uses: actions/checkout@"+publicEvent.SHA) || !strings.Contains(workflowText, `test "$(git rev-parse HEAD)" = "`+publicEvent.SHA+`"`) {
+		t.Fatalf("Phase 4 public checkout identity drifted: event=%#v workflow=%s", publicEvent, workflowSource)
+	}
+	for _, required := range []string{
+		`scripts/phase-0-shell-oracle-checkout "$$PHASE4_COMMIT"`,
+		`test -z "$$(git status --porcelain --untracked-files=all)"`,
+		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
+		`version: "2026.5.12"`,
+		`runtime_version="0.0.0-phase4.$${PHASE4_COMMIT}"`,
+		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
+		`mise exec -- go run ./internal/harness/cmd/phase4-upload`,
+		`--event-path testdata/phase4/events/public-checkout.json`, `--runtime "$$distribution_root/buildkite-gha"`,
+		`--runtime-version "$$runtime_version"`, `--runtime-queue hosted`,
+		`--node24 "$$(mise where node@24)/bin/node"`, `--commit ` + publicEvent.SHA,
+		`testdata/phase4/.github/workflows/public-actions.yml`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Phase 4 upload proof lacks %q:\n%s", required, source)
+		}
+	}
+	var upload struct {
+		Steps []struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+			Agents                 struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-4-upload-importer" || upload.Steps[0].Agents.Queue != "elastic-runners" {
+		t.Fatalf("Phase 4 upload proof = %#v", upload.Steps)
+	}
+	loader := upload.Steps[1]
+	if loader.Key != "phase-4-continuation-loader" || loader.DependsOn != "phase-4-upload-importer" || !loader.AllowDependencyFailure || loader.Agents.Queue != "elastic-runners" || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-4-upload-continuation.yml" {
+		t.Fatalf("Phase 4 continuation loader = %#v", loader)
+	}
+	continuationSource, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", "phase-4-upload-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var continuation struct {
+		Steps []struct {
+			Key       string `yaml:"key"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+			Agents struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(continuation.Steps) != 1 || continuation.Steps[0].Key != "phase-4-native-after-actions" || continuation.Steps[0].Agents.Queue != "elastic-runners" || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != "gha-public-actions" || !continuation.Steps[0].DependsOn[0].AllowFailure {
+		t.Fatalf("Phase 4 continuation = %#v", continuation.Steps)
 	}
 }
 

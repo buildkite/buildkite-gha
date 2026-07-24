@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ type Metadata struct {
 	Path        string            `yaml:"-"`
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description"`
+	Author      string            `yaml:"author"`
 	Inputs      map[string]Input  `yaml:"inputs"`
 	Outputs     map[string]Output `yaml:"outputs"`
 	Runs        Runs              `yaml:"runs"`
@@ -64,12 +66,17 @@ type CompositeStep struct {
 	WorkingDirectory string            `yaml:"working-directory"`
 	Env              map[string]string `yaml:"env"`
 	If               string            `yaml:"if"`
+	With             map[string]string `yaml:"with"`
 }
 
 // Runtime identifies one supported action execution model.
 type Runtime string
 
 const (
+	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
+	MaxNestedActionDepth = 10
+	// RuntimeNode20 executes a JavaScript action with managed Node 20.
+	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
 	// RuntimeComposite executes a composite action.
@@ -123,6 +130,16 @@ func Load(root, path string) (Metadata, error) {
 	}
 
 	metadata := Metadata{Path: actionPath}
+	var document yaml.Node
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
+	}
+	if err := rejectCompositeControls(metadataPath, &document); err != nil {
+		return Metadata{}, err
+	}
+	if err := validateCompositeSteps(metadataPath, &document); err != nil {
+		return Metadata{}, err
+	}
 	decoder := yaml.NewDecoder(bytes.NewReader(source))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&metadata); err != nil {
@@ -149,10 +166,108 @@ func Load(root, path string) (Metadata, error) {
 	return metadata, nil
 }
 
+func rejectCompositeControls(path string, document *yaml.Node) error {
+	node := document
+	if node.Kind == yaml.DocumentNode && len(node.Content) != 0 {
+		node = node.Content[0]
+	}
+	runs := mappingValue(node, "runs")
+	using := mappingValue(runs, "using")
+	if using == nil || using.Value != string(RuntimeComposite) {
+		return nil
+	}
+	steps := mappingValue(runs, "steps")
+	if steps == nil || steps.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for i, step := range steps.Content {
+		id := ""
+		if idNode := mappingValue(step, "id"); idNode != nil {
+			id = idNode.Value
+		}
+		for _, control := range []string{"background", "wait", "wait-all", "cancel", "parallel"} {
+			if controlNode := mappingKeyNode(step, control); controlNode != nil {
+				owner := fmt.Sprintf("child %d", i+1)
+				if id != "" {
+					owner += fmt.Sprintf(" (id %q)", id)
+				}
+				return fmt.Errorf("parse action metadata %q:%d:%d: composite %s declares unsupported control %q", path, controlNode.Line, controlNode.Column, owner, control)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCompositeSteps(path string, document *yaml.Node) error {
+	node := document
+	if node.Kind == yaml.DocumentNode && len(node.Content) != 0 {
+		node = node.Content[0]
+	}
+	runs := mappingValue(node, "runs")
+	using := mappingValue(runs, "using")
+	if using == nil || using.Value != string(RuntimeComposite) {
+		return nil
+	}
+	steps := mappingValue(runs, "steps")
+	if steps == nil || steps.Kind != yaml.SequenceNode {
+		return nil
+	}
+	ids := make(map[string]struct{}, len(steps.Content))
+	for i, step := range steps.Content {
+		run := mappingKeyNode(step, "run")
+		uses := mappingKeyNode(step, "uses")
+		switch {
+		case run != nil && uses != nil:
+			return fmt.Errorf("parse action metadata %q:%d:%d: composite child %d declares both run and uses", path, uses.Line, uses.Column, i+1)
+		case run == nil && uses == nil:
+			return fmt.Errorf("parse action metadata %q:%d:%d: composite child %d has no run or uses execution", path, step.Line, step.Column, i+1)
+		case run != nil && mappingKeyNode(step, "with") != nil:
+			with := mappingKeyNode(step, "with")
+			return fmt.Errorf("parse action metadata %q:%d:%d: composite run child %d may not declare with", path, with.Line, with.Column, i+1)
+		}
+		id := mappingValue(step, "id")
+		if id == nil || id.Value == "" {
+			continue
+		}
+		key := strings.ToLower(id.Value)
+		if _, exists := ids[key]; exists {
+			return fmt.Errorf("parse action metadata %q:%d:%d: duplicate case-insensitive composite child id %q", path, id.Line, id.Column, key)
+		}
+		ids[key] = struct{}{}
+	}
+	return nil
+}
+
+func mappingValue(node *yaml.Node, name string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == name {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func mappingKeyNode(node *yaml.Node, name string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == name {
+			return node.Content[i]
+		}
+	}
+	return nil
+}
+
 // Runtime classifies the action execution model and rejects unsupported values
 // so compilation and execution share one support boundary.
 func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
+	case string(RuntimeNode20):
+		return RuntimeNode20, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
 	case string(RuntimeComposite):
@@ -162,6 +277,45 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	default:
 		return "", fmt.Errorf("unsupported runtime %q", metadata.Runs.Using)
 	}
+}
+
+// ValidateEntrypoints confines JavaScript lifecycle programs to the verified
+// action source tree and requires each declared entry point to be a regular
+// file. Callers should invoke this after Runtime.
+func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
+	if runtime != RuntimeNode20 && runtime != RuntimeNode24 {
+		return nil
+	}
+	if metadata.Runs.Main == "" {
+		return fmt.Errorf("JavaScript action has no main entry point")
+	}
+	for _, lifecycle := range []struct{ phase, entry string }{
+		{phase: "pre", entry: metadata.Runs.Pre},
+		{phase: "main", entry: metadata.Runs.Main},
+		{phase: "post", entry: metadata.Runs.Post},
+	} {
+		phase, entry := lifecycle.phase, lifecycle.entry
+		if entry == "" {
+			continue
+		}
+		clean := path.Clean(entry)
+		if path.IsAbs(entry) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(entry, "\\") {
+			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
+		}
+		folded := strings.ToLower(clean)
+		if folded == ".git" || strings.HasPrefix(folded, ".git/") {
+			return fmt.Errorf("JavaScript action %s entry point %q is excluded from verified action source", phase, entry)
+		}
+		candidate := filepath.Join(metadata.Path, filepath.FromSlash(clean))
+		info, err := os.Stat(candidate)
+		if err != nil {
+			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("JavaScript action %s entry point %q is not a regular file", phase, entry)
+		}
+	}
+	return nil
 }
 
 // RequiredCapabilities returns the plan capabilities needed by the runtime.

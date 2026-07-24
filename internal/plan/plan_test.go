@@ -1,10 +1,14 @@
 package plan
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 func TestDecodePreservesEnvelopeFixtureContract(t *testing.T) {
@@ -179,6 +183,289 @@ func TestRequiredSecretsRequireCapability(t *testing.T) {
 	job.RequiredSecrets = []string{"TOKEN"}
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "secrets capability") {
 		t.Fatalf("Validate() error = %v, want capability binding", err)
+	}
+}
+
+func TestV3ActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV3
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{
+		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
+		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reencoded, err := Encode(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != string(reencoded) {
+		t.Fatalf("v3 encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
+	}
+
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v3.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV3, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v3 plan does not validate against schema: %v", err)
+	}
+}
+
+func TestV3RemoteNestedActionLocks(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	commit := strings.Repeat("c", 40)
+	job := validJob()
+	job.Schema = SchemaV3
+	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"owner/repo/root/child@v1": {Lock: "a-0000000000000002"}}},
+		{ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root/child", SourceDigest: digest},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	job.Actions[1].Path = "other"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "remote child does not match lock identity") {
+		t.Fatalf("Validate() error = %v, want nested remote identity rejection", err)
+	}
+}
+
+func TestV3ActionLockValidationMatrix(t *testing.T) {
+	remote := func() Job {
+		job := validJob()
+		job.Schema = SchemaV3
+		job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "Owner/Repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
+		return job
+	}
+	if err := remote().Validate(); err != nil {
+		t.Fatalf("case-insensitive requested repository should match canonical lock: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{"uppercase canonical repository", func(j *Job) { j.Actions[0].Repository = "Owner/repo" }, "invalid GitHub identity"},
+		{"ref case is exact", func(j *Job) { j.Steps[0].Uses = "owner/repo/root@V1" }, "does not match"},
+		{"path case is exact", func(j *Job) { j.Steps[0].Uses = "owner/repo/Root@v1" }, "does not match"},
+		{"malformed step selector", func(j *Job) { j.Steps[0].Action.Lock = "bad" }, "malformed action selector"},
+		{"malformed child selector", func(j *Job) { j.Actions[0].Children = map[string]ActionSelector{"owner/other@v1": {Lock: "bad"}} }, "invalid child selector"},
+		{"unsorted IDs", func(j *Job) {
+			j.Actions = append([]ActionLock{{ID: "a-0000000000000002", Source: "workspace", Path: "x", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}, j.Actions...)
+		}, "sorted IDs"},
+		{"invalid digest", func(j *Job) { j.Actions[0].SourceDigest = "sha256:no" }, "invalid digest"},
+		{"invalid commit", func(j *Job) { j.Actions[0].Commit = "abc" }, "invalid GitHub identity"},
+		{"segment over byte limit", func(j *Job) { j.Actions[0].Path = strings.Repeat("x", 256) }, "invalid GitHub identity"},
+		{"path control", func(j *Job) { j.Actions[0].Path = "x\ny" }, "invalid GitHub identity"},
+		{"path invalid utf8", func(j *Job) { j.Actions[0].Path = string([]byte{0xff}) }, "invalid GitHub identity"},
+		{"unused lock", func(j *Job) {
+			j.Actions = append(j.Actions, ActionLock{ID: "a-0000000000000002", Source: "workspace", Path: "x", SourceDigest: "sha256:" + strings.Repeat("a", 64)})
+		}, "unused"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := remote()
+			tt.edit(&job)
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestV3LocalChildPreservesParentIdentity(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV3
+	digest := "sha256:" + strings.Repeat("a", 64)
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./root", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{ID: "a-0000000000000001", Source: "workspace", Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}}},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: digest},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	job.Actions[1].Path = "root/child"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not match workspace action identity") {
+		t.Fatalf("Validate() error = %v, want workspace-root child path rejection", err)
+	}
+	job.Actions[1].Path = "child"
+	job.Actions[1].SourceDigest = "sha256:" + strings.Repeat("b", 64)
+	if err := job.Validate(); err != nil {
+		t.Fatalf("workspace child may bind its own action tree digest: %v", err)
+	}
+}
+
+func TestV3RemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV3
+	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{
+		{
+			ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1",
+			Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("a", 64),
+			Children: map[string]ActionSelector{"./child": {Lock: "a-0000000000000002"}},
+		},
+		{ID: "a-0000000000000002", Source: "workspace", Path: "child", SourceDigest: "sha256:" + strings.Repeat("b", 64)},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	job.Actions[1] = ActionLock{
+		ID: "a-0000000000000002", Source: "github", Repository: "owner/repo", RequestedRef: "v1",
+		Commit: strings.Repeat("c", 40), Path: "child", SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not match workspace action identity") {
+		t.Fatalf("Validate() error = %v, want downloaded-source substitution rejection", err)
+	}
+}
+
+func TestV3ActionSelectorsAndPathsFailClosed(t *testing.T) {
+	local := func() Job {
+		job := validJob()
+		job.Schema = SchemaV3
+		job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+		return job
+	}
+	tests := []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing selector", edit: func(j *Job) { j.Steps[0].Action = nil }, want: "has no action selector"},
+		{name: "missing lock", edit: func(j *Job) { j.Steps[0].Action.Lock = "a-0000000000000002" }, want: "missing lock"},
+		{name: "action on run", edit: func(j *Job) {
+			j.Steps[0] = Step{ID: "run", Kind: "run", Command: "true", Action: &ActionSelector{Lock: "a-0000000000000001"}}
+		}, want: "incompatible action"},
+		{name: "action on control", edit: func(j *Job) {
+			j.Steps[0] = Step{ID: "wait", Kind: "wait-all", Action: &ActionSelector{Lock: "a-0000000000000001"}}
+		}, want: "incompatible execution"},
+		{name: "local identity mismatch", edit: func(j *Job) { j.Steps[0].Uses = "./actions/other" }, want: "does not match"},
+		{name: "absolute path", edit: func(j *Job) { j.Actions[0].Path = "/actions/build" }, want: "invalid workspace identity"},
+		{name: "backslash path", edit: func(j *Job) { j.Actions[0].Path = `actions\build` }, want: "invalid workspace identity"},
+		{name: "dot segment", edit: func(j *Job) { j.Actions[0].Path = "actions/../build" }, want: "invalid workspace identity"},
+		{name: "oversized uses", edit: func(j *Job) { j.Steps[0].Uses = "./" + strings.Repeat("a", 1023) }, want: "exceeds 1024 bytes"},
+		{name: "unsupported source", edit: func(j *Job) { j.Actions[0].Source = "other" }, want: "unsupported source"},
+		{name: "too many locks", edit: func(j *Job) { j.Actions = make([]ActionLock, 1025) }, want: "more than 1024"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := local()
+			test.edit(&job)
+			if err := job.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestV3WorkspaceRootActionAndSharedChildDAG(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV3
+	digest := "sha256:" + strings.Repeat("a", 64)
+	job.Steps = []Step{{ID: "root", Kind: "uses", Uses: "./", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	children := make(map[string]ActionSelector, 256)
+	base := "manyletters/repository@v1"
+	for i := range 256 {
+		variant := []byte(base)
+		for bit := 0; bit < 8; bit++ {
+			if i&(1<<bit) != 0 {
+				variant[bit] -= 'a' - 'A'
+			}
+		}
+		children[string(variant)] = ActionSelector{Lock: "a-0000000000000002"}
+	}
+	job.Actions = []ActionLock{
+		{ID: "a-0000000000000001", Source: "workspace", SourceDigest: digest, Children: children},
+		{ID: "a-0000000000000002", Source: "github", Repository: "manyletters/repository", RequestedRef: "v1", Commit: strings.Repeat("b", 40), SourceDigest: "sha256:" + strings.Repeat("c", 64)},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatalf("workspace-root action with shared-child DAG rejected: %v", err)
+	}
+}
+
+func TestV3ActionLockGraphDepthAndCycles(t *testing.T) {
+	chain := func(count int) Job {
+		job := validJob()
+		job.Schema = SchemaV3
+		job.Steps = []Step{{ID: "root", Kind: "uses", Uses: "./action-" + leftPadHex(0), Action: &ActionSelector{Lock: "a-0000000000000000"}}}
+		job.Actions = make([]ActionLock, count)
+		for i := range count {
+			id := "a-" + leftPadHex(i)
+			path := "child"
+			if i == 0 {
+				path = "action-" + leftPadHex(i)
+			}
+			job.Actions[i] = ActionLock{ID: id, Source: "workspace", Path: path, SourceDigest: "sha256:" + strings.Repeat(string(rune('a'+i%6)), 64)}
+			if i+1 < count {
+				job.Actions[i].Children = map[string]ActionSelector{"./child": {Lock: "a-" + leftPadHex(i+1)}}
+			}
+		}
+		return job
+	}
+	exact := chain(metadata.MaxNestedActionDepth)
+	if err := exact.Validate(); err != nil {
+		t.Fatalf("exact maximum depth rejected: %v", err)
+	}
+	over := chain(metadata.MaxNestedActionDepth + 1)
+	if err := over.Validate(); err == nil || !strings.Contains(err.Error(), "exceeds maximum depth") {
+		t.Fatalf("overflow depth error = %v", err)
+	}
+	cyclic := chain(2)
+	cyclic.Actions[1].Children = map[string]ActionSelector{"./action-" + leftPadHex(0): {Lock: cyclic.Actions[0].ID}}
+	if err := cyclic.Validate(); err == nil || !strings.Contains(err.Error(), "contains a cycle") {
+		t.Fatalf("cycle error = %v", err)
+	}
+}
+
+func leftPadHex(value int) string {
+	const hex = "0123456789abcdef"
+	encoded := make([]byte, 16)
+	for i := len(encoded) - 1; i >= 0; i-- {
+		encoded[i] = hex[value&15]
+		value >>= 4
+	}
+	return string(encoded)
+}
+
+func TestLegacySchemasRejectActionFields(t *testing.T) {
+	encoded, err := Encode(validJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		strings.Replace(string(encoded), `"steps":`, `"actions":[],"steps":`, 1),
+		strings.Replace(string(encoded), `"kind": "run",`, `"kind": "run","action":{"lock":"a-0000000000000001"},`, 1),
+	} {
+		if _, err := Decode([]byte(field)); err == nil || !strings.Contains(err.Error(), "not supported by legacy schemas") {
+			t.Fatalf("Decode() error = %v, want closed legacy contract rejection", err)
+		}
 	}
 }
 

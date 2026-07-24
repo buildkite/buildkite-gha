@@ -79,6 +79,28 @@ Every imported workflow is a normal Buildkite build. Buildkite owns the job
 graph and displays the live job logs. There is no shadow GitHub workflow run to
 reconcile and no requirement to visit GitHub to understand progress.
 
+### Event identity and capability issuance are the security boundary
+
+GitHub Actions does not isolate `run` and `uses` steps from each other inside a
+job. Both execute arbitrary code with the authority available to that job. Its
+meaningful security boundary is the GitHub control plane, which authenticates
+the repository event and decides which job-scoped tokens, secrets, OIDC claims,
+environments, and runners that event may use.
+
+Buildkite dynamic pipeline upload is likewise ordinary pipeline authority, not
+a weaker class of job merely because the pipeline was generated. Public,
+anonymous, tokenless actions may run on an ambient-clean fixed hosted queue
+without a privileged compiler, plan signer, or supporting service. They have no
+more authority than a shell step that downloads and executes public code.
+
+Protected capabilities are different. A plan may request a GitHub token,
+private source, secret, environment grant, privileged queue, or compatible OIDC
+identity, but it cannot authorize that request with its own event fields. A
+future control-plane service authenticates the requesting job with Buildkite Job
+OIDC, verifies provider provenance and customer policy, and issues a narrow,
+short-lived capability grant. Compilation and plan transport remain separate
+from that authorization decision.
+
 ### Compile jobs; interpret steps
 
 Translate workflow-level and job-level constructs into Buildkite primitives
@@ -183,8 +205,9 @@ buildkite-gha run-job --plan .buildkite-gha/plans/<digest>.json
 
 `--provider <name>` switches positional workflow paths to repository-relative
 provider paths resolved at the attested event SHA. Without `--provider`, paths
-are local files and compilation is unprivileged unless another authenticated
-event source is configured.
+are local files and the supplied event is unattested. An unattested event can
+drive tokenless execution on an allowed queue, but cannot authorize a protected
+capability.
 
 `compile` must not mutate the current build. It is suitable for local review,
 golden tests, and:
@@ -200,29 +223,34 @@ bootstrap job if either operation fails.
 
 ### Initial Buildkite pipeline
 
-A customer can start with:
+A tokenless customer can start with an ordinary dynamic upload step. This
+example assumes the workflow and event snapshot have been materialized as
+inert local inputs:
 
 ```yaml
 steps:
   - label: ":github: Load existing CI workflow"
     key: "gha-ci"
     agents:
-      queue: "gha-compiler"
-    checkout:
-      skip: true
+      queue: "hosted"
     command: >-
       buildkite-gha upload
-      --provider github
+      --event-path .buildkite/events/current.json
+      --runtime-queue hosted
       .github/workflows/ci.yml
 ```
 
-With checkout skipped, the workflow path is repository-relative and the
-provider adapter reads it at the attested event SHA; it is not a path in an
-agent checkout. The `gha-compiler` queue runs the pinned distribution with
-local repository hooks and plugins disabled. `upload` refuses to sign plans if
-it cannot attest that compiler identity and environment. A plain command step
-outside this contract can run only the explicit unsigned, tokenless,
-unprivileged development mode.
+This importer is authoritative in the same sense as any other Buildkite dynamic
+pipeline generator. It should use a pinned distribution, fixed queue policy,
+bounded inert inputs, and generated jobs without ambient protected credentials.
+It does not need a signer merely to upload tokenless jobs. If the workflow asks
+for a protected capability, `upload` fails unless the installation has a valid
+control-plane grant for that exact build and plan.
+
+A future provider-backed mode may skip checkout and read the workflow through a
+data-only provider adapter at an authenticated event SHA. Private reads in that
+mode are brokered capabilities; the compiler must not receive a broad reusable
+provider credential.
 
 An existing native step can depend on the importer:
 
@@ -231,12 +259,11 @@ steps:
   - label: ":github: Load existing CI workflow"
     key: "gha-ci"
     agents:
-      queue: "gha-compiler"
-    checkout:
-      skip: true
+      queue: "hosted"
     command: >-
       buildkite-gha upload
-      --provider github
+      --event-path .buildkite/events/current.json
+      --runtime-queue hosted
       .github/workflows/ci.yml
 
   - label: ":rocket: Native deployment"
@@ -413,28 +440,24 @@ compiler serializes one canonical context snapshot into each job plan. The job
 runtime must not independently infer a different `github.ref`, SHA, actor, or
 event payload.
 
-The snapshot must carry authenticated provenance before it can authorize
-secrets, provider tokens, a privileged queue, or privileged containers. For the
-initial implementation, compilation and plan signing run on a trusted compiler
-queue, using a pinned verified `buildkite-gha` distribution and a signing key
-that workflow code cannot access. The runtime verifies the signed envelope
-against a configured trust root and independently applies current queue, event,
-secret, and container policy. A digest detects accidental corruption but is not
-an authenticity boundary.
-
-If a provider later supplies a signed event envelope directly, the compiler may
-preserve that provenance instead of asserting it itself. An unattested
-`--event-path` is suitable for local validation and tokenless, unprivileged
-execution only; it must fail closed when the requested job needs a protected
-capability.
+The snapshot is compatibility data, not self-authenticating authority. Its
+digest detects substitution and keeps compile-time and runtime contexts
+consistent, but a plan cannot make its event trustworthy by declaring a trust
+classification. An unattested `--event-path` is suitable for local validation
+and tokenless execution. Any request for a protected capability must be checked
+against authenticated Buildkite job identity and independently verified
+provider provenance.
 
 The provider interface owns:
 
 - repository and event metadata;
 - source and action reference resolution;
 - authenticated clone/archive access;
-- provider API token issuance; and
+- the provider facts required by capability policy; and
 - provider-specific URL/context fields.
+
+Provider API token issuance belongs to the protected capability control plane,
+not the parser or source abstraction.
 
 Implement GitHub first, but keep Cursor Origin behind the same interface from
 the start.
@@ -444,6 +467,53 @@ used during compilation for matrices, conditions, and `runs-on`. Support a
 documented precedence across bridge configuration, Buildkite pipeline/build
 environment, and provider repository/organization variables. Snapshot the
 resolved values into the plan so compile-time and runtime expressions agree.
+
+### Protected capability control plane
+
+Public, anonymous, tokenless workflows have no control-plane dependency. A
+supporting service is introduced only for capabilities that ordinary pipeline
+code cannot already access. The service authenticates every caller with a
+short-lived Buildkite Job OIDC token whose audience is exactly the service. It
+validates the Buildkite issuer and JWKS, time bounds, immutable organization,
+pipeline, build, and job IDs, step identity, runner environment, cluster, and
+queue as required by policy.
+
+Buildkite OIDC proves which Buildkite job is asking. It does not by itself prove
+the complete GitHub event type, actor, fork relationship, workflow source, or
+environment approval. The service must obtain those facts independently. The
+strongest integration receives GitHub App webhooks, records their verified
+payload and the Buildkite build it creates, then joins a later Job OIDC
+`build_id` to that event. An initial implementation may query and cross-check
+Buildkite and GitHub APIs, but must document any event-fidelity gap and deny
+claims it cannot establish.
+
+The compiler submits the canonical plan digest and its requested capabilities.
+After evaluating customer policy and provider facts, the service may return a
+signed, expiring grant bound to the immutable Buildkite and provider identities,
+plan digest, target jobs, queue, exact capability set, audience, and policy
+version. Effective authority is the intersection of:
+
+```text
+workflow request
+∩ organization policy
+∩ provider event policy
+∩ provider installation permissions
+∩ queue policy
+```
+
+The service may then broker narrowly scoped GitHub App installation tokens,
+private repository or action access, selected secrets, environment grants, or
+explicitly supported compatible OIDC credentials. Direct Buildkite OIDC is
+preferred for cloud providers that can trust `https://agent.buildkite.com`. A
+compatibility issuer must use its own issuer and only emit claims established by
+the service; it must never impersonate GitHub's OIDC issuer.
+
+This service does not compile workflows, upload pipelines, schedule jobs,
+interpret ordinary tokenless plans, provide per-step isolation, or make public
+action code trustworthy. It is not a replacement for Buildkite pipeline
+signing. It is the authorization and audit boundary for protected capabilities,
+with explicit expiry, revocation, key rotation, abuse controls, and fail-closed
+behavior.
 
 ### Versioned job plan
 
@@ -466,53 +536,51 @@ contains no secret values and includes:
 - declared job outputs; and
 - compatibility capabilities required by the runtime.
 
-Plans should be canonical JSON with a content digest inside a signed envelope
-that binds the plan digest, compiler version, build identity, event provenance,
-workflow digest, trust classification, deterministic target step key, permitted
-queue and capability ceiling, and expiry. The compile job uploads the envelopes
-as namespaced Buildkite artifacts before the generated jobs become eligible.
-Each generated job downloads its plan from the known compiler step, verifies
-the signature, build binding, digest, expiry, schema version, and that the
-envelope's step key and queue match the executing Buildkite job before resolving
-any capability, then invokes `run-job`. A plan produced by an untrusted or
-unverifiable compiler is never promoted into a privileged runtime merely
-because its digest matches.
+Plans are canonical JSON with content digests. The upload job publishes them as
+namespaced, producer-attributed Buildkite artifacts before generated jobs become
+eligible. Each generated job downloads its plan from the exact importer,
+verifies the digest, schema, build, job, step, queue, and compiler/runtime
+binding, then invokes `run-job`. These checks protect transport and prevent a
+job from accidentally consuming another job's plan; they do not grant protected
+authority.
+
+A plan lists requested capabilities. Before resolving any protected capability,
+the runtime must additionally present its own Buildkite Job OIDC identity and a
+matching signed control-plane grant. The grant, not a self-declared plan event or
+the fact that a compiler signed bytes, authorizes the request. Signed plan
+envelopes remain useful as optional integrity evidence and as a Phase 0
+conformance mechanism, but are not required for public tokenless execution and
+must not substitute for capability authorization.
 
 Do not put complete plans into command-line arguments, environment variables,
 or build metadata. They can exceed operating-system and Buildkite metadata
 limits and are difficult to audit safely.
 
-### Trusted bootstrap boundary
+### Dynamic upload and bootstrap boundary
 
-Treat the bootstrap job as security-sensitive infrastructure because any
-running Buildkite job can request a dynamic pipeline upload. The first
-supported bootstrap contract is:
+The bootstrap job has the ordinary authority Buildkite grants every dynamic
+pipeline generator: it can add executable steps to its build. That makes it
+security-relevant, but not a separate cryptographic principal. The supported
+bootstrap contract is:
 
-- run a pinned, checksummed `buildkite-gha` distribution on a dedicated trusted
-  compiler queue;
-- use a non-exportable plan-envelope signer, such as a narrowly scoped KMS or
-  signing broker, so the parsing process can request a signature but cannot read
-  signing key material;
-- distribute verification-only trust roots to runtime queues and define key
-  rotation and revocation as part of the installer contract;
-- obtain workflow and action metadata as inert input without running repository
-  hooks, plugins, generated scripts, or repository-provided binaries;
-- provide no workflow-readable secrets or write-capable provider token to the
-  compiler; a short-lived, least-privilege read credential may be brokered for
-  private source and action resolution, must be registered with the Agent
-  redactor before output, and must never enter plans, envelopes, emitted YAML,
-  or diagnostics;
-- emit fixed `run-job` commands whose queue, plugins, containers, and
-  capabilities are selected through trusted policy rather than copied directly
-  from workflow text;
-- reject compilation when the bootstrap identity, event provenance, signing
-  capability, or target queue policy cannot be established.
+- run a pinned, checksummed `buildkite-gha` distribution;
+- obtain workflow and action metadata as bounded inert input without executing
+  repository hooks, plugins, generated scripts, or repository-provided
+  binaries during data-only provider reads;
+- provide no ambient protected credentials to tokenless importer or runtime
+  queues;
+- emit fixed `run-job` commands whose queue, plugins, containers, and requested
+  capabilities are selected through fail-closed policy rather than copied
+  directly from workflow text;
+- bind every content-addressed plan to the generated job and exact importer;
+  and
+- reject protected capability requests unless a matching control-plane grant
+  can be established by the execution job.
 
-Buildkite signed pipelines are an optional defence-in-depth layer, not an
-initial bootstrap requirement. The first implementation relies on the signed,
-build-bound job-plan envelope for runtime authority and keeps generated
-commands fixed by trusted policy. Native signed-pipeline integration is deferred
-to hardening after the runtime and transport semantics are proven.
+Buildkite signed pipelines are an optional Buildkite-specific defence-in-depth
+layer for installations that require uploaded step provenance. They are not a
+GitHub Actions compatibility requirement, and neither pipeline signatures nor
+plan signatures replace the protected capability service.
 
 For an untrusted pull request, either fetch the workflow files through a
 data-only provider adapter or use an agent configuration that disables local
@@ -596,11 +664,13 @@ attempt selector, which also fails closed; the supported recovery for either
 case is to retry the whole build.
 
 Values that influence a trusted decision, including continuation inputs,
-native replacement validation, and retry state, must come from a
-producer-attributed artifact or carry a compiler-verifiable signature. A
-namespaced metadata key alone is insufficient because another job in the same
-build can overwrite it. Phase 0 must verify the selected attribution mechanism
-against a real build rather than assume metadata exposes writer identity.
+native replacement validation, and retry state, must come from a verified
+producer-attributed artifact. If a value can widen protected authority, it must
+instead be covered by a control-plane grant; a compiler signature alone is not
+authorization. A namespaced metadata key is insufficient because another job
+in the same build can overwrite it. Phase 0 must verify the selected
+attribution mechanism against a real build rather than assume metadata exposes
+writer identity.
 
 Record matrix-instance outputs separately for auditability and maintain the
 logical job output using GHA's completion-order, last-writer-wins behavior when
@@ -647,12 +717,12 @@ Represent these as deferred graph continuations:
 5. It publishes immutable plans and uploads the downstream Buildkite jobs with
    stable keys.
 
-Continuations run on the same trusted compiler queue under the complete
-bootstrap contract. Treat every prerequisite output as untrusted input and
-apply explicit type, size, matrix-cardinality, and expression limits before
-expansion. A continuation inherits and may only narrow the originating signed
-compilation's event trust classification, permitted queues, permissions, and
-capability ceiling; workflow-produced values cannot widen any of them.
+Continuations are ordinary authoritative dynamic uploads within the same
+Buildkite build. Treat every prerequisite output as untrusted input and apply
+explicit type, size, matrix-cardinality, and expression limits before
+expansion. Workflow-produced values cannot widen queue policy or a protected
+capability grant. Each newly generated job that needs protected authority must
+be covered by a matching grant bound to its plan and authenticated job identity.
 
 Continuations and the initial upload must use an explicit retry protocol.
 Buildkite rejects an upload when a step key already exists; deterministic keys
@@ -883,16 +953,20 @@ missing fields and the required adapter capability.
 
 ### Secrets, permissions, tokens, and untrusted changes
 
-Treat workflow compilation and job execution as separate trust boundaries.
+Treat the authenticated build event and protected capability exchange as the
+authorization boundary. Compilation parses arbitrary workflow text and records
+requests; execution runs arbitrary shell and action code with job-level
+authority.
 
-- The compiler can inspect untrusted workflow text as data but cannot execute
-  repository-owned hooks, plugins, scripts, or binaries and cannot resolve
-  secret values.
-- The compiler identity and canonical event snapshot are authenticated and
-  bound into every signed job-plan envelope.
-- The generated plan declares required secret names and permissions.
-- The runtime verifies plan provenance, then asks a Buildkite secret provider
-  for only the values independently permitted to that event and job.
+- The generated plan declares required secret names and permissions but cannot
+  authorize either one.
+- Every protected execution job authenticates to the control plane with a
+  Buildkite Job OIDC token using an exact service audience.
+- The service verifies immutable Buildkite identity, queue, provider provenance,
+  fork status, ref, commit, workflow policy, and any environment approval before
+  issuing a narrow, short-lived grant or credential.
+- The runtime verifies that the grant matches its own job, plan digest, queue,
+  requested capability, audience, and expiry before resolving a value.
 - Fork pull requests receive no privileged secrets by default.
 - An untrusted event can target only queues explicitly configured for untrusted
   code; workflow-controlled `runs-on` values cannot select a privileged queue.
@@ -902,21 +976,24 @@ Treat workflow compilation and job execution as separate trust boundaries.
 - Job outputs containing registered secret literals or explicitly supported
   standard encodings are rejected rather than published; general secret taint
   tracking is out of scope.
-- OIDC uses a Buildkite-issued identity and documented migration guidance; it
-  must not pretend to have GitHub issuer or subject claims.
+- Cloud OIDC uses a Buildkite-issued identity with documented migration guidance
+  whenever possible. A compatibility service uses its own issuer and only
+  translates claims it has independently established; it must not pretend to be
+  GitHub's issuer.
 
-Policy evaluation occurs before pipeline upload and again before runtime secret
-or privileged container access. Runtime enforcement is required because a plan
-artifact may have been produced by an older compiler or a less-trusted agent.
-Runtime policy must use verified envelope claims and trusted local
-configuration; it must never treat an unsigned plan's self-declared event or
-trust classification as authority.
+Policy may reject a request before upload, but protected authority is evaluated
+again at credential exchange. Runtime enforcement must never treat a plan's
+self-declared event, trust classification, signature, or capability list as
+sufficient authority.
 
 When GitHub is the repository provider, populate `github.token` and
-`GITHUB_TOKEN` only from an explicitly configured customer secret or a
-short-lived GitHub App installation token permitted by the event trust policy.
-Do not invent a token or silently grant write access. Validation must identify
-actions and expressions requiring a provider token when none is configured.
+`GITHUB_TOKEN` only from a repository- and permission-scoped GitHub App
+installation token brokered for the authenticated job. This approximates but
+does not duplicate native `GITHUB_TOKEN`: app identity, endpoint support,
+expiration, and event-recursion behavior can differ and must be documented. Do
+not invent a token or silently grant write access. Validation must identify
+actions and expressions requiring a provider token when no compatible grant can
+be issued.
 
 ### Installation and release model
 
@@ -930,10 +1007,10 @@ small Buildkite plugin. Every generated job must execute the same bridge version
 that produced its plan unless the plan schema explicitly permits a compatible
 newer runtime.
 
-Plan-envelope validity must cover the maximum supported build queueing and
-manual-retry window. Once an envelope expires, a job fails with a diagnostic
-that directs the operator to start a new build; an old build cannot silently
-refresh its own authority by retrying an untrusted job.
+Protected capability-grant validity must cover the intended exchange window and
+remain short-lived. Once a grant expires, the service re-evaluates current
+policy from authenticated job identity or denies the exchange; an old build
+cannot silently refresh authority from plan-controlled data.
 
 Do not download an unpinned latest binary separately in every generated job.
 
@@ -1050,7 +1127,6 @@ The first externally useful beta should support:
 - local and public remote actions resolved to immutable commits;
 - statically resolvable local reusable workflows;
 - checkout, cache, and artifact compatibility;
-- Buildkite secrets with default-deny fork policy;
 - job summaries, warnings, errors, and live masked logs; and
 - native jobs after the imported workflow.
 
@@ -1061,6 +1137,8 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - GitHub Enterprise Server;
 - all repository event types;
 - remote private reusable workflows;
+- private checkout and private actions;
+- protected secrets and GitHub token issuance;
 - dynamic matrices and other runtime graph generation;
 - job-level replacement;
 - deployment environments and approval parity;
@@ -1095,9 +1173,29 @@ Explicitly defer from beta unless implementation evidence changes the order:
   hydrate exact producer results and publish bounded terminal manifests before
   exit; the live `shell.yml` proof passed with checkout suppressed on ephemeral
   hosted agents.
+- Phase 3 is complete. The shell runtime now owns background, wait, wait-all,
+  cancel, and parallel controls through a ten-active-step supervisor. Effects
+  and failures remain barrier-scoped, workflow commands and mask registration
+  are serialized across concurrent streams, and cancellation escalates across
+  complete process groups without skipping bounded cleanup.
+- Phase 4 is implemented within the tokenless public-action boundary.
+  Action-resolved v3 plans carry immutable local and public action locks, verify
+  complete source trees, transport exact managed Node 20/24 runtimes, execute
+  nested composites and JavaScript pre/main/post lifecycle, and fail closed on
+  private sources or provider-dependent authentication. Action resolution is
+  independent of event trust; the current general `upload` command remains
+  shell-only because managed Node provisioning has not yet moved out of the
+  Phase 4 proof importer, not because public actions require plan signing.
+  Because this repository is private, live evidence is split: a synthetic
+  public event proves anonymous checkout and portable setup actions on
+  Buildkite, while the GitHub-hosted oracle and local conformance suite cover the
+  private repository's JavaScript/composite fixture. This does not claim a
+  same-workflow private checkout proof on Buildkite.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
-  and eight conformance cases define the signed plan-envelope trust contract.
+  and eight conformance cases preserve the Phase 0 signed-envelope transport
+  and tamper experiment. ADR 0002 is superseded as the production authorization
+  model by the protected capability control plane described above.
 - The second work wave is integrated: actionlint is isolated behind owned
   workflow and expression models, the compiler emits deterministic static IR
   for the smoke corpus, the differential harness materializes isolated Git
@@ -1128,8 +1226,30 @@ Explicitly defer from beta unless implementation evidence changes the order:
   an authoritative completion order.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
-  repository checks, and all three smoke compiler outputs pass the current
+  repository checks, and all four smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+
+Phase 4 live evidence:
+
+- [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
+  ran exact implementation commit
+  `9ec7df250e2e3f3afc05489b02d04ff48647df3a`. Its policy-controlled importer
+  compiled an unattested synthetic event for public `actions/checkout` commit
+  `3d3c42e5aac5ba805825da76410c181273ba90b1`; the generated hosted job fetched
+  that exact SHA anonymously, then pinned `setup-node` and `setup-go` installed
+  and verified Node 24.18.0 and Go 1.26.5. The repository check, generated job,
+  separate continuation loader, and native continuation all passed.
+- [GitHub Actions run 30059944969](https://github.com/buildkite/buildkite-gha/actions/runs/30059944969)
+  ran the same implementation commit against the private repository. Its
+  producer and consumer proved the local JavaScript/composite output chain,
+  environment propagation, state, summaries, masking registration, and post
+  lifecycle on GitHub's runner.
+- Buildkite build 72 does not claim local-action or cross-job v3 evidence: its
+  event repository intentionally differs from the repository containing the
+  compiled proof workflow. Those Buildkite runtime semantics are covered by
+  deterministic conformance tests. Build 53 documented the reason for the
+  split by failing the credential-scrubbed anonymous fetch of this private
+  repository; no private credential was added or forwarded.
 
 Phase 2 live evidence:
 
@@ -1182,7 +1302,7 @@ Phase 0 spike support snapshot:
 | Execute | Sequential Bash/sh steps; fresh workspaces; bounded prerequisite, step, and job outputs; environment, path, state, and summary files; status conditions; masking; timeouts; process-group cancellation; `continue-on-error`; and bounded LIFO post-actions | Producer result hydration still enters through the transport boundary; remote actions, nested composite actions, services/job containers, concurrent steps, and unsupported expression/coercion forms fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
-| Trust | Eight signed-envelope conformance cases plus live rejection of a corrupted signature and bounded RFC 8785 runtime bindings for build, step, queue, event, plan, and capabilities | KMS-backed plan signing, verification-only queue roots, and checkout-free hook/plugin isolation are production hardening gates; Buildkite signed-pipeline integration is optional Phase 9 work |
+| Authorization | Eight signed-envelope conformance cases plus live rejection of a corrupted signature prove bounded signing and verification mechanics only | Protected capabilities require Buildkite Job OIDC authentication, provider provenance and policy verification, narrow signed grants, runtime exchange checks, and auditability; Buildkite signed-pipeline integration remains optional Phase 9 work |
 | Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed; a live interrupted upload and retry returned exit 75 | Operator cancel/rebuild is the supported recovery until Buildkite exposes an authoritative completed-upload query |
 
 ### Phase 0 — Prove the semantic foundation (complete)
@@ -1217,8 +1337,9 @@ Build four spikes before committing to the runtime implementation:
 The Phase 0 live transport spike uses exact-commit checkouts, an intentionally
 public disposable signing key, and an unprivileged queue. It proves transport,
 binding, and rejection mechanics without claiming a production trust boundary.
-KMS-backed plan signing, verification-only roots, and checkout-free compiler
-isolation are Phase 9 gates before protected capabilities are enabled.
+Its signed plan envelope does not authorize protected capabilities. Those wait
+for the Job OIDC-authenticated control plane, provider provenance checks, and
+runtime grant exchange defined for Phase 6.
 
 Use the spikes to decide which `act` packages can be imported, which need a
 maintained fork, and which semantics should be implemented independently. Keep
@@ -1235,9 +1356,9 @@ Definition of done:
 - Interrupted-upload recovery is proven in a real build when a documented
   verification query exists; otherwise the fail-closed path and explicit
   operator recovery are proven and recorded as the supported behavior.
-- The bootstrap and plan-envelope trust chain is documented and proven with
-  tampering, replay, expiry, wrong-build, wrong-job, wrong-queue, and
-  untrusted-event fixtures.
+- Plan-envelope transport mechanics are documented and proven with tampering,
+  replay, expiry, wrong-build, wrong-job, wrong-queue, and untrusted-event
+  fixtures without claiming that they authorize protected resources.
 - The project has a written reuse/fork decision for `act`.
 - Major semantic gaps discovered by the spikes are reflected in the support
   table rather than hidden.
@@ -1316,12 +1437,12 @@ Delivery slices:
 3. Implement `buildkite-gha upload` for the explicit unprivileged local-event
    mode, materializing immutable plans before dynamically uploading the
    generated pipeline. Protected capabilities remain unavailable until the
-   Phase 9 trust installation exists.
+   control plane for that capability exists.
 4. Run `testdata/smoke/.github/workflows/shell.yml` on Buildkite, compare its
    normalized observation with the GitHub Actions oracle, exercise failure and
    cancellation cleanup, and inspect raw logs for the secret fixture.
 
-### Phase 3 — Concurrent step runtime
+### Phase 3 — Concurrent step runtime (complete)
 
 Extend the shell state machine with the shipped GitHub Actions concurrency
 contract:
@@ -1349,7 +1470,7 @@ Definition of done:
 - Cancellation reliably terminates complete process trees without skipping
   bounded post-job cleanup.
 
-### Phase 4 — JavaScript and composite actions
+### Phase 4 — JavaScript and composite actions (implemented)
 
 Implement:
 
@@ -1401,19 +1522,45 @@ Definition of done:
 - Cancellation and agent loss do not routinely leave containers or networks.
 - Privileged options are subject to explicit queue policy.
 
-### Phase 6 — Buildkite-backed core services
+### Phase 6 — Core services and protected capability control plane
 
-Provide compatibility for the most common service-backed actions:
+Deliver two explicit tracks. Tokenless Buildkite-backed adapters remain local to
+the job:
 
 - cache restore/save;
 - artifact upload/download;
-- checkout under GitHub and Cursor Origin provider adapters;
-- step summaries and annotations; and
-- scoped repository-provider tokens.
+- public checkout under GitHub and Cursor Origin provider adapters; and
+- step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
 requires an HTTP protocol, run a job-local compatibility endpoint or provide a
 well-defined adapter rather than proxying GitHub's private service.
+
+Protected provider features use the supporting control-plane service:
+
+- authenticate callers with Buildkite Job OIDC and an exact service audience;
+- bind immutable organization, pipeline, build, job, cluster, and queue IDs;
+- establish GitHub event, repository, ref, SHA, actor, and fork provenance
+  independently of plan-controlled fields;
+- evaluate organization, event, environment, queue, and requested-permission
+  policy;
+- issue signed, expiring grants bound to exact plan digests and jobs;
+- broker private checkout and action access, selected secrets, and scoped
+  GitHub App installation tokens; and
+- maintain audit records, expiry, revocation, key rotation, and fail-closed
+  behavior.
+
+Delivery slices:
+
+1. Ship tokenless cache, artifact, summary, and public-checkout adapters without
+   a service dependency.
+2. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
+   policy evaluation, and signed no-op grants before returning credentials.
+3. Add private checkout, private actions, and private reusable-workflow source
+   access through the narrowest practical credential or download interface.
+4. Add scoped GitHub tokens, selected secrets, and environment grants.
+5. Prefer direct Buildkite OIDC migration, then add only explicitly supported
+   compatibility-issuer claims for providers that cannot consume it directly.
 
 Definition of done:
 
@@ -1421,12 +1568,17 @@ Definition of done:
   producer and verifies the same contents in both consumer matrix instances on
   GitHub Actions and `buildkite-gha`.
 - Common official cache and artifact actions work without a GitHub Actions run.
-- `actions/checkout` against a private repository works with an explicitly
-  configured, least-privilege provider token.
-- Artifact and cache keys cannot cross organization/build trust boundaries
+- Artifact and cache keys cannot cross organization/build boundaries
   unexpectedly.
 - Cursor Origin checkout does not require a GitHub repository mirror.
-- The validator distinguishes portable and provider-dependent actions.
+- Private checkout and actions use repository-scoped, least-privilege access
+  without exposing a reusable service credential to the compiler.
+- A forged event, wrong build/job/queue, expired grant, broadened permission,
+  and fork-to-privileged transition all fail before a protected value is
+  returned.
+- Public tokenless workflows still run when the control-plane service is absent.
+- The validator distinguishes portable and provider-dependent actions and names
+  any unavailable protected capability.
 
 ### Phase 7 — Dynamic graph and reusable workflows
 
@@ -1473,6 +1625,8 @@ Complete:
 - archive traversal, symlink, command injection, and resource-exhaustion tests;
 - optional Buildkite signed-pipeline integration for installations that require
   uploaded step signatures;
+- protected capability service availability, abuse controls, audit retention,
+  key rotation, revocation, and external security review;
 - signed releases, checksums, provenance, and SBOMs;
 - Hosted Agent image integration;
 - the installer Buildkite plugin;
@@ -1618,7 +1772,8 @@ Security defaults:
   workflow depth, total jobs, matrix size, output size, and log command size;
 - add masks before exposing values to child processes where possible;
 - never enable shell tracing around secrets; and
-- fail closed when event trust or permissions cannot be established.
+- fail closed when provider provenance or protected capability policy cannot be
+  established.
 
 ## Buildkite platform follow-ups
 
@@ -1632,7 +1787,8 @@ compatibility may justify Buildkite additions:
 - richer logical sub-step/timeline presentation inside one command job;
 - targeted matrix-sibling cancellation;
 - Buildkite-backed cache APIs suitable for Actions toolkit adapters;
-- short-lived provider token brokering;
+- Buildkite Job OIDC claims and APIs sufficient for short-lived provider token
+  brokering;
 - Origin event/context integration;
 - imported-job and native-job output contracts; and
 - UI treatment for generated/imported pipelines and compatibility findings.
@@ -1723,17 +1879,26 @@ unknown plan.
 
 ## Key learnings from pressure-testing
 
-- A content digest does not establish who produced a plan. The design now uses
-  authenticated event provenance and a signed, build-bound plan envelope before
-  any runtime can access protected capabilities.
-- The bootstrap job is part of the trusted computing base because it can upload
-  executable pipeline steps. The plan now forbids repository-owned code during
-  compilation and requires a pinned compiler, isolated signing capability, and
-  fail-closed queue policy.
-- Buildkite step signing would add a second signing system before the runtime
-  semantics are proven. The signed job-plan envelope remains the authority
-  boundary, while native signed-pipeline integration moves to optional Phase 9
-  hardening.
+- A content digest establishes plan integrity, not authority. Protected
+  capabilities require authenticated Buildkite job identity, independently
+  verified provider provenance, and a narrow control-plane grant.
+- GitHub Actions does not isolate steps inside a job. A public action and a
+  shell command have equivalent job authority, so anonymous tokenless actions
+  do not require a privileged compiler merely because they use `uses:` syntax.
+- A Buildkite bootstrap job has ordinary dynamic pipeline authority. Pinning the
+  compiler, disabling accidental repository execution, and applying queue
+  policy are important operational controls, but do not create a separate
+  cryptographic principal.
+- Buildkite Job OIDC is the natural authentication mechanism for a future
+  capability service. It proves Buildkite job identity but needs provider facts
+  for GitHub event type, actor, fork relationship, workflow source, and
+  environment policy.
+- Plan-envelope signing proved bounded canonical signing, tamper rejection, and
+  build/job/queue binding in Phase 0. It is retained as an integrity mechanism,
+  not as production capability authorization.
+- Buildkite pipeline signing protects uploaded command provenance and remains
+  optional installation-specific defence in depth; it is not required for
+  tokenless Actions compatibility.
 - Concurrent Actions steps require their own supervisor and conformance surface;
   they are now an explicit delivery phase rather than an unowned beta promise.
 - Skipping Buildkite checkout is necessary but does not itself create a clean
@@ -1744,17 +1909,18 @@ unknown plan.
 
 ## Resolved decisions before Phase 0
 
-1. Canonical plans cross job and agent boundaries only inside signed envelopes
-   that bind their provenance, build, workflow, compiler, target step and queue,
-   trust classification, capability ceiling, and expiry. A digest alone is
-   insufficient.
-2. The bootstrap is a trusted, data-only compiler job. It runs a pinned verified
-   distribution, executes no repository-owned code, exposes no workflow-readable
-   secret, and can request plan signatures without reading signing key material.
+1. Canonical plans cross job and agent boundaries as content-addressed,
+   producer-attributed artifacts bound to the build, importer, target job, step,
+   queue, compiler, and workflow. These bindings protect transport but do not
+   authorize protected resources.
+2. The bootstrap is an ordinary Buildkite dynamic pipeline generator. It runs a
+   pinned verified distribution, treats provider-fetched workflow text as inert
+   data, exposes no ambient protected credential in tokenless mode, and emits
+   fixed fail-closed job definitions.
 3. Buildkite signed pipelines are not required for the initial implementation.
-   Signed, build-bound job-plan envelopes and runtime queue policy authorize
-   protected capabilities. Buildkite step signing is optional defence in depth
-   and is deferred to Phase 9.
+   Buildkite step signing is optional defence in depth and is deferred to Phase
+   9. Protected capabilities are separately authorized by the Phase 6 control
+   plane after Buildkite Job OIDC authentication.
 4. Generated compatibility jobs set `checkout.skip: true`, require Buildkite
    Agent v3.130.0 or later, and allocate a fresh `GITHUB_WORKSPACE` themselves.
 5. Parallel and background steps remain in the beta target and are implemented
@@ -1765,10 +1931,10 @@ unknown plan.
 7. Import actionlint v1.7.12 unchanged as the syntax frontend and immediately
    adapt it into owned models. Keep act v0.2.89 and Actions runner v2.336.0 as
    pinned behavioral oracles; do not import or fork act for production.
-8. Plan envelopes use detached ES256 JWS over RFC 8785 canonical claims with a
-   dedicated non-exportable AWS KMS P-256 signer and verification-only JWKS on
-   runtime queues. This trust domain remains separate from Buildkite pipeline
-   signing.
+8. The Phase 0 envelope experiment uses detached ES256 JWS over bounded RFC 8785
+   canonical claims and remains separate from Buildkite pipeline signing. It
+   proves signing mechanics only. The production capability-grant profile, key
+   custody, rotation, revocation, and audit contract are Phase 6 decisions.
 9. Explicit bridge, provider, and Buildkite variable maps use
    `Bridge < Provider < Buildkite` precedence and are snapshotted into every
    compiled plan.
@@ -1785,8 +1951,9 @@ unknown plan.
 None of these decisions blocks the Phase 2 sequential shell runtime. Resolve
 them in the phase that first needs the capability:
 
-1. Phase 6 provider integration will determine which authenticated GitHub event
-   payload Buildkite exposes and whether a small platform API is missing.
+1. Phase 6 control-plane work will determine which authenticated GitHub event
+   payload Buildkite exposes, whether the service must receive GitHub App
+   webhooks directly, and whether a small Buildkite platform API is missing.
 2. Phase 5 container work will choose direct Hosted Agent execution versus a
    compatibility image from measured tool-cache and Docker behavior.
 3. Phase 4 action work will define how the distribution supplies Node 20 and
@@ -1795,13 +1962,14 @@ them in the phase that first needs the capability:
    for cache and artifact actions.
 5. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
-6. Phase 6 will define Cursor Origin checkout, event, pull-request, and
-   short-lived-token contracts alongside the GitHub provider adapter.
+6. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
+   and short-lived capability contracts alongside the GitHub provider adapter.
 7. Phases 5 and 9 will define the queue capabilities and trust properties
    required for Docker and privileged workloads.
-8. Phases 6 and 9 will choose the source and permission model for
-   `github.token` and `GITHUB_TOKEN`; tokenless workflows remain the default
-   until then.
+8. Phase 6 will define the GitHub App installation-token compatibility contract
+   for `github.token` and `GITHUB_TOKEN`, including repository/permission
+   narrowing and documented differences from native Actions tokens. Tokenless
+   workflows remain the default until then.
 
 ## Recommended first product milestone
 
@@ -1826,7 +1994,8 @@ that proves the product boundary:
    events; the Buildkite-native transport artifact is excluded from differential
    comparison.
 9. Generated jobs skip checkout, create fresh workspaces, and reject a plan
-   envelope that is tampered, replayed, expired, or bound to another build.
+   whose digest or build, importer, job, step, queue, or runtime binding does not
+   match. The tokenless queue exposes no ambient protected credential.
 
 This product milestone draws narrow slices from Phases 0, 1, 2, and 4; it does
 not replace or waive the complete definition of done for any phase. It tests

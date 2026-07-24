@@ -3,6 +3,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -179,6 +180,12 @@ func CompilePlans(path string, source, eventSource []byte, compilerVersion, comp
 // CompilePlansWithOptions creates one plan per job using compiler-selected
 // queues and the same snapshotted vars used for graph construction.
 func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
+	return CompilePlansContext(context.Background(), path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
+}
+
+// CompilePlansContext creates one plan per job and permits cancellation while
+// compilation resolves immutable public action source.
+func CompilePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	if compilerVersion == "" {
 		return nil, fmt.Errorf("compiler version is required")
 	}
@@ -189,10 +196,10 @@ func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVe
 	if err != nil {
 		return nil, err
 	}
-	return compilePlans(ir, compilerVersion, compilerDistributionDigest)
+	return compilePlans(ctx, ir, compilerVersion, compilerDistributionDigest, options)
 }
 
-func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]plan.Job, error) {
+func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode event payload: %w", err)
@@ -204,8 +211,11 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 	for _, instance := range ir.Jobs {
 		logicalByKey[instance.Key] = instance.LogicalJobID
 	}
+	actionSource := newMemoizedActionSource(options.ActionSource)
 	for _, instance := range ir.Jobs {
 		steps := make([]plan.Step, len(instance.Steps))
+		var actionIndexes []int
+		var actionRefs []string
 		usedIDs := make(map[string]struct{}, len(instance.Steps))
 		for _, step := range instance.Steps {
 			if step.ID != "" {
@@ -231,10 +241,39 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
 				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
 			}
+			if step.Kind == "uses" {
+				actionIndexes = append(actionIndexes, i)
+				actionRefs = append(actionRefs, step.Uses)
+			}
 		}
-		capabilities, err := requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
-		if err != nil {
-			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+		jobSchema := plan.Schema
+		var actions []plan.ActionLock
+		var capabilities []string
+		if options.ResolveActions && len(actionRefs) != 0 {
+			for _, i := range actionIndexes {
+				if strings.HasPrefix(strings.ToLower(instance.Steps[i].Uses), "actions/checkout@") {
+					if err := validateCheckoutInputs(instance.Steps[i].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
+						span := instance.Steps[i].Span.Start
+						return nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+					}
+				}
+			}
+			selectors, locks, actionCapabilities, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
+			if err != nil {
+				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			}
+			for i, selector := range selectors {
+				steps[actionIndexes[i]].Action = &plan.ActionSelector{Lock: selector.Lock}
+			}
+			jobSchema = plan.SchemaV3
+			actions = locks
+			capabilities = actionCapabilities
+		} else {
+			var err error
+			capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
+			if err != nil {
+				return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			}
 		}
 		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
 		for _, logicalNeed := range instance.LogicalNeeds {
@@ -258,7 +297,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			sort.Strings(capabilities)
 		}
 		job := plan.Job{
-			Schema: plan.Schema,
+			Schema: jobSchema,
 			Compiler: plan.Compiler{
 				Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 			},
@@ -286,6 +325,7 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
 			Outputs:                 instance.Outputs,
 			Steps:                   steps,
+			Actions:                 actions,
 		}
 		if err := job.Validate(); err != nil {
 			return nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -299,6 +339,48 @@ func compilePlans(ir IR, compilerVersion, compilerDistributionDigest string) ([]
 		plans = append(plans, job)
 	}
 	return plans, nil
+}
+
+func validateCheckoutInputs(inputs map[string]string, repository, sha string) error {
+	names := make([]string, 0, len(inputs))
+	for name := range inputs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		value := inputs[name]
+		normalized := strings.ToLower(name)
+		if seen[normalized] {
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+		}
+		seen[normalized] = true
+		switch normalized {
+		case "repository":
+			if !strings.EqualFold(value, repository) {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "ref":
+			if value != sha {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "persist-credentials":
+			if value != "false" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "fetch-depth":
+			if value != "1" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		case "clean", "set-safe-directory":
+			if value != "true" {
+				return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+			}
+		default:
+			return fmt.Errorf("explicit input %q is unsupported (including empty values); Phase 6 is required", name)
+		}
+	}
+	return nil
 }
 
 func requiredSecrets(instance JobInstance) ([]string, error) {
@@ -958,16 +1040,8 @@ func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.
 		if repositoryRoot == "" {
 			return nil, fmt.Errorf("resolve local action %q: workflow path %q must identify a repository root", step.Uses, workflowPath)
 		}
-		action, err := loadLocalAction(repositoryRoot, step.Uses)
-		if err != nil {
+		if err := collectActionCapabilities(repositoryRoot, step.Uses, capabilities, nil); err != nil {
 			return nil, err
-		}
-		runtime, err := action.Runtime()
-		if err != nil {
-			return nil, fmt.Errorf("local action %q uses %w", step.Uses, err)
-		}
-		for _, capability := range runtime.RequiredCapabilities() {
-			capabilities[capability] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(capabilities))
@@ -976,6 +1050,43 @@ func requiredCapabilities(repositoryRoot, workflowPath string, steps []workflow.
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func collectActionCapabilities(repositoryRoot, uses string, capabilities map[string]struct{}, stack []string) error {
+	if !strings.HasPrefix(uses, "./") {
+		return fmt.Errorf("nested remote action %q is unsupported", uses)
+	}
+	action, err := loadLocalAction(repositoryRoot, uses)
+	if err != nil {
+		return err
+	}
+	for _, ancestor := range stack {
+		if ancestor == action.Path {
+			return fmt.Errorf("local action recursion detected at %q", action.Path)
+		}
+	}
+	if len(stack) >= metadata.MaxNestedActionDepth {
+		return fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, action.Path)
+	}
+	runtime, err := action.Runtime()
+	if err != nil {
+		return fmt.Errorf("local action %q uses %w", uses, err)
+	}
+	for _, capability := range runtime.RequiredCapabilities() {
+		capabilities[capability] = struct{}{}
+	}
+	if runtime != metadata.RuntimeComposite {
+		return nil
+	}
+	stack = append(append([]string(nil), stack...), action.Path)
+	for _, child := range action.Runs.Steps {
+		if child.Uses != "" {
+			if err := collectActionCapabilities(repositoryRoot, child.Uses, capabilities, stack); err != nil {
+				return fmt.Errorf("local action %q nested uses %w", uses, err)
+			}
+		}
+	}
+	return nil
 }
 
 func loadLocalAction(repositoryRoot, uses string) (metadata.Metadata, error) {

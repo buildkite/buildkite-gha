@@ -53,6 +53,7 @@ type StepStatus struct {
 // ConditionContext contains the runtime values available while evaluating a
 // job or step condition.
 type ConditionContext struct {
+	Inputs       map[string]string
 	Needs        map[string]map[string]string
 	NeedResults  map[string]string
 	Steps        map[string]StepStatus
@@ -371,6 +372,8 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
 		}
+	case len(path) == 1 && strings.EqualFold(root, "inputs") && context.Inputs != nil:
+		return findString(context.Inputs, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "env"):
 		return findString(context.Env, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "vars"):

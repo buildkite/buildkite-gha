@@ -1,4 +1,4 @@
-// Package runtime executes explicitly resolved local GitHub Actions action steps.
+// Package runtime executes explicitly resolved GitHub Actions action steps.
 package runtime
 
 import (
@@ -25,18 +25,21 @@ const (
 	maxStreamLineBytes    = 1024 * 1024
 )
 
-// Runner executes local actions using explicitly configured host tools.
+// Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
 	Stdout          io.Writer
 	Stderr          io.Writer
+	Node20          string
 	Node24          string
 	ManagedNodeRoot string
 	Docker          string
+	Git             string
 	CleanupTimeout  time.Duration
 	InterruptGrace  time.Duration
 	TerminateGrace  time.Duration
 	Secrets         SecretResolver
 	Redactor        Redactor
+	Actions         ActionMaterializer
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -292,9 +295,10 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 	}
 }
 
-// DiscoverNode24 resolves an explicit Node binary or a binary in the managed
-// runtime root, and rejects binaries that do not report major version 24.
-func DiscoverNode24(explicit, managedRoot string) (string, error) {
+// DiscoverNode resolves an explicit Node binary or a binary in the managed
+// runtime root, and rejects binaries that do not report the requested major.
+// It deliberately does not fall back to PATH.
+func DiscoverNode(major int, explicit, managedRoot string) (string, error) {
 	var candidates []string
 	if explicit != "" {
 		candidates = append(candidates, explicit)
@@ -303,13 +307,14 @@ func DiscoverNode24(explicit, managedRoot string) (string, error) {
 		if runtime.GOOS == "windows" {
 			name = "node.exe"
 		}
+		version := fmt.Sprintf("%d", major)
 		candidates = append(candidates,
-			filepath.Join(managedRoot, "node24", "bin", name),
-			filepath.Join(managedRoot, "node", "24", "bin", name),
+			filepath.Join(managedRoot, "node"+version, "bin", name),
+			filepath.Join(managedRoot, "node", version, "bin", name),
 			filepath.Join(managedRoot, "bin", name),
 		)
 	} else {
-		return "", errors.New("node 24 is not configured: set Runner.Node24 or Runner.ManagedNodeRoot")
+		return "", fmt.Errorf("node %d is not configured: set the matching Runner.Node field or Runner.ManagedNodeRoot", major)
 	}
 
 	var failures []string
@@ -322,12 +327,17 @@ func DiscoverNode24(explicit, managedRoot string) (string, error) {
 			continue
 		}
 		version := strings.TrimSpace(string(output))
-		if strings.HasPrefix(version, "v24.") {
+		if strings.HasPrefix(version, fmt.Sprintf("v%d.", major)) {
 			return candidate, nil
 		}
 		failures = append(failures, fmt.Sprintf("%s: reported %q", candidate, version))
 	}
-	return "", fmt.Errorf("node 24 discovery failed: %s", strings.Join(failures, "; "))
+	return "", fmt.Errorf("node %d discovery failed: %s", major, strings.Join(failures, "; "))
+}
+
+// DiscoverNode24 retains the original Node 24 discovery API.
+func DiscoverNode24(explicit, managedRoot string) (string, error) {
+	return DiscoverNode(24, explicit, managedRoot)
 }
 
 func newResult() Result {
@@ -351,7 +361,7 @@ func (r Runner) stderr() io.Writer {
 func actionInputEnv(inputs map[string]string) map[string]string {
 	env := make(map[string]string, len(inputs))
 	for name, value := range inputs {
-		name = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(name, " ", "_"), "-", "_"))
+		name = strings.ToUpper(strings.ReplaceAll(name, " ", "_"))
 		env["INPUT_"+name] = value
 	}
 	return env

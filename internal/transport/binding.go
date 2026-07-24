@@ -16,8 +16,8 @@ const (
 	maxBindingLifetime   = int64((24 * time.Hour) / time.Second)
 )
 
-// RuntimeBinding is signed by the trusted compiler and is inert until its
-// signature has been verified.
+// RuntimeBinding is the signed Phase 0 integrity binding and is inert until its
+// signature has been verified. It does not authorize protected capabilities.
 type RuntimeBinding struct {
 	Issuer            string       `json:"iss"`
 	ID                string       `json:"jti"`

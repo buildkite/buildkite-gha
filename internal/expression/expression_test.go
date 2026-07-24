@@ -131,12 +131,14 @@ func TestEvaluateFailsClosed(t *testing.T) {
 
 func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	context := ConditionContext{
+		Inputs:      map[string]string{"enabled": "true"},
 		Needs:       map[string]map[string]string{"build": {"gate": "yes"}},
 		NeedResults: map[string]string{"build": "failure"},
 		Steps:       map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
 		Failure:     true,
 	}
 	for _, condition := range []string{
+		"inputs.enabled == 'true'",
 		"always() && needs.build.result == 'failure' && needs.build.outputs.gate == 'yes'",
 		"failure() && steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'",
 		"always() && steps.soft.outputs.ready",
@@ -154,6 +156,20 @@ func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
+	context := ConditionContext{Inputs: map[string]string{"enabled": "true"}}
+	for condition, want := range map[string]bool{
+		"inputs.enabled == 'true'": true,
+		"INPUTS.ENABLED == 'true'": true,
+		"inputs.missing":           false,
+	} {
+		got, err := EvaluateCondition(condition, context)
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if _, err := EvaluateCondition("1 < 2", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted unsupported ordered comparison")
@@ -166,6 +182,9 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 	}
 	if _, err := EvaluateCondition("needs.missing.result", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted an unavailable need result")
+	}
+	if _, err := EvaluateCondition("inputs.enabled", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted inputs outside an action context")
 	}
 }
 

@@ -1,0 +1,40 @@
+name: Phase 4 public actions proof
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  public-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact public event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify anonymous checkout identity
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+          test "$(git remote get-url origin)" = "https://github.com/actions/checkout.git"
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+          token: ""
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+          token: ""
+
+      - name: Verify portable setup actions
+        shell: bash
+        run: |
+          node --version | grep '^v24\.'
+          go version | grep 'go1\.26\.5 '

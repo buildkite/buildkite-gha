@@ -53,6 +53,28 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileBundleEmitsPolicyNodeRuntimesOnlyInPipeline(t *testing.T) {
+	path := smokePath(".github", "workflows", "shell.yml")
+	source := readFile(t, path)
+	event := readFile(t, smokePath("events", "push.json"))
+	without, err := CompileBundle(path, source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := defaultOptions()
+	options.NodeRuntimeDigests = map[int]string{24: "sha256:4444444444444444444444444444444444444444444444444444444444444444"}
+	with, err := CompileBundleWithOptions(path, source, event, "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(with.IR, without.IR) || !reflect.DeepEqual(with.Plans, without.Plans) {
+		t.Fatal("Node runtime policy changed compiler IR or plans")
+	}
+	if !bytes.Contains(with.Pipeline, []byte("BUILDKITE_GHA_NODE24")) || bytes.Contains(without.Pipeline, []byte("BUILDKITE_GHA_NODE")) {
+		t.Fatalf("runtime pipeline propagation mismatch\nwith:\n%s\nwithout:\n%s", with.Pipeline, without.Pipeline)
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {
