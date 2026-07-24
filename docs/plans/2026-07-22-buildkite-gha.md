@@ -1202,7 +1202,8 @@ Explicitly defer from beta unless implementation evidence changes the order:
   checkout and portable setup actions on Buildkite, while the GitHub-hosted
   oracle and local conformance suite cover the private repository's
   JavaScript/composite fixture. This does not claim a same-workflow private
-  checkout proof on Buildkite or live evidence for the migrated normal path.
+  checkout proof on Buildkite. The migrated normal path now has separate exact
+  Buildkite and GitHub-hosted evidence below.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1243,9 +1244,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 Phase 4 live evidence:
 
-- The Phase 4 Buildkite pipeline now invokes the exact built production
-  `buildkite-gha upload` CLI and retains the separate continuation loader.
-  Exact live evidence for this newly migrated normal path is pending.
+- [Buildkite build 79](https://buildkite.com/buildkite/buildkite-gha/builds/79)
+  ran exact implementation commit
+  `c5b9c56762e94ce2084a7fe7223c5f18a432e2bc`. The policy-controlled importer
+  invoked the exact built production `buildkite-gha upload` CLI with pinned
+  managed Node 20/24 runtimes. The repository check, generated hosted public
+  action job, separate continuation loader, and native continuation all passed.
+- [GitHub Actions run 30069516646](https://github.com/buildkite/buildkite-gha/actions/runs/30069516646)
+  ran the same implementation commit against the private repository. Its
+  producer and consumer passed the JavaScript/composite differential fixture.
 
 - [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
   ran exact implementation commit

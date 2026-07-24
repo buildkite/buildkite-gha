@@ -152,12 +152,13 @@ native Buildkite continuation. `.github/workflows/phase-4-actions-oracle.yml`
 separately runs on GitHub against this private repository to exercise local
 JavaScript/composite outputs and lifecycle. The split does not claim that
 Buildkite executed those private local actions; Buildkite runtime coverage for
-them remains in the conformance suite. The exact-commit evidence is
+them remains in the conformance suite. The production-upload evidence is
+[Buildkite build 79](https://buildkite.com/buildkite/buildkite-gha/builds/79)
+and [GitHub Actions run 30069516646](https://github.com/buildkite/buildkite-gha/actions/runs/30069516646),
+both against exact implementation commit
+`c5b9c56762e94ce2084a7fe7223c5f18a432e2bc`. Historical
 [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
-and [GitHub Actions run 30059944969](https://github.com/buildkite/buildkite-gha/actions/runs/30059944969).
-Build 72 remains evidence for the former proof importer; it did not exercise
-the newly migrated normal `upload` path. Exact live Buildkite evidence for that
-path is pending.
+remains evidence for the former proof importer.
 
 ## License
 
