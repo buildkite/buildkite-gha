@@ -28,13 +28,15 @@ safe_detail() {
 }
 
 cleanup() {
-  local prior=$? leftovers=0 verification_failed=0 result
-  (( cleanup_ran == 0 )) || return "$prior"
+  local prior=$? final leftovers=0 verification_failed=0 result
+  final="$prior"
+  trap - EXIT
+  (( cleanup_ran == 0 )) || exit "$final"
   cleanup_ran=1
   if (( created == 0 )); then
     [[ -z "$work" ]] || rm -rf -- "$work"
     record cleanup skip nothing-created
-    return "$prior"
+    exit "$final"
   fi
   set +e
   # Positional parameters are intentionally expanded by the bounded child shell.
@@ -44,8 +46,13 @@ cleanup() {
     docker network rm "$5" >/dev/null 2>&1 || true
     docker image rm -f "$6" >/dev/null 2>&1 || true
   ' _ "$server" "$client" "$publisher" "$signal" "$network" "$image"
-  for kind in container network image; do
-    if ! result="$(timeout 10s docker "$kind" ls -q --filter "label=${label_key}=${owner}" 2>/dev/null)"; then
+  if ! result="$(timeout 10s docker container ls --all --quiet --filter "label=${label_key}=${owner}" 2>/dev/null)"; then
+    verification_failed=1
+  elif [[ -n "$result" ]]; then
+    leftovers=1
+  fi
+  for kind in network image; do
+    if ! result="$(timeout 10s docker "$kind" ls --quiet --filter "label=${label_key}=${owner}" 2>/dev/null)"; then
       verification_failed=1
     elif [[ -n "$result" ]]; then
       leftovers=1
@@ -55,14 +62,16 @@ cleanup() {
   set -e
   if (( leftovers )); then
     record cleanup fail leftovers
-    return 1
+    (( prior != 0 )) || final=1
+    exit "$final"
   fi
   if (( verification_failed )); then
     record cleanup fail verification-unavailable
-    return 1
+    (( prior != 0 )) || final=1
+    exit "$final"
   fi
   record cleanup pass exact-label-empty
-  return "$prior"
+  exit "$final"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -120,8 +129,8 @@ if timeout 30s docker run --rm --label "${label_key}=${owner}" -v "$work/mount:/
     record bind-default pass "$category"
   else record bind-default fail write-failed; fi
 else
-  record bind-requested not-applicable endpoint-path-model
-  record bind-default not-applicable endpoint-path-model
+  record bind-requested fail endpoint-path-model
+  record bind-default fail endpoint-path-model
 fi
 
 if timeout 30s docker network create --label "${label_key}=${owner}" "$network" >/dev/null 2>&1; then
@@ -154,7 +163,7 @@ if (( bind_supported )); then
     if timeout 15s docker stop --time 5 "$signal" >/dev/null 2>&1 && [[ -f "$work/signal/term" ]] && [[ "$(cat "$work/signal/term")" == term ]]; then record signal-stop pass term-observed; else record signal-stop fail forced-or-unobserved; fi
   else record signal-stop fail container-unavailable; fi
 else
-  record signal-stop not-applicable endpoint-path-model
+  record signal-stop fail bind-prerequisite-missing
 fi
 
 rm -rf -- "$work"
