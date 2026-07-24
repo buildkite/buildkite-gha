@@ -44,8 +44,8 @@ type Runner struct {
 	Secrets         SecretResolver
 	Redactor        Redactor
 	Actions         ActionMaterializer
-	workspacePin    *pinnedDirectory
-	runnerTempPin   *pinnedDirectory
+	runnerTemp      string
+	implicitJobPATH string
 	explicitJobPATH bool
 }
 
@@ -62,16 +62,15 @@ type JavaScriptAction struct {
 
 // DockerAction is an already-resolved local Docker action.
 type DockerAction struct {
-	Name          string
-	Path          string
-	SourceRoot    string
-	SourceDigest  string
-	Dockerfile    string
-	Workspace     string
-	Env           map[string]string
-	workspacePin  *pinnedDirectory
-	runnerTempPin *pinnedDirectory
-	explicitPATH  bool
+	Name         string
+	Path         string
+	SourceRoot   string
+	SourceDigest string
+	Dockerfile   string
+	Workspace    string
+	Env          map[string]string
+	runnerTemp   string
+	explicitPATH bool
 }
 
 // Result contains file-command effects produced by an action or lifecycle.
@@ -102,38 +101,41 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 	}
 	action.Workspace = abs
 	_, action.explicitPATH = action.Env["PATH"]
-	action.workspacePin, e = pinDirectory(abs)
+	workspace, e := os.Open(abs)
 	if e != nil {
 		return newResult(), e
 	}
-	defer func() { err = errors.Join(err, action.workspacePin.close()) }()
+	defer func() { err = errors.Join(err, workspace.Close()) }()
+	workspaceInfo, e := workspace.Stat()
+	if e != nil {
+		return newResult(), e
+	}
+	if e := workspace.Chmod(0o777); e != nil {
+		return newResult(), fmt.Errorf("make Docker workspace writable: %w", e)
+	}
 	if callerWorkspace {
-		defer func() { err = errors.Join(err, action.workspacePin.restore()) }()
+		defer func() { err = errors.Join(err, workspace.Chmod(workspaceInfo.Mode().Perm())) }()
 	}
 	temp, e := os.MkdirTemp("", "buildkite-gha-runner-")
 	if e != nil {
 		return newResult(), e
 	}
 	defer func() { _ = os.RemoveAll(temp) }()
-	action.runnerTempPin, e = pinDirectory(temp)
-	if e != nil {
-		return newResult(), e
+	if e := os.Chmod(temp, 0o777); e != nil {
+		return newResult(), fmt.Errorf("make Docker runner temp writable: %w", e)
 	}
-	defer func() { err = errors.Join(err, action.runnerTempPin.close()) }()
+	action.runnerTemp = temp
 	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
 }
 
 func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action DockerAction) (result Result, err error) {
 	result = newResult()
-	if action.workspacePin == nil {
-		action.workspacePin = r.workspacePin
-	}
-	if action.runnerTempPin == nil {
-		action.runnerTempPin = r.runnerTempPin
+	if action.runnerTemp == "" {
+		action.runnerTemp = r.runnerTemp
 	}
 	action.explicitPATH = action.explicitPATH || r.explicitJobPATH
-	if action.workspacePin == nil || action.runnerTempPin == nil {
-		return result, errors.New("docker workspace and runner temp are not pinned")
+	if action.Workspace == "" || action.runnerTemp == "" {
+		return result, errors.New("docker workspace and runner temp are required")
 	}
 	docker := r.Docker
 	if docker == "" {
@@ -251,22 +253,16 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		return result, err
 	}
 	if action.Workspace != "" {
-		if err := validateDockerMountPath(action.workspacePin.source()); err != nil {
+		if err := validateDockerMountPath(action.Workspace); err != nil {
 			return result, err
 		}
-		if err := validateDockerMountPath(action.runnerTempPin.source()); err != nil {
+		if err := validateDockerMountPath(action.runnerTemp); err != nil {
 			return result, err
 		}
-	}
-	if err := action.workspacePin.widen(); err != nil {
-		return result, fmt.Errorf("make pinned workspace container-writable: %w", err)
-	}
-	if err := action.runnerTempPin.widen(); err != nil {
-		return result, fmt.Errorf("make pinned runner temp container-writable: %w", err)
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
 	if action.Workspace != "" {
-		args = append(args, "--mount", "type=bind,source="+action.workspacePin.source()+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTempPin.source()+",target=/github/runner_temp", "--workdir", "/github/workspace")
+		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
 	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {

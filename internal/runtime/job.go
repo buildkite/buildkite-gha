@@ -155,15 +155,21 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return jobResult, fmt.Errorf("resolve workspace: %w", err)
 	}
-	var workspacePin *pinnedDirectory
 	if job.HasCapability("docker") {
-		workspacePin, err = pinDirectory(workspace)
+		workspaceDir, err := os.Open(workspace)
 		if err != nil {
 			return jobResult, err
 		}
-		defer func() { runJobErr = errors.Join(runJobErr, workspacePin.close()) }()
+		defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Close()) }()
+		workspaceInfo, err := workspaceDir.Stat()
+		if err != nil {
+			return jobResult, err
+		}
+		if err := workspaceDir.Chmod(0o777); err != nil {
+			return jobResult, fmt.Errorf("make Docker workspace writable: %w", err)
+		}
 		if callerWorkspace {
-			defer func() { runJobErr = errors.Join(runJobErr, workspacePin.restore()) }()
+			defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Chmod(workspaceInfo.Mode().Perm())) }()
 		}
 	}
 	jobEnv, err := evaluateMap(job.Env, eval)
@@ -176,25 +182,26 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(runnerTemp) }()
-	var runnerTempPin *pinnedDirectory
 	if job.HasCapability("docker") {
-		runnerTempPin, err = pinDirectory(runnerTemp)
-		if err != nil {
-			return jobResult, err
+		if err := os.Chmod(runnerTemp, 0o777); err != nil {
+			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
 		}
-		defer func() { runJobErr = errors.Join(runJobErr, runnerTempPin.close()) }()
 	}
 	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
 		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
 	}
 	if job.HasCapability("docker") {
-		r.workspacePin = workspacePin
-		r.runnerTempPin = runnerTempPin
-		r.explicitJobPATH = explicitJobPATH
+		r.runnerTemp = runnerTemp
 	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
 	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
 		jobResult.Env["PATH"] = path
+	}
+	if job.HasCapability("docker") {
+		r.explicitJobPATH = explicitJobPATH
+		if !explicitJobPATH {
+			r.implicitJobPATH = jobResult.Env["PATH"]
+		}
 	}
 	eval.Env = jobResult.Env
 	actions := newActionLockResolver(job, workspace, r.Actions)
@@ -821,7 +828,15 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		_, stepPATH := stepEnv["PATH"]
 		_, actionPATH := dockerEnv["PATH"]
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv), explicitPATH: stepPATH || actionPATH})
+		jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
+		invocationEnv := mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs))
+		for name, value := range dockerEnv {
+			_, exists := invocationEnv[name]
+			if !exists || (name == "PATH" && !jobPATH && !stepPATH) {
+				invocationEnv[name] = value
+			}
+		}
+		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)

@@ -201,12 +201,6 @@ if [[ "$1" == buildx && "$2" == build ]]; then
   printf '%s' "$owner" > "$state/owner"
   cp "$dockerfile" "$state/staged-Dockerfile"
   touch "$state/image"
-  if [[ "$scenario" == replace-workspace ]]; then
-    original="$(cat "$state/original-workspace")"
-    replacement="$(cat "$state/replacement-workspace")"
-    mv "$original" "$original.moved"
-    ln -s "$replacement" "$original"
-  fi
   [[ "$scenario" != build-fail ]] || exit 32
   exit 0
 fi
@@ -241,9 +235,6 @@ if [[ "$1" == run ]]; then
   done
   [[ -n "$files" && -n "$workspace" && -n "$runner_temp" && "$workdir" == /github/workspace ]] || exit 33
   [[ -d "$workspace" && -d "$runner_temp" ]] || exit 41
-  if [[ "$scenario" == replace-workspace ]]; then
-    [[ "$(cat "$workspace/original-marker")" == original && ! -e "$workspace/replacement-marker" ]] || exit 42
-  fi
   [[ "$name" == "$(cat "$state/image-name" | sed 's/-image-/-container-/')" ]] || exit 33
   [[ "$owner" == "$(cat "$state/owner")" && "${args[$((${#args[@]} - 1))]}" == "$(cat "$state/image-name")" ]] || exit 39
   printf '%s' "$files" > "$state/command-files-path"
@@ -461,12 +452,8 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 			mounts = append(mounts, run[i+1])
 		}
 	}
-	fdPrefix := "type=bind,source=/proc/" + strconv.Itoa(os.Getpid()) + "/fd/"
-	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || !strings.HasPrefix(mounts[1], fdPrefix) || !strings.HasSuffix(mounts[1], ",target=/github/workspace") || !strings.HasPrefix(mounts[2], fdPrefix) || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
+	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
-	}
-	if strings.Contains(strings.Join(mounts[1:], "\x00"), action.Workspace) {
-		t.Fatalf("Docker mounts expose mutable workspace path: %#v", mounts)
 	}
 	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
 		t.Fatalf("Docker working directory = %q", workdir)
@@ -517,37 +504,19 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunDockerPinsWorkspaceBeforeDockerInvocation(t *testing.T) {
-	fake := newFakeDocker(t, "replace-workspace")
-	action := fakeDockerAction(t)
-	replacement := t.TempDir()
-	if err := os.WriteFile(filepath.Join(action.Workspace, "original-marker"), []byte("original"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(replacement, "replacement-marker"), []byte("replacement"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(fake.root, "original-workspace"), []byte(action.Workspace), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(fake.root, "replacement-workspace"), []byte(replacement), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), action); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestRunDockerPreservesExplicitPath(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		jobPATH    string
 		stepPATH   string
 		actionPATH string
+		wantPATH   string
 	}{
-		{name: "job", jobPATH: "/job/bin"},
-		{name: "step", stepPATH: "/step/bin"},
-		{name: "action", actionPATH: "/action/bin"},
+		{name: "job", jobPATH: "/job/bin", wantPATH: "/job/bin"},
+		{name: "step", stepPATH: "/step/bin", wantPATH: "/step/bin"},
+		{name: "action", actionPATH: "/action/bin", wantPATH: "/action/bin"},
+		{name: "job over action default", jobPATH: "/job/bin", actionPATH: "/action/bin", wantPATH: "/job/bin"},
+		{name: "step over action default", stepPATH: "/step/bin", actionPATH: "/action/bin", wantPATH: "/step/bin"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake := newFakeDocker(t, "success")
@@ -576,17 +545,69 @@ func TestRunDockerPreservesExplicitPath(t *testing.T) {
 			if runIndex < 0 {
 				t.Fatalf("Docker run absent: %#v", calls)
 			}
-			want := test.jobPATH
-			if test.stepPATH != "" {
-				want = test.stepPATH
-			}
-			if test.actionPATH != "" {
-				want = test.actionPATH
-			}
-			if !slices.Contains(calls[runIndex].args, "PATH="+want) {
-				t.Fatalf("Docker environment does not preserve explicit PATH %q: %#v", want, calls[runIndex].args)
+			if !slices.Contains(calls[runIndex].args, "PATH="+test.wantPATH) {
+				t.Fatalf("Docker environment does not preserve explicit PATH %q: %#v", test.wantPATH, calls[runIndex].args)
 			}
 		})
+	}
+}
+
+func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker dynamic PATH test\n")
+	writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", "name: Docker dynamic PATH test\nruns:\n  using: docker\n  image: Dockerfile\n")
+	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "path", Kind: "run", Command: `printf '%s\n' 'PATH=/dynamic/bin' >> "$GITHUB_ENV"`},
+		{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker"},
+	})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.calls(t)
+	runIndex := callIndex(calls, "run")
+	if runIndex < 0 || !slices.Contains(calls[runIndex].args, "PATH=/dynamic/bin") {
+		t.Fatalf("Docker environment does not preserve dynamic PATH: %#v", calls)
+	}
+}
+
+func TestRunDockerActionEnvironmentUsesInvocationBeforeActionDefaults(t *testing.T) {
+	fake := newFakeDocker(t, "success")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker environment precedence test\n")
+	writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", `name: Docker environment precedence test
+inputs:
+  value:
+    default: default-input
+runs:
+  using: docker
+  image: Dockerfile
+  env:
+    MODE: action
+    ACTION_ONLY: default
+    INPUT_VALUE: action
+`)
+	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM scratch\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./.github/actions/docker",
+		With: map[string]string{"value": "caller-input"},
+		Env:  map[string]string{"MODE": "caller"},
+	}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	if _, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace); err != nil {
+		t.Fatal(err)
+	}
+	calls := fake.calls(t)
+	runIndex := callIndex(calls, "run")
+	if runIndex < 0 {
+		t.Fatalf("Docker run absent: %#v", calls)
+	}
+	for _, want := range []string{"MODE=caller", "ACTION_ONLY=default", "INPUT_VALUE=caller-input"} {
+		if !slices.Contains(calls[runIndex].args, want) {
+			t.Fatalf("Docker environment omits %q: %#v", want, calls[runIndex].args)
+		}
 	}
 }
 

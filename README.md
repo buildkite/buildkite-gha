@@ -93,11 +93,12 @@ remain deferred. Action resolution is independent of event trust. Normal
 that require only network access, plus the supported Dockerfile-action subset
 when its `docker` capability has same-process compiler provenance. Dockerfile
 actions run from a private staged copy of the verified source, require the local
-Buildx `default` Docker driver and a local Linux daemon that can resolve pinned
-workspace descriptors through `/proc`, use fixed workspace and file-command
-mounts, and receive runtime-owned names and labels with bounded cleanup.
-`docker://` images, Docker lifecycle overrides, arbitrary Docker options,
-services, and job containers remain outside the executable subset. In Buildkite,
+Buildx `default` Docker driver, use fixed workspace and file-command mounts, and
+receive runtime-owned names and labels with bounded cleanup. Docker and host
+steps share the job's security boundary; installations that require host-level
+isolation must run each job in a disposable VM. `docker://` images, Docker
+lifecycle overrides, arbitrary Docker options, services, and job containers
+remain outside the executable subset. In Buildkite,
 `run-job` verifies the exact build, job, step, and plan digest before resolving
 each prerequisite from its attributed producer artifact, then publishes the
 terminal result under a bounded cleanup context; metadata is only a best-effort
