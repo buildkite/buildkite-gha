@@ -142,8 +142,8 @@ separately runs on GitHub against this private repository to exercise local
 JavaScript/composite outputs and lifecycle. The split does not claim that
 Buildkite executed those private local actions; Buildkite runtime coverage for
 them remains in the conformance suite. The exact-commit evidence is
-[Buildkite build 66](https://buildkite.com/buildkite/buildkite-gha/builds/66)
-and [GitHub Actions run 30052575655](https://github.com/buildkite/buildkite-gha/actions/runs/30052575655).
+[Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
+and [GitHub Actions run 30059944969](https://github.com/buildkite/buildkite-gha/actions/runs/30059944969).
 
 ## License
 

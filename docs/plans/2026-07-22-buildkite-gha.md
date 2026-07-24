@@ -1231,20 +1231,20 @@ Explicitly defer from beta unless implementation evidence changes the order:
 
 Phase 4 live evidence:
 
-- [Buildkite build 66](https://buildkite.com/buildkite/buildkite-gha/builds/66)
+- [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
   ran exact implementation commit
-  `e11500540fd4ce95730dc97b23636f3f0eebd260`. Its policy-controlled importer
+  `9ec7df250e2e3f3afc05489b02d04ff48647df3a`. Its policy-controlled importer
   compiled an unattested synthetic event for public `actions/checkout` commit
   `3d3c42e5aac5ba805825da76410c181273ba90b1`; the generated hosted job fetched
   that exact SHA anonymously, then pinned `setup-node` and `setup-go` installed
   and verified Node 24.18.0 and Go 1.26.5. The repository check, generated job,
   separate continuation loader, and native continuation all passed.
-- [GitHub Actions run 30052575655](https://github.com/buildkite/buildkite-gha/actions/runs/30052575655)
+- [GitHub Actions run 30059944969](https://github.com/buildkite/buildkite-gha/actions/runs/30059944969)
   ran the same implementation commit against the private repository. Its
   producer and consumer proved the local JavaScript/composite output chain,
   environment propagation, state, summaries, masking registration, and post
   lifecycle on GitHub's runner.
-- Buildkite build 66 does not claim local-action or cross-job v3 evidence: its
+- Buildkite build 72 does not claim local-action or cross-job v3 evidence: its
   event repository intentionally differs from the repository containing the
   compiled proof workflow. Those Buildkite runtime semantics are covered by
   deterministic conformance tests. Build 53 documented the reason for the
