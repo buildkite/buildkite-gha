@@ -323,6 +323,39 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	}
 }
 
+func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "derived-event-importer")
+	t.Setenv("BUILDKITE_REPO", "git@github.com:buildkite/buildkite-gha.git")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Unverified Author")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode derived-event plan %q: %v", path, err)
+		}
+		planCount++
+		if job.Event.Provider != "github" || job.Event.Name != "push" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/main" || job.Event.SHA != sha || job.Event.Actor != "Unverified Author" {
+			t.Fatalf("derived plan event = %#v", job.Event)
+		}
+	}
+	if planCount != 3 {
+		t.Fatalf("derived-event plan count = %d, want 3", planCount)
+	}
+}
+
 func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -746,7 +779,7 @@ func TestRunUsageErrors(t *testing.T) {
 		{name: "unknown command", args: []string{"nope"}, want: `unknown command "nope"`},
 		{name: "unknown help command", args: []string{"help", "nope"}, want: `unknown command "nope"`},
 		{name: "version arguments", args: []string{"--version", "extra"}, want: "does not accept arguments"},
-		{name: "upload missing event", args: []string{"upload", "--runtime-queue", "hosted", "workflow.yml"}, want: "--event-path is required"},
+		{name: "upload outside Buildkite", args: []string{"upload", "--runtime-queue", "hosted", "workflow.yml"}, want: "BUILDKITE=true"},
 	}
 
 	for _, test := range tests {

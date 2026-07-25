@@ -43,7 +43,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] --runtime-queue hosted <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
@@ -90,7 +90,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
 				}
 				if args[0] == "upload" {
-					_, _ = fmt.Fprint(stdout, "\nThis is the unsigned, unprivileged event-file path; it does not grant production plan authority.\n")
+					_, _ = fmt.Fprint(stdout, "\nThis unsigned, unprivileged path accepts an explicit event file or derives compatibility data from Buildkite; neither grants protected authority.\n")
 				}
 				return 0
 			}
@@ -534,19 +534,21 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
-	if eventPath == "" {
-		return usageError(stderr, "upload: --event-path is required")
-	}
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
-	if os.Getenv("BUILDKITE") == "" || importerStep == "" {
-		return usageError(stderr, "upload: BUILDKITE and BUILDKITE_STEP_KEY are required")
+	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
+		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
 	}
 	workflowSource, err := os.ReadFile(workflowPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	eventSource, err := os.ReadFile(eventPath)
+	var eventSource []byte
+	if eventPath != "" {
+		eventSource, err = os.ReadFile(eventPath)
+	} else {
+		eventSource, err = buildkiteEventSource(os.Getenv)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
