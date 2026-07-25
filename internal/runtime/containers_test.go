@@ -164,9 +164,13 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(0)
 	case "create":
 		name := ""
+		var publications []string
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "--name" {
 				name = args[i+1]
+			}
+			if args[i] == "--publish" {
+				publications = append(publications, args[i+1])
 			}
 			if args[i] == "--mount" {
 				p := strings.Split(args[i+1], ",")
@@ -189,6 +193,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			}
 		}
 		_ = os.WriteFile(containerPath(name), nil, 0o600)
+		if strings.HasPrefix(name, "buildkite-gha-service-") {
+			_ = os.WriteFile(containerPath(name)+".ports", []byte(strings.Join(publications, "\n")), 0o600)
+		}
 		if scenario == "fail-later-service-create" && strings.HasPrefix(name, "buildkite-gha-service-") {
 			counter := filepath.Join(root, "service-create-count")
 			data, _ := os.ReadFile(counter)
@@ -206,6 +213,30 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	case "start":
 		if scenario == "fail-start" {
 			os.Exit(42)
+		}
+		os.Exit(0)
+	case "port":
+		if scenario == "malformed-port" {
+			fmt.Print("6379/tcp -> 0.0.0.0:49152\n")
+			os.Exit(0)
+		}
+		data, _ := os.ReadFile(containerPath(args[len(args)-1]) + ".ports")
+		for _, publication := range strings.Split(string(data), "\n") {
+			if publication == "" {
+				continue
+			}
+			publication = strings.TrimPrefix(publication, "127.0.0.1:")
+			parts := strings.SplitN(publication, "/", 2)
+			proto := "tcp"
+			if len(parts) == 2 {
+				proto = parts[1]
+			}
+			mapping := strings.Split(parts[0], ":")
+			containerPort, hostPort := mapping[len(mapping)-1], "49152"
+			if len(mapping) > 1 && mapping[len(mapping)-2] != "" {
+				hostPort = mapping[len(mapping)-2]
+			}
+			fmt.Printf("%s/%s -> 127.0.0.1:%s\n", containerPort, proto, hostPort)
 		}
 		os.Exit(0)
 	case "inspect":
@@ -574,6 +605,21 @@ func TestRunJobContainerServiceFailureDiagnosticsAreMasked(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing.T) {
+	f := newJobDocker(t, "malformed-port")
+	w, tmp := t.TempDir(), t.TempDir()
+	var output bytes.Buffer
+	p := newCommandProcessor(&output, &output)
+	p.addMask("sibling-secret")
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), p, w, tmp, plan.Container{}, map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}})
+	if err == nil || !strings.Contains(err.Error(), `service "db" has malformed Docker port output`) {
+		t.Fatalf("error=%v", err)
+	}
+	if strings.Contains(output.String(), "sibling-secret") || !strings.Contains(output.String(), "***") || jobDockerCallIndex(f.calls(t), "logs", "--tail", "200") < 0 {
+		t.Fatalf("unmasked or missing diagnostics: %q", output.String())
+	}
+}
+
 func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.T) {
 	f := newJobDocker(t, "fail-later-service-create")
 	w, tmp := t.TempDir(), t.TempDir()
@@ -620,23 +666,100 @@ func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.
 	}
 }
 
+func TestRunHostJobServiceReadinessCancellationCleansEverything(t *testing.T) {
+	f := newJobDocker(t, "service-starting")
+	w, tmp := t.TempDir(), t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (Runner{Docker: f.path}).startJobContainer(ctx, newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{}, map[string]plan.Container{"db": {Image: "postgres"}})
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for jobDockerCallIndex(f.calls(t), "inspect") < 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	err := <-done
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	joined := fmt.Sprint(f.calls(t))
+	if !strings.Contains(joined, "rm --force buildkite-gha-service-") || !strings.Contains(joined, "network rm buildkite-gha-network-") || strings.Contains(joined, "rm --force buildkite-gha-job-") {
+		t.Fatalf("incomplete or over-broad host-service cancellation cleanup: %s", joined)
+	}
+}
+
 func TestJobContainerCleanupBudgetScalesToMaximumServices(t *testing.T) {
 	if got, want := jobContainerCleanupTimeout(10*time.Second, 32), 106*time.Second; got != want {
 		t.Fatalf("cleanup timeout = %s, want %s", got, want)
 	}
 }
 
-func TestRunJobRejectsHostServicesBeforeDocker(t *testing.T) {
+func TestRunJobHostServicesLifecycle(t *testing.T) {
 	f := newJobDocker(t, "")
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
-	j.Services = map[string]plan.Container{"db": {Image: "postgres"}}
-	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err == nil || !strings.Contains(err.Error(), "M4b") {
-		t.Fatalf("error=%v", err)
+	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}}
+	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
+		t.Fatal(err)
 	}
-	if len(f.calls(t)) != 0 {
-		t.Fatal("Docker called for rejected host services")
+	for _, call := range f.calls(t) {
+		if call.Args[0] == "exec" {
+			t.Fatalf("host service job used persistent container exec: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := fixturePath(t)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{
+		{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`},
+		{ID: "docker", Kind: "uses", Uses: "./actions/docker", With: map[string]string{"expected_file": "${{ job.services.redis.ports[6379] }}"}, Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports['6379'] }}"}, Action: &plan.ActionSelector{Lock: lockID}},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Services = map[string]plan.Container{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
+	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), job, workspace); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.calls(t)
+	if jobDockerCallIndex(calls, "exec") >= 0 {
+		t.Fatalf("host-service job unexpectedly used persistent container exec: %#v", calls)
+	}
+	create, run := jobDockerCallIndex(calls, "create"), jobDockerCallIndex(calls, "run")
+	if create < 0 || run < 0 {
+		t.Fatalf("host-service Docker action calls absent: %#v", calls)
+	}
+	network := argumentAfter(t, calls[create].Args, "--network")
+	if got := argumentAfter(t, calls[run].Args, "--network"); got != network {
+		t.Fatalf("Docker action network = %q, want %q", got, network)
+	}
+	joined := strings.Join(calls[run].Args, " ")
+	for _, want := range []string{"--env INPUT_EXPECTED_FILE=49152", "--env SERVICE_PORT=49152"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("Docker action did not receive service expression %q: %#v", want, calls[run].Args)
+		}
+	}
+	if jobDockerCallIndex(calls, "network", "rm") < run {
+		t.Fatalf("host-service network removed before Docker action: %#v", calls)
+	}
+}
+
+func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
+	f := newJobDocker(t, "")
+	w := t.TempDir()
+	j := jobContainerPlan(t, w, nil)
+	j.Container = nil
+	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
+	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}}
+	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -810,10 +933,6 @@ func TestRunJobContainerRejectsDeferredFeaturesBeforeDocker(t *testing.T) {
 			switch feature {
 			case "action":
 				j.Steps = []plan.Step{{Kind: "uses", Uses: "x"}}
-			case "service":
-				j.Services = map[string]plan.Container{"db": {Image: "x"}}
-			case "port":
-				j.Container.Ports = []string{"8080"}
 			}
 			if _, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: m}).RunJob(context.Background(), j, w); e == nil {
 				t.Fatal("accepted")

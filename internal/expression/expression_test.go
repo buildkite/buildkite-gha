@@ -76,6 +76,37 @@ func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
 	}
 }
 
+func TestServicePortIsTheOnlyRuntimeJobExpression(t *testing.T) {
+	services := map[string]map[string]string{"redis": {"6379": "49152"}}
+	context := Context{Services: services, Env: map[string]string{"PORT": "6379"}}
+	for _, reference := range []string{"job.services.redis.ports[6379]", "JOB.Services.REDIS.Ports[6379]", "job.services.REDIS.ports['6379']"} {
+		got, err := Evaluate("${{ "+reference+" }}", context)
+		if err != nil || got != "49152" {
+			t.Fatalf("Evaluate(%q) = %q, %v", reference, got, err)
+		}
+	}
+	if got, err := EvaluateCondition("job.services.Redis.ports[6379] == '49152'", ConditionContext{Services: services}); err != nil || !got {
+		t.Fatalf("service condition = %v, %v", got, err)
+	}
+	for _, reference := range []string{"job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
+		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil {
+			t.Errorf("Evaluate(%q) unexpectedly succeeded", reference)
+		}
+	}
+	for _, reference := range []string{"matrix[0]", "env[0]", "github.event.items[0]"} {
+		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil || !strings.Contains(err.Error(), "does not support numeric indices") {
+			t.Errorf("Evaluate(%q) numeric index error = %v", reference, err)
+		}
+	}
+	expr, err := Parse("${{ job.services.redis.ports[6379] }}", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EvaluateCompile(expr, CompileContext{}); err == nil {
+		t.Fatal("compile-time job context unexpectedly succeeded")
+	}
+}
+
 func TestSecretReferencesUsesExpressionAST(t *testing.T) {
 	template := "${{ secrets.dot_token }}:${{ secrets['BRACKET_TOKEN'] }}:${{ secrets.DOT_TOKEN }}:${{ matrix.value }}:${{ 'not }} a delimiter' }}"
 	got, err := SecretReferences(template)

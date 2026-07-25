@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,7 @@ type jobContainerBackend struct {
 	mounts                    []containerMount
 	nodeMu                    sync.Mutex
 	probedNodes               map[string]bool
+	servicePorts              map[string]map[string]string
 }
 
 func privateDocker(r Runner) (string, string, map[string]string, error) {
@@ -81,7 +84,10 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		return nil, err
 	}
 	id := hex.EncodeToString(nonce[:])
-	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner=" + id, container: "buildkite-gha-job-" + id, network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp}
+	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner=" + id, network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]map[string]string)}
+	if spec.Image != "" {
+		b.container = "buildkite-gha-job-" + id
+	}
 	b.mounts = []containerMount{{host: workspace, target: jobContainerWorkspace}, {host: temp, target: jobContainerTemp}}
 	for _, m := range extra {
 		if err := validateContainerMount(m); err != nil {
@@ -116,24 +122,32 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 	if err = validateDockerMountPath(temp); err != nil {
 		return nil, err
 	}
-	runtimeExecutable := r.RuntimeExecutable
-	if runtimeExecutable == "" {
-		runtimeExecutable, err = os.Executable()
+	var runtimeExecutable string
+	if spec.Image != "" {
+		runtimeExecutable = r.RuntimeExecutable
+		if runtimeExecutable == "" {
+			runtimeExecutable, err = os.Executable()
+			if err != nil {
+				return nil, fmt.Errorf("resolve runtime executable: %w", err)
+			}
+		}
+		runtimeExecutable, err = filepath.Abs(runtimeExecutable)
 		if err != nil {
 			return nil, fmt.Errorf("resolve runtime executable: %w", err)
 		}
+		if err = validateDockerMountFile(runtimeExecutable); err != nil {
+			return nil, err
+		}
 	}
-	runtimeExecutable, err = filepath.Abs(runtimeExecutable)
-	if err != nil {
-		return nil, fmt.Errorf("resolve runtime executable: %w", err)
+	if spec.Image != "" {
+		if err = r.runStreaming(ctx, newCommandProcessor(r.stdout(), r.stderr()), "", env, docker, "pull", spec.Image); err != nil {
+			return nil, fmt.Errorf("pull job container image: %w", err)
+		}
 	}
-	if err = validateDockerMountFile(runtimeExecutable); err != nil {
-		return nil, err
+	pulled := map[string]bool{}
+	if spec.Image != "" {
+		pulled[spec.Image] = true
 	}
-	if err = r.runStreaming(ctx, newCommandProcessor(r.stdout(), r.stderr()), "", env, docker, "pull", spec.Image); err != nil {
-		return nil, fmt.Errorf("pull job container image: %w", err)
-	}
-	pulled := map[string]bool{spec.Image: true}
 	for _, serviceID := range sortedKeys(services) {
 		image := services[serviceID].Image
 		if pulled[image] {
@@ -172,6 +186,14 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 			return nil, fmt.Errorf("start service %q: %w", service.id, err)
 		}
 	}
+	for _, service := range b.services {
+		ports, portErr := b.readServicePorts(ctx, service.id, service.name, services[service.id].Ports)
+		if portErr != nil {
+			b.serviceDiagnostics(processor, service.name)
+			return nil, portErr
+		}
+		b.servicePorts[service.id] = ports
+	}
 	readinessCtx, cancelReadiness := context.WithTimeout(ctx, serviceReadinessAttempts*serviceReadinessInterval)
 	defer cancelReadiness()
 	for _, service := range b.services {
@@ -179,47 +201,98 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 			return nil, err
 		}
 	}
-	args := []string{"create", "--name", b.container, "--label", b.owner, "--network", b.network,
-		"--mount", "type=bind,source=" + workspace + ",target=" + jobContainerWorkspace,
-		"--mount", "type=bind,source=" + temp + ",target=" + jobContainerTemp,
-		"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
-		"--workdir", jobContainerWorkspace, "--entrypoint", "sh"}
-	for _, m := range b.mounts[2:] {
-		mount := "type=bind,source=" + m.host + ",target=" + m.target
-		if m.readonly {
-			mount += ",readonly"
+	if spec.Image != "" {
+		args := []string{"create", "--name", b.container, "--label", b.owner, "--network", b.network,
+			"--mount", "type=bind,source=" + workspace + ",target=" + jobContainerWorkspace,
+			"--mount", "type=bind,source=" + temp + ",target=" + jobContainerTemp,
+			"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
+			"--workdir", jobContainerWorkspace, "--entrypoint", "sh"}
+		for _, m := range b.mounts[2:] {
+			mount := "type=bind,source=" + m.host + ",target=" + m.target
+			if m.readonly {
+				mount += ",readonly"
+			}
+			args = append(args, "--mount", mount)
 		}
-		args = append(args, "--mount", mount)
-	}
-	for _, name := range sortedKeys(spec.Env) {
-		args = append(args, "--env", name+"="+spec.Env[name])
-	}
-	args = appendPublishedPorts(args, spec.Ports)
-	args = append(args, spec.Image, "-c", "while :; do sleep 3600; done")
-	if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
-		return nil, fmt.Errorf("create job container: %w", err)
-	}
-	if _, err = boundedDockerOutput(ctx, env, docker, "start", b.container); err != nil {
-		return nil, fmt.Errorf("start job container: %w", err)
-	}
-	probePID := jobContainerTemp + "/startup-probe.pid"
-	out, probeErr := boundedDockerOutput(ctx, env, docker, "exec", b.container, jobContainerRuntime, ContainerProcessHelperCommand, "run", probePID, "sh", "-c", `printf '%s' "$PATH"`)
-	if probeErr != nil {
-		return nil, fmt.Errorf("job container runtime helper failed to start (the mounted executable must be a self-contained Linux executable and the image must provide sh): %w", probeErr)
-	}
-	_ = os.Remove(filepath.Join(temp, "startup-probe.pid"))
-	b.imagePATH = out
-	for _, m := range b.mounts[2:] {
-		if !m.readonly || !m.probe {
-			continue
+		for _, name := range sortedKeys(spec.Env) {
+			args = append(args, "--env", name+"="+spec.Env[name])
 		}
-		probe := "test -r \"$1\" && test -x \"$1\""
-		if _, e := boundedDockerOutput(ctx, env, docker, "exec", b.container, "sh", "-c", probe, "sh", m.target); e != nil {
-			return nil, fmt.Errorf("read-only job container mount %q is not readable/traversable by the image USER: %w", m.target, e)
+		args = appendPublishedPorts(args, spec.Ports)
+		args = append(args, spec.Image, "-c", "while :; do sleep 3600; done")
+		if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
+			return nil, fmt.Errorf("create job container: %w", err)
+		}
+		if _, err = boundedDockerOutput(ctx, env, docker, "start", b.container); err != nil {
+			return nil, fmt.Errorf("start job container: %w", err)
+		}
+		probePID := jobContainerTemp + "/startup-probe.pid"
+		out, probeErr := boundedDockerOutput(ctx, env, docker, "exec", b.container, jobContainerRuntime, ContainerProcessHelperCommand, "run", probePID, "sh", "-c", `printf '%s' "$PATH"`)
+		if probeErr != nil {
+			return nil, fmt.Errorf("job container runtime helper failed to start (the mounted executable must be a self-contained Linux executable and the image must provide sh): %w", probeErr)
+		}
+		_ = os.Remove(filepath.Join(temp, "startup-probe.pid"))
+		b.imagePATH = out
+		for _, m := range b.mounts[2:] {
+			if !m.readonly || !m.probe {
+				continue
+			}
+			probe := "test -r \"$1\" && test -x \"$1\""
+			if _, e := boundedDockerOutput(ctx, env, docker, "exec", b.container, "sh", "-c", probe, "sh", m.target); e != nil {
+				return nil, fmt.Errorf("read-only job container mount %q is not readable/traversable by the image USER: %w", m.target, e)
+			}
 		}
 	}
 	ok = true
 	return b, nil
+}
+
+var dockerPortLine = regexp.MustCompile(`^([0-9]+)/(tcp|udp) -> 127\.0\.0\.1:([0-9]+)$`)
+
+func (b *jobContainerBackend) readServicePorts(ctx context.Context, id, name string, declared []string) (map[string]string, error) {
+	want := map[string]bool{}
+	for _, publication := range declared {
+		parts := strings.SplitN(publication, "/", 2)
+		proto := "tcp"
+		if len(parts) == 2 {
+			proto = parts[1]
+		}
+		container := parts[0]
+		if i := strings.LastIndex(container, ":"); i >= 0 {
+			container = container[i+1:]
+		}
+		want[container+"/"+proto] = true
+	}
+	out, err := boundedDockerOutput(ctx, b.env, b.docker, "port", name)
+	if err != nil {
+		return nil, fmt.Errorf("query service %q ports: %w", id, err)
+	}
+	got, result := map[string]bool{}, map[string]string{}
+	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(out, "\r\n", "\n"), "\n"), "\n") {
+		if line == "" && out == "" {
+			continue
+		}
+		m := dockerPortLine.FindStringSubmatch(line)
+		if m == nil {
+			return nil, fmt.Errorf("service %q has malformed Docker port output %q", id, line)
+		}
+		cp, e1 := strconv.Atoi(m[1])
+		hp, e2 := strconv.Atoi(m[3])
+		key := m[1] + "/" + m[2]
+		if e1 != nil || e2 != nil || cp < 1 || cp > 65535 || hp < 1 || hp > 65535 || !want[key] {
+			return nil, fmt.Errorf("service %q has invalid or undeclared port mapping %q", id, line)
+		}
+		got[key] = true
+		// GitHub's runner exposes ports in a dictionary keyed only by numeric
+		// container port, so later Docker mappings intentionally replace earlier
+		// TCP/UDP mappings for the same port.
+		result[m[1]] = m[3]
+	}
+	for key := range want {
+		if !got[key] {
+			return nil, fmt.Errorf("service %q is missing declared port mapping %s", id, key)
+		}
+	}
+	return result, nil
 }
 
 func appendPublishedPorts(args, ports []string) []string {
@@ -454,14 +527,18 @@ func (b *jobContainerBackend) cleanup() error {
 			}
 		}
 	}
-	out, queryErr := boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "name=^/"+b.container+"$")
-	if queryErr != nil {
-		err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
-	}
-	if queryErr != nil || strings.TrimSpace(out) != "" {
-		_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", b.container)
-		if e != nil {
-			err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+	var out string
+	var queryErr error
+	if b.container != "" {
+		out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "name=^/"+b.container+"$")
+		if queryErr != nil {
+			err = errors.Join(err, fmt.Errorf("query job container: %w", queryErr))
+		}
+		if queryErr != nil || strings.TrimSpace(out) != "" {
+			_, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", b.container)
+			if e != nil {
+				err = errors.Join(err, fmt.Errorf("remove job container: %w", e))
+			}
 		}
 	}
 	out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "network", "ls", "--quiet", "--filter", "label="+b.owner, "--filter", "name=^"+b.network+"$")

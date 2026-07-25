@@ -40,6 +40,7 @@ type Context struct {
 	Vars        map[string]string
 	Env         map[string]string
 	GitHub      map[string]any
+	Services    map[string]map[string]string
 }
 
 // StepStatus contains the values exposed for one completed step while
@@ -61,6 +62,7 @@ type ConditionContext struct {
 	Vars         map[string]string
 	Matrix       map[string]any
 	GitHub       map[string]any
+	Services     map[string]map[string]string
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
@@ -368,6 +370,8 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 
 func resolveConditionReference(root string, path []string, context ConditionContext) (any, error) {
 	switch {
+	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
+		return resolveServicePort(context.Services, path[1], path[3], "condition")
 	case strings.EqualFold(root, "github"):
 		if value, ok := lookupRuntimeValue(context.GitHub, path); ok {
 			return value, nil
@@ -544,11 +548,17 @@ func referencePath(node actionlint.ExprNode) (string, []string, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		index, ok := node.Index.(*actionlint.StringNode)
-		if !ok {
-			return root, nil, fmt.Errorf("expression index must be a string literal")
+		switch index := node.Index.(type) {
+		case *actionlint.StringNode:
+			return root, append(path, index.Value), nil
+		case *actionlint.IntNode:
+			if !strings.EqualFold(root, "job") || len(path) != 3 || !strings.EqualFold(path[0], "services") || !strings.EqualFold(path[2], "ports") {
+				return root, nil, fmt.Errorf("expression variable %q does not support numeric indices", root)
+			}
+			return root, append(path, fmt.Sprint(index.Value)), nil
+		default:
+			return root, nil, fmt.Errorf("expression index must be a string literal or integer literal")
 		}
-		return root, append(path, index.Value), nil
 	default:
 		return "", nil, fmt.Errorf("unsupported expression reference")
 	}
@@ -582,6 +592,18 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 		}
 	}
 	return current, nil
+}
+
+func resolveServicePort(services map[string]map[string]string, service, port, kind string) (string, error) {
+	for id, ports := range services {
+		if strings.EqualFold(id, service) {
+			if value, ok := ports[port]; ok {
+				return value, nil
+			}
+			return "", fmt.Errorf("%s references unavailable service port %s.%s", kind, service, port)
+		}
+	}
+	return "", fmt.Errorf("%s references unavailable service %q", kind, service)
 }
 
 func objectValue(value any, name string) (any, bool, error) {
@@ -671,6 +693,8 @@ func evaluateReference(reference string, context Context) (string, error) {
 		return "", err
 	}
 	switch {
+	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
+		return resolveServicePort(context.Services, path[1], path[3], "expression")
 	case len(path) >= 1 && strings.EqualFold(root, "github"):
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {

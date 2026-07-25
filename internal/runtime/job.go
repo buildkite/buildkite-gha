@@ -96,9 +96,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
-	if len(job.Services) != 0 && job.Container == nil {
-		return JobResult{}, fmt.Errorf("services on host jobs are not supported until Phase 5 M4b")
-	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
@@ -250,6 +247,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, setupErr
 		}
 		r.jobContainer = backend
+		r.jobDocker = backend
+		eval.Services = backend.servicePorts
+		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
+	} else if len(job.Services) != 0 {
+		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, job.Services)
+		if setupErr != nil {
+			return jobResult, setupErr
+		}
+		r.jobDocker = backend
+		eval.Services = backend.servicePorts
 		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
 	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
@@ -344,7 +351,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
@@ -1008,7 +1015,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeEnv, result.Env)
 		id := strings.ToLower(step.ID)
-		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
+		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))

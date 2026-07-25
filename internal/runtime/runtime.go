@@ -49,6 +49,7 @@ type Runner struct {
 	implicitJobPATH   string
 	explicitJobPATH   bool
 	jobContainer      *jobContainerBackend
+	jobDocker         *jobContainerBackend
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -268,8 +269,8 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
-	if r.jobContainer != nil {
-		args = append(args, "--network", r.jobContainer.network)
+	if r.jobDocker != nil {
+		args = append(args, "--network", r.jobDocker.network)
 	}
 	if action.Workspace != "" {
 		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
