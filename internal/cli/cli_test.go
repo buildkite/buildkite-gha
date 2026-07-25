@@ -606,7 +606,7 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: sources}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "runtime not implemented") {
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted-tokenless upload does not admit") {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", sources, err)
 		}
 	}

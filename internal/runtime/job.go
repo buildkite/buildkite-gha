@@ -95,8 +95,18 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
-	if job.Container != nil || len(job.Services) != 0 {
-		return JobResult{}, fmt.Errorf("job and service container runtime is not implemented")
+	if len(job.Services) != 0 {
+		return JobResult{}, fmt.Errorf("service containers are not supported until Phase 5 M4")
+	}
+	if job.Container != nil {
+		if len(job.Container.Ports) != 0 {
+			return JobResult{}, fmt.Errorf("job container ports are not supported until Phase 5 M4")
+		}
+		for _, step := range job.Steps {
+			if step.Kind == "uses" {
+				return JobResult{}, fmt.Errorf("actions in job containers are not supported until Phase 5 M3")
+			}
+		}
 	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" {
@@ -141,8 +151,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		jobResult.Conclusion = "skipped"
 		return jobResult, nil
 	}
+	runCtx := ctx
+	cancelJob := func() {}
+	if job.TimeoutMinutes > 0 {
+		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
+	}
+	defer cancelJob()
 
-	secrets, err := r.resolveSecrets(ctx, processor, job.RequiredSecrets)
+	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
 		return jobResult, err
 	}
@@ -196,9 +212,22 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if job.HasCapability("docker") {
 		r.runnerTemp = runnerTemp
 	}
+	if job.Container != nil {
+		backend, setupErr := r.startJobContainer(runCtx, workspace, runnerTemp, *job.Container)
+		if setupErr != nil {
+			return jobResult, setupErr
+		}
+		r.jobContainer = backend
+		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
+	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
-	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
-		jobResult.Env["PATH"] = path
+	if r.jobContainer != nil && !explicitJobPATH {
+		jobResult.Env["PATH"] = r.jobContainer.imagePATH
+	}
+	if r.jobContainer == nil {
+		if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
+			jobResult.Env["PATH"] = path
+		}
 	}
 	if job.HasCapability("docker") {
 		r.explicitJobPATH = explicitJobPATH
@@ -208,12 +237,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	eval.Env = jobResult.Env
 	actions := newActionLockResolver(job, workspace, r.Actions)
-	runCtx := ctx
-	cancelJob := func() {}
-	if job.TimeoutMinutes > 0 {
-		runCtx, cancelJob = context.WithTimeout(runCtx, durationMinutes(job.TimeoutMinutes))
-	}
-	defer cancelJob()
 	var posts postRegistry
 	statuses := make(map[string]expression.StepStatus, len(job.Steps))
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)

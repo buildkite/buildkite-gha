@@ -33,7 +33,11 @@ type fileCommandEffects struct {
 }
 
 func newCommandFiles() (commandFiles, error) {
-	dir, err := os.MkdirTemp("", "buildkite-gha-files-")
+	return newCommandFilesUnder("")
+}
+
+func newCommandFilesUnder(parent string) (commandFiles, error) {
+	dir, err := os.MkdirTemp(parent, "buildkite-gha-files-")
 	if err != nil {
 		return commandFiles{}, fmt.Errorf("create file-command directory: %w", err)
 	}

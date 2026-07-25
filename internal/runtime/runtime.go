@@ -31,22 +31,24 @@ const (
 
 // Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
-	Stdout          io.Writer
-	Stderr          io.Writer
-	Node20          string
-	Node24          string
-	ManagedNodeRoot string
-	Docker          string
-	Git             string
-	CleanupTimeout  time.Duration
-	InterruptGrace  time.Duration
-	TerminateGrace  time.Duration
-	Secrets         SecretResolver
-	Redactor        Redactor
-	Actions         ActionMaterializer
-	runnerTemp      string
-	implicitJobPATH string
-	explicitJobPATH bool
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Node20            string
+	Node24            string
+	ManagedNodeRoot   string
+	Docker            string
+	RuntimeExecutable string
+	Git               string
+	CleanupTimeout    time.Duration
+	InterruptGrace    time.Duration
+	TerminateGrace    time.Duration
+	Secrets           SecretResolver
+	Redactor          Redactor
+	Actions           ActionMaterializer
+	runnerTemp        string
+	implicitJobPATH   string
+	explicitJobPATH   bool
+	jobContainer      *jobContainerBackend
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -433,19 +435,33 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
-	files, err := newCommandFiles()
+	var files commandFiles
+	var err error
+	if r.jobContainer != nil {
+		files, err = newCommandFilesUnder(r.runnerTemp)
+	} else {
+		files, err = newCommandFiles()
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = files.cleanup() }()
-	env = mergeStringMaps(env, map[string]string{
-		"GITHUB_OUTPUT":       files.output,
-		"GITHUB_ENV":          files.env,
-		"GITHUB_PATH":         files.path,
-		"GITHUB_STATE":        files.state,
-		"GITHUB_STEP_SUMMARY": files.summary,
-	})
-	runErr := r.runStreaming(ctx, processor, dir, env, name, args...)
+	commandPaths := map[string]string{"GITHUB_OUTPUT": files.output, "GITHUB_ENV": files.env, "GITHUB_PATH": files.path, "GITHUB_STATE": files.state, "GITHUB_STEP_SUMMARY": files.summary}
+	if r.jobContainer != nil {
+		if err := files.allowContainerWrites(); err != nil {
+			return err
+		}
+		for key, path := range commandPaths {
+			commandPaths[key] = r.jobContainer.containerPath(path)
+		}
+	}
+	env = mergeStringMaps(env, commandPaths)
+	var runErr error
+	if r.jobContainer != nil {
+		runErr = r.jobContainer.exec(ctx, r, processor, dir, env, name, args...)
+	} else {
+		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
+	}
 	effects, fileErr := files.apply(result, state)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
 		pathEnv := map[string]string{"PATH": env["PATH"]}

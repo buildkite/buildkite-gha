@@ -20,3 +20,9 @@ func terminateProcessGroup(ctx context.Context, pid int, _, _ time.Duration, fin
 	case <-finished:
 	}
 }
+
+func terminateProcessGroupNow(pid int, _, _ time.Duration) {
+	if process, err := os.FindProcess(pid); err == nil {
+		_ = process.Kill()
+	}
+}

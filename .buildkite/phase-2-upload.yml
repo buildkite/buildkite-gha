@@ -12,7 +12,7 @@ steps:
       scripts/phase-0-shell-oracle-checkout "$$commit"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase2.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
-      mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
         --runtime-queue hosted \

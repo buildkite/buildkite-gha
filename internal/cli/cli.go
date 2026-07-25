@@ -63,6 +63,9 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
 	}
+	if args[0] == gharuntime.ContainerProcessHelperCommand {
+		return gharuntime.RunContainerProcessHelper(args[1:])
+	}
 
 	switch args[0] {
 	case "-h", "--help":
@@ -213,6 +216,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Secrets:         gharuntime.EnvironmentSecrets{},
 		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:         actionMaterializer,
+	}
+	runner.RuntimeExecutable, err = os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
+		return 1
 	}
 	var result gharuntime.JobResult
 	var runErr error
@@ -671,7 +679,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					return fmt.Errorf("job %q uses job or service containers; runtime not implemented", artifact.Job.Workflow.LogicalJobID)
+					return fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID)
 				}
 				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
 			}
