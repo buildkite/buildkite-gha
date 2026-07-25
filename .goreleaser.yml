@@ -8,6 +8,7 @@ builds:
       - CGO_ENABLED=0
     goos: [linux]
     goarch: [amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
       - -trimpath
     ldflags:
@@ -18,16 +19,45 @@ archives:
     ids: [buildkite-gha-linux]
     formats: [tar.gz]
     name_template: buildkite-gha_Linux_x86_64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
     files:
       - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
       - src: .release/runtimes/node20/bin/node
         dst: runtimes/node20/bin/node
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0755
+          owner: root
+          group: root
       - src: .release/runtimes/node20/LICENSE
         dst: runtimes/node20/LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
       - src: .release/runtimes/node24/bin/node
         dst: runtimes/node24/bin/node
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0755
+          owner: root
+          group: root
       - src: .release/runtimes/node24/LICENSE
         dst: runtimes/node24/LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
 
 checksum:
   name_template: checksums.txt

@@ -215,8 +215,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Env["MISE_JOBS"] != "1" {
 		t.Fatalf("default pipeline MISE_JOBS = %q, want serial tool installation", document.Env["MISE_JOBS"])
 	}
-	if len(document.Steps) != 10 {
-		t.Fatalf("default pipeline = %#v, want nine gated loaders plus repository checks", document.Steps)
+	if len(document.Steps) != 12 {
+		t.Fatalf("default pipeline = %#v, want nine gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -232,6 +232,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
+	}
+	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" || got.queue != "elastic-runners" {
+		t.Fatalf("release publisher = %#v", got)
 	}
 	if got := steps["phase-0-shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml" || got.condition != `build.env("PHASE0_PROBE") == "shell"` {
 		t.Fatalf("shell oracle loader = %#v", got)

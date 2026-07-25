@@ -11,6 +11,34 @@ runtime, and Phase 5 container runtime are implemented. The compiler validates
 the supported graph, expands local reusable workflows and matrices, applies
 queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
+## Quick start
+
+For a public GitHub repository on a Linux x86-64 Buildkite agent, add the
+[GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
+to `pipeline.yml`:
+
+```yaml
+steps:
+  - label: ":github: GitHub Actions"
+    plugins:
+      - github-actions#v0.1.0:
+          workflow: .github/workflows/ci.yml
+```
+
+The plugin downloads and verifies the matching public CLI distribution. The
+CLI derives the event snapshot from Buildkite, compiles the workflow, and
+uploads native Buildkite jobs to the fixed `hosted` queue. GitHub Actions `on:`
+does not configure Buildkite triggers; configure those on the Buildkite
+pipeline and select the workflow explicitly in the plugin.
+
+This v0.1 preview is intended for public, tokenless workflows. It covers shell,
+JavaScript, composite, local, and supported Dockerfile actions, plus matrices,
+local reusable workflows, conditions, job dependencies, concurrent steps,
+services, and job containers in the underlying runtime. The drop-in upload
+path remains narrower: private actions, workflow secrets, GitHub-compatible
+OIDC, artifact/cache actions, privileged queues, and job or service containers
+fail closed. Use a disposable job VM when the workflow needs host isolation.
+
 ## Commands
 
 The current command surface is:
@@ -145,7 +173,8 @@ optional installation-specific defence in depth.
 
 ## Installation
 
-The v0 release distribution supports Linux x86-64. Download
+The plugin in [Quick start](#quick-start) is the recommended installation. For
+direct CLI use, the v0 release distribution supports Linux x86-64. Download
 `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the GitHub release,
 verify the archive against the checksum file, and extract it to a stable
 location. Keep the bundled `runtimes/` directory beside `buildkite-gha`; it
@@ -154,6 +183,17 @@ contains the pinned Node 20 and Node 24 executables required by actions.
 Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
 and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
 publisher creates the GitHub release after repository checks pass.
+
+The release step's tag condition prevents accidental publication; it is not a
+secret boundary because pull-request code can upload arbitrary Buildkite
+steps. `BUILDKITE_GHA_GITHUB_RELEASE_TOKEN` must be a Buildkite Secret that is
+unavailable to the public CI pipeline. Run tagged releases in a dedicated
+release pipeline configured to build upstream tags only, and restrict the
+secret's access policy to that pipeline's immutable `pipeline_id` and webhook
+`build_source`. The webhook policy does not distinguish tag and pull-request
+webhooks, so the release pipeline's tag-only provider filter is a load-bearing
+part of this boundary. Do not expose the token through a shared agent
+environment hook or to ordinary branch and pull-request jobs.
 
 ## Development
 
