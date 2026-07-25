@@ -3266,7 +3266,7 @@ func requireNode24(t *testing.T) string {
 			}
 		}
 	}
-	t.Skip("Node 24 unavailable: set BUILDKITE_GHA_TEST_NODE24 or install managed Node 24 with `mise install node@24`")
+	livePrerequisiteUnavailable(t, "Node 24 unavailable: set BUILDKITE_GHA_TEST_NODE24 or install managed Node 24 with `mise install node@24`")
 	return ""
 }
 
@@ -3274,15 +3274,24 @@ func requireDocker(t *testing.T) string {
 	t.Helper()
 	docker, err := exec.LookPath("docker")
 	if err != nil {
-		t.Skip("Docker unavailable: docker executable not found")
+		livePrerequisiteUnavailable(t, "Docker unavailable: docker executable not found")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if output, err := exec.CommandContext(ctx, docker, "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
-		t.Skipf("Docker unavailable: daemon probe failed: %v: %s", err, strings.TrimSpace(string(output)))
+		livePrerequisiteUnavailable(t, "Docker unavailable: daemon probe failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	if output, err := exec.CommandContext(ctx, docker, "buildx", "inspect", "default", "--format", "{{.Driver}}").CombinedOutput(); err != nil || string(output) != "docker\n" {
-		t.Skipf("Docker unavailable: default Buildx builder is not the local docker driver: %v: %s", err, strings.TrimSpace(string(output)))
+		livePrerequisiteUnavailable(t, "Docker unavailable: default Buildx builder is not the local docker driver: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return docker
+}
+
+func livePrerequisiteUnavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	message := fmt.Sprintf(format, args...)
+	if os.Getenv("BUILDKITE_GHA_LIVE_REQUIRED") == "1" {
+		t.Fatal(message)
+	}
+	t.Skip(message)
 }

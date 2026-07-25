@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -1572,6 +1573,12 @@ func liveContainerJob(t *testing.T, docker string, steps []plan.Step) JobResult 
 
 func buildLiveContainerRuntime(t *testing.T) string {
 	t.Helper()
+	if explicit := os.Getenv("BUILDKITE_GHA_TEST_RUNTIME"); explicit != "" {
+		if err := validateDockerMountFile(explicit); err != nil {
+			t.Fatalf("BUILDKITE_GHA_TEST_RUNTIME is not a mount-safe executable: %v", err)
+		}
+		return explicit
+	}
 	root := filepath.Dir(fixturePath(t))
 	binary := filepath.Join(t.TempDir(), "buildkite-gha")
 	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/buildkite-gha")
@@ -1644,4 +1651,190 @@ runs:
 	if contents, readErr := os.ReadFile(filepath.Join(workspace, "post-ran")); readErr != nil || string(contents) != "yes" {
 		t.Fatalf("live container post = %q, %v", contents, readErr)
 	}
+}
+
+func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "phase5", "runtime"))); err != nil {
+		t.Fatalf("copy Phase 5 fixture: %v", err)
+	}
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "runtime.yml")
+	workflowSource, err := os.ReadFile(workflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventSource, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := compiler.CompileBundleWithOptions(workflowPath, workflowSource, eventSource, "phase5-live", "sha256:"+strings.Repeat("2", 64), "phase5-live-importer", compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "gha-untrusted"},
+			UntrustedQueues: []string{"gha-untrusted"},
+		},
+		ResolveActions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("compiled plans = %d, want 2", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		job := artifact.Job
+		if job.Schema != plan.SchemaV4 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
+		}
+		wantSources := []string{"dockerfile-actions", "service-containers"}
+		if job.Workflow.LogicalJobID == "container-runtime" {
+			wantSources = []string{"dockerfile-actions", "job-containers", "service-containers"}
+		}
+		if !slices.Equal(artifact.Authorization.DockerCapabilitySources, wantSources) {
+			t.Fatalf("compiled %s Docker provenance = %#v, want %#v", job.Workflow.LogicalJobID, artifact.Authorization.DockerCapabilitySources, wantSources)
+		}
+	}
+	docker := requireDocker(t)
+	node24 := requireNode24(t)
+	before := liveDockerOwnedResources(t, docker)
+	runtimeExecutable := buildLiveContainerRuntime(t)
+	seen := map[string]bool{}
+	for _, artifact := range bundle.Plans {
+		job := artifact.Job
+		var logs bytes.Buffer
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		result, runErr := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable, Node24: node24, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+		cancel()
+		if runErr != nil || result.Conclusion != "success" {
+			t.Fatalf("run %s result = %#v, error = %v, logs = %q", job.Workflow.LogicalJobID, result, runErr, logs.String())
+		}
+		wantObservation := strings.TrimSuffix(job.Workflow.LogicalJobID, "-runtime") + "-runtime"
+		if result.Outputs["observation"] != wantObservation {
+			t.Fatalf("run %s observation = %q, want %q", job.Workflow.LogicalJobID, result.Outputs["observation"], wantObservation)
+		}
+		if strings.Contains(logs.String(), "phase5-javascript-secret") || strings.Contains(logs.String(), "phase5-docker-secret") {
+			t.Fatalf("run %s leaked a registered mask: %q", job.Workflow.LogicalJobID, logs.String())
+		}
+		if job.Workflow.LogicalJobID == "container-runtime" {
+			for _, want := range []string{"phase5 JavaScript main\n", "phase5 Docker action summary\n", "phase5 JavaScript post\n"} {
+				if !strings.Contains(result.Summary, want) {
+					t.Fatalf("container summary lacks %q: %q", want, result.Summary)
+				}
+			}
+		}
+		seen[job.Workflow.LogicalJobID] = true
+	}
+	if !seen["container-runtime"] || !seen["host-runtime"] {
+		t.Fatalf("executed logical jobs = %#v", seen)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(workspace, "phase5-post-ran")); readErr != nil || string(contents) != "yes" {
+		t.Fatalf("compiled container post marker = %q, %v", contents, readErr)
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("Phase 5 runtime leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLivePhase5ManifestContainerFixtures(t *testing.T) {
+	docker := requireDocker(t)
+	workspace := t.TempDir()
+	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "unsupported"))); err != nil {
+		t.Fatalf("copy smoke fixture root: %v", err)
+	}
+	eventSource, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeExecutable := buildLiveContainerRuntime(t)
+	before := liveDockerOwnedResources(t, docker)
+	for _, test := range []struct {
+		name       string
+		provenance string
+		logicalJob string
+	}{
+		{name: "job-container.yml", provenance: "job-containers", logicalJob: "container"},
+		{name: "service-container.yml", provenance: "service-containers", logicalJob: "service"},
+	} {
+		workflowPath := filepath.Join(workspace, ".github", "workflows", test.name)
+		workflowSource, readErr := os.ReadFile(workflowPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		bundle, compileErr := compiler.CompileBundle(workflowPath, workflowSource, eventSource, "phase5-live", "sha256:"+strings.Repeat("2", 64), "phase5-live-importer")
+		if compileErr != nil {
+			t.Fatalf("compile %s: %v", test.name, compileErr)
+		}
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV4 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
+			t.Fatalf("compiled %s boundary = %#v", test.name, bundle.Plans)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		result, runErr := (Runner{Docker: docker, RuntimeExecutable: runtimeExecutable}).RunJob(ctx, bundle.Plans[0].Job, workspace)
+		cancel()
+		if runErr != nil || result.Conclusion != "success" {
+			t.Fatalf("run %s result = %#v, error = %v", test.name, result, runErr)
+		}
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("manifest container fixtures leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLivePhase5UnhealthyServiceDiagnostics(t *testing.T) {
+	docker := requireDocker(t)
+	contextDir := t.TempDir()
+	dockerfile := `FROM busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+HEALTHCHECK --interval=1s --timeout=1s --retries=1 CMD exit 1
+CMD ["sh", "-c", "echo phase5-health-diagnostic >&2; sleep 300"]
+`
+	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "buildkite-gha-phase5-unhealthy-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	command := exec.Command(docker, "buildx", "build", "--builder", "default", "--load", "--tag", image, contextDir)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build unhealthy service: %v: %s", err, output)
+	}
+	t.Cleanup(func() { _ = exec.Command(docker, "image", "rm", "--force", image).Run() })
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/health.yml", "name: health diagnostics\n")
+	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []plan.Step{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Services = map[string]plan.Container{"unhealthy": {Image: image}}
+	var logs bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	_, err := (Runner{Docker: docker, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+	if err == nil || !strings.Contains(err.Error(), `service "unhealthy" failed readiness with status "unhealthy"`) {
+		t.Fatalf("unhealthy service error = %v, logs = %q", err, logs.String())
+	}
+	if !strings.Contains(logs.String(), "phase5-health-diagnostic") {
+		t.Fatalf("unhealthy service diagnostic absent: %q", logs.String())
+	}
+}
+
+func liveDockerOwnedResources(t *testing.T, docker string) []string {
+	t.Helper()
+	queries := []struct {
+		kind string
+		args []string
+	}{
+		{kind: "container", args: []string{"container", "ls", "--all", "--format", "{{.Names}}", "--filter", "name=buildkite-gha-"}},
+		{kind: "network", args: []string{"network", "ls", "--format", "{{.Name}}", "--filter", "name=buildkite-gha-network-"}},
+		{kind: "image", args: []string{"image", "ls", "--format", "{{.Repository}}", "--filter", "reference=buildkite-gha-image-*"}},
+	}
+	var resources []string
+	for _, query := range queries {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		output, err := exec.CommandContext(ctx, docker, query.args...).CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("query live Docker %s resources: %v: %s", query.kind, err, output)
+		}
+		for _, name := range strings.Fields(string(output)) {
+			resources = append(resources, query.kind+":"+name)
+		}
+	}
+	slices.Sort(resources)
+	return resources
 }

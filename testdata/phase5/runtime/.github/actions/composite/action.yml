@@ -1,0 +1,24 @@
+name: Phase 5 composite action
+description: Exercises nested expression and environment propagation in a job container.
+
+inputs:
+  message:
+    description: Value to transform.
+    required: true
+
+outputs:
+  result:
+    description: Transformed value.
+    value: ${{ steps.transform.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Transform value
+      id: transform
+      shell: sh
+      env:
+        MESSAGE: ${{ inputs.message }}
+      run: |
+        echo "result=$MESSAGE-composite" >> "$GITHUB_OUTPUT"
+        echo 'PHASE5_COMPOSITE_ENV=seen' >> "$GITHUB_ENV"
