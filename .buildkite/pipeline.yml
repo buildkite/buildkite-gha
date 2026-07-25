@@ -97,3 +97,14 @@ steps:
     command: "mise run --jobs 1 check"
     agents:
       queue: "elastic-runners"
+
+  - wait
+
+  - label: ":rocket: Publish release"
+    if: build.tag != null
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise exec -- scripts/ci-buildkite-release"
+    agents:
+      queue: "elastic-runners"

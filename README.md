@@ -18,7 +18,7 @@ The current command surface is:
 ```text
 buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>
 buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>
-buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>
+buildkite-gha upload [--event-path <path>] --runtime-queue hosted <workflow>
 buildkite-gha run-job --plan <path> [--result <path>]
 ```
 
@@ -33,10 +33,17 @@ target only the untrusted queue. The emitted YAML references content-addressed
 plans and the exact compiler executable, but `compile` does not materialize or
 upload those artifacts.
 
-`upload` is the Buildkite importer path for local, unattested event files. It
-requires `BUILDKITE_STEP_KEY`, compiles the deterministic bundle, materializes
-and uploads the exact executable, every content-addressed plan, and, for action
-workflows, the managed Node runtimes, then uses
+`upload` is the Buildkite importer path for unattested compatibility events. It
+requires `BUILDKITE_STEP_KEY`. With `--event-path`, it reads an explicit event
+file; without one, it derives a bounded GitHub compatibility snapshot from the
+current Buildkite repository, commit, branch, tag, or pull-request environment.
+Buildkite repository and author fields can be modified or unverified, and pull
+requests deliberately use the exact Buildkite commit with a
+`refs/pull/<number>/head` compatibility ref rather than claiming GitHub merge
+semantics. Neither input mode authorizes protected capabilities. The command
+compiles the deterministic bundle, materializes and uploads the exact
+executable, every content-addressed plan, and, for action workflows, the managed
+Node runtimes, then uses
 `buildkite-agent pipeline upload --no-interpolation --reject-secrets`. Generated
 jobs skip checkout, download their artifacts from the exact importer into a
 fresh temporary directory, verify their digests, and run the plan.
@@ -135,6 +142,18 @@ independently verify GitHub event provenance and customer policy before issuing
 a narrow, expiring grant. Canonical plan digests protect transport integrity;
 they do not authorize those capabilities. Buildkite pipeline signing remains
 optional installation-specific defence in depth.
+
+## Installation
+
+The v0 release distribution supports Linux x86-64. Download
+`buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the GitHub release,
+verify the archive against the checksum file, and extract it to a stable
+location. Keep the bundled `runtimes/` directory beside `buildkite-gha`; it
+contains the pinned Node 20 and Node 24 executables required by actions.
+
+Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
+and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
+publisher creates the GitHub release after repository checks pass.
 
 ## Development
 

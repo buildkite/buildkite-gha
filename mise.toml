@@ -4,6 +4,8 @@ golangci-lint = "2.12.2"
 jq = "1.8.2"
 node = ["24.18.0", "20.20.2"]
 shellcheck = "0.11.0"
+goreleaser = "2.17.0"
+svu = "3.4.1"
 
 [env]
 GOTOOLCHAIN = "local"
@@ -29,7 +31,7 @@ run = "golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh scripts/phase-0-shell-oracle-checkout scripts/phase-0-sign-json scripts/phase-0-verify-json scripts/phase-5-hosted-docker-probe scripts/phase-5-hosted-runtime-probe scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/phase5/runtime/.github/actions/docker/entrypoint.sh"
+run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh scripts/ci-buildkite-release scripts/phase-0-shell-oracle-checkout scripts/phase-0-sign-json scripts/phase-0-verify-json scripts/phase-5-hosted-docker-probe scripts/phase-5-hosted-runtime-probe scripts/release scripts/smoke-local scripts/stage-release-runtimes testdata/actions/docker/entrypoint.sh testdata/phase5/runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.vet]
 description = "Run go vet"
@@ -38,6 +40,15 @@ run = "go vet ./..."
 [tasks.build]
 description = "Build all Go commands"
 run = "go build ./..."
+
+[tasks.release]
+description = "Tag and push the next pre-1.0 release"
+depends = ["check"]
+run = "scripts/release"
+
+[tasks."release:check"]
+description = "Validate the release configuration"
+run = "goreleaser check"
 
 [tasks.plan-fixtures]
 description = "Validate signed plan-envelope fixtures"
@@ -53,5 +64,5 @@ run = "./scripts/smoke-local --profile hosted-tokenless"
 
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
-depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures", "smoke:local"]
+depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures", "smoke:local", "release:check"]
 run = "true"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf '[ci-buildkite-release] error: %s\n' "$*" >&2; exit 1; }
+require_command() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+for command in buildkite-agent git goreleaser curl sha256sum tar; do require_command "$command"; done
+
+: "${BUILDKITE_TAG:?BUILDKITE_TAG is required}"
+: "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
+semver_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+semver_prerelease="${semver_identifier}(\\.${semver_identifier})*"
+[[ "$BUILDKITE_TAG" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${semver_prerelease})?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] \
+  || die 'BUILDKITE_TAG must be a pre-1.0 semantic version tag'
+[[ "$BUILDKITE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die 'BUILDKITE_COMMIT must be a full lowercase commit ID'
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+git fetch --force --tags origin
+tag_commit="$(git rev-list -n 1 "$BUILDKITE_TAG^{commit}")" || die 'release tag does not resolve to a commit'
+[[ "$tag_commit" == "$BUILDKITE_COMMIT" ]] || die "tag resolves to ${tag_commit}, not BUILDKITE_COMMIT"
+[[ "$(git rev-parse HEAD)" == "$BUILDKITE_COMMIT" ]] || die 'checked-out HEAD does not match BUILDKITE_COMMIT'
+
+scripts/stage-release-runtimes
+github_token="$(buildkite-agent secret get BUILDKITE_GHA_GITHUB_RELEASE_TOKEN)"
+github_token="${github_token//$'\r'/}"
+[[ -n "$github_token" ]] || die 'BUILDKITE_GHA_GITHUB_RELEASE_TOKEN is empty'
+export GITHUB_TOKEN="$github_token"
+goreleaser release --clean
