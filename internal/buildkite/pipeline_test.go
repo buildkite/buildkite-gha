@@ -199,6 +199,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var document struct {
+		Env   map[string]string `yaml:"env"`
 		Steps []struct {
 			Key     string `yaml:"key"`
 			Command string `yaml:"command"`
@@ -210,6 +211,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
+	}
+	if document.Env["MISE_JOBS"] != "1" {
+		t.Fatalf("default pipeline MISE_JOBS = %q, want serial tool installation", document.Env["MISE_JOBS"])
 	}
 	if len(document.Steps) != 9 {
 		t.Fatalf("default pipeline = %#v, want eight gated loaders plus repository checks", document.Steps)

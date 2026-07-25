@@ -1,3 +1,6 @@
+env:
+  MISE_JOBS: "1"
+
 steps:
   - label: ":test_tube: Load Phase 0 shell oracle"
     key: "phase-0-shell-oracle-loader"
