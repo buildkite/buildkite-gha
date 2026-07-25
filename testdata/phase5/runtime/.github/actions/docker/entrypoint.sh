@@ -4,6 +4,8 @@ set -eu
 test "$GITHUB_WORKSPACE" = /github/workspace
 test -f "$GITHUB_WORKSPACE/$INPUT_EXPECTED_FILE"
 
+# The Redis protocol frame contains a literal "$4" bulk-string length.
+# shellcheck disable=SC2016
 reply="$(printf '*1\r\n$4\r\nPING\r\n' | nc -w 3 "$INPUT_SERVICE_HOST" "$INPUT_SERVICE_PORT")"
 case "$reply" in
   +PONG*) ;;

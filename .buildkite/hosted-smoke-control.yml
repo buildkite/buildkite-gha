@@ -12,6 +12,8 @@ steps:
         allow_failure: true
       - step: "phase-5-docker-action-continuation-loader"
         allow_failure: true
+      - step: "phase-5-runtime-continuation-loader"
+        allow_failure: true
     agents:
       queue: "elastic-runners"
     command: "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml"
