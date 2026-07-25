@@ -1265,6 +1265,29 @@ Explicitly defer from beta unless implementation evidence changes the order:
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all four smoke compiler outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+- The smoke inventory now separates compilation, production-policy admission,
+  and runtime evidence. `mise run smoke:local` is network-free: it validates
+  the manifest and workflows and checks deterministic compilation, but is not
+  runtime proof. `mise run smoke:profile` opts into public-network action
+  resolution and managed-runtime preparation, then applies the same
+  `hosted-tokenless` admission policy as production upload. An `admitted`
+  result is still not runtime proof and does not establish that a generic
+  action can execute without an unimplemented GitHub service.
+- The profile is also exposed as the text/JSON workflow preflight
+  `buildkite-gha validate --profile hosted-tokenless --event-path <path>
+  --format text|json <workflow>`. Expected-negative fixtures preserve current
+  boundaries: official GitHub artifact/cache actions compile but are denied
+  admission pending Phase 6, while job and service containers fail static
+  compilation.
+- A consolidated exact-commit hosted dispatcher is available with
+  `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
+  Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
+  hosted-Docker capability, and Phase 5 Dockerfile-action proofs. The dispatcher
+  deliberately uploads each existing importer and continuation independently,
+  then settles their generated and native terminal steps; it does not flatten
+  the importer/continuation topology. Existing `PHASE2_PROBE`, `PHASE3_PROBE`,
+  `PHASE4_PROBE`, and both `PHASE5_PROBE` selectors remain available for
+  targeted runs.
 
 Phase 4 live evidence:
 
@@ -1739,6 +1762,48 @@ separate compatibility projects with their own host, shell, path, and container
 semantics.
 
 ## Test strategy
+
+### Smoke and manual admission lanes
+
+The checked-in smoke manifest is a classified inventory, not a claim that
+arbitrary common workflows are supported. The required local gate is
+`mise run smoke:local`; it uses no network, performs manifest and static
+validation, and compares two nonempty compilations byte-for-byte. Compilation
+success is never runtime evidence. Its expected-negative fixtures require job
+and service containers to remain compile-time incompatible at the current
+boundary.
+
+`mise run smoke:profile` is an opt-in networked lane. It resolves anonymous
+public action sources, prepares the pinned managed Node runtimes, compiles the
+plans, and evaluates the production `hosted-tokenless` admission policy. The
+equivalent operator-facing preflight is:
+
+```bash
+buildkite-gha validate --profile hosted-tokenless \
+  --event-path <event.json> --format text|json <workflow.yml>
+```
+
+Admission is policy evidence, not execution evidence. In particular, known
+official artifact and cache actions compile but must be rejected until Phase 6
+provides their service adapters. Unknown generic action dependencies are not
+declared executable merely because the profile admits them.
+
+The manual hosted aggregate is dispatched against one exact full commit:
+
+```bash
+commit=$(git rev-parse HEAD)
+test ${#commit} -eq 40
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env SMOKE_PROBE=hosted --env SMOKE_COMMIT="$commit" --yes
+```
+
+It gathers Phase 2 shell/upload, Phase 3 concurrency, Phase 4 public actions,
+and both Phase 5 Docker proofs in one build. Each phase still owns an independent
+importer and continuation loader; a final aggregate waits for all generated and
+native terminal evidence, including failures, without changing those security
+or dependency boundaries. Keep the phase-specific selectors for focused
+reruns and fault isolation.
 
 ### Initial checked-in corpus
 
