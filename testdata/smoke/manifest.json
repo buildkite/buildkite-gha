@@ -56,6 +56,15 @@
       "action_preflight": "hosted-tokenless"
     },
     {
+      "id": "phase5-container-runtime",
+      "workflow": "testdata/phase5/runtime/.github/workflows/runtime.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "The complete compiler-to-Runner container fixture passed in exact-commit Buildkite build 136.",
+      "note": "Hosted-tokenless admission still rejects its job- and service-container provenance.",
+      "action_preflight": "none"
+    },
+    {
       "id": "unsupported-cache-service",
       "workflow": "testdata/unsupported/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",
@@ -68,18 +77,18 @@
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-unsupported",
-      "evidence": "Static validation rejects job containers at the owned compatibility boundary.",
-      "note": "This negative fixture prevents compile success from implying job-container support.",
+      "expectation": "runtime-pass",
+      "evidence": "The plan-v4 job-container fixture passed in exact-commit Buildkite build 136.",
+      "note": "Hosted-tokenless admission still rejects job-container provenance.",
       "action_preflight": "none"
     },
     {
       "id": "unsupported-service-container",
       "workflow": "testdata/unsupported/.github/workflows/service-container.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-unsupported",
-      "evidence": "Static validation rejects service containers at the owned compatibility boundary.",
-      "note": "This negative fixture prevents compile success from implying service-container support.",
+      "expectation": "runtime-pass",
+      "evidence": "The plan-v4 service-container fixture passed in exact-commit Buildkite build 136.",
+      "note": "Hosted-tokenless admission still rejects service-container provenance.",
       "action_preflight": "none"
     }
   ]

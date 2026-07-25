@@ -23,7 +23,7 @@ type PlanArtifact struct {
 // It is deliberately not part of the encoded plan: runtimes independently
 // enforce capabilities, while upload policy relies only on fresh compilation.
 type PlanAuthorization struct {
-	DockerCapabilitySource string
+	DockerCapabilitySources []string
 }
 
 // Bundle is the complete deterministic output of static compilation.

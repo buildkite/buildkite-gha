@@ -229,6 +229,7 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Vars:        cloneStrings(in.Vars),
 		Env:         cloneStrings(in.Env),
 		GitHub:      cloneAnyMap(in.GitHub),
+		Services:    cloneNestedStrings(in.Services),
 	}
 }
 

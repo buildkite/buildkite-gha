@@ -1,0 +1,17 @@
+name: Phase 5 JavaScript action
+description: Exercises Node lifecycle and file commands inside a persistent job container.
+
+inputs:
+  message:
+    description: Value to transform.
+    required: true
+
+outputs:
+  result:
+    description: Transformed value.
+
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

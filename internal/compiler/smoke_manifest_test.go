@@ -45,7 +45,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action", "unsupported-cache-service", "unsupported-job-container", "unsupported-service-container"}
+	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action", "phase5-container-runtime", "unsupported-cache-service", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}
@@ -86,7 +86,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 	}
 
 	var checkedIn []string
-	for _, pattern := range []string{"testdata/smoke/.github/workflows/*.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/unsupported/.github/workflows/*.yml"} {
+	for _, pattern := range []string{"testdata/smoke/.github/workflows/*.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/phase5/runtime/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
 		if err != nil {
 			t.Fatal(err)

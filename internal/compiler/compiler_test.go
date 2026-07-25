@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1123,6 +1124,9 @@ func TestCompilePlansAcceptsNode20LocalAction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: node20\n  main: index.js\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(actionDir, "index.js"), []byte("// fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	source := []byte("on: push\njobs:\n  node20:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/node20\n")
 	if _, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted"); err != nil {
 		t.Fatalf("CompilePlans() error = %v, want node20 support", err)
@@ -1284,4 +1288,15 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return source
+}
+
+func TestCompilePlansEmitV4ForContainers(t *testing.T) {
+	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
+	plans, err := CompilePlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV4 || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
+		t.Fatalf("container plan = %#v", plans)
+	}
 }

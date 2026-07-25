@@ -480,3 +480,99 @@ func validJob() Job {
 		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
 	}
 }
+
+func TestV4ContainerContractAndLegacyRejection(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
+	job.Services = map[string]Container{"redis": {Image: "redis:7", Ports: []string{"6379:6379"}}}
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV4, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v4 plan does not validate against schema: %v", err)
+	}
+	job.Actions = nil
+	job.Steps = []Step{{ID: "step-1", Kind: "run", Command: "true"}}
+	for _, schema := range []string{SchemaV1, SchemaV2, SchemaV3} {
+		job.Schema = schema
+		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support containers") {
+			t.Fatalf("Validate(%s) error = %v", schema, err)
+		}
+	}
+}
+
+func TestContainerPortGrammarMatchesSchema(t *testing.T) {
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV4, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		port  string
+		valid bool
+	}{
+		{"0", false}, {"1", true}, {"65535", true}, {"65536", false},
+		{"8080:80", true}, {"0:80", false}, {"8080:65536", false},
+		{"53/udp", true}, {"443/tcp", true}, {"443/sctp", false},
+		{"08", false}, {"+80", false}, {"80/udp/tcp", false},
+	} {
+		t.Run(test.port, func(t *testing.T) {
+			goValid := validateContainer("node:24", nil, []string{test.port}) == nil
+			job := validJob()
+			job.Schema = SchemaV4
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &Container{Image: "node:24", Ports: []string{test.port}}
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			schemaValid := schema.Validate(document) == nil
+			if goValid != test.valid || schemaValid != test.valid {
+				t.Fatalf("Go valid = %t, schema valid = %t, want %t", goValid, schemaValid, test.valid)
+			}
+		})
+	}
+}

@@ -1203,10 +1203,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
   20 and 24 executable bytes for action workflows; the repository distribution
   pins these runtimes to 20.20.2 and 24.18.0. Shell-only uploads remain
   unchanged and require no Node runtime. This path remains `EventUntrusted`,
-  fixed to the ambient-clean, tokenless hosted queue, and accepts only no
-  capability or `network`; private remote action or repository source, provider
-  tokens, secrets, Docker, privileged queues, and other protected capabilities
-  fail closed.
+  fixed to the ambient-clean, tokenless hosted queue, and accepts no capability,
+  `network`, or the Phase 5 compiler-proven Dockerfile-action provenance.
+  Private remote action or repository source, provider tokens, secrets, job- or
+  service-container provenance, privileged queues, and other protected
+  capabilities fail closed.
   Because this repository is private, the historical live evidence is split:
   the former proof importer used a synthetic public event to prove anonymous
   checkout and portable setup actions on Buildkite, while the GitHub-hosted
@@ -1214,20 +1215,23 @@ Explicitly defer from beta unless implementation evidence changes the order:
   JavaScript/composite fixture. This does not claim a same-workflow private
   checkout proof on Buildkite. The migrated normal path now has separate exact
   Buildkite and GitHub-hosted evidence below.
-- Phase 5 entry evidence is implemented without yet authorizing Docker in the
-  production upload path. An exact-commit, fixed-`hosted` probe demonstrates a
-  runnable local Docker daemon, bind mounts and ownership, private-network DNS,
-  health checks, dynamic loopback port publication, observable TERM handling,
-  and exact-label cleanup. Buildkite Hosted Agents provide a disposable,
-  isolated virtualized environment for each job and destroy it regardless of
-  exit status. The queue's active Buildx builder is remote and cluster-scoped,
-  however, so anonymous Dockerfile builds must select the local `default`
-  Docker driver explicitly rather than execute untrusted `RUN` instructions in
-  the remote builder's persistent shared cache. The first production slice
-  remains limited to Dockerfile-backed local and anonymous public actions;
-  `docker://`, Docker pre/post entrypoints, job containers, services, private
-  registries, arbitrary options, protected capabilities, and privileged queues
-  continue to fail closed until their owning slices land.
+- Phase 5 is complete. Schema-v4 plans own one persistent job container,
+  service containers for container and host jobs, network aliases and ports,
+  health diagnostics, host/container path translation, Dockerfile actions, and
+  bounded cancellation and cleanup. Shell, JavaScript, and composite steps run
+  in the persistent job container; services and Dockerfile actions are siblings
+  on one runtime-owned network. Host jobs remain host processes and receive
+  loopback-only published service ports. Image pulls are anonymous through a
+  private Docker configuration, and Dockerfile builds explicitly select the
+  local `default` driver so workflow code remains inside the disposable hosted
+  job VM rather than the queue's remote shared builder. That VM is the isolation
+  boundary; fixed mounts, networks, labels, and cleanup prevent resource
+  confusion but do not sandbox mutually trusted steps within one job. Normal
+  `hosted-tokenless` upload remains limited to compiler-proven Dockerfile-backed
+  local and anonymous public actions. Job- and service-container provenance,
+  `docker://`, Docker lifecycle overrides, private registries, arbitrary
+  options, credentials, protected capabilities, and privileged queues continue
+  to fail closed.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1263,7 +1267,7 @@ Explicitly defer from beta unless implementation evidence changes the order:
   an authoritative completion order.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
-  repository checks, and all four smoke compiler outputs pass the current
+  repository checks, and all compilable smoke-manifest outputs pass the current
   Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
 - The smoke inventory now separates compilation, production-policy admission,
   and runtime evidence. `mise run smoke:local` is network-free: it validates
@@ -1277,17 +1281,18 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `buildkite-gha validate --profile hosted-tokenless --event-path <path>
   --format text|json <workflow>`. Expected-negative fixtures preserve current
   boundaries: official GitHub artifact/cache actions compile but are denied
-  admission pending Phase 6, while job and service containers fail static
-  compilation.
+  admission pending Phase 6. Job and service containers compile to schema-v4
+  plans and have hosted runtime evidence, while production admission rejects
+  their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
-  hosted-Docker capability, and Phase 5 Dockerfile-action proofs. The dispatcher
-  deliberately uploads each existing importer and continuation independently,
-  then settles their generated and native terminal steps; it does not flatten
-  the importer/continuation topology. Existing `PHASE2_PROBE`, `PHASE3_PROBE`,
-  `PHASE4_PROBE`, and both `PHASE5_PROBE` selectors remain available for
-  targeted runs.
+  hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
+  container-runtime proofs. The dispatcher deliberately uploads each existing
+  importer and continuation independently, then settles their generated and
+  native terminal steps; it does not flatten the importer/continuation topology.
+  Existing `PHASE2_PROBE`, `PHASE3_PROBE`, `PHASE4_PROBE`, and all three
+  `PHASE5_PROBE` selectors remain available for targeted runs.
 
 Phase 4 live evidence:
 
@@ -1301,7 +1306,7 @@ Phase 4 live evidence:
   ran the same implementation commit against the private repository. Its
   producer and consumer passed the JavaScript/composite differential fixture.
 
-Phase 5 entry evidence:
+Phase 5 evidence:
 
 - [Buildkite build 102](https://buildkite.com/buildkite/buildkite-gha/builds/102)
   ran exact implementation commit
@@ -1311,10 +1316,18 @@ Phase 5 entry evidence:
   requested UID/GID bind ownership, private-network HTTP by alias, container
   health, dynamic loopback publication, TERM observation, and exact-label
   cleanup. The separate continuation settled only after the hosted probe.
-- This establishes capability and queue-isolation evidence, not production
-  Docker authorization. Normal `buildkite-gha upload` still rejects the
-  `docker` capability until the staged-source, cancellation, bounded cleanup,
-  and policy work below is implemented and reviewed.
+- Build 102 establishes capability and queue-isolation prerequisites. It does
+  not by itself authorize Docker; the separately reviewed Dockerfile-action
+  path is the only Docker provenance admitted by normal tokenless upload.
+- [Buildkite build 136](https://buildkite.com/buildkite/buildkite-gha/builds/136)
+  ran exact runtime-evidence commit
+  `50db2cf89ba23c0e051d7d57cc03e115606768e5`. All seven required live tests
+  passed without skips. The compiler-to-Runner proof covered a persistent job
+  container, services from container and host jobs, service DNS and loopback
+  ports, JavaScript/composite/Dockerfile action lifecycle, process-tree
+  cancellation, masked health diagnostics, and exact owned-resource cleanup.
+  This proves the broader runtime implementation; it does not broaden
+  `hosted-tokenless` admission to job- or service-container provenance.
 
 - [Buildkite build 72](https://buildkite.com/buildkite/buildkite-gha/builds/72)
   ran exact implementation commit
@@ -1386,7 +1399,7 @@ Phase 0 spike support snapshot:
 | Boundary | Proven locally | Explicit gap or live gate |
 | --- | --- | --- |
 | Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
-| Execute | Sequential Bash/sh steps; fresh workspaces; bounded prerequisite, step, and job outputs; environment, path, state, and summary files; status conditions; masking; timeouts; process-group cancellation; `continue-on-error`; and bounded LIFO post-actions | Producer result hydration still enters through the transport boundary; remote actions, nested composite actions, services/job containers, concurrent steps, and unsupported expression/coercion forms fail closed |
+| Execute | Bash/sh steps; ten-active-step concurrency with barrier-scoped effects; JavaScript, composite, and Dockerfile actions; persistent job containers; services for container and host jobs; fresh workspaces; bounded prerequisite, step, and job outputs; file commands; conditions; masking; timeouts; process-tree cancellation; `continue-on-error`; bounded LIFO post-actions; and exact container cleanup | Producer result hydration enters through the transport boundary; private actions, `docker://` actions, protected credentials, arbitrary container options, unsupported operating systems, and unsupported expression/coercion forms fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
 | Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
 | Authorization | Eight signed-envelope conformance cases plus live rejection of a corrupted signature prove bounded signing and verification mechanics only | Protected capabilities require Buildkite Job OIDC authentication, provider provenance and policy verification, narrow signed grants, runtime exchange checks, and auditability; Buildkite signed-pipeline integration remains optional Phase 9 work |
@@ -1589,7 +1602,7 @@ Definition of done:
 - Private action authentication is either implemented safely or rejected
   clearly.
 
-### Phase 5 — Containers and services (entry capability proven)
+### Phase 5 — Containers and services (complete)
 
 Implement the Linux Docker execution backend for:
 
@@ -1601,7 +1614,7 @@ Implement the Linux Docker execution backend for:
 - host/container path translation; and
 - orphan cleanup.
 
-Implementation order and fixed boundaries:
+Implemented order and fixed boundaries:
 
 1. Harden Dockerfile-backed actions first. Build only a private staged copy of
    the verified action tree, select `buildx build --builder default --load`, use
@@ -1612,12 +1625,12 @@ Implementation order and fixed boundaries:
    Docker pre/post entrypoints, arbitrary Docker options, private registries,
    credentials, provider tokens, host namespaces, devices, socket mounts, and
    privileged capabilities.
-3. Add persistent job containers and path translation only after Docker action
-   lifecycle, command-file processing, masking, cancellation, and cleanup pass
-   differential and exact-commit evidence.
-4. Add services, aliases, port context, health diagnostics, and startup/orphan
-   reconciliation on the same runtime-owned backend. Do not translate imported
-   container definitions into workflow-controlled Buildkite plugins.
+3. Persistent job containers and path translation landed after Docker action
+   lifecycle, command-file processing, masking, cancellation, and cleanup
+   passed conformance coverage.
+4. Services, aliases, port context, health diagnostics, and startup/orphan
+   cleanup use the same runtime-owned backend. Imported container definitions
+   are not translated into workflow-controlled Buildkite plugins.
 
 The runtime's fixed mounts, translated paths, private Docker configuration,
 owned labels, and bounded cleanup preserve Actions behavior and prevent
@@ -1637,13 +1650,14 @@ product and security decision.
 
 Definition of done:
 
-- Container and host-job fixtures observe GHA-compatible workspace paths and
-  service connectivity.
-- Failed health checks produce useful Buildkite diagnostics.
-- Cancellation and agent loss do not routinely leave containers or networks.
-- Workflow-declared privileged options are subject to explicit queue policy;
-  direct commands inside a job remain governed by that queue's job-level
-  isolation.
+- The exact-commit hosted container and host-job fixtures observe compatible
+  workspace paths and service connectivity.
+- Failed health checks produce bounded, masked Buildkite diagnostics.
+- Cancellation terminates owned process trees and container resources under a
+  bounded cleanup context. Hosted VM destruction is the terminal guarantee on
+  agent loss.
+- Workflow-declared privileged options remain rejected. Direct commands inside
+  a job remain governed by that queue's job-level isolation.
 
 ### Phase 6 — Core services and protected capability control plane
 
@@ -1769,9 +1783,9 @@ The checked-in smoke manifest is a classified inventory, not a claim that
 arbitrary common workflows are supported. The required local gate is
 `mise run smoke:local`; it uses no network, performs manifest and static
 validation, and compares two nonempty compilations byte-for-byte. Compilation
-success is never runtime evidence. Its expected-negative fixtures require job
-and service containers to remain compile-time incompatible at the current
-boundary.
+success is never runtime evidence. Job and service container entries are marked
+`runtime-pass` only because exact-commit hosted build 136 ran their plans; they
+remain excluded from the production admission profile.
 
 `mise run smoke:profile` is an opt-in networked lane. It resolves anonymous
 public action sources, prepares the pinned managed Node runtimes, compiles the
@@ -1799,11 +1813,12 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 It gathers Phase 2 shell/upload, Phase 3 concurrency, Phase 4 public actions,
-and both Phase 5 Docker proofs in one build. Each phase still owns an independent
+and the three Phase 5 Docker capability, Dockerfile-action, and complete
+container-runtime proofs in one build. Each phase still owns an independent
 importer and continuation loader; a final aggregate waits for all generated and
 native terminal evidence, including failures, without changing those security
-or dependency boundaries. Keep the phase-specific selectors for focused
-reruns and fault isolation.
+or dependency boundaries. Keep the phase-specific selectors for focused reruns
+and fault isolation.
 
 ### Initial checked-in corpus
 
@@ -2123,11 +2138,10 @@ them in the phase that first needs the capability:
 1. Phase 6 control-plane work will determine which authenticated GitHub event
    payload Buildkite exposes, whether the service must receive GitHub App
    webhooks directly, and whether a small Buildkite platform API is missing.
-2. Phase 5 uses direct Hosted Agent execution for the tokenless Dockerfile
-   action slice. Exact-commit build 102 proved the local `default` Docker driver,
-   bind/path behavior, private networking, health, loopback publication,
-   signals, and cleanup. A compatibility image remains deferred until job
-   containers or tool-cache differences demonstrate a concrete need.
+2. Phase 5 uses direct Hosted Agent execution. Exact-commit build 102 proved
+   the local `default` Docker driver and queue prerequisites; build 136 proved
+   the complete container runtime. A compatibility image remains deferred until
+   tool-cache differences demonstrate a concrete need.
 3. Phase 6 will choose job-local protocol adapters versus recognized built-ins
    for cache and artifact actions.
 4. Phase 4 will set the customer-beta event and expression subset from the

@@ -45,7 +45,10 @@ upload. Admission does not execute action code or prove that a generic action
 is independent of GitHub-only artifact, cache, token, or OIDC services.
 Known official cache and artifact actions are rejected until their Phase 6
 adapters exist; the profile leaves unknown generic service dependencies as an
-explicit warning rather than guessing from arbitrary action source.
+explicit warning rather than guessing from arbitrary action source. Runtime-pass
+job and service container fixtures are deliberately not marked for this profile:
+their execution is proven separately, while production hosted-tokenless
+admission continues to reject their container provenance.
 
 `events/push.json` is deterministic and its repository SHA is intentionally
 synthetic. End-to-end runs involving checkout must bind the event to the real

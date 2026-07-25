@@ -18,6 +18,8 @@ steps:
         allow_failure: true
       - step: "gha-docker-action"
         allow_failure: true
+      - step: "phase-5-hosted-runtime-probe"
+        allow_failure: true
       - step: "phase-2-native-after-shell"
         allow_failure: true
       - step: "phase-3-native-after-concurrent"
@@ -27,6 +29,8 @@ steps:
       - step: "phase-5-native-after-hosted-docker"
         allow_failure: true
       - step: "phase-5-native-after-docker-action"
+        allow_failure: true
+      - step: "phase-5-native-after-runtime"
         allow_failure: true
     agents:
       queue: "elastic-runners"
@@ -42,11 +46,13 @@ steps:
         gha-public-actions \
         phase-5-hosted-docker-probe \
         gha-docker-action \
+        phase-5-hosted-runtime-probe \
         phase-2-native-after-shell \
         phase-3-native-after-concurrent \
         phase-4-native-after-actions \
         phase-5-native-after-hosted-docker \
-        phase-5-native-after-docker-action
+        phase-5-native-after-docker-action \
+        phase-5-native-after-runtime
       do
         outcome="$$(buildkite-agent step get "outcome" --step "$$step")"
         printf '%s: %s\n' "$$step" "$$outcome"

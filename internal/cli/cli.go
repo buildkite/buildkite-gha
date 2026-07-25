@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +62,9 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
+	}
+	if args[0] == gharuntime.ContainerProcessHelperCommand {
+		return gharuntime.RunContainerProcessHelper(args[1:])
 	}
 
 	switch args[0] {
@@ -187,7 +191,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if job.Schema == plan.SchemaV3 && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -212,6 +216,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Secrets:         gharuntime.EnvironmentSecrets{},
 		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:         actionMaterializer,
+	}
+	runner.RuntimeExecutable, err = os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
+		return 1
 	}
 	var result gharuntime.JobResult
 	var runErr error
@@ -668,7 +677,10 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			if capability == "docker" && artifact.Authorization.DockerCapabilitySource != "dockerfile-actions" {
+			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
+				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
+					return fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID)
+				}
 				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
 			}
 			if capability != "network" && capability != "docker" {

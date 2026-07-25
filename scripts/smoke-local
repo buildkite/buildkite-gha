@@ -22,7 +22,7 @@ cd "$root"
 jq -e '
   keys == ["fixtures", "schema"] and
   .schema == "buildkite-gha/smoke-manifest/v1" and
-  (.fixtures | type == "array" and length == 9) and
+  (.fixtures | type == "array" and length == 10) and
   all(.fixtures[];
     keys == ["action_preflight", "event", "evidence", "expectation", "id", "note", "workflow"] and
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
@@ -36,7 +36,7 @@ jq -e '
   ([.fixtures[] | [.workflow, .event] | join("\u0000")] | length == (unique | length))
 ' "$manifest" >/dev/null
 
-mise exec -- go build -o "$work/buildkite-gha" ./cmd/buildkite-gha
+CGO_ENABLED=0 mise exec -- go build -o "$work/buildkite-gha" ./cmd/buildkite-gha
 if [[ -n "$profile" ]]; then
   node20="$(mise where node@20)/bin/node"
   node24="$(mise where node@24)/bin/node"

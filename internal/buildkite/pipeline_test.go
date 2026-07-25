@@ -215,8 +215,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Env["MISE_JOBS"] != "1" {
 		t.Fatalf("default pipeline MISE_JOBS = %q, want serial tool installation", document.Env["MISE_JOBS"])
 	}
-	if len(document.Steps) != 9 {
-		t.Fatalf("default pipeline = %#v, want eight gated loaders plus repository checks", document.Steps)
+	if len(document.Steps) != 10 {
+		t.Fatalf("default pipeline = %#v, want nine gated loaders plus repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -254,6 +254,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["phase-5-docker-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml" || got.condition != `build.env("PHASE5_PROBE") == "docker-action" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 5 Dockerfile action loader = %#v", got)
 	}
+	if got := steps["phase-5-runtime-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-runtime.yml" || got.condition != `build.env("PHASE5_PROBE") == "runtime" && build.env("SMOKE_PROBE") != "hosted"` {
+		t.Fatalf("Phase 5 container runtime loader = %#v", got)
+	}
 	hosted := steps["hosted-smoke-loader"]
 	if hosted.condition != `build.env("SMOKE_PROBE") == "hosted"` || hosted.queue != "elastic-runners" {
 		t.Fatalf("hosted smoke loader = %#v", hosted)
@@ -275,7 +278,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			t.Fatalf("hosted smoke loader lacks %q:\n%s", required, hosted.command)
 		}
 	}
-	for _, fragment := range []string{"phase-2-upload.yml", "phase-3-upload.yml", "phase-4-upload.yml", "phase-5-capabilities.yml", "phase-5-docker-action.yml", "hosted-smoke-control.yml"} {
+	for _, fragment := range []string{"phase-2-upload.yml", "phase-3-upload.yml", "phase-4-upload.yml", "phase-5-capabilities.yml", "phase-5-docker-action.yml", "phase-5-runtime.yml", "hosted-smoke-control.yml"} {
 		if count := strings.Count(hosted.command, "buildkite-agent pipeline upload .buildkite/"+fragment); count != 1 {
 			t.Fatalf("hosted smoke loader uploads %s %d times:\n%s", fragment, count, hosted.command)
 		}
@@ -680,6 +683,96 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 	}
 }
 
+func TestPhase5ContainerRuntimeProofContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	read := func(name string) []byte {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join(root, ".buildkite", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	importerBody := read("phase-5-runtime.yml")
+	var importer struct {
+		Steps []struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+			Agents                 struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(importerBody, &importer); err != nil {
+		t.Fatal(err)
+	}
+	if len(importer.Steps) != 2 || importer.Steps[0].Key != "phase-5-runtime-importer" || importer.Steps[0].Agents.Queue != "elastic-runners" {
+		t.Fatalf("Phase 5 runtime importer = %#v", importer.Steps)
+	}
+	loader := importer.Steps[1]
+	if loader.Key != "phase-5-runtime-continuation-loader" || loader.DependsOn != "phase-5-runtime-importer" || !loader.AllowDependencyFailure || loader.Agents.Queue != "elastic-runners" || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-5-runtime-continuation.yml" {
+		t.Fatalf("Phase 5 runtime continuation loader = %#v", loader)
+	}
+	for _, fragment := range []string{
+		`commit="$${PHASE5_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
+		`git status --porcelain --untracked-files=all`,
+		`pipeline upload --no-interpolation --reject-secrets .buildkite/phase-5-runtime-probe.yml`,
+		`automatic: false`,
+	} {
+		if !strings.Contains(string(importerBody), fragment) {
+			t.Fatalf("Phase 5 runtime importer lacks %q:\n%s", fragment, importerBody)
+		}
+	}
+
+	probeBody := read("phase-5-runtime-probe.yml")
+	for _, fragment := range []string{`key: "phase-5-hosted-runtime-probe"`, `queue: "hosted"`, `timeout_in_minutes: 25`, `automatic: false`, `mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`, `command: "scripts/phase-5-hosted-runtime-probe"`} {
+		if !strings.Contains(string(probeBody), fragment) {
+			t.Fatalf("Phase 5 runtime probe pipeline lacks %q:\n%s", fragment, probeBody)
+		}
+	}
+	continuationBody := read("phase-5-runtime-continuation.yml")
+	for _, fragment := range []string{`key: "phase-5-native-after-runtime"`, `step: "phase-5-hosted-runtime-probe"`, `allow_failure: true`, `queue: "elastic-runners"`} {
+		if !strings.Contains(string(continuationBody), fragment) {
+			t.Fatalf("Phase 5 runtime continuation lacks %q:\n%s", fragment, continuationBody)
+		}
+	}
+
+	script, err := os.ReadFile(filepath.Join(root, "scripts", "phase-5-hosted-runtime-probe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(script)
+	for _, fragment := range []string{
+		"set -euo pipefail",
+		`commit=${PHASE5_COMMIT:-${SMOKE_COMMIT:-}}`,
+		`scripts/phase-0-shell-oracle-checkout "$commit"`,
+		`git status --porcelain --untracked-files=all`,
+		`docker buildx inspect default`,
+		`CGO_ENABLED=0 mise exec -- go build`,
+		`BUILDKITE_GHA_LIVE_REQUIRED=1`,
+		`BUILDKITE_GHA_TEST_RUNTIME="$runtime"`,
+		`BUILDKITE_GHA_TEST_NODE24="$node24"`,
+		`go test ./internal/runtime -count=1 -timeout=20m`,
+		`TestLivePhase5CompiledContainerRuntime`,
+		`TestLivePhase5ManifestContainerFixtures`,
+		`TestLivePhase5UnhealthyServiceDiagnostics`,
+		`--- SKIP:`,
+		`PHASE5_RUNTIME_OBSERVATION=`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("Phase 5 runtime probe script lacks %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"--privileged", "--network host", "/var/run/docker.sock", "docker prune", "docker system prune", "printenv"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("Phase 5 runtime probe contains forbidden %q", forbidden)
+		}
+	}
+}
+
 func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	type dependency struct {
 		Step         string `yaml:"step"`
@@ -723,9 +816,9 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	if control.Key != "hosted-smoke-aggregator-loader" || control.Agents.Queue != "elastic-runners" || control.Command != "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml" {
 		t.Fatalf("control step = %#v", control)
 	}
-	assertSet("control", control.DependsOn, map[string]bool{"phase-2-continuation-loader": true, "phase-3-continuation-loader": true, "phase-4-continuation-loader": true, "phase-5-continuation-loader": true, "phase-5-docker-action-continuation-loader": true})
+	assertSet("control", control.DependsOn, map[string]bool{"phase-2-continuation-loader": true, "phase-3-continuation-loader": true, "phase-4-continuation-loader": true, "phase-5-continuation-loader": true, "phase-5-docker-action-continuation-loader": true, "phase-5-runtime-continuation-loader": true})
 	generated := map[string]bool{}
-	for _, name := range []string{"phase-2-upload-continuation.yml", "phase-3-upload-continuation.yml", "phase-4-upload-continuation.yml", "phase-5-capabilities-continuation.yml", "phase-5-docker-action-continuation.yml"} {
+	for _, name := range []string{"phase-2-upload-continuation.yml", "phase-3-upload-continuation.yml", "phase-4-upload-continuation.yml", "phase-5-capabilities-continuation.yml", "phase-5-docker-action-continuation.yml", "phase-5-runtime-continuation.yml"} {
 		continuation := read(name)
 		for _, dependency := range continuation.DependsOn {
 			generated[dependency.Step] = true
@@ -735,7 +828,7 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	for key := range generated {
 		want[key] = true
 	}
-	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime"} {
 		want[key] = true
 	}
 	aggregator := read("hosted-smoke-aggregator.yml")
@@ -748,7 +841,7 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 			t.Fatalf("aggregator command does not inspect generated step %q: %s", key, aggregator.Command)
 		}
 	}
-	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime"} {
 		if !strings.Contains(aggregator.Command, key) {
 			t.Fatalf("aggregator command does not inspect required step %q: %s", key, aggregator.Command)
 		}

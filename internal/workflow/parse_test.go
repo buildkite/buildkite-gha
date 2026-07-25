@@ -56,6 +56,66 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
+func TestParseOwnsLiteralContainersAndSortsServices(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: postgres:16, ports: ['5432:5432']}\n    steps:\n      - run: true\n")
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := parsed.Jobs[0]
+	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "alpha" || job.Services[1].Name != "zed" {
+		t.Fatalf("owned containers = %#v / %#v", job.Container, job.Services)
+	}
+}
+
+func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
+	for name, body := range map[string]string{
+		"credentials": "credentials: {username: me, password: secret}",
+		"volumes":     "volumes: ['/tmp:/tmp']",
+		"options":     "options: --privileged",
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      " + body + "\n    steps:\n      - run: true\n")
+			if _, err := Parse("containers.yml", source); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("Parse() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
+	unrelated := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/action@v1\n        with: {image: node:24, options: --privileged}\n")
+	if _, err := Parse("scoped.yml", unrelated); err != nil {
+		t.Fatalf("unrelated action inputs were treated as a container: %v", err)
+	}
+	for _, test := range []struct {
+		name, field, want string
+	}{
+		{"image", "image: INVALID IMAGE", "bad.yml:6:14:"},
+		{"env-key", "image: node:24\n      env: {'bad-key': ok}", "bad.yml:7:13:"},
+		{"env-value", "image: node:24\n      env: {OK: '" + strings.Repeat("x", 65537) + "'}", "bad.yml:7:17:"},
+		{"port", "image: node:24\n      ports: ['65536/tcp']", "bad.yml:7:15:"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      " + test.field + "\n    steps: [{run: true}]\n")
+			if _, err := Parse("bad.yml", source); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want location %s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseContainerShortForms(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: redis:7\n      postgres: {image: postgres:16, ports: ['5432:5432/udp']}\n    steps: [{run: true}]\n")
+	parsed, err := Parse("short.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Jobs[0].Container.Image != "node:24" || len(parsed.Jobs[0].Services) != 2 {
+		t.Fatalf("containers = %#v, %#v", parsed.Jobs[0].Container, parsed.Jobs[0].Services)
+	}
+}
+
 func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
 	source := []byte("name: runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    if: always()\n    timeout-minutes: 5\n    steps:\n      - run: echo ok\n        if: success()\n        timeout-minutes: 2\n        continue-on-error: true\n")
 	parsed, err := Parse("workflow.yml", source)

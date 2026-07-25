@@ -49,10 +49,27 @@ type Job struct {
 	If                      string                 `json:"if,omitempty"`
 	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
+	Container               *Container             `json:"container,omitempty"`
+	Services                []Service              `json:"services,omitempty"`
 	DefaultShell            string                 `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
 	Steps                   []Step                 `json:"steps"`
 	Span                    Span                   `json:"span"`
+}
+
+// Container is the statically owned subset of a GitHub Actions container.
+type Container struct {
+	Image string            `json:"image"`
+	Env   map[string]string `json:"env,omitempty"`
+	Ports []string          `json:"ports,omitempty"`
+	Span  Span              `json:"span"`
+}
+
+// Service is a named service container. Services are sorted by Name because
+// actionlint v1.7.12 exposes them as a map and does not retain source order.
+type Service struct {
+	Name      string    `json:"name"`
+	Container Container `json:"container"`
 }
 
 // ReusableWorkflowCall is a job-level invocation of another workflow.

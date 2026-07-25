@@ -22,6 +22,10 @@ func terminateProcessGroup(ctx context.Context, pid int, interruptGrace, termina
 	// Signal children before the shell so its foreground command is interrupted
 	// before the shell dispatches its own trap. A single group signal leaves a
 	// fork/exit race where the shell can terminate without running that trap.
+	terminateProcessGroupNow(pid, interruptGrace, terminateGrace)
+}
+
+func terminateProcessGroupNow(pid int, interruptGrace, terminateGrace time.Duration) {
 	signalProcessGroup(pid, syscall.SIGINT)
 	if waitForProcessGroupExit(pid, interruptGrace) {
 		return

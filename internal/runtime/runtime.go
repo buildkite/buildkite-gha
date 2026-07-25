@@ -31,22 +31,25 @@ const (
 
 // Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
-	Stdout          io.Writer
-	Stderr          io.Writer
-	Node20          string
-	Node24          string
-	ManagedNodeRoot string
-	Docker          string
-	Git             string
-	CleanupTimeout  time.Duration
-	InterruptGrace  time.Duration
-	TerminateGrace  time.Duration
-	Secrets         SecretResolver
-	Redactor        Redactor
-	Actions         ActionMaterializer
-	runnerTemp      string
-	implicitJobPATH string
-	explicitJobPATH bool
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Node20            string
+	Node24            string
+	ManagedNodeRoot   string
+	Docker            string
+	RuntimeExecutable string
+	Git               string
+	CleanupTimeout    time.Duration
+	InterruptGrace    time.Duration
+	TerminateGrace    time.Duration
+	Secrets           SecretResolver
+	Redactor          Redactor
+	Actions           ActionMaterializer
+	runnerTemp        string
+	implicitJobPATH   string
+	explicitJobPATH   bool
+	jobContainer      *jobContainerBackend
+	jobDocker         *jobContainerBackend
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -58,6 +61,8 @@ type JavaScriptAction struct {
 	Post   string
 	Inputs map[string]string
 	Env    map[string]string
+
+	nodeMajor int
 }
 
 // DockerAction is an already-resolved local Docker action.
@@ -136,6 +141,9 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	action.explicitPATH = action.explicitPATH || r.explicitJobPATH
 	if action.Workspace == "" || action.runnerTemp == "" {
 		return result, errors.New("docker workspace and runner temp are required")
+	}
+	if r.jobContainer != nil && (action.Workspace != r.jobContainer.workspace || action.runnerTemp != r.jobContainer.temp) {
+		return result, errors.New("docker action workspace and runner temp must match the job container's owned host paths")
 	}
 	docker := r.Docker
 	if docker == "" {
@@ -261,14 +269,32 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
+	if r.jobDocker != nil {
+		args = append(args, "--network", r.jobDocker.network)
+	}
 	if action.Workspace != "" {
 		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
+	}
+	var siblingPaths *jobContainerBackend
+	if r.jobContainer != nil {
+		siblingPaths = &jobContainerBackend{mounts: []containerMount{
+			{host: action.Workspace, target: "/github/workspace"},
+			{host: action.runnerTemp, target: "/github/runner_temp"},
+		}}
 	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
 			continue
 		}
-		args = append(args, "--env", name+"="+action.Env[name])
+		value := action.Env[name]
+		if siblingPaths != nil {
+			if name == "PATH" {
+				value = siblingPaths.translatePATH(value)
+			} else {
+				value = siblingPaths.containerPath(value)
+			}
+		}
+		args = append(args, "--env", name+"="+value)
 	}
 	if action.Workspace != "" {
 		args = append(args, "--env", "GITHUB_WORKSPACE=/github/workspace")
@@ -398,6 +424,19 @@ func boundedDockerOutput(ctx context.Context, env map[string]string, docker stri
 	return output.String(), err
 }
 
+func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, docker, args...)
+	cmd.Env = processEnv(env)
+	var output strings.Builder
+	w := &limitedWriter{writer: &output, remaining: 4096}
+	cmd.Stdout, cmd.Stderr = w, w
+	err := cmd.Run()
+	if w.exceeded {
+		return output.String(), fmt.Errorf("docker output exceeds limit")
+	}
+	return output.String(), err
+}
+
 type limitedWriter struct {
 	writer    io.Writer
 	remaining int
@@ -426,26 +465,52 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, filepath.Join(action.Path, entry)); err != nil {
+	entrypoint := filepath.Join(action.Path, entry)
+	if r.jobContainer != nil {
+		if err := r.jobContainer.probeNode(ctx, node, action.nodeMajor); err != nil {
+			return err
+		}
+		absNode, err := filepath.Abs(node)
+		if err != nil {
+			return err
+		}
+		node = r.jobContainer.containerPath(absNode)
+		entrypoint = r.jobContainer.containerPath(entrypoint)
+	}
+	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, entrypoint); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
-	files, err := newCommandFiles()
+	var files commandFiles
+	var err error
+	if r.jobContainer != nil {
+		files, err = newCommandFilesUnder(r.runnerTemp)
+	} else {
+		files, err = newCommandFiles()
+	}
 	if err != nil {
 		return err
 	}
 	defer func() { _ = files.cleanup() }()
-	env = mergeStringMaps(env, map[string]string{
-		"GITHUB_OUTPUT":       files.output,
-		"GITHUB_ENV":          files.env,
-		"GITHUB_PATH":         files.path,
-		"GITHUB_STATE":        files.state,
-		"GITHUB_STEP_SUMMARY": files.summary,
-	})
-	runErr := r.runStreaming(ctx, processor, dir, env, name, args...)
+	commandPaths := map[string]string{"GITHUB_OUTPUT": files.output, "GITHUB_ENV": files.env, "GITHUB_PATH": files.path, "GITHUB_STATE": files.state, "GITHUB_STEP_SUMMARY": files.summary}
+	if r.jobContainer != nil {
+		if err := files.allowContainerWrites(); err != nil {
+			return err
+		}
+		for key, path := range commandPaths {
+			commandPaths[key] = r.jobContainer.containerPath(path)
+		}
+	}
+	env = mergeStringMaps(env, commandPaths)
+	var runErr error
+	if r.jobContainer != nil {
+		runErr = r.jobContainer.exec(ctx, r, processor, dir, env, name, args...)
+	} else {
+		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
+	}
 	effects, fileErr := files.apply(result, state)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
 		pathEnv := map[string]string{"PATH": env["PATH"]}
