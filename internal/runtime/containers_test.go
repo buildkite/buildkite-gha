@@ -1,11 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -68,6 +72,15 @@ func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 		out = append(out, c)
 	}
 	return out
+}
+
+func jobDockerCallIndex(calls []jobDockerCall, command ...string) int {
+	for i, call := range calls {
+		if len(call.Args) >= len(command) && slices.Equal(call.Args[:len(command)], command) {
+			return i
+		}
+	}
+	return -1
 }
 
 func envPointer(name string) *string {
@@ -142,6 +155,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 				}
 				if src != "" {
 					_ = os.WriteFile(filepath.Join(root, "mount-"+strings.ReplaceAll(dst, "/", "_")), []byte(src), 0o600)
+					mf, _ := os.OpenFile(filepath.Join(root, "mounts"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+					mb, _ := json.Marshal(struct{ Target, Source string }{dst, src})
+					_, _ = mf.Write(append(mb, '\n'))
+					_ = mf.Close()
 				}
 			}
 		}
@@ -189,13 +206,13 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if (scenario == "fail-probe" && startupProbe) || (scenario == "fail-step" && !startupProbe) {
 			os.Exit(42)
 		}
-		fakeJobDockerExec(root, args)
+		fakeJobDockerExec(root, scenario, args)
 	default:
 		os.Exit(46)
 	}
 }
 
-func fakeJobDockerExec(root string, args []string) {
+func fakeJobDockerExec(root, scenario string, args []string) {
 	var wd string
 	env := map[string]string{}
 	i := 1
@@ -217,19 +234,53 @@ func fakeJobDockerExec(root string, args []string) {
 		os.Exit(2)
 	}
 	i++ // container
-	if i+3 >= len(args) || args[i+1] != ContainerProcessHelperCommand {
+	if i >= len(args) {
 		os.Exit(2)
 	}
-	helper := args[i+2:]
 	translate := func(p string) string {
-		for _, m := range []struct{ c, f string }{{jobContainerWorkspace, "mount-___w_repo_repo"}, {jobContainerTemp, "mount-___w__temp"}, {jobContainerRuntime, "mount-___buildkite-gha_runtime"}} {
-			if strings.HasPrefix(p, m.c) {
-				host, _ := os.ReadFile(filepath.Join(root, m.f))
-				return filepath.Join(string(host), strings.TrimPrefix(p, m.c))
+		type mount struct{ Target, Source string }
+		var best mount
+		data, _ := os.ReadFile(filepath.Join(root, "mounts"))
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			var m mount
+			if json.Unmarshal([]byte(line), &m) == nil && (p == m.Target || strings.HasPrefix(p, m.Target+"/")) && len(m.Target) > len(best.Target) {
+				best = m
 			}
+		}
+		if best.Target != "" {
+			return filepath.Join(best.Source, strings.TrimPrefix(p, best.Target))
 		}
 		return p
 	}
+	// Setup mount probes and Node compatibility probes intentionally bypass the
+	// process helper in production, just as real docker exec does.
+	if args[i] == "sh" && i+4 < len(args) && args[i+1] == "-c" {
+		args[i+4] = translate(args[i+4])
+		if scenario == "fail-mount-probe" {
+			os.Exit(42)
+		}
+		if err := syscall.Exec("/bin/sh", args[i:], os.Environ()); err != nil {
+			os.Exit(126)
+		}
+	}
+	if strings.HasPrefix(args[i], "/") && i+1 < len(args) && args[i+1] == "--version" {
+		if scenario == "wrong-node-major" {
+			fmt.Print("v20.0.0\n")
+			os.Exit(0)
+		}
+		if scenario == "incompatible-node" {
+			os.Exit(126)
+		}
+		nodeArgs := append([]string(nil), args[i:]...)
+		nodeArgs[0] = translate(nodeArgs[0])
+		if err := syscall.Exec(nodeArgs[0], nodeArgs, os.Environ()); err != nil {
+			os.Exit(126)
+		}
+	}
+	if i+2 >= len(args) || args[i+1] != ContainerProcessHelperCommand {
+		os.Exit(2)
+	}
+	helper := append([]string(nil), args[i+2:]...)
 	if helper[0] == "run" && len(helper) >= 5 && helper[1] == jobContainerTemp+"/startup-probe.pid" {
 		fmt.Print("/image/bin:/usr/bin")
 		os.Exit(0)
@@ -530,6 +581,497 @@ func TestJobContainerPATHTranslationPreservesEmptyComponents(t *testing.T) {
 	}
 }
 
+func TestContainerPathUsesLongestReadOnlyMount(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	selected := filepath.Join(repository, "selected")
+	b := jobContainerBackend{mounts: []containerMount{
+		{host: repository, target: "/__w/_actions/repository", readonly: true},
+		{host: selected, target: "/__w/_actions/selected", readonly: true},
+	}}
+	if got, want := b.containerPath(filepath.Join(selected, "dist", "index.js")), "/__w/_actions/selected/dist/index.js"; got != want {
+		t.Fatalf("containerPath = %q, want %q", got, want)
+	}
+
+	file := filepath.Join(root, "runtime")
+	if err := os.WriteFile(file, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, mounts := range [][]containerMount{
+		{{host: "relative", target: "/valid", readonly: true}},
+		{{host: file, target: "relative", readonly: true}},
+		{{host: file, target: "/bad,target", readonly: true}},
+	} {
+		if err := validateContainerMount(mounts[0]); err == nil {
+			t.Fatalf("accepted invalid mount %#v", mounts[0])
+		}
+	}
+}
+
+func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
+	for _, scenario := range []string{"wrong-node-major", "incompatible-node"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newJobDocker(t, scenario)
+			w := t.TempDir()
+			writeFixtureFile(t, w, "unused/action.yml", "name: probe\nruns:\n  using: node24\n  main: main.js\n")
+			writeFixtureFile(t, w, "unused/main.js", "")
+			node := filepath.Join(t.TempDir(), "node")
+			if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.0.0\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			j := jobContainerPlan(t, w, nil)
+			lockID := remoteLifecycleLockID(1)
+			j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "./unused", Action: &plan.ActionSelector{Lock: lockID}}}
+			j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "unused", SourceDigest: digestTree(t, filepath.Join(w, "unused"))}}
+			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).RunJob(context.Background(), j, w)
+			if err == nil || (!strings.Contains(err.Error(), "exact major") && !strings.Contains(err.Error(), "incompatible")) {
+				t.Fatalf("error = %v", err)
+			}
+			calls := f.calls(t)
+			joined := fmt.Sprint(calls)
+			if !strings.Contains(joined, "rm --force buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+				t.Fatalf("owned resources not cleaned: %s", joined)
+			}
+			for _, call := range calls {
+				if strings.Contains(strings.Join(call.Args, " "), ContainerProcessHelperCommand+" run") && !strings.Contains(strings.Join(call.Args, " "), "startup-probe") {
+					t.Fatalf("action lifecycle executed before failed Node probe: %#v", call.Args)
+				}
+			}
+		})
+	}
+}
+
+func TestRunJobContainerDoesNotProbeConfiguredNodeWithoutActions(t *testing.T) {
+	f := newJobDocker(t, "incompatible-node")
+	w := t.TempDir()
+	node := filepath.Join(t.TempDir(), "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.0.0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "shell", Kind: "run", Shell: "sh", Command: "true"}})
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).RunJob(context.Background(), j, w); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		if slices.Contains(call.Args, "type=bind,source="+node+",target=/__buildkite-gha/node24,readonly") || slices.Contains(call.Args, "/__buildkite-gha/node24") {
+			t.Fatalf("actionless container job mounted or probed Node: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunJobContainerDoesNotProbeConfiguredNodeForCompositeOnlyActions(t *testing.T) {
+	f := newJobDocker(t, "incompatible-node")
+	w := t.TempDir()
+	writeFixtureFile(t, w, "composite/action.yml", "name: composite only\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo COMPOSITE_ONLY=seen >> \"$GITHUB_ENV\"\n")
+	node := filepath.Join(t.TempDir(), "missing-node")
+	lockID := remoteLifecycleLockID(1)
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "composite", Kind: "uses", Uses: "./composite", Action: &plan.ActionSelector{Lock: lockID}}})
+	j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "composite", SourceDigest: digestTree(t, filepath.Join(w, "composite"))}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).RunJob(context.Background(), j, w)
+	if err != nil || result.Env["COMPOSITE_ONLY"] != "seen" {
+		t.Fatalf("composite-only container result = %#v, error = %v", result, err)
+	}
+	for _, call := range f.calls(t) {
+		if slices.Contains(call.Args, "/__buildkite-gha/node24") && slices.Contains(call.Args, "--version") {
+			t.Fatalf("composite-only container probed Node: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing.T) {
+	f := newJobDocker(t, "fail-mount-probe")
+	w := t.TempDir()
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "selected/action.yml", "name: remote\nruns:\n  using: composite\n  steps: []\n")
+	digest := digestTree(t, remote)
+	j := jobContainerPlan(t, w, nil)
+	lockID := remoteLifecycleLockID(1)
+	j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID}}}
+	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), j, w)
+	if err == nil || !strings.Contains(err.Error(), "not readable/traversable") {
+		t.Fatalf("read-only mount probe error = %v", err)
+	}
+	calls := f.calls(t)
+	joined := fmt.Sprint(calls)
+	if !strings.Contains(joined, "rm --force buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+		t.Fatalf("owned resources not cleaned: %s", joined)
+	}
+	if len(calls) == 0 {
+		t.Fatal("Docker was not called")
+	}
+	if _, statErr := os.Stat(calls[0].Config); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("private Docker config remains after mount probe failure: %v", statErr)
+	}
+}
+
+func TestRunJobContainerSkippedRemoteJavaScriptDoesNotRequireNode(t *testing.T) {
+	f := newJobDocker(t, "incompatible-node")
+	w := t.TempDir()
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "selected/action.yml", "name: skipped remote\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "selected/main.js", "")
+	writeFixtureFile(t, remote, "selected/post.js", "")
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "skipped", Kind: "uses", Uses: remoteLifecycleUses("selected"), Condition: "false", Action: &plan.ActionSelector{Lock: lockID}}})
+	j.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	missingNode := filepath.Join(t.TempDir(), "missing-node")
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: missingNode, Actions: materializer}).RunJob(context.Background(), j, w)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("skipped remote JavaScript result = %#v, error = %v", result, err)
+	}
+	for _, call := range f.calls(t) {
+		if slices.Contains(call.Args, "--version") {
+			t.Fatalf("skipped remote JavaScript probed Node: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := fixturePath(t)
+	node := requireNode24(t)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		ID: "javascript", Kind: "uses", Uses: "./actions/javascript",
+		With:   map[string]string{"message": "container", "order": "single"},
+		Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{{
+		ID: lockID, Source: "workspace", Path: "actions/javascript",
+		SourceDigest: digestTree(t, filepath.Join(workspace, "actions", "javascript")),
+	}}
+	job.Outputs = map[string]string{"result": "${{ steps.javascript.outputs.result }}"}
+	var logs bytes.Buffer
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outputs["result"] != "container-javascript" || result.Env["RUNTIME_SEEN"] != "true" || result.State["pre"] != "ready" || result.State["phase"] != "main" || result.Summary != "runtime main summary\nruntime post single\n" {
+		t.Fatalf("container JavaScript result = %#v", result)
+	}
+	if strings.Contains(logs.String(), "runtime-secret-value") {
+		t.Fatalf("container JavaScript logs leaked mask: %q", logs.String())
+	}
+	for _, event := range []string{"lifecycle:pre", "lifecycle:main", "masked probe: ***", "lifecycle:post:single"} {
+		if !strings.Contains(logs.String(), event) {
+			t.Fatalf("container JavaScript logs omit %q: %q", event, logs.String())
+		}
+	}
+	pre, main, post := strings.Index(logs.String(), "lifecycle:pre"), strings.Index(logs.String(), "lifecycle:main"), strings.Index(logs.String(), "lifecycle:post:single")
+	if pre < 0 || pre > main || main > post {
+		t.Fatalf("container JavaScript lifecycle order = %q", logs.String())
+	}
+	calls := f.calls(t)
+	createIndex := jobDockerCallIndex(calls, "create")
+	if createIndex < 0 {
+		t.Fatalf("Docker create absent: %#v", calls)
+	}
+	create := calls[createIndex].Args
+	nodeMount := "type=bind,source=" + node + ",target=/__buildkite-gha/node24,readonly"
+	if !slices.Contains(create, nodeMount) || slices.Contains(create, "--user") {
+		t.Fatalf("container JavaScript create mounts/user = %#v", create)
+	}
+	seenLifecycleExec := false
+	for _, call := range calls {
+		joined := strings.Join(call.Args, "\x00")
+		if !strings.Contains(joined, ContainerProcessHelperCommand+"\x00run") || !strings.Contains(joined, "/actions/javascript/") {
+			continue
+		}
+		seenLifecycleExec = true
+		if !strings.Contains(joined, "/__buildkite-gha/node24") || !strings.Contains(joined, "GITHUB_ACTION_PATH="+jobContainerWorkspace+"/actions/javascript") {
+			t.Fatalf("container JavaScript paths were not translated: %#v", call.Args)
+		}
+	}
+	if !seenLifecycleExec {
+		t.Fatalf("container JavaScript exec absent: %#v", calls)
+	}
+}
+
+func TestRunJobContainerCompositeAndNestedJavaScript(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: nested container actions\n")
+	for _, name := range []string{"top", "nested"} {
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/main.js", "")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/post.js", "")
+	}
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Nested lifecycle
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo COMPOSITE_SEEN=yes >> "$GITHUB_ENV"
+    - id: child
+      uses: ./.github/actions/nested
+`)
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := filepath.Join(workspace, "lifecycle.log")
+	topID, compositeID, nestedID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "top", Kind: "uses", Uses: "./.github/actions/top", Action: &plan.ActionSelector{Lock: topID}},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
+		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_SEEN" = yes`},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
+	job.Actions = []plan.ActionLock{
+		{ID: topID, Source: "workspace", Path: ".github/actions/top", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/top"))},
+		{ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite")), Children: map[string]plan.ActionSelector{"./.github/actions/nested": {Lock: nestedID}}},
+		{ID: nestedID, Source: "workspace", Path: ".github/actions/nested", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/nested"))},
+	}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("container nested actions result = %#v, error = %v", result, err)
+	}
+	events, err := os.ReadFile(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(events), "top:main\nnested:main\nnested:post\ntop:post\n"; got != want {
+		t.Fatalf("container nested lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "selected/action.yml", "name: remote\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, remote, "selected/main.js", `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "remote=yes\n")
+`)
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
+	job.Outputs = map[string]string{"remote": "${{ steps.remote.outputs.remote }}"}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t), Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Outputs["remote"] != "yes" {
+		t.Fatalf("remote container action result = %#v, error = %v", result, err)
+	}
+	if materializer.calls != 1 {
+		t.Fatalf("remote materialization calls = %d, want 1", materializer.calls)
+	}
+	calls := f.calls(t)
+	createIndex := jobDockerCallIndex(calls, "create")
+	if createIndex < 0 {
+		t.Fatalf("Docker create absent: %#v", calls)
+	}
+	target := remoteMountTarget("owner/repo", strings.Repeat("a", 40))
+	wantMount := "type=bind,source=" + remote + ",target=" + target + ",readonly"
+	count := 0
+	for _, arg := range calls[createIndex].Args {
+		if arg == wantMount {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("remote readonly root mount count = %d in %#v", count, calls[createIndex].Args)
+	}
+	if jobDockerCallIndex(calls, "create") <= 0 {
+		t.Fatalf("remote materialization was not completed before Docker create")
+	}
+}
+
+func TestRunJobContainerRemoteChildOfWorkspaceCompositeMountedBeforeCreate(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: nested remote container action\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: workspace parent
+runs:
+  using: composite
+  steps:
+    - uses: owner/repo/selected@v1
+`)
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "selected/action.yml", "name: remote child\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, remote, "selected/main.js", "")
+	node := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
+`)
+	if err := os.Chmod(node, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	localID, remoteID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	digest := digestTree(t, remote)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+		ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: localID},
+	}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{
+		{ID: localID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite")), Children: map[string]plan.ActionSelector{remoteLifecycleUses("selected"): {Lock: remoteID}}},
+		remoteLifecycleLock(remoteID, "selected", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "selected"), SourceDigest: digest}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Env["NESTED_REMOTE"] != "seen" {
+		t.Fatalf("nested remote container action result = %#v, error = %v", result, err)
+	}
+	if materializer.calls != 1 {
+		t.Fatalf("nested remote materialization calls = %d, want 1", materializer.calls)
+	}
+	calls := f.calls(t)
+	createIndex := jobDockerCallIndex(calls, "create")
+	if createIndex < 0 {
+		t.Fatalf("Docker create absent: %#v", calls)
+	}
+	wantMount := "type=bind,source=" + remote + ",target=" + remoteMountTarget("owner/repo", strings.Repeat("a", 40)) + ",readonly"
+	if !slices.Contains(calls[createIndex].Args, wantMount) {
+		t.Fatalf("nested remote source was not mounted at create: %#v", calls[createIndex].Args)
+	}
+}
+
+func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: lazy container action\n")
+	actionSource := t.TempDir()
+	actionYAML := "name: lazy\nruns:\n  using: node24\n  main: main.js\n"
+	mainJS := `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "lazy=ready\n")
+`
+	writeFixtureFile(t, actionSource, "action.yml", actionYAML)
+	writeFixtureFile(t, actionSource, "main.js", mainJS)
+	lockID := remoteLifecycleLockID(1)
+	lazyDir := ".github/actions/lazy"
+	create := fmt.Sprintf("mkdir -p %s; printf '%%s' %s | base64 -d > %s/action.yml; printf '%%s' %s | base64 -d > %s/main.js",
+		lazyDir, base64.StdEncoding.EncodeToString([]byte(actionYAML)), lazyDir,
+		base64.StdEncoding.EncodeToString([]byte(mainJS)), lazyDir)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "populate", Kind: "run", Shell: "sh", Command: create},
+		{ID: "lazy", Kind: "uses", Uses: "./" + lazyDir, Action: &plan.ActionSelector{Lock: lockID}},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
+	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Outputs["lazy"] != "ready" {
+		t.Fatalf("lazy container action result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobContainerRejectsDockerActionsUntilSiblingBackend(t *testing.T) {
+	t.Run("workspace", func(t *testing.T) {
+		f := newJobDocker(t, "")
+		workspace := fixturePath(t)
+		lockID := remoteLifecycleLockID(1)
+		job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+			ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
+		}})
+		job.Schema = plan.SchemaV4
+		job.RequiredCapabilities = []string{"docker", "network"}
+		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+		job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
+		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, workspace)
+		if err == nil || !strings.Contains(err.Error(), "unsupported until Phase 5 M3b") {
+			t.Fatalf("workspace Docker action error = %v", err)
+		}
+		for _, call := range f.calls(t) {
+			if len(call.Args) != 0 && (call.Args[0] == "buildx" || call.Args[0] == "run") {
+				t.Fatalf("workspace Docker action executed nested Docker command: %#v", call.Args)
+			}
+		}
+	})
+
+	t.Run("remote preflight", func(t *testing.T) {
+		f := newJobDocker(t, "")
+		workspace := t.TempDir()
+		writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote Docker rejection\n")
+		remote := t.TempDir()
+		writeFixtureFile(t, remote, "docker/action.yml", "name: docker\nruns:\n  using: docker\n  image: Dockerfile\n")
+		writeFixtureFile(t, remote, "docker/Dockerfile", "FROM scratch\n")
+		digest := digestTree(t, remote)
+		lockID := remoteLifecycleLockID(1)
+		job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+			ID: "docker", Kind: "uses", Uses: remoteLifecycleUses("docker"), Action: &plan.ActionSelector{Lock: lockID},
+		}})
+		job.Schema = plan.SchemaV4
+		job.RequiredCapabilities = []string{"docker", "network"}
+		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+		job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "docker", digest, nil)}
+		materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "docker"), SourceDigest: digest}}
+		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), job, workspace)
+		if err == nil || !strings.Contains(err.Error(), "unsupported until Phase 5 M3b") {
+			t.Fatalf("remote Docker action error = %v", err)
+		}
+		if calls := f.calls(t); len(calls) != 0 {
+			t.Fatalf("remote Docker action reached Docker before preflight rejection: %#v", calls)
+		}
+	})
+}
+
+func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: cancelled container action\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: cancel\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", `require("node:fs").writeFileSync(process.env.READY, "ready"); setInterval(() => {}, 30000)
+`)
+	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", `require("node:fs").writeFileSync(process.env.POST_MARKER, "post")
+`)
+	ready, postMarker := filepath.Join(workspace, "ready"), filepath.Join(workspace, "post-ran")
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "background", Kind: "uses", Uses: "./.github/actions/cancel", Background: true, Action: &plan.ActionSelector{Lock: lockID}},
+		{ID: "await", Kind: "run", Shell: "sh", Command: `while [ ! -f "$READY" ]; do sleep .01; done`},
+		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Env = map[string]string{"READY": ready, "POST_MARKER": postMarker}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: ".github/actions/cancel", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/cancel"))}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t), InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond, CleanupTimeout: 15 * time.Second}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("cancelled container JavaScript result = %#v, error = %v", result, err)
+	}
+	if contents, readErr := os.ReadFile(postMarker); readErr != nil || string(contents) != "post" {
+		t.Fatalf("cancelled container JavaScript post = %q, %v", contents, readErr)
+	}
+	terminateCalls := 0
+	for _, call := range f.calls(t) {
+		if strings.Contains(strings.Join(call.Args, "\x00"), ContainerProcessHelperCommand+"\x00terminate") {
+			terminateCalls++
+		}
+	}
+	if terminateCalls != 1 {
+		t.Fatalf("cancelled container JavaScript terminate calls = %d, want 1", terminateCalls)
+	}
+}
+
 func TestValidateDockerMountFileRequiresExistingRegularExecutableSafeAbsoluteFile(t *testing.T) {
 	d := t.TempDir()
 	for _, p := range []string{d, "relative", filepath.Join(d, "missing")} {
@@ -558,11 +1100,24 @@ func liveContainerJob(t *testing.T, docker string, steps []plan.Step) JobResult 
 	j := jobContainerPlan(t, w, steps)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	r, e := (Runner{Docker: docker, RuntimeExecutable: os.Args[0], InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).RunJob(ctx, j, w)
+	r, e := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), InterruptGrace: 100 * time.Millisecond, TerminateGrace: 100 * time.Millisecond}).RunJob(ctx, j, w)
 	if e != nil {
 		t.Fatal(e)
 	}
 	return r
+}
+
+func buildLiveContainerRuntime(t *testing.T) string {
+	t.Helper()
+	root := filepath.Dir(fixturePath(t))
+	binary := filepath.Join(t.TempDir(), "buildkite-gha")
+	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, "./cmd/buildkite-gha")
+	command.Dir = root
+	command.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build static container runtime: %v: %s", err, output)
+	}
+	return binary
 }
 func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 	d := requireDocker(t)
@@ -570,7 +1125,14 @@ func TestLiveJobContainerPersistsAcrossShellSteps(t *testing.T) {
 }
 func TestLiveJobContainerDefaultNonRootUser(t *testing.T) {
 	d := requireDocker(t)
-	liveContainerJob(t, d, []plan.Step{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" = 0`}})
+	w := t.TempDir()
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "u", Kind: "run", Shell: "sh", Command: `test "$(id -u)" != 0`}})
+	j.Container.Image = "nginxinc/nginx-unprivileged:stable-alpine"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := (Runner{Docker: d, RuntimeExecutable: buildLiveContainerRuntime(t)}).RunJob(ctx, j, w); err != nil {
+		t.Fatal(err)
+	}
 }
 func TestLiveJobContainerCancellationKillsProcessTree(t *testing.T) {
 	d := requireDocker(t)
@@ -578,4 +1140,45 @@ func TestLiveJobContainerCancellationKillsProcessTree(t *testing.T) {
 		{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: "sleep 30 & wait"},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"bg"}},
 	})
+}
+
+func TestLiveJobContainerJavaScriptCompositeAndPost(t *testing.T) {
+	docker := requireDocker(t)
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: live container actions\n")
+	writeFixtureFile(t, workspace, ".github/actions/js/action.yml", "name: js\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/js/main.js", `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "value=live\n")
+`)
+	writeFixtureFile(t, workspace, ".github/actions/js/post.js", `require("node:fs").writeFileSync(process.env.GITHUB_WORKSPACE + "/post-ran", "yes")
+`)
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: composite
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: echo COMPOSITE_LIVE=yes >> "$GITHUB_ENV"
+`)
+	jsID, compositeID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "js", Kind: "uses", Uses: "./.github/actions/js", Action: &plan.ActionSelector{Lock: jsID}},
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
+		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_LIVE" = yes`},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "node:24-bookworm-slim"}
+	job.Actions = []plan.ActionLock{
+		{ID: jsID, Source: "workspace", Path: ".github/actions/js", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/js"))},
+		{ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/composite"))},
+	}
+	job.Outputs = map[string]string{"value": "${{ steps.js.outputs.value }}"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	result, err := (Runner{Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: requireNode24(t)}).RunJob(ctx, job, workspace)
+	if err != nil || result.Outputs["value"] != "live" || result.Env["COMPOSITE_LIVE"] != "yes" {
+		t.Fatalf("live container actions result = %#v, error = %v", result, err)
+	}
+	if contents, readErr := os.ReadFile(filepath.Join(workspace, "post-ran")); readErr != nil || string(contents) != "yes" {
+		t.Fatalf("live container post = %q, %v", contents, readErr)
+	}
 }

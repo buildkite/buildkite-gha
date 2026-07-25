@@ -60,6 +60,8 @@ type JavaScriptAction struct {
 	Post   string
 	Inputs map[string]string
 	Env    map[string]string
+
+	nodeMajor int
 }
 
 // DockerAction is an already-resolved local Docker action.
@@ -428,7 +430,19 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, filepath.Join(action.Path, entry)); err != nil {
+	entrypoint := filepath.Join(action.Path, entry)
+	if r.jobContainer != nil {
+		if err := r.jobContainer.probeNode(ctx, node, action.nodeMajor); err != nil {
+			return err
+		}
+		absNode, err := filepath.Abs(node)
+		if err != nil {
+			return err
+		}
+		node = r.jobContainer.containerPath(absNode)
+		entrypoint = r.jobContainer.containerPath(entrypoint)
+	}
+	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, entrypoint); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil

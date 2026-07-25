@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -19,6 +21,12 @@ const jobContainerWorkspace = "/__w/repo/repo"
 const jobContainerTemp = "/__w/_temp"
 const jobContainerRuntime = "/__buildkite-gha/runtime"
 
+type containerMount struct {
+	host, target string
+	readonly     bool
+	probe        bool
+}
+
 type jobContainerBackend struct {
 	runner                    Runner
 	docker                    string
@@ -27,6 +35,9 @@ type jobContainerBackend struct {
 	owner, container, network string
 	workspace, temp           string
 	imagePATH                 string
+	mounts                    []containerMount
+	nodeMu                    sync.Mutex
+	probedNodes               map[string]bool
 }
 
 func privateDocker(r Runner) (string, string, map[string]string, error) {
@@ -49,7 +60,7 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 	return docker, config, map[string]string{"DOCKER_CONFIG": config}, nil
 }
 
-func (r Runner) startJobContainer(ctx context.Context, workspace, temp string, spec plan.Container) (_ *jobContainerBackend, err error) {
+func (r Runner) startJobContainer(ctx context.Context, workspace, temp string, spec plan.Container, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	docker, config, env, err := privateDocker(r)
 	if err != nil {
 		return nil, err
@@ -61,6 +72,28 @@ func (r Runner) startJobContainer(ctx context.Context, workspace, temp string, s
 	}
 	id := hex.EncodeToString(nonce[:])
 	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner=" + id, container: "buildkite-gha-job-" + id, network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp}
+	b.mounts = []containerMount{{host: workspace, target: jobContainerWorkspace}, {host: temp, target: jobContainerTemp}}
+	for _, m := range extra {
+		if err := validateContainerMount(m); err != nil {
+			_ = os.RemoveAll(config)
+			return nil, err
+		}
+		duplicate := false
+		for _, old := range b.mounts {
+			if old.host == m.host && old.target == m.target {
+				duplicate = true
+				break
+			}
+			if old.host == m.host || old.target == m.target {
+				_ = os.RemoveAll(config)
+				return nil, fmt.Errorf("conflicting job container mount mapping %q to %q", m.host, m.target)
+			}
+		}
+		if duplicate {
+			continue
+		}
+		b.mounts = append(b.mounts, m)
+	}
 	ok := false
 	defer func() {
 		if !ok {
@@ -98,6 +131,13 @@ func (r Runner) startJobContainer(ctx context.Context, workspace, temp string, s
 		"--mount", "type=bind,source=" + temp + ",target=" + jobContainerTemp,
 		"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
 		"--workdir", jobContainerWorkspace, "--entrypoint", "sh"}
+	for _, m := range b.mounts[2:] {
+		mount := "type=bind,source=" + m.host + ",target=" + m.target
+		if m.readonly {
+			mount += ",readonly"
+		}
+		args = append(args, "--mount", mount)
+	}
 	for _, name := range sortedKeys(spec.Env) {
 		args = append(args, "--env", name+"="+spec.Env[name])
 	}
@@ -115,18 +155,31 @@ func (r Runner) startJobContainer(ctx context.Context, workspace, temp string, s
 	}
 	_ = os.Remove(filepath.Join(temp, "startup-probe.pid"))
 	b.imagePATH = out
+	for _, m := range b.mounts[2:] {
+		if !m.readonly || !m.probe {
+			continue
+		}
+		probe := "test -r \"$1\" && test -x \"$1\""
+		if _, e := boundedDockerOutput(ctx, env, docker, "exec", b.container, "sh", "-c", probe, "sh", m.target); e != nil {
+			return nil, fmt.Errorf("read-only job container mount %q is not readable/traversable by the image USER: %w", m.target, e)
+		}
+	}
 	ok = true
 	return b, nil
 }
 
 func (b *jobContainerBackend) containerPath(path string) string {
-	if rel, err := filepath.Rel(b.workspace, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return filepath.ToSlash(filepath.Join(jobContainerWorkspace, rel))
+	best, bestLen := path, -1
+	mounts := b.mounts
+	if len(mounts) == 0 {
+		mounts = []containerMount{{host: b.workspace, target: jobContainerWorkspace}, {host: b.temp, target: jobContainerTemp}}
 	}
-	if rel, err := filepath.Rel(b.temp, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return filepath.ToSlash(filepath.Join(jobContainerTemp, rel))
+	for _, m := range mounts {
+		if rel, err := filepath.Rel(m.host, path); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && len(m.host) > bestLen {
+			best, bestLen = filepath.ToSlash(filepath.Join(m.target, rel)), len(m.host)
+		}
 	}
-	return path
+	return best
 }
 
 func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandProcessor, dir string, env map[string]string, name string, argv ...string) error {
@@ -182,6 +235,62 @@ func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *com
 		_ = os.Remove(pidfile + containerCancellationMarkerSuffix)
 		return errors.Join(ctx.Err(), terminateErr)
 	}
+}
+
+func validateContainerMount(m containerMount) error {
+	if m.host == "" || !filepath.IsAbs(m.host) || strings.ContainsAny(m.host, ",\"'\n\r\x00") {
+		return fmt.Errorf("job container mount source %q cannot be represented by Docker mount grammar", m.host)
+	}
+	info, err := os.Stat(m.host)
+	if err != nil {
+		return fmt.Errorf("validate job container mount source %q: %w", m.host, err)
+	}
+	if !info.IsDir() && !info.Mode().IsRegular() {
+		return fmt.Errorf("job container mount source %q is not a regular file or directory", m.host)
+	}
+	if !filepath.IsAbs(m.target) || strings.ContainsAny(m.target, ",\"'\n\r\x00") || filepath.Clean(m.target) != m.target {
+		return fmt.Errorf("job container mount target %q is invalid", m.target)
+	}
+	return nil
+}
+
+func remoteMountTarget(repository, commit string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(repository) + "\x00" + commit))
+	return fmt.Sprintf("/__w/_actions/%x", sum[:16])
+}
+
+func (b *jobContainerBackend) probeNode(ctx context.Context, host string, major int) error {
+	abs, err := filepath.Abs(host)
+	if err != nil {
+		return err
+	}
+	target := b.containerPath(abs)
+	if target == abs {
+		return fmt.Errorf("node %d runtime is not mounted in the job container", major)
+	}
+	key := fmt.Sprintf("%d:%s", major, target)
+	b.nodeMu.Lock()
+	if b.probedNodes[key] {
+		b.nodeMu.Unlock()
+		return nil
+	}
+	b.nodeMu.Unlock()
+
+	out, err := boundedDockerOutput(ctx, b.env, b.docker, "exec", b.container, target, "--version")
+	if err != nil {
+		return fmt.Errorf("mounted Node %d is incompatible with job container image: %w", major, err)
+	}
+	version := strings.TrimSpace(out)
+	if !strings.HasPrefix(version, fmt.Sprintf("v%d.", major)) {
+		return fmt.Errorf("mounted Node %d in job container reported %q; exact major %d is required", major, version, major)
+	}
+	b.nodeMu.Lock()
+	if b.probedNodes == nil {
+		b.probedNodes = map[string]bool{}
+	}
+	b.probedNodes[key] = true
+	b.nodeMu.Unlock()
+	return nil
 }
 
 func (b *jobContainerBackend) translatePATH(value string) string {
