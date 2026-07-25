@@ -331,6 +331,8 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	t.Setenv("BUILDKITE_REPO", "git@github.com:buildkite/buildkite-gha.git")
 	t.Setenv("BUILDKITE_COMMIT", sha)
 	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Unverified Author")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
