@@ -1795,6 +1795,13 @@ CMD ["sh", "-c", "echo phase5-health-diagnostic >&2; sleep 300"]
 		t.Fatalf("build unhealthy service: %v: %s", err, output)
 	}
 	t.Cleanup(func() { _ = exec.Command(docker, "image", "rm", "--force", image).Run() })
+	// Other live fixtures exercise anonymous pulls. Keep this one-off local image
+	// in the daemon so this test can isolate readiness diagnostics and cleanup.
+	dockerWrapper := filepath.Join(t.TempDir(), "docker")
+	wrapper := "#!/bin/sh\nif [ \"$1\" = pull ]; then exit 0; fi\nexec " + strconv.Quote(docker) + " \"$@\"\n"
+	if err := os.WriteFile(dockerWrapper, []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/health.yml", "name: health diagnostics\n")
 	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []plan.Step{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
@@ -1804,7 +1811,7 @@ CMD ["sh", "-c", "echo phase5-health-diagnostic >&2; sleep 300"]
 	var logs bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	_, err := (Runner{Docker: docker, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
+	_, err := (Runner{Docker: dockerWrapper, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
 	if err == nil || !strings.Contains(err.Error(), `service "unhealthy" failed readiness with status "unhealthy"`) {
 		t.Fatalf("unhealthy service error = %v, logs = %q", err, logs.String())
 	}
