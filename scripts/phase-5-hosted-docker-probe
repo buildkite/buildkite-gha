@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+commit=${PHASE5_COMMIT:-${SMOKE_COMMIT:-}}
+scripts/phase-0-shell-oracle-checkout "$commit"
+
 readonly image_base='busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028'
 readonly label_key='com.buildkite.buildkite-gha.phase5-owner'
 readonly suffix="${BUILDKITE_JOB_ID:-unknown}"
@@ -77,8 +80,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-: "${PHASE5_COMMIT:?}"
-scripts/phase-0-shell-oracle-checkout "$PHASE5_COMMIT"
 record platform pass "$(safe_detail "$(uname -s)-$(uname -m)")"
 
 if ! command -v docker >/dev/null 2>&1; then record docker-client unavailable not-found; exit 1; fi

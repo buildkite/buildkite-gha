@@ -15,36 +15,55 @@ steps:
 
   - label: ":pipeline: Load Phase 2 upload proof"
     key: "phase-2-upload-loader"
-    if: build.env("PHASE2_PROBE") == "upload"
+    if: build.env("PHASE2_PROBE") == "upload" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml"
     agents:
       queue: "elastic-runners"
 
   - label: ":pipeline: Load Phase 3 concurrent proof"
     key: "phase-3-upload-loader"
-    if: build.env("PHASE3_PROBE") == "concurrent"
+    if: build.env("PHASE3_PROBE") == "concurrent" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml"
     agents:
       queue: "elastic-runners"
 
   - label: ":pipeline: Load Phase 4 actions proof"
     key: "phase-4-upload-loader"
-    if: build.env("PHASE4_PROBE") == "actions"
+    if: build.env("PHASE4_PROBE") == "actions" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml"
     agents:
       queue: "elastic-runners"
 
   - label: ":docker: Load Phase 5 hosted Docker probe"
     key: "phase-5-capabilities-loader"
-    if: build.env("PHASE5_PROBE") == "capabilities"
+    if: build.env("PHASE5_PROBE") == "capabilities" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml"
     agents:
       queue: "elastic-runners"
 
   - label: ":docker: Load Phase 5 Dockerfile action proof"
     key: "phase-5-docker-action-loader"
-    if: build.env("PHASE5_PROBE") == "docker-action"
+    if: build.env("PHASE5_PROBE") == "docker-action" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml"
+    agents:
+      queue: "elastic-runners"
+
+  - label: ":pipeline: Load consolidated hosted smoke proof"
+    key: "hosted-smoke-loader"
+    if: build.env("SMOKE_PROBE") == "hosted"
+    command: |
+      set -euo pipefail
+      commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
+      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+      scripts/phase-0-shell-oracle-checkout "$$commit"
+      test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      buildkite-agent pipeline upload .buildkite/phase-2-upload.yml
+      buildkite-agent pipeline upload .buildkite/phase-3-upload.yml
+      buildkite-agent pipeline upload .buildkite/phase-4-upload.yml
+      buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml
+      buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml
+      buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
     agents:
       queue: "elastic-runners"
 
