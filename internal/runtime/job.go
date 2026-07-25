@@ -230,9 +230,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			if entrypointErr := action.ValidateEntrypoints(actionRuntime); entrypointErr != nil {
 				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr)
 			}
-			if actionRuntime == metadata.RuntimeDocker {
-				return jobResult, fmt.Errorf("docker actions in job containers are unsupported until Phase 5 M3b")
-			}
 		}
 		for _, step := range job.Steps {
 			if step.Kind != "uses" || step.Action == nil {
@@ -571,9 +568,6 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return err
 	}
-	if r.jobContainer != nil && runtime == metadata.RuntimeDocker {
-		return fmt.Errorf("docker actions in job containers are unsupported until Phase 5 M3b")
-	}
 	if runtime != metadata.RuntimeComposite {
 		return nil
 	}
@@ -602,14 +596,6 @@ func (r Runner) actionContainerMounts(ctx context.Context, actions *actionLockRe
 		entry.mu.Lock()
 		material := entry.material
 		entry.mu.Unlock()
-		if material != nil {
-			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
-			m := containerMount{host: material.RepositoryRoot, target: target, readonly: true, probe: true}
-			if old, ok := byTarget[target]; ok && old.host != m.host {
-				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
-			}
-			byTarget[target] = m
-		}
 
 		var action metadata.Metadata
 		switch lock.Source {
@@ -637,6 +623,14 @@ func (r Runner) actionContainerMounts(ctx context.Context, actions *actionLockRe
 		actionRuntime, err := action.Runtime()
 		if err != nil {
 			return nil, err
+		}
+		if material != nil && actionRuntime != metadata.RuntimeDocker {
+			target := remoteMountTarget(entry.lock.Repository, entry.lock.Commit)
+			m := containerMount{host: material.RepositoryRoot, target: target, readonly: true, probe: true}
+			if old, ok := byTarget[target]; ok && old.host != m.host {
+				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
+			}
+			byTarget[target] = m
 		}
 		switch actionRuntime {
 		case metadata.RuntimeNode20:
@@ -969,9 +963,6 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, invocationID, jobEnv, stepEnv, actionEval, posts, actions, prepared, actionLock, actionStack)
 		return composite, err
 	case metadata.RuntimeDocker:
-		if r.jobContainer != nil {
-			return result, fmt.Errorf("docker action %q in a job container is unsupported until Phase 5 M3b", step.Uses)
-		}
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}

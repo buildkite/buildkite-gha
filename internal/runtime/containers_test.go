@@ -131,7 +131,23 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(42)
 	}
 	container, network := filepath.Join(root, "container"), filepath.Join(root, "network")
+	actionContainer, actionImage := filepath.Join(root, "action-container"), filepath.Join(root, "action-image")
 	switch key {
+	case "buildx":
+		if len(args) > 1 && args[1] == "inspect" {
+			fmt.Print("Driver: docker\n")
+			os.Exit(0)
+		}
+		if len(args) > 1 && args[1] == "build" {
+			_ = os.WriteFile(actionImage, nil, 0o600)
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--label" {
+					_ = os.WriteFile(filepath.Join(root, "action-owner"), []byte(args[i+1]), 0o600)
+				}
+			}
+			os.Exit(0)
+		}
+		os.Exit(46)
 	case "pull":
 		os.Exit(0)
 	case "network-create":
@@ -176,13 +192,59 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "query-fail" && strings.Contains(strings.Join(args, " "), "name=") {
 			os.Exit(43)
 		}
-		if _, err := os.Stat(container); err == nil {
+		joined := strings.Join(args, " ")
+		owner, _ := os.ReadFile(filepath.Join(root, "action-owner"))
+		isAction := strings.Contains(joined, "buildkite-gha-container-") || (len(owner) != 0 && strings.Contains(joined, string(owner)))
+		path := container
+		if isAction {
+			path = actionContainer
+		}
+		if _, err := os.Stat(path); err == nil {
 			fmt.Print("container-id")
 		}
 		os.Exit(0)
-	case "rm":
-		_ = os.Remove(container)
+	case "run":
+		var files string
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "type=bind,source=") && strings.HasSuffix(arg, ",target=/github/file_commands") {
+				files = strings.TrimSuffix(strings.TrimPrefix(arg, "type=bind,source="), ",target=/github/file_commands")
+			}
+		}
+		if files == "" {
+			os.Exit(47)
+		}
+		_ = os.WriteFile(actionContainer, nil, 0o600)
+		_ = os.WriteFile(filepath.Join(files, "output"), []byte("container=ran\n"), 0o600)
+		_ = os.WriteFile(filepath.Join(files, "env"), []byte("DOCKER_RUNTIME_SEEN=true\n"), 0o600)
+		_ = os.WriteFile(filepath.Join(files, "path"), []byte("/fake/action/bin\n"), 0o600)
+		_ = os.WriteFile(filepath.Join(files, "state"), []byte("docker_state=seen\n"), 0o600)
+		_ = os.WriteFile(filepath.Join(files, "summary"), []byte("docker action summary\n"), 0o600)
+		fmt.Print("::add-mask::sibling-secret\nmasked: sibling-secret\n")
+		if scenario == "fail-action-run" {
+			os.Exit(48)
+		}
 		os.Exit(0)
+	case "stop":
+		os.Exit(0)
+	case "rm":
+		if strings.Contains(strings.Join(args, " "), "buildkite-gha-container-") {
+			_ = os.Remove(actionContainer)
+		} else {
+			_ = os.Remove(container)
+		}
+		os.Exit(0)
+	case "image":
+		if len(args) > 1 && args[1] == "ls" {
+			if _, err := os.Stat(actionImage); err == nil {
+				fmt.Print("image-id")
+			}
+			os.Exit(0)
+		}
+		if len(args) > 1 && args[1] == "rm" {
+			_ = os.Remove(actionImage)
+			os.Exit(0)
+		}
+		os.Exit(46)
 	case "network-ls":
 		if scenario == "query-fail" && strings.Contains(strings.Join(args, " "), "name=") {
 			os.Exit(44)
@@ -983,10 +1045,11 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	}
 }
 
-func TestRunJobContainerRejectsDockerActionsUntilSiblingBackend(t *testing.T) {
+func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 	t.Run("workspace", func(t *testing.T) {
 		f := newJobDocker(t, "")
 		workspace := fixturePath(t)
+		var logs bytes.Buffer
 		lockID := remoteLifecycleLockID(1)
 		job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
 			ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
@@ -994,15 +1057,43 @@ func TestRunJobContainerRejectsDockerActionsUntilSiblingBackend(t *testing.T) {
 		job.Schema = plan.SchemaV4
 		job.RequiredCapabilities = []string{"docker", "network"}
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+		job.Env = map[string]string{"WORKSPACE_CHILD": filepath.Join(workspace, "child")}
 		job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
-		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, workspace)
-		if err == nil || !strings.Contains(err.Error(), "unsupported until Phase 5 M3b") {
-			t.Fatalf("workspace Docker action error = %v", err)
+		job.Outputs = map[string]string{"container": "${{ steps.docker.outputs.container }}"}
+		result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+		if err != nil || result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.Summary != "docker action summary\n" || !strings.HasPrefix(result.Env["PATH"], "/fake/action/bin:") {
+			t.Fatalf("workspace Docker action result = %#v, error = %v", result, err)
 		}
-		for _, call := range f.calls(t) {
-			if len(call.Args) != 0 && (call.Args[0] == "buildx" || call.Args[0] == "run") {
-				t.Fatalf("workspace Docker action executed nested Docker command: %#v", call.Args)
+		if strings.Contains(logs.String(), "sibling-secret") {
+			t.Fatalf("mask leaked in logs: %q", logs.String())
+		}
+		calls := f.calls(t)
+		create, run := jobDockerCallIndex(calls, "create"), jobDockerCallIndex(calls, "run")
+		if create < 0 || run < 0 || jobDockerCallIndex(calls, "buildx", "build") < 0 {
+			t.Fatalf("sibling build/run absent: %#v", calls)
+		}
+		network := argumentAfter(t, calls[create].Args, "--network")
+		if got := argumentAfter(t, calls[run].Args, "--network"); got != network {
+			t.Fatalf("sibling network = %q, want %q", got, network)
+		}
+		joined := strings.Join(calls[run].Args, " ")
+		for _, want := range []string{"source=" + workspace + ",target=/github/workspace", "target=/github/runner_temp", "target=/github/file_commands", "WORKSPACE_CHILD=/github/workspace/child"} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("sibling run missing %q: %#v", want, calls[run].Args)
 			}
+		}
+		if slices.Contains(calls[run].Args, "--user") {
+			t.Fatalf("sibling run overrides image user: %#v", calls[run].Args)
+		}
+		networkRemove := jobDockerCallIndex(calls, "network", "rm")
+		actionRemove := -1
+		for i, call := range calls {
+			if len(call.Args) >= 3 && call.Args[0] == "rm" && strings.HasPrefix(call.Args[2], "buildkite-gha-container-") {
+				actionRemove = i
+			}
+		}
+		if actionRemove < 0 || networkRemove < actionRemove {
+			t.Fatalf("job network removed before action cleanup: %#v", calls)
 		}
 	})
 
@@ -1023,14 +1114,63 @@ func TestRunJobContainerRejectsDockerActionsUntilSiblingBackend(t *testing.T) {
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 		job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "docker", digest, nil)}
 		materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: filepath.Join(remote, "docker"), SourceDigest: digest}}
-		_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), job, workspace)
-		if err == nil || !strings.Contains(err.Error(), "unsupported until Phase 5 M3b") {
-			t.Fatalf("remote Docker action error = %v", err)
+		result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), job, workspace)
+		if err != nil || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
+			t.Fatalf("remote Docker action result = %#v, error = %v", result, err)
 		}
-		if calls := f.calls(t); len(calls) != 0 {
-			t.Fatalf("remote Docker action reached Docker before preflight rejection: %#v", calls)
+		if materializer.calls != 1 {
+			t.Fatalf("remote materialization calls = %d, want 1", materializer.calls)
+		}
+		calls := f.calls(t)
+		if jobDockerCallIndex(calls, "buildx", "build") < 0 || jobDockerCallIndex(calls, "run") < 0 {
+			t.Fatalf("remote Docker action did not build and run: %#v", calls)
+		}
+		create := jobDockerCallIndex(calls, "create")
+		if create < 0 {
+			t.Fatalf("job container create absent: %#v", calls)
+		}
+		for _, arg := range calls[create].Args {
+			if strings.Contains(arg, "source="+remote+",") {
+				t.Fatalf("remote Docker-only source was unnecessarily mounted in the job container: %#v", calls[create].Args)
+			}
 		}
 	})
+}
+
+func TestRunJobContainerSiblingDockerFailureCleansActionAndJobResources(t *testing.T) {
+	f := newJobDocker(t, "fail-action-run")
+	workspace := fixturePath(t)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
+	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "run Docker action") {
+		t.Fatalf("sibling Docker action failure = %v", err)
+	}
+	calls := f.calls(t)
+	for _, command := range [][]string{{"rm", "--force"}, {"image", "rm", "--force"}, {"network", "rm"}} {
+		if jobDockerCallIndex(calls, command...) < 0 {
+			t.Fatalf("cleanup command %v absent: %#v", command, calls)
+		}
+	}
+	actionRemove := jobDockerCallIndex(calls, "rm", "--force")
+	jobNetworkRemove := jobDockerCallIndex(calls, "network", "rm")
+	if actionRemove < 0 || jobNetworkRemove < actionRemove {
+		t.Fatalf("job network cleanup raced action cleanup: %#v", calls)
+	}
+}
+
+func TestRunDockerRejectsMismatchedJobContainerPaths(t *testing.T) {
+	r := Runner{jobContainer: &jobContainerBackend{workspace: "/owned/workspace", temp: "/owned/temp"}}
+	_, err := r.runDocker(context.Background(), newCommandProcessor(nil, nil), DockerAction{Workspace: "/other/workspace", runnerTemp: "/owned/temp"})
+	if err == nil || !strings.Contains(err.Error(), "must match the job container's owned host paths") {
+		t.Fatalf("mismatched sibling paths error = %v", err)
+	}
 }
 
 func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {

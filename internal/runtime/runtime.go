@@ -141,6 +141,9 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	if action.Workspace == "" || action.runnerTemp == "" {
 		return result, errors.New("docker workspace and runner temp are required")
 	}
+	if r.jobContainer != nil && (action.Workspace != r.jobContainer.workspace || action.runnerTemp != r.jobContainer.temp) {
+		return result, errors.New("docker action workspace and runner temp must match the job container's owned host paths")
+	}
 	docker := r.Docker
 	if docker == "" {
 		docker, err = exec.LookPath("docker")
@@ -265,14 +268,32 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
+	if r.jobContainer != nil {
+		args = append(args, "--network", r.jobContainer.network)
+	}
 	if action.Workspace != "" {
 		args = append(args, "--mount", "type=bind,source="+action.Workspace+",target=/github/workspace", "--mount", "type=bind,source="+action.runnerTemp+",target=/github/runner_temp", "--workdir", "/github/workspace")
+	}
+	var siblingPaths *jobContainerBackend
+	if r.jobContainer != nil {
+		siblingPaths = &jobContainerBackend{mounts: []containerMount{
+			{host: action.Workspace, target: "/github/workspace"},
+			{host: action.runnerTemp, target: "/github/runner_temp"},
+		}}
 	}
 	for _, name := range sortedKeys(action.Env) {
 		if name == "RUNNER_TOOL_CACHE" || (name == "PATH" && !action.explicitPATH) || name == "GITHUB_WORKSPACE" || name == "RUNNER_TEMP" {
 			continue
 		}
-		args = append(args, "--env", name+"="+action.Env[name])
+		value := action.Env[name]
+		if siblingPaths != nil {
+			if name == "PATH" {
+				value = siblingPaths.translatePATH(value)
+			} else {
+				value = siblingPaths.containerPath(value)
+			}
+		}
+		args = append(args, "--env", name+"="+value)
 	}
 	if action.Workspace != "" {
 		args = append(args, "--env", "GITHUB_WORKSPACE=/github/workspace")
