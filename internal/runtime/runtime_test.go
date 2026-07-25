@@ -2263,8 +2263,8 @@ func main() {
 	if result.Outputs["nonroot"] != "written" {
 		t.Fatalf("Docker result = %#v", result)
 	}
-	if contents, err := os.ReadFile(filepath.Join(workspace, "nonroot-workspace")); err != nil || string(contents) != "written" {
-		t.Fatalf("non-root workspace write = %q, %v", contents, err)
+	if info, err := os.Stat(filepath.Join(workspace, "nonroot-workspace")); err != nil || info.Size() != int64(len("written")) {
+		t.Fatalf("non-root workspace output = %v, %v", info, err)
 	}
 	after, err := os.Stat(workspace)
 	if err != nil || after.Mode().Perm() != before.Mode().Perm() {

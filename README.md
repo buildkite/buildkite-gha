@@ -7,10 +7,9 @@ compatibility runtime, without creating a GitHub Actions run.
 
 The Phase 0 semantic foundation, Phase 1 static compiler, Phase 2 shell
 runtime, Phase 3 concurrent-step runtime, Phase 4 JavaScript/composite action
-runtime, and the Dockerfile-action entry slice of Phase 5 are implemented. The
-compiler validates the supported graph, expands local reusable workflows and
-matrices, applies queue policy, produces immutable job plans, and emits a
-Buildkite pipeline.
+runtime, and Phase 5 container runtime are implemented. The compiler validates
+the supported graph, expands local reusable workflows and matrices, applies
+queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
 ## Commands
 
@@ -96,9 +95,28 @@ actions run from a private staged copy of the verified source, require the local
 Buildx `default` Docker driver, use fixed workspace and file-command mounts, and
 receive runtime-owned names and labels with bounded cleanup. Docker and host
 steps share the job's security boundary; installations that require host-level
-isolation must run each job in a disposable VM. `docker://` images, Docker
-lifecycle overrides, arbitrary Docker options, services, and job containers
-remain outside the executable subset. In Buildkite,
+isolation must run each job in a disposable VM.
+
+Schema-v4 plans additionally support one persistent job container and declared
+service containers. Shell, JavaScript, and composite steps execute in the job
+container; Dockerfile actions and services run as siblings on one runtime-owned
+network. Container jobs reach services by their service IDs. Host jobs remain
+host processes and reach published service ports through
+`127.0.0.1:${{ job.services.<id>.ports[<port>] }}`; sibling Dockerfile actions
+join the service network. Declared image users remain in effect, service and
+Docker-action entrypoints are preserved, and the runtime owns the persistent
+job-container command. Images are pulled anonymously with a private Docker
+configuration. Runtime names, networks, labels, mounts, process trees, and
+cleanup are owned exactly and cleaned under bounded contexts.
+
+Only literal public images, environment values, and ports are accepted.
+Credentials, private registries, arbitrary Docker options or volumes,
+privileged containers, host Docker socket mounts, devices, arbitrary host
+mounts, and `docker://` action images remain unsupported. Production
+`hosted-tokenless` upload also continues to reject job- and service-container
+provenance: the broader container runtime is currently exercised through the
+checked-in compiler-to-Runner hosted proof, while normal upload admits only the
+compiler-proven Dockerfile-action slice. In Buildkite,
 `run-job` verifies the exact build, job, step, and plan digest before resolving
 each prerequisite from its attributed producer artifact, then publishes the
 terminal result under a bounded cleanup context; metadata is only a best-effort
@@ -149,9 +167,12 @@ mise run smoke:local
 This validates the manifest, performs static workflow validation, and compiles
 the supported fixtures twice to verify deterministic output. It also checks
 the expected-negative classifications: workflows using the official GitHub
-artifact and cache actions compile, while job and service containers fail
-static compilation. A passing local smoke run is compile-time evidence only;
-it is explicitly not proof that a workflow runs successfully.
+artifact and cache actions compile but remain runtime-unsupported. Job and
+service container fixtures compile deterministically and are classified
+`runtime-pass` from the exact-commit hosted Phase 5 proof, while remaining
+outside production `hosted-tokenless` admission. A passing local smoke run is
+compile-time evidence only; it is explicitly not proof that a workflow runs
+successfully.
 
 For an opt-in public-network preflight, run:
 
@@ -190,8 +211,9 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 The aggregate collects the Phase 2 shell/upload proof, Phase 3 concurrent-step
-proof, Phase 4 public-action proof, and both Phase 5 Docker proofs (hosted Docker
-capabilities and the Dockerfile action). It retains each phase's independent
+proof, Phase 4 public-action proof, and three Phase 5 proofs: hosted Docker
+capabilities, the production Dockerfile-action slice, and the complete
+compiler-to-Runner container runtime. It retains each phase's independent
 importer and continuation loader rather than flattening their topology. The
 phase-specific selectors below remain available for targeted diagnosis.
 
@@ -236,6 +258,16 @@ builds and runs the verified action on `hosted`, propagates its output, and must
 settle before the separately uploaded native Buildkite continuation. The
 matching differential is
 `.github/workflows/phase-5-docker-action-oracle.yml`.
+
+The complete Phase 5 runtime proof is intentionally separate from production
+upload admission. Start an exact-commit build with `PHASE5_PROBE=runtime` and
+`PHASE5_COMMIT=<full commit>` to load `.buildkite/phase-5-runtime.yml`. It runs
+the checked-in two-job fixture through the compiler and Runner on hosted Docker,
+covering persistent container state, services from container and host jobs,
+JavaScript/composite/Dockerfile actions, process-tree cancellation, diagnostics,
+masking, and exact cleanup. [Buildkite build 136](https://buildkite.com/buildkite/buildkite-gha/builds/136)
+passed all required live tests without skips against exact runtime-evidence
+commit `50db2cf89ba23c0e051d7d57cc03e115606768e5`.
 
 ## License
 
