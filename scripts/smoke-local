@@ -4,6 +4,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly root
 readonly manifest="$root/testdata/smoke/manifest.json"
+profile=""
+if (( $# != 0 )); then
+  [[ $# == 2 && "$1" == --profile && "$2" == hosted-tokenless ]] || {
+    echo 'usage: scripts/smoke-local [--profile hosted-tokenless]' >&2
+    exit 2
+  }
+  profile="$2"
+fi
 work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-smoke.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
@@ -29,8 +37,12 @@ jq -e '
 ' "$manifest" >/dev/null
 
 mise exec -- go build -o "$work/buildkite-gha" ./cmd/buildkite-gha
+if [[ -n "$profile" ]]; then
+  node20="$(mise where node@20)/bin/node"
+  node24="$(mise where node@24)/bin/node"
+fi
 
-while IFS=$'\t' read -r id workflow event expectation; do
+while IFS=$'\t' read -r id workflow event expectation action_preflight; do
   [[ -f "$root/$workflow" ]] || { echo "$id: missing workflow $workflow" >&2; exit 1; }
   [[ -f "$root/$event" ]] || { echo "$id: missing event $event" >&2; exit 1; }
   echo "$id: classification=$expectation"
@@ -44,7 +56,17 @@ while IFS=$'\t' read -r id workflow event expectation; do
   [[ -s "$work/$id.first" ]] || { echo "$id: empty pipeline" >&2; exit 1; }
   cmp -s "$work/$id.first" "$work/$id.second" || { echo "$id: nondeterministic pipeline" >&2; exit 1; }
   echo "$id: validate=pass compile=deterministic"
-done < <(jq -r '.fixtures[] | [.id, .workflow, .event, .expectation] | @tsv' "$manifest")
+  if [[ -n "$profile" && "$action_preflight" == "$profile" ]]; then
+    BUILDKITE_GHA_NODE20="$node20" BUILDKITE_GHA_NODE24="$node24" \
+      "$work/buildkite-gha" validate --profile "$profile" --format json \
+      --event-path "$root/$event" "$root/$workflow" >"$work/$id.profile.json"
+    jq -e '.result == "admitted" and .admission.result == "admitted"' "$work/$id.profile.json" >/dev/null
+    echo "$id: profile=$profile admission=pass runtime=not-proven"
+  fi
+done < <(jq -r '.fixtures[] | [.id, .workflow, .event, .expectation, .action_preflight] | @tsv' "$manifest")
 
 echo 'PASS: local smoke inventory validated and compiled deterministically.'
 echo 'CAVEAT: successful compilation is not runtime evidence; classifications come from the manifest.'
+if [[ -n "$profile" ]]; then
+  echo 'CAVEAT: profile admission resolves actions and applies upload policy but does not execute arbitrary action code.'
+fi

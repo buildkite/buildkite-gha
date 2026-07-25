@@ -47,6 +47,10 @@ run = "python3 testdata/plans/validate.py"
 description = "Validate and deterministically compile the local smoke inventory"
 run = "./scripts/smoke-local"
 
+[tasks."smoke:profile"]
+description = "Resolve actions and apply the hosted-tokenless profile to smoke fixtures"
+run = "./scripts/smoke-local --profile hosted-tokenless"
+
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
 depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures", "smoke:local"]

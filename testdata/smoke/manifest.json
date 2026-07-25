@@ -26,7 +26,7 @@
       "expectation": "compile-pass",
       "evidence": "Local JavaScript and composite action components have runtime tests; the complete hosted fixture does not.",
       "note": "Component runtime evidence must not be read as full workflow runtime evidence.",
-      "action_preflight": "none"
+      "action_preflight": "hosted-tokenless"
     },
     {
       "id": "smoke-artifact",
@@ -35,7 +35,7 @@
       "expectation": "runtime-unsupported",
       "evidence": "Compilation is covered, but GitHub artifact service emulation is deferred.",
       "note": "Upload-artifact and download-artifact require hosted service compatibility.",
-      "action_preflight": "none"
+      "action_preflight": "hosted-tokenless"
     },
     {
       "id": "phase4-public-actions",
@@ -44,7 +44,7 @@
       "expectation": "runtime-pass",
       "evidence": "The pinned public checkout and setup action proof has runtime coverage.",
       "note": "The local harness compiles only and never fetches these actions.",
-      "action_preflight": "none"
+      "action_preflight": "hosted-tokenless"
     },
     {
       "id": "phase5-docker-action",
@@ -53,7 +53,7 @@
       "expectation": "runtime-pass",
       "evidence": "The pinned public Dockerfile action proof has hosted runtime coverage.",
       "note": "The deterministic smoke event matches the production Phase 5 proof input.",
-      "action_preflight": "none"
+      "action_preflight": "hosted-tokenless"
     }
   ]
 }

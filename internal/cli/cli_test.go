@@ -103,6 +103,60 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_COMPILE" {
 			t.Fatalf("report = %#v", report)
 		}
+
+		stdout.Reset()
+		stderr.Reset()
+		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("profile Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		}
+		var profileReport compatibility.ProfileReport
+		if err := json.Unmarshal(stdout.Bytes(), &profileReport); err != nil {
+			t.Fatal(err)
+		}
+		if profileReport.Result != "incompatible" || profileReport.Compile.Result != "incompatible" || profileReport.Admission.Result != "not-evaluated" || len(profileReport.Diagnostics) != 1 || profileReport.Diagnostics[0].Code != "E_COMPILE" {
+			t.Fatalf("profile report = %#v", profileReport)
+		}
+	})
+
+	t.Run("validate hosted tokenless profile", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
+		runner := &cliCaptureRunner{}
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("profile validation made Buildkite calls: %#v", runner.commands)
+		}
+		var report compatibility.ProfileReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "admitted" || report.Profile != "hosted-tokenless" || report.Compile.Instances != 3 || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
+			t.Fatalf("profile report = %#v", report)
+		}
+	})
+
+	t.Run("validate profile requires event", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--profile", "hosted-tokenless", workflowPath}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "--event-path is required with --profile") {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+	})
+
+	t.Run("validate profile importer cannot collide with generated key", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "profile.yml")
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  profile:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProfileReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.Result != "admitted" {
+			t.Fatalf("profile report = %#v, error = %v", report, err)
+		}
 	})
 
 	t.Run("compile", func(t *testing.T) {
@@ -135,6 +189,73 @@ func TestRunValidateAndCompile(t *testing.T) {
 			t.Fatalf("compile IR = %#v, error = %v", ir, err)
 		}
 	})
+}
+
+func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
+	actionPath := filepath.Join(root, ".github", "actions", "local")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "main.js"), []byte("console.log('local action')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, root, 20))
+	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, root, 24))
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProfileReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "W_ACTION_RUNTIME_UNKNOWN" {
+		t.Fatalf("profile report = %#v", report)
+	}
+
+	t.Setenv("BUILDKITE_GHA_NODE20", filepath.Join(root, "missing-node20"))
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("environment Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "indeterminate" || report.Admission.Result != "not-evaluated" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_ENVIRONMENT" {
+		t.Fatalf("environment profile report = %#v", report)
+	}
+}
+
+func TestValidateHostedTokenlessProfileRejectsProtectedCapabilityAfterCompile(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "secret.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProfileReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, `capability "secrets"`) {
+		t.Fatalf("profile report = %#v", report)
+	}
 }
 
 func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T) {
@@ -897,8 +1018,14 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
 	}
-	if _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("validateArgs() error = %v, want duplicate format error", err)
+	}
+	if _, _, _, _, err := validateArgs([]string{"--profile", "hosted-tokenless", "--profile", "hosted-tokenless", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("validateArgs() error = %v, want duplicate profile error", err)
+	}
+	if _, _, _, _, err := validateArgs([]string{"--profile", "unknown", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted-tokenless"`) {
+		t.Fatalf("validateArgs() error = %v, want unknown profile error", err)
 	}
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)

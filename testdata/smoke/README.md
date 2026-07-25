@@ -37,6 +37,12 @@ each workflow, and compare two nonempty pipeline compilations byte for byte.
 The default harness does not parse emitted YAML, fetch actions, or execute
 workflows; successful compilation is not runtime evidence.
 
+Run `mise run smoke:profile` for the opt-in networked preflight of entries marked
+`hosted-tokenless`. It anonymously resolves actions, prepares the managed Node
+runtimes, compiles plans, and applies the same admission policy as production
+upload. Admission does not execute action code or prove that a generic action
+is independent of GitHub-only artifact, cache, token, or OIDC services.
+
 `events/push.json` is deterministic and its repository SHA is intentionally
 synthetic. End-to-end runs involving checkout must bind the event to the real
 fixture repository and commit. External actions remain pinned to immutable
