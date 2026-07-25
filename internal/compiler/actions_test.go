@@ -33,7 +33,11 @@ func (contextActionSource) Fetch(ctx context.Context, _ source.Reference) (sourc
 func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
-	return source.Resolved{Reference: r, Commit: strings.Repeat("a", 40)}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
+	commit := strings.Repeat("a", 40)
+	if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
+		commit = strings.ToLower(r.Ref)
+	}
+	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
 }
 
 func writeAction(t *testing.T, root, name, body string) {
@@ -44,6 +48,11 @@ func writeAction(t *testing.T, root, name, body string) {
 	}
 	if err := os.WriteFile(filepath.Join(d, "action.yml"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(body, "using: docker") {
+		if err := os.WriteFile(filepath.Join(d, "Dockerfile"), []byte("FROM scratch\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, entry := range []string{"index.js"} {
 		if strings.Contains(body, entry) {
@@ -357,6 +366,42 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 	}
 	if len(terminals) != 1 || len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != terminals[0] {
 		t.Fatalf("Phase 4 continuation dependencies = %#v, compiled public actions terminals = %#v", continuation.Steps, terminals)
+	}
+}
+
+func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
+	workflowPath := filepath.Join("..", "..", "testdata", "phase5", ".github", "workflows", "docker-action.yml")
+	templatePath := workflowPath + ".tmpl"
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, templatePath), pushEvent(t), "phase5-test", testDistributionDigest, Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" {
+		t.Fatalf("Phase 5 Dockerfile action plans = %#v", plans)
+	}
+	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "phase-5-docker-action-continuation.yml"))
+	var continuation struct {
+		Steps []struct {
+			DependsOn []struct {
+				Step string `yaml:"step"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(continuationSource, &continuation); err != nil {
+		t.Fatal(err)
+	}
+	if len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != plans[0].Target.StepKey {
+		t.Fatalf("Phase 5 continuation dependencies = %#v, compiled terminal = %q", continuation.Steps, plans[0].Target.StepKey)
 	}
 }
 

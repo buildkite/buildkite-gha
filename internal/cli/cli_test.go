@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -338,6 +339,52 @@ func TestRunUploadLocalJavaScriptActionUploadsExactManagedNodes(t *testing.T) {
 	}
 }
 
+func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "docker.yml")
+	actionRoot := filepath.Join(root, ".github", "actions", "docker")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := "on: push\njobs:\n  docker:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/docker\n"
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: docker\n  image: Dockerfile\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "docker-importer")
+	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, root, 20))
+	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, root, 24))
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var job plan.Job
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		decoded, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode uploaded Docker plan: %v", err)
+		}
+		job = decoded
+	}
+	if !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) || len(job.Actions) != 1 || job.Actions[0].Source != "workspace" {
+		t.Fatalf("uploaded Docker action plan = %#v", job)
+	}
+}
+
 func TestRunUploadWrongNodeFailsBeforeAgentSideEffects(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
@@ -395,7 +442,7 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "docker", "future-capability"} {
+	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "future-capability"} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
@@ -406,14 +453,26 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadAllowsNetworkOnlyActions(t *testing.T) {
+func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testing.T) {
+	for _, capabilities := range [][]string{nil, {"network"}, {"docker"}, {"docker", "network"}} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow:             plan.Workflow{LogicalJobID: "action-job"},
+			RequiredCapabilities: capabilities,
+			Steps:                []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/example@commit"}},
+		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySource: "dockerfile-actions"}}}}
+		if err := validateUnprivilegedBundle(bundle); err != nil {
+			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", capabilities, err)
+		}
+	}
+}
+
+func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-		Workflow:             plan.Workflow{LogicalJobID: "action-job"},
-		RequiredCapabilities: []string{"network"},
-		Steps:                []plan.Step{{ID: "remote", Kind: "uses", Uses: "actions/example@commit"}},
+		Workflow:             plan.Workflow{LogicalJobID: "unproven-docker"},
+		RequiredCapabilities: []string{"docker"},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err != nil {
-		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
+	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "without compiler-verified Dockerfile action provenance") {
+		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
 

@@ -87,6 +87,16 @@ meaningful security boundary is the GitHub control plane, which authenticates
 the repository event and decides which job-scoped tokens, secrets, OIDC claims,
 environments, and runners that event may use.
 
+The corresponding host-isolation boundary is the disposable job environment,
+normally a per-job VM with its own local Docker daemon. Shell steps, JavaScript
+actions, Docker actions, job containers, and service containers inside that
+environment share one job-level authority. The compatibility runtime must not
+claim to sandbox one workflow step from another with mount-path pinning, a
+Docker invocation broker, or shared-host PID namespace tricks. If workflow code
+requires isolation from other jobs or the agent host, the selected queue must
+provide that isolation for the whole job. A self-hosted queue that shares a host
+or Docker daemon across trust domains is outside this tokenless threat model.
+
 Buildkite dynamic pipeline upload is likewise ordinary pipeline authority, not
 a weaker class of job merely because the pipeline was generated. Public,
 anonymous, tokenless actions may run on an ambient-clean fixed hosted queue
@@ -1586,6 +1596,15 @@ Implementation order and fixed boundaries:
    reconciliation on the same runtime-owned backend. Do not translate imported
    container definitions into workflow-controlled Buildkite plugins.
 
+The runtime's fixed mounts, translated paths, private Docker configuration,
+owned labels, and bounded cleanup preserve Actions behavior and prevent
+accidental resource confusion. They are not a security boundary against other
+code in the same workflow job: a host `run` step with access to the local Docker
+daemon has the same job-level authority as a Docker action. Do not add a mount
+broker or host-level containment solely to distinguish those steps. Untrusted
+jobs instead require a disposable VM and job-scoped daemon; stronger isolation
+is a queue/executor concern.
+
 The hosted default remote builder is not an authorization boundary for
 anonymous Dockerfiles: it has cluster-scoped persistent caching. The tokenless
 path must use the probed local `default` Docker driver so Dockerfile execution
@@ -1599,7 +1618,9 @@ Definition of done:
   service connectivity.
 - Failed health checks produce useful Buildkite diagnostics.
 - Cancellation and agent loss do not routinely leave containers or networks.
-- Privileged options are subject to explicit queue policy.
+- Workflow-declared privileged options are subject to explicit queue policy;
+  direct commands inside a job remain governed by that queue's job-level
+  isolation.
 
 ### Phase 6 — Core services and protected capability control plane
 
@@ -1964,6 +1985,10 @@ unknown plan.
 - GitHub Actions does not isolate steps inside a job. A public action and a
   shell command have equivalent job authority, so anonymous tokenless actions
   do not require a privileged compiler merely because they use `uses:` syntax.
+- Docker is an execution backend within that shared job authority, not a
+  per-step sandbox. Disposable job VMs provide host isolation; fixed runtime
+  mounts and options provide compatibility and resource ownership rather than
+  protection from another step in the same job.
 - A Buildkite bootstrap job has ordinary dynamic pipeline authority. Pinning the
   compiler, disabling accidental repository execution, and applying queue
   policy are important operational controls, but do not create a separate

@@ -583,7 +583,10 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			if capability != "network" {
+			if capability == "docker" && artifact.Authorization.DockerCapabilitySource != "dockerfile-actions" {
+				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
+			}
+			if capability != "network" && capability != "docker" {
 				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
 			}
 		}

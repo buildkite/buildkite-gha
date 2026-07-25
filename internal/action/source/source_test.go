@@ -99,6 +99,25 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsExactCommitMismatch(t *testing.T) {
+	otherSHA := strings.Repeat("a", 40)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, otherSHA)
+	}))
+	defer ts.Close()
+	resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := Parse("o/r@" + testSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "resolved exact commit") {
+		t.Fatalf("Resolve() error = %v, want exact-commit mismatch", err)
+	}
+}
+
 func TestResolverFallbackErrorsAndCancellation(t *testing.T) {
 	t.Run("rate limit", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

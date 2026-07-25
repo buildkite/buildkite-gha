@@ -538,11 +538,14 @@ func TestCompilePlansResolveReusableLocalActionsFromRepositoryRoot(t *testing.T)
 	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: docker\n  image: Dockerfile\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(actionDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker"}) || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" {
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" {
 		t.Fatalf("reusable local-action plan = %#v", plans)
 	}
 }
@@ -1053,13 +1056,16 @@ func TestCompilePlansDerivesDockerCapability(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: docker\n  image: Dockerfile\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(actionDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	source := []byte("on: push\njobs:\n  docker:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/docker\n")
 	plans, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := plans[0].RequiredCapabilities; len(got) != 1 || got[0] != "docker" {
-		t.Fatalf("required capabilities = %#v, want [docker]", got)
+	if got := plans[0].RequiredCapabilities; !reflect.DeepEqual(got, []string{"docker", "network"}) {
+		t.Fatalf("required capabilities = %#v, want [docker network]", got)
 	}
 }
 

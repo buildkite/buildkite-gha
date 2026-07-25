@@ -23,6 +23,7 @@ type commandFiles struct {
 	state   string
 	summary string
 	path    string
+	open    map[string]*os.File
 }
 
 type fileCommandEffects struct {
@@ -43,24 +44,63 @@ func newCommandFiles() (commandFiles, error) {
 		state:   filepath.Join(dir, "state"),
 		summary: filepath.Join(dir, "summary"),
 		path:    filepath.Join(dir, "path"),
+		open:    make(map[string]*os.File, 5),
 	}
 	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), os.RemoveAll(dir))
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if err != nil {
+			return commandFiles{}, errors.Join(fmt.Errorf("create file-command file: %w", err), files.cleanup())
 		}
+		files.open[path] = file
 	}
 	return files, nil
+}
+
+func (files commandFiles) allowContainerWrites() error {
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
+		file, err := files.retained(path)
+		if err != nil {
+			return err
+		}
+		if err := file.Chmod(0o666); err != nil {
+			return fmt.Errorf("make container file command writable: %w", err)
+		}
+	}
+	// Container images may declare any USER. Permit traversal to the fixed,
+	// pre-created files without permitting directory listing or new entries.
+	if err := os.Chmod(files.dir, 0o711); err != nil {
+		return fmt.Errorf("make container file-command directory traversable: %w", err)
+	}
+	return nil
+}
+
+func (files commandFiles) retained(path string) (*os.File, error) {
+	file := files.open[path]
+	if file == nil {
+		return nil, fmt.Errorf("file command %s is not retained", filepath.Base(path))
+	}
+	return file, nil
+}
+
+func (files commandFiles) cleanup() error {
+	var cleanupErr error
+	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
+		if file := files.open[path]; file != nil {
+			cleanupErr = errors.Join(cleanupErr, file.Close())
+		}
+	}
+	return errors.Join(cleanupErr, os.RemoveAll(files.dir))
 }
 
 func (files commandFiles) apply(result *Result, state map[string]string) (fileCommandEffects, error) {
 	if err := files.checkSizeBudget(); err != nil {
 		return fileCommandEffects{}, err
 	}
-	outputs, outputErr := parseCommandFile(files.output)
-	env, envErr := parseCommandFile(files.env)
-	states, stateErr := parseCommandFile(files.state)
-	summary, summaryErr := readBoundedFile(files.summary, maxCommandFileBytes)
-	paths, pathErr := parsePathFile(files.path)
+	outputs, outputErr := files.parseCommandFile(files.output)
+	env, envErr := files.parseCommandFile(files.env)
+	states, stateErr := files.parseCommandFile(files.state)
+	summary, summaryErr := files.readBoundedFile(files.summary, maxCommandFileBytes)
+	paths, pathErr := files.parsePathFile(files.path)
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
 		return fileCommandEffects{}, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
@@ -101,7 +141,11 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 func (files commandFiles) checkSizeBudget() error {
 	var total int64
 	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
-		info, err := os.Stat(path)
+		file, err := files.retained(path)
+		if err != nil {
+			return err
+		}
+		info, err := file.Stat()
 		if err != nil {
 			return fmt.Errorf("stat file command %s: %w", filepath.Base(path), err)
 		}
@@ -116,8 +160,34 @@ func (files commandFiles) checkSizeBudget() error {
 	return nil
 }
 
-func parsePathFile(path string) ([]string, error) {
-	contents, err := readBoundedFile(path, maxCommandFileBytes)
+func (files commandFiles) parseCommandFile(path string) (map[string]string, error) {
+	file, err := files.retained(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek file command %s: %w", filepath.Base(path), err)
+	}
+	return parseCommandReader(path, file)
+}
+
+func (files commandFiles) readBoundedFile(path string, limit int64) ([]byte, error) {
+	file, err := files.retained(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek file command %s: %w", filepath.Base(path), err)
+	}
+	return readBoundedReader(path, file, limit)
+}
+
+func (files commandFiles) parsePathFile(path string) ([]string, error) {
+	contents, err := files.readBoundedFile(path, maxCommandFileBytes)
+	return parsePathContents(contents, err)
+}
+
+func parsePathContents(contents []byte, err error) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -134,13 +204,8 @@ func parsePathFile(path string) ([]string, error) {
 	return paths, nil
 }
 
-func readBoundedFile(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-	contents, err := io.ReadAll(io.LimitReader(file, limit+1))
+func readBoundedReader(path string, reader io.Reader, limit int64) ([]byte, error) {
+	contents, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -150,15 +215,9 @@ func readBoundedFile(path string, limit int64) ([]byte, error) {
 	return contents, nil
 }
 
-func parseCommandFile(path string) (map[string]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = file.Close() }()
-
+func parseCommandReader(path string, reader io.Reader) (map[string]string, error) {
 	values := make(map[string]string)
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maxStreamLineBytes)
 	entries := 0
 	for scanner.Scan() {

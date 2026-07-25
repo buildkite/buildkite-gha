@@ -90,7 +90,8 @@ func VerifyWorkflow(job plan.Job, workspace string) error {
 }
 
 // RunJob executes the plan's ordered steps and always drains registered post actions.
-func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (JobResult, error) {
+func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (final JobResult, runJobErr error) {
+	callerWorkspace := workspace != ""
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
@@ -154,28 +155,60 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (Job
 	if err != nil {
 		return jobResult, fmt.Errorf("resolve workspace: %w", err)
 	}
+	if job.HasCapability("docker") {
+		workspaceDir, err := os.Open(workspace)
+		if err != nil {
+			return jobResult, err
+		}
+		defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Close()) }()
+		workspaceInfo, err := workspaceDir.Stat()
+		if err != nil {
+			return jobResult, err
+		}
+		if err := workspaceDir.Chmod(0o777); err != nil {
+			return jobResult, fmt.Errorf("make Docker workspace writable: %w", err)
+		}
+		if callerWorkspace {
+			defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Chmod(workspaceInfo.Mode().Perm())) }()
+		}
+	}
 	jobEnv, err := evaluateMap(job.Env, eval)
 	if err != nil {
 		return jobResult, fmt.Errorf("evaluate job environment: %w", err)
 	}
+	_, explicitJobPATH := jobEnv["PATH"]
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
 	if err != nil {
 		return jobResult, fmt.Errorf("create runner temp: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(runnerTemp) }()
+	if job.HasCapability("docker") {
+		if err := os.Chmod(runnerTemp, 0o777); err != nil {
+			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
+		}
+	}
 	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
 		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+	}
+	if job.HasCapability("docker") {
+		r.runnerTemp = runnerTemp
 	}
 	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
 	if path, ok := os.LookupEnv("PATH"); ok && jobResult.Env["PATH"] == "" {
 		jobResult.Env["PATH"] = path
+	}
+	if job.HasCapability("docker") {
+		r.explicitJobPATH = explicitJobPATH
+		if !explicitJobPATH {
+			r.implicitJobPATH = jobResult.Env["PATH"]
+		}
 	}
 	eval.Env = jobResult.Env
 	actions := newActionLockResolver(job, workspace, r.Actions)
 	runCtx := ctx
 	cancelJob := func() {}
 	if job.TimeoutMinutes > 0 {
-		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
+		runCtx, cancelJob = context.WithTimeout(runCtx, durationMinutes(job.TimeoutMinutes))
 	}
 	defer cancelJob()
 	var posts postRegistry
@@ -786,7 +819,24 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, Workspace: workspace, Env: mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs), dockerEnv)})
+		sourceRoot, sourceDigest := action.Path, ""
+		if action.SourceRoot != "" {
+			sourceRoot = action.SourceRoot
+		}
+		if actionLock != nil {
+			sourceDigest = actionLock.SourceDigest
+		}
+		_, stepPATH := stepEnv["PATH"]
+		_, actionPATH := dockerEnv["PATH"]
+		jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
+		invocationEnv := mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs))
+		for name, value := range dockerEnv {
+			_, exists := invocationEnv[name]
+			if !exists || (name == "PATH" && !jobPATH && !stepPATH) {
+				invocationEnv[name] = value
+			}
+		}
+		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)

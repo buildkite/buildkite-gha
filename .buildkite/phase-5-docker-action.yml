@@ -1,0 +1,36 @@
+steps:
+  - label: ":pipeline: Phase 5 Dockerfile action importer"
+    key: "phase-5-docker-action-importer"
+    agents:
+      queue: "elastic-runners"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      proof_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase5-action.XXXXXXXX")"
+      trap 'rm -rf -- "$$proof_root"' EXIT
+      mkdir -p "$$proof_root/.github/workflows"
+      cp testdata/phase5/.github/workflows/docker-action.yml.tmpl \
+        "$$proof_root/.github/workflows/docker-action.yml"
+      runtime_version="0.0.0-phase5.$${PHASE5_COMMIT}"
+      mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$proof_root/buildkite-gha" ./cmd/buildkite-gha
+      BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node" \
+      BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node" \
+      "$$proof_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runtime-queue hosted \
+        "$$proof_root/.github/workflows/docker-action.yml"
+
+  - label: ":pipeline: Phase 5 Dockerfile action continuation loader"
+    key: "phase-5-docker-action-continuation-loader"
+    depends_on: "phase-5-docker-action-importer"
+    allow_dependency_failure: true
+    agents:
+      queue: "elastic-runners"
+    command: "buildkite-agent pipeline upload .buildkite/phase-5-docker-action-continuation.yml"

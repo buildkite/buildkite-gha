@@ -2,7 +2,7 @@
 set -eu
 
 test "$GITHUB_WORKSPACE" = /github/workspace
-test -f "$GITHUB_WORKSPACE/smoke/.github/workflows/ci.yml"
+test -f "$GITHUB_WORKSPACE/$INPUT_EXPECTED_FILE"
 printf '%s\n' 'container=ran' >> "$GITHUB_OUTPUT"
 printf '%s\n' 'DOCKER_RUNTIME_SEEN=true' >> "$GITHUB_ENV"
 printf '%s\n' 'docker action summary' >> "$GITHUB_STEP_SUMMARY"

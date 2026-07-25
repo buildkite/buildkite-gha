@@ -1,6 +1,16 @@
 name: Runtime Docker fixture
 description: Exercises a local Docker action with file commands and masking.
 
+inputs:
+  expected_file:
+    description: Workspace-relative file that must be visible in the container.
+    required: false
+    default: smoke/.github/workflows/ci.yml
+
+outputs:
+  container:
+    description: Confirms that the Docker action ran.
+
 runs:
   using: docker
   image: Dockerfile

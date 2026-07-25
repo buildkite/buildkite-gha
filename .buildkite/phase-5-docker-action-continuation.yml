@@ -1,0 +1,9 @@
+steps:
+  - label: ":white_check_mark: Phase 5 Dockerfile action dependency extension"
+    key: "phase-5-native-after-docker-action"
+    depends_on:
+      - step: "gha-docker-action"
+        allow_failure: true
+    agents:
+      queue: "elastic-runners"
+    command: "echo 'Phase 5 Dockerfile action settled before native continuation'"
