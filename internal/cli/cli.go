@@ -675,6 +675,21 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
 			}
 		}
+		for _, action := range artifact.Job.Actions {
+			if action.Source != "github" {
+				continue
+			}
+			var service string
+			switch strings.ToLower(action.Repository) {
+			case "actions/upload-artifact", "actions/download-artifact":
+				service = "artifact"
+			case "actions/cache":
+				service = "cache"
+			}
+			if service != "" {
+				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, service)
+			}
+		}
 	}
 	return nil
 }

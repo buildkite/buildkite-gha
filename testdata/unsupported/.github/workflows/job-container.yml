@@ -1,0 +1,11 @@
+name: Unsupported job container
+
+on:
+  push:
+
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    container: node:24
+    steps:
+      - run: node --version

@@ -111,13 +111,19 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 func TestLoadIsStrictAndConfined(t *testing.T) {
 	t.Run("official declarative fields", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\nauthor: GitHub\nruns:\n  using: node24\n  main: dist/index.js\n")
+		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\nauthor: GitHub\ninputs:\n  version:\n    deprecationMessage: Use version-file instead\nbranding:\n  icon: package\n  color: blue\nruns:\n  using: node24\n  main: dist/index.js\n")
 		action, err := Load(root, ".")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if action.Author != "GitHub" {
 			t.Fatalf("Load() author = %q, want GitHub", action.Author)
+		}
+		if action.Inputs["version"].DeprecationMessage != "Use version-file instead" {
+			t.Fatalf("Load() deprecation message = %q", action.Inputs["version"].DeprecationMessage)
+		}
+		if action.Branding.Icon != "package" || action.Branding.Color != "blue" {
+			t.Fatalf("Load() branding = %#v", action.Branding)
 		}
 	})
 
@@ -126,6 +132,14 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")
 		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
 			t.Fatalf("Load() error = %v, want unknown field rejection", err)
+		}
+	})
+
+	t.Run("unknown nested field", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "branding:\n  unexpected: true\nruns:\n  using: node24\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
+			t.Fatalf("Load() error = %v, want nested unknown field rejection", err)
 		}
 	})
 

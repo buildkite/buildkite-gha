@@ -45,7 +45,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action"}
+	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action", "unsupported-cache-service", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}
@@ -59,7 +59,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 			t.Fatalf("invalid or duplicate ID %q", fixture.ID)
 		}
 		ids[fixture.ID] = true
-		if fixture.Expectation != "compile-pass" && fixture.Expectation != "runtime-pass" && fixture.Expectation != "runtime-unsupported" && fixture.Expectation != "future" {
+		if fixture.Expectation != "compile-pass" && fixture.Expectation != "compile-unsupported" && fixture.Expectation != "runtime-pass" && fixture.Expectation != "runtime-unsupported" && fixture.Expectation != "future" {
 			t.Fatalf("%s: invalid expectation %q", fixture.ID, fixture.Expectation)
 		}
 		if fixture.ActionPreflight != "none" && fixture.ActionPreflight != "hosted-tokenless" {
@@ -86,7 +86,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 	}
 
 	var checkedIn []string
-	for _, pattern := range []string{"testdata/smoke/.github/workflows/*.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl"} {
+	for _, pattern := range []string{"testdata/smoke/.github/workflows/*.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/unsupported/.github/workflows/*.yml"} {
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
 		if err != nil {
 			t.Fatal(err)

@@ -597,6 +597,25 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 	}
 }
 
+func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
+	for repository, service := range map[string]string{
+		"actions/upload-artifact":   "artifact",
+		"actions/download-artifact": "artifact",
+		"actions/cache":             "cache",
+	} {
+		t.Run(repository, func(t *testing.T) {
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+				Workflow: plan.Workflow{LogicalJobID: "service-action"},
+				Actions:  []plan.ActionLock{{Source: "github", Repository: repository}},
+			}}}}
+			err := validateUnprivilegedBundle(bundle)
+			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+service+" service") || !strings.Contains(err.Error(), "Phase 6") {
+				t.Fatalf("validateUnprivilegedBundle(%q) error = %v", repository, err)
+			}
+		})
+	}
+}
+
 func TestDeterministicGzip(t *testing.T) {
 	source := []byte("exact node executable bytes\n")
 	first, err := deterministicGzip(source)

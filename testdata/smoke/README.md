@@ -26,10 +26,11 @@ Expectations have these precise meanings:
 
 - `compile-pass`: validation and deterministic compilation are required. Any
   cited component runtime evidence does not establish full fixture execution.
+- `compile-unsupported`: validation must fail with a stable compile diagnostic.
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently GitHub artifact services).
+  intentionally unsupported (currently GitHub artifact and cache services).
 - `future`: the fixture is inventoried but not yet required to compile.
 
 Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
@@ -42,6 +43,9 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 runtimes, compiles plans, and applies the same admission policy as production
 upload. Admission does not execute action code or prove that a generic action
 is independent of GitHub-only artifact, cache, token, or OIDC services.
+Known official cache and artifact actions are rejected until their Phase 6
+adapters exist; the profile leaves unknown generic service dependencies as an
+explicit warning rather than guessing from arbitrary action source.
 
 `events/push.json` is deterministic and its repository SHA is intentionally
 synthetic. End-to-end runs involving checkout must bind the event to the real
