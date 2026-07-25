@@ -822,7 +822,11 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		if shell == "" {
-			shell = "bash"
+			if r.jobContainer != nil {
+				shell = "sh"
+			} else {
+				shell = "bash"
+			}
 		}
 		workingDirectory := step.WorkingDirectory
 		if workingDirectory == "" {

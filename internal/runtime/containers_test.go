@@ -520,6 +520,26 @@ func TestRunJobContainerLifecycleAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	j := jobContainerPlan(t, workspace, []plan.Step{{ID: "default", Kind: "run", Command: "true"}})
+	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, workspace); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		i := slices.Index(call.Args, ContainerProcessHelperCommand)
+		if i < 0 || len(call.Args) < i+7 || call.Args[len(call.Args)-1] != "true" {
+			continue
+		}
+		if got, want := call.Args[i+3:], []string{"sh", "-e", "-c", "true"}; !slices.Equal(got, want) {
+			t.Fatalf("default container shell argv = %#v, want %#v", got, want)
+		}
+		return
+	}
+	t.Fatal("default-shell container exec call not found")
+}
+
 func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	f := newJobDocker(t, "")
 	w := t.TempDir()
