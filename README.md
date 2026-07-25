@@ -13,7 +13,8 @@ queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
 ## Quick start
 
-For a public GitHub repository on a Linux x86-64 Buildkite agent, add the
+For a public GitHub repository on a Linux x86-64 Buildkite agent with glibc
+2.28 or newer, add the
 [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
 to `pipeline.yml`:
 
@@ -174,15 +175,19 @@ optional installation-specific defence in depth.
 ## Installation
 
 The plugin in [Quick start](#quick-start) is the recommended installation. For
-direct CLI use, the v0 release distribution supports Linux x86-64. Download
-`buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the GitHub release,
-verify the archive against the checksum file, and extract it to a stable
-location. Keep the bundled `runtimes/` directory beside `buildkite-gha`; it
-contains the pinned Node 20 and Node 24 executables required by actions.
+direct CLI use, the v0 release distribution supports Linux x86-64 with glibc
+2.28 or newer. Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt`
+from the GitHub release, verify the archive against the checksum file, and
+extract it to a stable location. Keep the bundled `runtimes/` directory beside
+`buildkite-gha`; it contains the pinned Node 20 and Node 24 executables required
+by actions.
 
 Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
 and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
 publisher creates the GitHub release after repository checks pass.
+The source repository must be public before the initial tag is pushed because
+the companion plugin intentionally downloads release assets without a GitHub
+token.
 
 The release step's tag condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite

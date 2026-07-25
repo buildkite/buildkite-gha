@@ -1022,11 +1022,13 @@ agents can install a pinned version through a small Buildkite plugin. Every
 generated job must execute the same bridge version that produced its plan
 unless the plan schema explicitly permits a compatible newer runtime.
 
-The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
-archive containing the CLI and digest-pinned Node 20 and 24 runtimes, plus the
-`github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
-release, verifies its checksum and fixed archive layout, caches the verified
-distribution, and invokes the fixed hosted-tokenless upload path. Release
+The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64,
+glibc 2.28+ archive containing the CLI and digest-pinned Node 20 and 24
+runtimes, plus the `github-actions#v0.1.0` installer plugin. The plugin downloads
+an exact public release, verifies its checksum and fixed archive layout, caches
+the verified distribution, and invokes the fixed hosted-tokenless upload path.
+The source repository must be public before the initial tag because plugin
+installation intentionally uses anonymous release downloads. Release
 signatures, provenance attestations, and SBOMs remain Phase 9 work and are not
 claimed by this preview.
 
