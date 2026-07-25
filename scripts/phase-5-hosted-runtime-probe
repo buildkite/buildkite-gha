@@ -7,7 +7,8 @@ test -z "$(git status --porcelain --untracked-files=all)"
 
 command -v docker >/dev/null
 timeout 20s docker version >/dev/null
-test "$(timeout 10s docker buildx inspect default --format '{{.Driver}}')" = docker
+driver="$(timeout 10s docker buildx inspect default 2>/dev/null | awk '/^Driver:/ {print $2; exit}')"
+test "$driver" = docker
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-phase5-runtime.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT

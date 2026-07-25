@@ -3281,7 +3281,7 @@ func requireDocker(t *testing.T) string {
 	if output, err := exec.CommandContext(ctx, docker, "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
 		livePrerequisiteUnavailable(t, "Docker unavailable: daemon probe failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
-	if output, err := exec.CommandContext(ctx, docker, "buildx", "inspect", "default", "--format", "{{.Driver}}").CombinedOutput(); err != nil || string(output) != "docker\n" {
+	if output, err := exec.CommandContext(ctx, docker, "buildx", "inspect", "default").CombinedOutput(); err != nil || dockerBuilderDriver(string(output)) != "docker" {
 		livePrerequisiteUnavailable(t, "Docker unavailable: default Buildx builder is not the local docker driver: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return docker
