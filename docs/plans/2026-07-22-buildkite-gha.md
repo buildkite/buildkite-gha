@@ -1022,6 +1022,24 @@ agents can install a pinned version through a small Buildkite plugin. Every
 generated job must execute the same bridge version that produced its plan
 unless the plan schema explicitly permits a compatible newer runtime.
 
+The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
+archive containing the CLI and digest-pinned Node 20 and 24 runtimes, plus the
+`github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
+release, verifies its checksum and fixed archive layout, caches the verified
+distribution, and invokes the fixed hosted-tokenless upload path. Release
+signatures, provenance attestations, and SBOMs remain Phase 9 work and are not
+claimed by this preview.
+
+For a public source repository, a tag condition in repository-controlled
+pipeline YAML is a scheduling guard, not release-token authorization. The
+GitHub publisher credential must be unavailable to ordinary CI and retrieved
+only in a dedicated upstream-tag-only release pipeline. Its external Buildkite
+Secret access policy must at least bind the immutable release `pipeline_id` and
+webhook `build_source`; because that policy does not distinguish tag webhooks
+from pull-request webhooks, the pipeline's tag-only provider filter is also a
+load-bearing control. Never expose the publisher token through a shared agent
+environment hook.
+
 Protected capability-grant validity must cover the intended exchange window and
 remain short-lived. Once a grant expires, the service re-evaluates current
 policy from authenticated job identity or denies the exchange; an old build
