@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,12 +29,11 @@ func TestSmokeManifestInventory(t *testing.T) {
 		Fixtures []fixture `json:"fixtures"`
 	}
 	root := filepath.Join("..", "..")
-	f, err := os.Open(filepath.Join(root, "testdata", "smoke", "manifest.json"))
+	source, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", "manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	decoder := json.NewDecoder(f)
+	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
 		t.Fatal(err)

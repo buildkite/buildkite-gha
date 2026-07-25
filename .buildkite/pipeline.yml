@@ -55,6 +55,17 @@ steps:
       set -euo pipefail
       commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
       [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+      for phase_commit in \
+        "$${PHASE2_COMMIT:-}" \
+        "$${PHASE3_COMMIT:-}" \
+        "$${PHASE4_COMMIT:-}" \
+        "$${PHASE5_COMMIT:-}"
+      do
+        [[ -z "$$phase_commit" || "$$phase_commit" == "$$commit" ]] || {
+          echo "phase-specific commit $$phase_commit conflicts with SMOKE_COMMIT" >&2
+          exit 1
+        }
+      done
       scripts/phase-0-shell-oracle-checkout "$$commit"
       test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"

@@ -257,6 +257,12 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	for _, required := range []string{
 		`commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"`,
 		`[[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]`,
+		`"$${PHASE2_COMMIT:-}"`,
+		`"$${PHASE3_COMMIT:-}"`,
+		`"$${PHASE4_COMMIT:-}"`,
+		`"$${PHASE5_COMMIT:-}"`,
+		`[[ -z "$$phase_commit" || "$$phase_commit" == "$$commit" ]]`,
+		`phase-specific commit $$phase_commit conflicts with SMOKE_COMMIT`,
 		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
 		`git status --porcelain --untracked-files=all`,
@@ -725,14 +731,29 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	for key := range generated {
 		want[key] = true
 	}
-	for _, key := range []string{"phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
 		want[key] = true
 	}
 	aggregator := read("hosted-smoke-aggregator.yml")
-	if aggregator.Key != "hosted-smoke-terminal" || aggregator.Agents.Queue != "elastic-runners" || aggregator.Command != "echo 'All hosted smoke targets settled'" {
+	if aggregator.Key != "hosted-smoke-terminal" || aggregator.Agents.Queue != "elastic-runners" {
 		t.Fatalf("aggregator step = %#v", aggregator)
 	}
 	assertSet("aggregator", aggregator.DependsOn, want)
+	for key := range generated {
+		if !strings.Contains(aggregator.Command, key) {
+			t.Fatalf("aggregator command does not inspect generated step %q: %s", key, aggregator.Command)
+		}
+	}
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+		if !strings.Contains(aggregator.Command, key) {
+			t.Fatalf("aggregator command does not inspect required step %q: %s", key, aggregator.Command)
+		}
+	}
+	for _, fragment := range []string{`buildkite-agent step get "outcome"`, `[[ "$$outcome" == passed ]] || failed=1`, `exit 1`, `All hosted smoke targets passed`} {
+		if !strings.Contains(aggregator.Command, fragment) {
+			t.Fatalf("aggregator command lacks %q: %s", fragment, aggregator.Command)
+		}
+	}
 }
 
 func TestPlanPathIsContentAddressed(t *testing.T) {

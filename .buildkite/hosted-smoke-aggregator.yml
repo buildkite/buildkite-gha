@@ -2,9 +2,13 @@ steps:
   - label: ":white_check_mark: Hosted smoke targets settled"
     key: "hosted-smoke-terminal"
     depends_on:
+      - step: "gha-producer"
+        allow_failure: true
       - step: "gha-consumer-5ebbc197d87b"
         allow_failure: true
       - step: "gha-consumer-91934b28b00f"
+        allow_failure: true
+      - step: "gha-concurrent"
         allow_failure: true
       - step: "gha-observe"
         allow_failure: true
@@ -26,4 +30,30 @@ steps:
         allow_failure: true
     agents:
       queue: "elastic-runners"
-    command: "echo 'All hosted smoke targets settled'"
+    command: |
+      set -euo pipefail
+      failed=0
+      for step in \
+        gha-producer \
+        gha-consumer-5ebbc197d87b \
+        gha-consumer-91934b28b00f \
+        gha-concurrent \
+        gha-observe \
+        gha-public-actions \
+        phase-5-hosted-docker-probe \
+        gha-docker-action \
+        phase-2-native-after-shell \
+        phase-3-native-after-concurrent \
+        phase-4-native-after-actions \
+        phase-5-native-after-hosted-docker \
+        phase-5-native-after-docker-action
+      do
+        outcome="$$(buildkite-agent step get "outcome" --step "$$step")"
+        printf '%s: %s\n' "$$step" "$$outcome"
+        [[ "$$outcome" == passed ]] || failed=1
+      done
+      if (( failed != 0 )); then
+        echo 'One or more hosted smoke targets failed' >&2
+        exit 1
+      fi
+      echo 'All hosted smoke targets passed'
