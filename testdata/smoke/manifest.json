@@ -1,0 +1,59 @@
+{
+  "schema": "buildkite-gha/smoke-manifest/v1",
+  "fixtures": [
+    {
+      "id": "smoke-shell",
+      "workflow": "testdata/smoke/.github/workflows/shell.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "Shell workflow runtime observations pass in the local runtime coverage.",
+      "note": "Primary shell and matrix runtime smoke fixture.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "smoke-concurrent",
+      "workflow": "testdata/smoke/.github/workflows/concurrent.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "Concurrent-step barriers, cancellation, and queueing have local runtime coverage.",
+      "note": "Exercises the concurrent workflow extensions.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "smoke-ci",
+      "workflow": "testdata/smoke/.github/workflows/ci.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Local JavaScript and composite action components have runtime tests; the complete hosted fixture does not.",
+      "note": "Component runtime evidence must not be read as full workflow runtime evidence.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "smoke-artifact",
+      "workflow": "testdata/smoke/.github/workflows/artifact.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-unsupported",
+      "evidence": "Compilation is covered, but GitHub artifact service emulation is deferred.",
+      "note": "Upload-artifact and download-artifact require hosted service compatibility.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "phase4-public-actions",
+      "workflow": "testdata/phase4/.github/workflows/public-actions.yml",
+      "event": "testdata/phase4/events/public-checkout.json",
+      "expectation": "runtime-pass",
+      "evidence": "The pinned public checkout and setup action proof has runtime coverage.",
+      "note": "The local harness compiles only and never fetches these actions.",
+      "action_preflight": "none"
+    },
+    {
+      "id": "phase5-docker-action",
+      "workflow": "testdata/phase5/.github/workflows/docker-action.yml.tmpl",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "The pinned public Dockerfile action proof has hosted runtime coverage.",
+      "note": "The deterministic smoke event matches the production Phase 5 proof input.",
+      "action_preflight": "none"
+    }
+  ]
+}
