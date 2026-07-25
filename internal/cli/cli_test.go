@@ -784,6 +784,8 @@ func TestRunUsageErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BUILDKITE", "")
+			t.Setenv("BUILDKITE_STEP_KEY", "")
 			var stdout, stderr bytes.Buffer
 			if code := Run(test.args, &stdout, &stderr, "dev"); code != 2 {
 				t.Fatalf("Run() code = %d, want 2", code)
