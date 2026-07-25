@@ -96,13 +96,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
-	if len(job.Services) != 0 {
-		return JobResult{}, fmt.Errorf("service containers are not supported until Phase 5 M4")
-	}
-	if job.Container != nil {
-		if len(job.Container.Ports) != 0 {
-			return JobResult{}, fmt.Errorf("job container ports are not supported until Phase 5 M4")
-		}
+	if len(job.Services) != 0 && job.Container == nil {
+		return JobResult{}, fmt.Errorf("services on host jobs are not supported until Phase 5 M4b")
 	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" {
@@ -250,7 +245,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return jobResult, mountErr
 			}
 		}
-		backend, setupErr := r.startJobContainer(runCtx, workspace, runnerTemp, *job.Container, containerMounts...)
+		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)
 		if setupErr != nil {
 			return jobResult, setupErr
 		}

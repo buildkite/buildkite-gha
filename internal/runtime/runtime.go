@@ -423,6 +423,19 @@ func boundedDockerOutput(ctx context.Context, env map[string]string, docker stri
 	return output.String(), err
 }
 
+func boundedDockerCombinedOutput(ctx context.Context, env map[string]string, docker string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, docker, args...)
+	cmd.Env = processEnv(env)
+	var output strings.Builder
+	w := &limitedWriter{writer: &output, remaining: 4096}
+	cmd.Stdout, cmd.Stderr = w, w
+	err := cmd.Run()
+	if w.exceeded {
+		return output.String(), fmt.Errorf("docker output exceeds limit")
+	}
+	return output.String(), err
+}
+
 type limitedWriter struct {
 	writer    io.Writer
 	remaining int
