@@ -95,6 +95,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
+	if job.Container != nil || len(job.Services) != 0 {
+		return JobResult{}, fmt.Errorf("job and service container runtime is not implemented")
+	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)

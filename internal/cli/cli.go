@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -668,7 +669,10 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
-			if capability == "docker" && artifact.Authorization.DockerCapabilitySource != "dockerfile-actions" {
+			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
+				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
+					return fmt.Errorf("job %q uses job or service containers; runtime not implemented", artifact.Job.Workflow.LogicalJobID)
+				}
 				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
 			}
 			if capability != "network" && capability != "docker" {

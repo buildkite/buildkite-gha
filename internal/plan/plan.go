@@ -19,6 +19,7 @@ const (
 	SchemaV1 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
 	SchemaV2 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 	SchemaV3 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v3.schema.json"
+	SchemaV4 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v4.schema.json"
 	Schema   = SchemaV2
 )
 
@@ -30,6 +31,10 @@ var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
+var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
+var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 
 type ActionSelector struct {
 	Lock string `json:"lock"`
@@ -114,6 +119,12 @@ type Step struct {
 	Source           *Span             `json:"source,omitempty"`
 }
 
+type Container struct {
+	Image string            `json:"image"`
+	Env   map[string]string `json:"env,omitempty"`
+	Ports []string          `json:"ports,omitempty"`
+}
+
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
 	Schema               string                  `json:"schema"`
@@ -129,15 +140,17 @@ type Job struct {
 	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
-	Needs                   map[string]Need   `json:"-"`
-	Env                     map[string]string `json:"env,omitempty"`
-	Condition               string            `json:"condition,omitempty"`
-	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string `json:"outputs,omitempty"`
-	Steps                   []Step            `json:"steps"`
-	Actions                 []ActionLock      `json:"actions,omitempty"`
+	Needs                   map[string]Need      `json:"-"`
+	Env                     map[string]string    `json:"env,omitempty"`
+	Condition               string               `json:"condition,omitempty"`
+	TimeoutMinutes          float64              `json:"timeout_minutes,omitempty"`
+	DefaultShell            string               `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string               `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string    `json:"outputs,omitempty"`
+	Steps                   []Step               `json:"steps"`
+	Actions                 []ActionLock         `json:"actions,omitempty"`
+	Container               *Container           `json:"container,omitempty"`
+	Services                map[string]Container `json:"services,omitempty"`
 }
 
 // Decode rejects unknown fields and trailing JSON so schema drift fails closed.
@@ -266,11 +279,14 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
 		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
+	}
+	if job.Schema != SchemaV4 && (job.Container != nil || len(job.Services) != 0) {
+		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
@@ -307,6 +323,30 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job plan repeats capability %q", capability)
 		}
 		capabilities[capability] = struct{}{}
+	}
+	if job.Container != nil || len(job.Services) != 0 {
+		if _, ok := capabilities["docker"]; !ok {
+			return fmt.Errorf("job containers and services require docker capability")
+		}
+		if _, ok := capabilities["network"]; !ok {
+			return fmt.Errorf("job containers and services require network capability")
+		}
+		if job.Container != nil {
+			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
+				return fmt.Errorf("job container: %w", err)
+			}
+		}
+		if len(job.Services) > 32 {
+			return fmt.Errorf("job plan has more than 32 services")
+		}
+		for name, service := range job.Services {
+			if !serviceNamePattern.MatchString(name) {
+				return fmt.Errorf("service name %q must be lowercase and valid", name)
+			}
+			if err := validateContainer(service.Image, service.Env, service.Ports); err != nil {
+				return fmt.Errorf("service %q: %w", name, err)
+			}
+		}
 	}
 	if !sort.StringsAreSorted(job.RequiredSecrets) {
 		return fmt.Errorf("job plan required secrets must be sorted")
@@ -424,9 +464,42 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 {
+	if job.Schema == SchemaV3 || job.Schema == SchemaV4 {
 		if err := validateActionLocks(job); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateContainer(image string, env map[string]string, ports []string) error {
+	if len(image) == 0 || len(image) > 512 || !containerImagePattern.MatchString(image) {
+		return fmt.Errorf("invalid image reference")
+	}
+	if len(env) > 256 {
+		return fmt.Errorf("environment has more than 256 entries")
+	}
+	total := 0
+	for key, value := range env {
+		if !containerEnvKeyPattern.MatchString(key) || len(key) > 255 || len(value) > 65536 {
+			return fmt.Errorf("invalid environment entry %q", key)
+		}
+		total += len(key) + len(value)
+	}
+	if total > 1048576 {
+		return fmt.Errorf("environment exceeds 1048576 bytes")
+	}
+	if len(ports) > 128 {
+		return fmt.Errorf("more than 128 ports")
+	}
+	seen := map[string]bool{}
+	for _, port := range ports {
+		if seen[port] {
+			return fmt.Errorf("repeated port %q", port)
+		}
+		seen[port] = true
+		if !containerPortPattern.MatchString(port) {
+			return fmt.Errorf("invalid port %q", port)
 		}
 	}
 	return nil

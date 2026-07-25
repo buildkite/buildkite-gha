@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1284,4 +1285,15 @@ func readFile(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return source
+}
+
+func TestCompilePlansEmitV4ForContainers(t *testing.T) {
+	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
+	plans, err := CompilePlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV4 || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
+		t.Fatalf("container plan = %#v", plans)
+	}
 }

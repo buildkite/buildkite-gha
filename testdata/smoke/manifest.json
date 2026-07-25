@@ -68,18 +68,18 @@
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-unsupported",
-      "evidence": "Static validation rejects job containers at the owned compatibility boundary.",
-      "note": "This negative fixture prevents compile success from implying job-container support.",
+      "expectation": "compile-pass",
+      "evidence": "Compilation emits plan v4 for the owned job-container contract.",
+      "note": "This is a contract-only fixture and is not a runtime-pass smoke test.",
       "action_preflight": "none"
     },
     {
       "id": "unsupported-service-container",
       "workflow": "testdata/unsupported/.github/workflows/service-container.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-unsupported",
-      "evidence": "Static validation rejects service containers at the owned compatibility boundary.",
-      "note": "This negative fixture prevents compile success from implying service-container support.",
+      "expectation": "compile-pass",
+      "evidence": "Compilation emits plan v4 for the owned service-container contract.",
+      "note": "This is a contract-only fixture and is not a runtime-pass smoke test.",
       "action_preflight": "none"
     }
   ]

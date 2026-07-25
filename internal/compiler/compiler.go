@@ -74,27 +74,29 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string            `json:"key"`
-	LogicalJobID            string            `json:"logical_job_id"`
-	Label                   string            `json:"label"`
-	Needs                   []string          `json:"needs,omitempty"`
-	LogicalNeeds            []string          `json:"logical_needs,omitempty"`
-	RunsOn                  []string          `json:"runs_on"`
-	Queue                   string            `json:"queue"`
-	Matrix                  map[string]any    `json:"matrix,omitempty"`
-	FailFast                *bool             `json:"fail_fast,omitempty"`
-	MaxParallel             *int              `json:"max_parallel,omitempty"`
-	Steps                   []workflow.Step   `json:"steps"`
-	Env                     map[string]string `json:"env,omitempty"`
-	If                      string            `json:"if,omitempty"`
-	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
-	DefaultShell            string            `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string `json:"outputs,omitempty"`
-	SourcePath              string            `json:"source_path"`
-	SourceDigest            string            `json:"source_digest"`
-	RepositoryRoot          string            `json:"-"`
-	Source                  workflow.Span     `json:"source"`
+	Key                     string              `json:"key"`
+	LogicalJobID            string              `json:"logical_job_id"`
+	Label                   string              `json:"label"`
+	Needs                   []string            `json:"needs,omitempty"`
+	LogicalNeeds            []string            `json:"logical_needs,omitempty"`
+	RunsOn                  []string            `json:"runs_on"`
+	Queue                   string              `json:"queue"`
+	Matrix                  map[string]any      `json:"matrix,omitempty"`
+	FailFast                *bool               `json:"fail_fast,omitempty"`
+	MaxParallel             *int                `json:"max_parallel,omitempty"`
+	Steps                   []workflow.Step     `json:"steps"`
+	Env                     map[string]string   `json:"env,omitempty"`
+	If                      string              `json:"if,omitempty"`
+	TimeoutMinutes          float64             `json:"timeout_minutes,omitempty"`
+	DefaultShell            string              `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string              `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string   `json:"outputs,omitempty"`
+	Container               *workflow.Container `json:"container,omitempty"`
+	Services                []workflow.Service  `json:"services,omitempty"`
+	SourcePath              string              `json:"source_path"`
+	SourceDigest            string              `json:"source_digest"`
+	RepositoryRoot          string              `json:"-"`
+	Source                  workflow.Span       `json:"source"`
 }
 
 // Report summarizes successful workflow validation.
@@ -277,7 +279,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			actions = locks
 			capabilities = actionCapabilities
 			if slices.Contains(actionCapabilities, "docker") {
-				authorization.DockerCapabilitySource = "dockerfile-actions"
+				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "dockerfile-actions")
 			}
 		} else {
 			var err error
@@ -285,6 +287,19 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			if err != nil {
 				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
+		}
+		if instance.Container != nil || len(instance.Services) != 0 {
+			jobSchema = plan.SchemaV4
+			capabilities = append(capabilities, "docker", "network")
+			sort.Strings(capabilities)
+			capabilities = slices.Compact(capabilities)
+			if instance.Container != nil {
+				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "job-containers")
+			}
+			if len(instance.Services) != 0 {
+				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "service-containers")
+			}
+			sort.Strings(authorization.DockerCapabilitySources)
 		}
 		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
 		for _, logicalNeed := range instance.LogicalNeeds {
@@ -337,6 +352,15 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			Outputs:                 instance.Outputs,
 			Steps:                   steps,
 			Actions:                 actions,
+		}
+		if instance.Container != nil {
+			job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
+		}
+		if len(instance.Services) != 0 {
+			job.Services = make(map[string]plan.Container, len(instance.Services))
+		}
+		for _, service := range instance.Services {
+			job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
 		}
 		if err := job.Validate(); err != nil {
 			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -604,6 +628,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 				Outputs:                 cloneMap(job.Outputs),
+				Container:               job.Container,
+				Services:                append([]workflow.Service(nil), job.Services...),
 				SourcePath:              jobPath,
 				SourceDigest:            sourceDigests[id],
 				RepositoryRoot:          sourceRoots[id],
