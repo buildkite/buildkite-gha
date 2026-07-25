@@ -1124,6 +1124,9 @@ func TestCompilePlansAcceptsNode20LocalAction(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: node20\n  main: index.js\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(actionDir, "index.js"), []byte("// fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	source := []byte("on: push\njobs:\n  node20:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/node20\n")
 	if _, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted"); err != nil {
 		t.Fatalf("CompilePlans() error = %v, want node20 support", err)

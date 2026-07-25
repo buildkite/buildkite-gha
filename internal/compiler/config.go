@@ -40,8 +40,9 @@ type Options struct {
 	Vars       VariableSources
 	Runners    RunnerPolicy
 	EventTrust EventTrust
-	// ResolveActions enables immutable v3 action locking independently of event
-	// trust. ActionSource is required only when a workflow uses remote actions.
+	// ResolveActions enables immutable remote action locking independently of
+	// event trust. Workspace-local actions are always locked without network
+	// access. ActionSource is required only when a workflow uses remote actions.
 	ResolveActions     bool
 	ActionSource       ActionSource
 	NodeRuntimeDigests map[int]string

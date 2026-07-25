@@ -266,6 +266,53 @@ jobs:
 	}
 }
 
+func TestCompilePlansLocksLocalActionsWithoutRemoteResolution(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "actions.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, "local", "name: local\nruns:\n  using: node24\n  main: index.js\n")
+	workflow := []byte(`on: push
+jobs:
+  actions:
+    runs-on: ubuntu-latest
+    container: node:24
+    services:
+      redis:
+        image: redis:7
+    steps:
+      - uses: ./local
+`)
+	first, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("workspace action plans are not deterministic")
+	}
+	if len(first) != 1 || first[0].Schema != plan.SchemaV4 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+		t.Fatalf("workspace action plan = %#v", first)
+	}
+}
+
+func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "actions.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte("on: push\njobs:\n  actions:\n    runs-on: ubuntu-latest\n    container: node:24\n    steps:\n      - uses: owner/action@v1\n")
+	_, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err == nil || !strings.Contains(err.Error(), "containers with remote actions require action resolution through upload or profile validation") {
+		t.Fatalf("CompilePlans() error = %v", err)
+	}
+}
+
 func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")

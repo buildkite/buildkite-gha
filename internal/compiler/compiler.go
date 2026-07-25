@@ -259,7 +259,17 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		var actions []plan.ActionLock
 		var capabilities []string
 		var authorization PlanAuthorization
-		if options.ResolveActions && len(actionRefs) != 0 {
+		lockActions := options.ResolveActions
+		if len(actionRefs) != 0 && !lockActions {
+			lockActions = true
+			for _, ref := range actionRefs {
+				if !strings.HasPrefix(ref, "./") {
+					lockActions = false
+					break
+				}
+			}
+		}
+		if lockActions && len(actionRefs) != 0 {
 			for _, i := range actionIndexes {
 				if strings.HasPrefix(strings.ToLower(instance.Steps[i].Uses), "actions/checkout@") {
 					if err := validateCheckoutInputs(instance.Steps[i].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
@@ -289,6 +299,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 		}
 		if instance.Container != nil || len(instance.Services) != 0 {
+			if len(actionRefs) != 0 && !lockActions {
+				return nil, nil, fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
+			}
 			jobSchema = plan.SchemaV4
 			capabilities = append(capabilities, "docker", "network")
 			sort.Strings(capabilities)
