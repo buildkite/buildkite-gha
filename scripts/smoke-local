@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+readonly manifest="$root/testdata/smoke/manifest.json"
+profile=""
+if (( $# != 0 )); then
+  [[ $# == 2 && "$1" == --profile && "$2" == hosted-tokenless ]] || {
+    echo 'usage: scripts/smoke-local [--profile hosted-tokenless]' >&2
+    exit 2
+  }
+  profile="$2"
+fi
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-smoke.XXXXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+
+cd "$root"
+
+[[ "$(jq --version)" == jq-1.8.2 ]] || { echo 'smoke-local requires mise-pinned jq 1.8.2' >&2; exit 1; }
+
+jq -e '
+  keys == ["fixtures", "schema"] and
+  .schema == "buildkite-gha/smoke-manifest/v1" and
+  (.fixtures | type == "array" and length == 9) and
+  all(.fixtures[];
+    keys == ["action_preflight", "event", "evidence", "expectation", "id", "note", "workflow"] and
+    (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+    (.workflow | type == "string" and length > 0 and startswith("testdata/") and (contains("..") | not)) and
+    (.event | type == "string" and length > 0 and startswith("testdata/") and (contains("..") | not)) and
+    (.expectation | IN("compile-pass", "compile-unsupported", "runtime-pass", "runtime-unsupported", "future")) and
+    (.action_preflight | IN("none", "hosted-tokenless")) and
+    (.evidence | type == "string" and length > 0) and
+    (.note | type == "string" and length > 0)) and
+  ([.fixtures[].id] | length == (unique | length)) and
+  ([.fixtures[] | [.workflow, .event] | join("\u0000")] | length == (unique | length))
+' "$manifest" >/dev/null
+
+mise exec -- go build -o "$work/buildkite-gha" ./cmd/buildkite-gha
+if [[ -n "$profile" ]]; then
+  node20="$(mise where node@20)/bin/node"
+  node24="$(mise where node@24)/bin/node"
+fi
+
+while IFS=$'\t' read -r id workflow event expectation action_preflight; do
+  [[ -f "$root/$workflow" ]] || { echo "$id: missing workflow $workflow" >&2; exit 1; }
+  [[ -f "$root/$event" ]] || { echo "$id: missing event $event" >&2; exit 1; }
+  echo "$id: classification=$expectation"
+  if [[ "$expectation" == future ]]; then
+    echo "$id: skipped=inventory-only"
+    continue
+  fi
+  if [[ "$expectation" == compile-unsupported ]]; then
+    if "$work/buildkite-gha" validate --format json --event-path "$root/$event" "$root/$workflow" >"$work/$id.validation.json"; then
+      echo "$id: validation unexpectedly succeeded" >&2
+      exit 1
+    fi
+    jq -e '.result == "incompatible" and any(.diagnostics[]; .code == "E_COMPILE")' "$work/$id.validation.json" >/dev/null
+    echo "$id: validate=expected-incompatible"
+    continue
+  fi
+  "$work/buildkite-gha" validate --format json --event-path "$root/$event" "$root/$workflow" | jq -e '.result == "compilable"' >/dev/null
+  "$work/buildkite-gha" compile --event-path "$root/$event" "$root/$workflow" >"$work/$id.first"
+  "$work/buildkite-gha" compile --event-path "$root/$event" "$root/$workflow" >"$work/$id.second"
+  [[ -s "$work/$id.first" ]] || { echo "$id: empty pipeline" >&2; exit 1; }
+  cmp -s "$work/$id.first" "$work/$id.second" || { echo "$id: nondeterministic pipeline" >&2; exit 1; }
+  echo "$id: validate=pass compile=deterministic"
+  if [[ -n "$profile" && "$action_preflight" == "$profile" ]]; then
+    profile_status=0
+    BUILDKITE_GHA_NODE20="$node20" BUILDKITE_GHA_NODE24="$node24" \
+      "$work/buildkite-gha" validate --profile "$profile" --format json \
+      --event-path "$root/$event" "$root/$workflow" >"$work/$id.profile.json" || profile_status=$?
+    if [[ "$expectation" == runtime-unsupported ]]; then
+      [[ "$profile_status" == 1 ]] || { echo "$id: profile unexpectedly exited $profile_status" >&2; exit 1; }
+      jq -e '.result == "not-admitted" and .admission.result == "not-admitted" and any(.diagnostics[]; .code == "E_PROFILE" and (.message | test("requires the unavailable GitHub Actions (artifact|cache) service; Phase 6 is required$")))' "$work/$id.profile.json" >/dev/null
+      echo "$id: profile=$profile admission=expected-rejection"
+    else
+      [[ "$profile_status" == 0 ]] || { echo "$id: profile unexpectedly exited $profile_status" >&2; exit 1; }
+      jq -e '.result == "admitted" and .admission.result == "admitted"' "$work/$id.profile.json" >/dev/null
+      echo "$id: profile=$profile admission=pass runtime=not-proven"
+    fi
+  fi
+done < <(jq -r '.fixtures[] | [.id, .workflow, .event, .expectation, .action_preflight] | @tsv' "$manifest")
+
+echo 'PASS: local smoke inventory matched its compile and rejection classifications.'
+echo 'CAVEAT: successful compilation is not runtime evidence; classifications come from the manifest.'
+if [[ -n "$profile" ]]; then
+  echo 'CAVEAT: profile admission resolves actions and applies upload policy but does not execute arbitrary action code.'
+fi

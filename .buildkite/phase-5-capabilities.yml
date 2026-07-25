@@ -5,7 +5,8 @@ steps:
       queue: "elastic-runners"
     command: |
       set -euo pipefail
-      scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"
+      commit="$${PHASE5_COMMIT:-$${SMOKE_COMMIT:-}}"
+      scripts/phase-0-shell-oracle-checkout "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
       buildkite-agent pipeline upload --no-interpolation --reject-secrets .buildkite/phase-5-hosted-probe.yml
 

@@ -1,0 +1,17 @@
+steps:
+  - label: ":pipeline: Load hosted smoke aggregator"
+    key: "hosted-smoke-aggregator-loader"
+    depends_on:
+      - step: "phase-2-continuation-loader"
+        allow_failure: true
+      - step: "phase-3-continuation-loader"
+        allow_failure: true
+      - step: "phase-4-continuation-loader"
+        allow_failure: true
+      - step: "phase-5-continuation-loader"
+        allow_failure: true
+      - step: "phase-5-docker-action-continuation-loader"
+        allow_failure: true
+    agents:
+      queue: "elastic-runners"
+    command: "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml"

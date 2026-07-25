@@ -29,7 +29,7 @@ run = "golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh scripts/phase-0-shell-oracle-checkout scripts/phase-0-sign-json scripts/phase-0-verify-json scripts/phase-5-hosted-docker-probe testdata/actions/docker/entrypoint.sh"
+run = "shellcheck -x .buildkite/phase-0-transport-probe/probe.sh scripts/phase-0-shell-oracle-checkout scripts/phase-0-sign-json scripts/phase-0-verify-json scripts/phase-5-hosted-docker-probe scripts/smoke-local testdata/actions/docker/entrypoint.sh"
 
 [tasks.vet]
 description = "Run go vet"
@@ -43,7 +43,15 @@ run = "go build ./..."
 description = "Validate signed plan-envelope fixtures"
 run = "python3 testdata/plans/validate.py"
 
+[tasks."smoke:local"]
+description = "Validate and deterministically compile the local smoke inventory"
+run = "./scripts/smoke-local"
+
+[tasks."smoke:profile"]
+description = "Resolve actions and apply the hosted-tokenless profile to smoke fixtures"
+run = "./scripts/smoke-local --profile hosted-tokenless"
+
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
-depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures"]
+depends = ["format", "build", "test", "test:race", "lint:go", "lint:shell", "vet", "plan-fixtures", "smoke:local"]
 run = "true"

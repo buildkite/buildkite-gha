@@ -1,0 +1,13 @@
+name: Unsupported service container
+
+on:
+  push:
+
+jobs:
+  service:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+    steps:
+      - run: true

@@ -8,7 +8,8 @@ steps:
           version: "2026.5.12"
     command: |
       set -euo pipefail
-      scripts/phase-0-shell-oracle-checkout "$$PHASE2_COMMIT"
+      commit="$${PHASE2_COMMIT:-$${SMOKE_COMMIT:-}}"
+      scripts/phase-0-shell-oracle-checkout "$$commit"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase2.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
       mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
@@ -20,6 +21,7 @@ steps:
   - label: ":pipeline: Phase 2 continuation loader"
     key: "phase-2-continuation-loader"
     depends_on: "phase-2-upload-importer"
+    allow_dependency_failure: true
     agents:
       queue: "elastic-runners"
     command: "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml"

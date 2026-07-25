@@ -1,4 +1,4 @@
-# Smoke workflow fixture
+# Smoke workflow fixtures
 
 This directory is a self-contained repository fixture for the first
 `buildkite-gha` vertical slice. A differential-test harness should materialize
@@ -18,13 +18,36 @@ workflow is executable:
 4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
 
-All four workflows are compiler fixtures from Phase 1 onward. Only promote a
-workflow into a required runtime lane when its owning phase is implemented.
+`manifest.json` is the authoritative, ordered compatibility inventory for
+these workflows and the related Phase 4 and Phase 5 fixtures. Every entry names
+its deterministic compile event and records the separate runtime evidence.
 
-`events/push.json` is a deterministic compile fixture, so its repository SHA is
-intentionally synthetic. End-to-end runs must bind the envelope to the real
-fixture repository and commit created by the harness before `actions/checkout`
-executes.
+Expectations have these precise meanings:
 
-The external actions are pinned to immutable commits. Update them intentionally
-and record any resulting observation change in the same commit.
+- `compile-pass`: validation and deterministic compilation are required. Any
+  cited component runtime evidence does not establish full fixture execution.
+- `compile-unsupported`: validation must fail with a stable compile diagnostic.
+- `runtime-pass`: runtime evidence exists outside this compile-only harness;
+  local validation and deterministic compilation remain required.
+- `runtime-unsupported`: compilation is required, but a runtime dependency is
+  intentionally unsupported (currently GitHub artifact and cache services).
+- `future`: the fixture is inventoried but not yet required to compile.
+
+Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
+each workflow, and compare two nonempty pipeline compilations byte for byte.
+The default harness does not parse emitted YAML, fetch actions, or execute
+workflows; successful compilation is not runtime evidence.
+
+Run `mise run smoke:profile` for the opt-in networked preflight of entries marked
+`hosted-tokenless`. It anonymously resolves actions, prepares the managed Node
+runtimes, compiles plans, and applies the same admission policy as production
+upload. Admission does not execute action code or prove that a generic action
+is independent of GitHub-only artifact, cache, token, or OIDC services.
+Known official cache and artifact actions are rejected until their Phase 6
+adapters exist; the profile leaves unknown generic service dependencies as an
+explicit warning rather than guessing from arbitrary action source.
+
+`events/push.json` is deterministic and its repository SHA is intentionally
+synthetic. End-to-end runs involving checkout must bind the event to the real
+fixture repository and commit. External actions remain pinned to immutable
+commits and should be updated intentionally with their runtime evidence.

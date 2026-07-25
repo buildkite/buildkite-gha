@@ -28,19 +28,27 @@ type Metadata struct {
 	Inputs      map[string]Input  `yaml:"inputs"`
 	Outputs     map[string]Output `yaml:"outputs"`
 	Runs        Runs              `yaml:"runs"`
+	Branding    Branding          `yaml:"branding"`
 }
 
 // Input declares one action input.
 type Input struct {
-	Description string  `yaml:"description"`
-	Required    bool    `yaml:"required"`
-	Default     *string `yaml:"default"`
+	Description        string  `yaml:"description"`
+	DeprecationMessage string  `yaml:"deprecationMessage"`
+	Required           bool    `yaml:"required"`
+	Default            *string `yaml:"default"`
 }
 
 // Output declares one action output.
 type Output struct {
 	Description string `yaml:"description"`
 	Value       string `yaml:"value"`
+}
+
+// Branding declares inert Marketplace presentation metadata.
+type Branding struct {
+	Icon  string `yaml:"icon"`
+	Color string `yaml:"color"`
 }
 
 // Runs declares how an action executes.

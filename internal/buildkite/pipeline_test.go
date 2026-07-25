@@ -199,27 +199,36 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var document struct {
+		Env   map[string]string `yaml:"env"`
 		Steps []struct {
 			Key     string `yaml:"key"`
 			Command string `yaml:"command"`
 			If      string `yaml:"if"`
+			Agents  struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
 	}
-	if len(document.Steps) != 8 {
-		t.Fatalf("default pipeline = %#v, want seven gated loaders plus repository checks", document.Steps)
+	if document.Env["MISE_JOBS"] != "1" {
+		t.Fatalf("default pipeline MISE_JOBS = %q, want serial tool installation", document.Env["MISE_JOBS"])
+	}
+	if len(document.Steps) != 9 {
+		t.Fatalf("default pipeline = %#v, want eight gated loaders plus repository checks", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
 		condition string
+		queue     string
 	}, len(document.Steps))
 	for _, step := range document.Steps {
 		steps[step.Key] = struct {
 			command   string
 			condition string
-		}{step.Command, step.If}
+			queue     string
+		}{step.Command, step.If, step.Agents.Queue}
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
@@ -230,20 +239,49 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["phase-0-transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml" || got.condition != `build.env("PHASE0_PROBE") == "transport"` {
 		t.Fatalf("transport probe loader = %#v", got)
 	}
-	if got := steps["phase-2-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml" || got.condition != `build.env("PHASE2_PROBE") == "upload"` {
+	if got := steps["phase-2-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml" || got.condition != `build.env("PHASE2_PROBE") == "upload" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 2 upload loader = %#v", got)
 	}
-	if got := steps["phase-3-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml" || got.condition != `build.env("PHASE3_PROBE") == "concurrent"` {
+	if got := steps["phase-3-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml" || got.condition != `build.env("PHASE3_PROBE") == "concurrent" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 3 upload loader = %#v", got)
 	}
-	if got := steps["phase-4-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml" || got.condition != `build.env("PHASE4_PROBE") == "actions"` {
+	if got := steps["phase-4-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml" || got.condition != `build.env("PHASE4_PROBE") == "actions" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 4 upload loader = %#v", got)
 	}
-	if got := steps["phase-5-capabilities-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml" || got.condition != `build.env("PHASE5_PROBE") == "capabilities"` {
+	if got := steps["phase-5-capabilities-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml" || got.condition != `build.env("PHASE5_PROBE") == "capabilities" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 5 capability loader = %#v", got)
 	}
-	if got := steps["phase-5-docker-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml" || got.condition != `build.env("PHASE5_PROBE") == "docker-action"` {
+	if got := steps["phase-5-docker-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml" || got.condition != `build.env("PHASE5_PROBE") == "docker-action" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 5 Dockerfile action loader = %#v", got)
+	}
+	hosted := steps["hosted-smoke-loader"]
+	if hosted.condition != `build.env("SMOKE_PROBE") == "hosted"` || hosted.queue != "elastic-runners" {
+		t.Fatalf("hosted smoke loader = %#v", hosted)
+	}
+	for _, required := range []string{
+		`commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"`,
+		`[[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]`,
+		`"$${PHASE2_COMMIT:-}"`,
+		`"$${PHASE3_COMMIT:-}"`,
+		`"$${PHASE4_COMMIT:-}"`,
+		`"$${PHASE5_COMMIT:-}"`,
+		`[[ -z "$$phase_commit" || "$$phase_commit" == "$$commit" ]]`,
+		`phase-specific commit $$phase_commit conflicts with SMOKE_COMMIT`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
+		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
+		`git status --porcelain --untracked-files=all`,
+	} {
+		if !strings.Contains(hosted.command, required) {
+			t.Fatalf("hosted smoke loader lacks %q:\n%s", required, hosted.command)
+		}
+	}
+	for _, fragment := range []string{"phase-2-upload.yml", "phase-3-upload.yml", "phase-4-upload.yml", "phase-5-capabilities.yml", "phase-5-docker-action.yml", "hosted-smoke-control.yml"} {
+		if count := strings.Count(hosted.command, "buildkite-agent pipeline upload .buildkite/"+fragment); count != 1 {
+			t.Fatalf("hosted smoke loader uploads %s %d times:\n%s", fragment, count, hosted.command)
+		}
+	}
+	if strings.Contains(hosted.command, "--replace") {
+		t.Fatalf("hosted smoke loader uses replacement upload:\n%s", hosted.command)
 	}
 }
 
@@ -254,7 +292,8 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	text := string(source)
 	for _, required := range []string{
-		`scripts/phase-0-shell-oracle-checkout "$$PHASE2_COMMIT"`,
+		`commit="$${PHASE2_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
@@ -267,10 +306,11 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Key       string `yaml:"key"`
-			Command   string `yaml:"command"`
-			DependsOn string `yaml:"depends_on"`
-			Agents    struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+			Agents                 struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 		} `yaml:"steps"`
@@ -281,7 +321,7 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	if len(document.Steps) != 2 || document.Steps[0].Key != "phase-2-upload-importer" || document.Steps[0].Agents.Queue != "elastic-runners" {
 		t.Fatalf("Phase 2 upload proof = %#v", document.Steps)
 	}
-	if document.Steps[1].Key != "phase-2-continuation-loader" || document.Steps[1].DependsOn != "phase-2-upload-importer" || document.Steps[1].Agents.Queue != "elastic-runners" || document.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml" {
+	if document.Steps[1].Key != "phase-2-continuation-loader" || document.Steps[1].DependsOn != "phase-2-upload-importer" || !document.Steps[1].AllowDependencyFailure || document.Steps[1].Agents.Queue != "elastic-runners" || document.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml" {
 		t.Fatalf("Phase 2 continuation loader = %#v", document.Steps[1])
 	}
 
@@ -350,7 +390,8 @@ func TestPhase3UploadProofPreservesSeparateContinuationLoader(t *testing.T) {
 	}
 	text := string(source)
 	for _, required := range []string{
-		`scripts/phase-0-shell-oracle-checkout "$$PHASE3_COMMIT"`,
+		`commit="$${PHASE3_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
@@ -363,9 +404,10 @@ func TestPhase3UploadProofPreservesSeparateContinuationLoader(t *testing.T) {
 	}
 	var upload struct {
 		Steps []struct {
-			Key       string `yaml:"key"`
-			Command   string `yaml:"command"`
-			DependsOn string `yaml:"depends_on"`
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &upload); err != nil {
@@ -374,7 +416,7 @@ func TestPhase3UploadProofPreservesSeparateContinuationLoader(t *testing.T) {
 	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-3-upload-importer" {
 		t.Fatalf("Phase 3 upload proof = %#v", upload.Steps)
 	}
-	if upload.Steps[1].Key != "phase-3-continuation-loader" || upload.Steps[1].DependsOn != "phase-3-upload-importer" || upload.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-3-upload-continuation.yml" {
+	if upload.Steps[1].Key != "phase-3-continuation-loader" || upload.Steps[1].DependsOn != "phase-3-upload-importer" || !upload.Steps[1].AllowDependencyFailure || upload.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-3-upload-continuation.yml" {
 		t.Fatalf("Phase 3 continuation loader = %#v", upload.Steps[1])
 	}
 
@@ -432,11 +474,12 @@ func TestPhase4UploadProofUsesTrustedManagedActionsPath(t *testing.T) {
 		t.Fatalf("Phase 4 public checkout identity drifted: event=%#v workflow=%s", publicEvent, workflowSource)
 	}
 	for _, required := range []string{
-		`scripts/phase-0-shell-oracle-checkout "$$PHASE4_COMMIT"`,
+		`commit="$${PHASE4_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`version: "2026.5.12"`,
-		`runtime_version="0.0.0-phase4.$${PHASE4_COMMIT}"`,
+		`runtime_version="0.0.0-phase4.$$commit"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
 		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
@@ -531,7 +574,8 @@ func TestPhase5HostedDockerCapabilityProbeContract(t *testing.T) {
 	if len(importer) != 2 || importer[0].Key != "phase-5-capabilities-importer" || importer[0].Agents.Queue != "elastic-runners" || importer[1].Key != "phase-5-continuation-loader" || importer[1].Agents.Queue != "elastic-runners" || fmt.Sprint(importer[1].DependsOn) != "phase-5-capabilities-importer" || !importer[1].AllowDependencyFailure || importer[1].Command != "buildkite-agent pipeline upload .buildkite/phase-5-capabilities-continuation.yml" {
 		t.Fatalf("Phase 5 importer = %#v", importer)
 	}
-	for _, fragment := range []string{`scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"`, `git status --porcelain --untracked-files=all`, `pipeline upload --no-interpolation --reject-secrets .buildkite/phase-5-hosted-probe.yml`} {
+	for _, fragment := range []string{`commit="$${PHASE5_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`, `git status --porcelain --untracked-files=all`, `pipeline upload --no-interpolation --reject-secrets .buildkite/phase-5-hosted-probe.yml`} {
 		if !strings.Contains(string(importerBody), fragment) {
 			t.Fatalf("Phase 5 importer lacks %q", fragment)
 		}
@@ -554,7 +598,7 @@ func TestPhase5HostedDockerCapabilityProbeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(probe)
-	for _, fragment := range []string{"set -euo pipefail", `${PHASE5_COMMIT:?}`, `scripts/phase-0-shell-oracle-checkout "$PHASE5_COMMIT"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
+	for _, fragment := range []string{"set -euo pipefail", `commit=${PHASE5_COMMIT:-${SMOKE_COMMIT:-}}`, `scripts/phase-0-shell-oracle-checkout "$commit"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("Phase 5 probe lacks %q", fragment)
 		}
@@ -574,11 +618,12 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`scripts/phase-0-shell-oracle-checkout "$$PHASE5_COMMIT"`,
+		`commit="$${PHASE5_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
 		`cp testdata/phase5/.github/workflows/docker-action.yml.tmpl`,
-		`runtime_version="0.0.0-phase5.$${PHASE5_COMMIT}"`,
+		`runtime_version="0.0.0-phase5.$$commit"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
 		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
@@ -632,6 +677,86 @@ func TestPhase5DockerfileActionUploadProofContract(t *testing.T) {
 	observation := `PHASE5_DOCKER_OBSERVATION={"container":"ran","output":"propagated","source":"public-exact"}`
 	if !strings.Contains(string(templateBody), action) || !strings.Contains(string(githubBody), action) || !strings.Contains(string(templateBody), observation) || !strings.Contains(string(githubBody), observation) {
 		t.Fatalf("Phase 5 Dockerfile differential fixtures drifted:\ntemplate:\n%s\nGitHub:\n%s", templateBody, githubBody)
+	}
+}
+
+func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
+	type dependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type smokeStep struct {
+		Key       string       `yaml:"key"`
+		Command   string       `yaml:"command"`
+		DependsOn []dependency `yaml:"depends_on"`
+		Agents    struct {
+			Queue string `yaml:"queue"`
+		} `yaml:"agents"`
+	}
+	read := func(name string) smokeStep {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document struct {
+			Steps []smokeStep `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(body, &document); err != nil || len(document.Steps) != 1 {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		return document.Steps[0]
+	}
+	assertSet := func(name string, dependencies []dependency, want map[string]bool) {
+		t.Helper()
+		if len(dependencies) != len(want) {
+			t.Fatalf("%s dependencies = %#v", name, dependencies)
+		}
+		for _, dependency := range dependencies {
+			if !want[dependency.Step] || !dependency.AllowFailure {
+				t.Fatalf("%s dependency = %#v", name, dependency)
+			}
+			delete(want, dependency.Step)
+		}
+	}
+	control := read("hosted-smoke-control.yml")
+	if control.Key != "hosted-smoke-aggregator-loader" || control.Agents.Queue != "elastic-runners" || control.Command != "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml" {
+		t.Fatalf("control step = %#v", control)
+	}
+	assertSet("control", control.DependsOn, map[string]bool{"phase-2-continuation-loader": true, "phase-3-continuation-loader": true, "phase-4-continuation-loader": true, "phase-5-continuation-loader": true, "phase-5-docker-action-continuation-loader": true})
+	generated := map[string]bool{}
+	for _, name := range []string{"phase-2-upload-continuation.yml", "phase-3-upload-continuation.yml", "phase-4-upload-continuation.yml", "phase-5-capabilities-continuation.yml", "phase-5-docker-action-continuation.yml"} {
+		continuation := read(name)
+		for _, dependency := range continuation.DependsOn {
+			generated[dependency.Step] = true
+		}
+	}
+	want := map[string]bool{}
+	for key := range generated {
+		want[key] = true
+	}
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+		want[key] = true
+	}
+	aggregator := read("hosted-smoke-aggregator.yml")
+	if aggregator.Key != "hosted-smoke-terminal" || aggregator.Agents.Queue != "elastic-runners" {
+		t.Fatalf("aggregator step = %#v", aggregator)
+	}
+	assertSet("aggregator", aggregator.DependsOn, want)
+	for key := range generated {
+		if !strings.Contains(aggregator.Command, key) {
+			t.Fatalf("aggregator command does not inspect generated step %q: %s", key, aggregator.Command)
+		}
+	}
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action"} {
+		if !strings.Contains(aggregator.Command, key) {
+			t.Fatalf("aggregator command does not inspect required step %q: %s", key, aggregator.Command)
+		}
+	}
+	for _, fragment := range []string{`buildkite-agent step get "outcome"`, `[[ "$$outcome" == passed ]] || failed=1`, `exit 1`, `All hosted smoke targets passed`} {
+		if !strings.Contains(aggregator.Command, fragment) {
+			t.Fatalf("aggregator command lacks %q: %s", fragment, aggregator.Command)
+		}
 	}
 }
 

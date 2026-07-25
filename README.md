@@ -17,7 +17,7 @@ Buildkite pipeline.
 The current command surface is:
 
 ```text
-buildkite-gha validate [--event-path <path>] [--format text|json] <workflow>
+buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>
 buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>
 buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>
 buildkite-gha run-job --plan <path> [--result <path>]
@@ -137,6 +137,63 @@ mise run check
 The command verifies formatting, builds the commands, runs the standard and
 race-enabled tests, runs `go vet`, golangci-lint, and shellcheck, and checks the
 signed plan-envelope fixtures. `make check` remains as a convenience alias.
+
+### Smoke and compatibility preflight
+
+Run the network-free smoke inventory with:
+
+```sh
+mise run smoke:local
+```
+
+This validates the manifest, performs static workflow validation, and compiles
+the supported fixtures twice to verify deterministic output. It also checks
+the expected-negative classifications: workflows using the official GitHub
+artifact and cache actions compile, while job and service containers fail
+static compilation. A passing local smoke run is compile-time evidence only;
+it is explicitly not proof that a workflow runs successfully.
+
+For an opt-in public-network preflight, run:
+
+```sh
+mise run smoke:profile
+```
+
+This anonymously resolves the selected public actions, prepares the managed
+Node runtimes, and applies the same `hosted-tokenless` production admission
+policy used by `upload`. The known official artifact and cache actions compile
+but fail admission until the Phase 6 adapters exist. An `admitted` result is
+not runtime proof and does not imply that an arbitrary admitted action is
+executable or independent of GitHub-only services.
+
+Use the same policy as a focused workflow compatibility preflight, with either
+human-readable or machine-readable output:
+
+```sh
+buildkite-gha validate --profile hosted-tokenless \
+  --event-path .buildkite/events/current.json --format text \
+  .github/workflows/ci.yml
+
+buildkite-gha validate --profile hosted-tokenless \
+  --event-path .buildkite/events/current.json --format json \
+  .github/workflows/ci.yml
+```
+
+To aggregate the implemented hosted runtime proofs in one exact-commit build:
+
+```sh
+commit=$(git rev-parse HEAD)
+test ${#commit} -eq 40
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env SMOKE_PROBE=hosted --env SMOKE_COMMIT="$commit" --yes
+```
+
+The aggregate collects the Phase 2 shell/upload proof, Phase 3 concurrent-step
+proof, Phase 4 public-action proof, and both Phase 5 Docker proofs (hosted Docker
+capabilities and the Dockerfile action). It retains each phase's independent
+importer and continuation loader rather than flattening their topology. The
+phase-specific selectors below remain available for targeted diagnosis.
 
 The gated live development proof uses the same pinned mise plugin as repository
 checks. Start an exact-commit build with `PHASE2_PROBE=upload` and

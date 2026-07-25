@@ -1,0 +1,18 @@
+name: Unsupported cache service
+
+on:
+  push:
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create cache payload
+        shell: bash
+        run: mkdir -p cache-data && echo payload > cache-data/value
+
+      - name: Cache payload
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: cache-data
+          key: unsupported-cache-fixture
