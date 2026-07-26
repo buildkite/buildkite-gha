@@ -36,7 +36,8 @@ func TestRunHelpAndVersion(t *testing.T) {
 		{name: "help flag", args: []string{"--help"}, wantOutput: "validate"},
 		{name: "help command", args: []string{"help"}, wantOutput: "run-job"},
 		{name: "command help", args: []string{"help", "compile"}, wantOutput: "buildkite-gha compile --event-path"},
-		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "--runtime-queue hosted"},
+		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "derives compatibility data from Buildkite"},
+		{name: "upload help flag", args: []string{"upload", "--help"}, wantOutput: "derives compatibility data from Buildkite"},
 		{name: "command help flag", args: []string{"run-job", "--help"}, wantOutput: "--plan <path>"},
 		{name: "version flag", args: []string{"--version"}, wantOutput: "buildkite-gha test-version\n"},
 	}

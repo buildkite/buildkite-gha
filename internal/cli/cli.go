@@ -132,7 +132,7 @@ func help(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	}
 	if args[0] == "upload" {
-		_, _ = fmt.Fprint(stdout, "\nThis is the unsigned, unprivileged event-file path; it does not grant production plan authority.\n")
+		_, _ = fmt.Fprint(stdout, "\nThis unsigned, unprivileged path accepts an explicit event file or derives compatibility data from Buildkite; neither grants protected authority.\n")
 	}
 	return 0
 }
