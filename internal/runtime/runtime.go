@@ -742,7 +742,7 @@ func (r Runner) installAndVerifyMiseNode(ctx context.Context, major int, mise st
 		if installErr := r.installMiseNode(ctx, mise, tool); installErr != nil {
 			return "", fmt.Errorf("replace invalid cached %s: %w", tool, installErr)
 		}
-		installation, node, err = r.miseNodeInstallation(ctx, major, mise)
+		_, node, err = r.miseNodeInstallation(ctx, major, mise)
 		if err == nil {
 			err = verifyManagedNodeExecutable(ctx, major, node, r.nodeDigest(major))
 		}
@@ -882,7 +882,7 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	}
 	got := hex.EncodeToString(hash.Sum(nil))
 	if got != want {
-		return fmt.Errorf("Node %d executable digest %s does not match expected digest %s", major, got, want)
+		return fmt.Errorf("node %d executable digest %s does not match expected digest %s", major, got, want)
 	}
 	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = processEnv(nil)
@@ -892,14 +892,17 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	if err != nil {
 		return fmt.Errorf("verify exact Node %d executable: %w: %s", major, err, strings.TrimSpace(stderr.String()))
 	}
-	wantVersion := fmt.Sprintf("v%d", major)
-	if major == 20 {
+	var wantVersion string
+	switch major {
+	case 20:
 		wantVersion = "v" + Node20Version
-	} else if major == 24 {
+	case 24:
 		wantVersion = "v" + Node24Version
+	default:
+		wantVersion = fmt.Sprintf("v%d", major)
 	}
 	if strings.TrimSpace(string(out)) != wantVersion {
-		return fmt.Errorf("Node %d executable reported %q, want %q", major, strings.TrimSpace(string(out)), wantVersion)
+		return fmt.Errorf("node %d executable reported %q, want %q", major, strings.TrimSpace(string(out)), wantVersion)
 	}
 	return nil
 }
