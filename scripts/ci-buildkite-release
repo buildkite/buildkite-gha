@@ -23,8 +23,8 @@ tag_commit="$(git rev-list -n 1 "$BUILDKITE_TAG^{commit}")" || die 'release tag 
 [[ "$tag_commit" == "$BUILDKITE_COMMIT" ]] || die "tag resolves to ${tag_commit}, not BUILDKITE_COMMIT"
 [[ "$(git rev-parse HEAD)" == "$BUILDKITE_COMMIT" ]] || die 'checked-out HEAD does not match BUILDKITE_COMMIT'
 
-github_token="$(buildkite-agent secret get GITHUB_RELEASE_TOKEN)"
+github_token="$(buildkite-agent secret get GHA_GITHUB_RELEASE_TOKEN)"
 github_token="${github_token//$'\r'/}"
-[[ -n "$github_token" ]] || die 'GITHUB_RELEASE_TOKEN is empty'
+[[ -n "$github_token" ]] || die 'GHA_GITHUB_RELEASE_TOKEN is empty'
 export GITHUB_TOKEN="$github_token"
 goreleaser release --clean

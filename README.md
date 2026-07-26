@@ -200,7 +200,7 @@ token.
 The release step's tag condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
 steps. Create a fine-grained GitHub token scoped only to this repository with
-Contents read/write permission, then store it as the `GITHUB_RELEASE_TOKEN`
+Contents read/write permission, then store it as the `GHA_GITHUB_RELEASE_TOKEN`
 Buildkite Secret in the release pipeline's cluster. Run tagged releases in a
 dedicated release pipeline configured to build upstream tags only, and use an
 access policy containing only that pipeline's immutable ID and webhook source:
