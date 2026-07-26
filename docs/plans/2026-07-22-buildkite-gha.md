@@ -834,13 +834,19 @@ at barriers, and the cross-stream masking race.
 - managed Node distributions rather than assuming the host's `node` is
   compatible.
 
-The distribution contains the Go binary and exactly Node 20.20.2 and 24.18.0
-under its fixed managed `runtimes/` layout. `BUILDKITE_GHA_NODE20` and
-`BUILDKITE_GHA_NODE24` are controlled explicit overrides, followed by
-`BUILDKITE_GHA_RUNTIME_ROOT`; otherwise runtime discovery uses the sibling
-`runtimes/` directory. Runtime bytes are copied, version-checked,
-deterministically archived and digested, uploaded, and reverified. There is no
-ambient PATH or network runtime fallback.
+The release archive contains only the static Go CLI and LICENSE. Agents require
+mise 2026.5.12 on the importer PATH. For action workflows, upload validates and
+deterministically archives that pinned importer mise executable, transports it
+as a content-addressed artifact, and re-verifies it in every generated job. Host
+actions execute with configuration disabled using exactly `mise --no-config
+exec node@20.20.2 -- node <entry>` or Node 24.18.0, never a fuzzy major and
+never repository mise configuration. `MISE_*` workflow environment overrides
+are withheld from that launcher, while ordinary shell steps retain them. For
+job containers, the host resolves that exact mise installation and mounts the
+Node executable; mise is not required in the image. Node runtime bytes are not
+release or Buildkite artifacts. Official mise-installed Node binaries require
+glibc 2.28+ when JavaScript actions run; that is not a requirement of the
+static Go CLI.
 
 #### Composite actions
 
@@ -1012,15 +1018,38 @@ be issued.
 
 ### Installation and release model
 
-Publish signed, checksummed releases with SBOMs. The initial supported
-distribution is Linux x86-64; Linux arm64 can follow once action/runtime
-compatibility is measured.
+Publish checksummed releases. Add signatures, provenance attestations, and
+SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
+arm64 can follow once action/runtime compatibility is measured.
 
-Distributions provide both pinned managed Node runtimes under the fixed layout.
-Hosted Agents may include that complete bridge distribution; customer-managed
-agents can install a pinned version through a small Buildkite plugin. Every
-generated job must execute the same bridge version that produced its plan
-unless the plan schema explicitly permits a compatible newer runtime.
+Distributions provide the static bridge CLI and LICENSE. The importer requires
+the pinned mise version, and action workflows transport its verified executable
+as a content-addressed artifact so generated hosted jobs can resolve exact Node
+versions without preinstalled mise. Every generated job must execute the same
+bridge version that produced its plan unless the plan schema explicitly permits
+a compatible newer runtime.
+
+The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
+archive containing only the static CLI and LICENSE, plus the
+`github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
+release, verifies its checksum and fixed archive layout, caches the verified
+distribution, verifies the importer mise version, and invokes the fixed
+hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are installed by mise on
+demand; official mise-installed Node binaries require glibc 2.28 or newer.
+The source repository must be public before the initial tag because plugin
+installation intentionally uses anonymous release downloads. Release
+signatures, provenance attestations, and SBOMs remain Phase 9 work and are not
+claimed by this preview.
+
+For a public source repository, a tag condition in repository-controlled
+pipeline YAML is a scheduling guard, not release-token authorization. The
+GitHub publisher credential must be unavailable to ordinary CI and retrieved
+only in a dedicated upstream-tag-only release pipeline. Its external Buildkite
+Secret access policy must at least bind the immutable release `pipeline_id` and
+webhook `build_source`; because that policy does not distinguish tag webhooks
+from pull-request webhooks, the pipeline's tag-only provider filter is also a
+load-bearing control. Never expose the publisher token through a shared agent
+environment hook.
 
 Protected capability-grant validity must cover the intended exchange window and
 remain short-lived. Once a grant expires, the service re-evaluates current
@@ -1195,16 +1224,16 @@ Explicitly defer from beta unless implementation evidence changes the order:
   complete process groups without skipping bounded cleanup.
 - Phase 4 is implemented within the tokenless public-action boundary.
   Action-resolved v3 plans carry immutable local and public action locks, verify
-  complete source trees, transport exact managed Node 20/24 runtimes, execute
-  nested composites and JavaScript pre/main/post lifecycle, and fail closed on
-  private sources or provider-dependent authentication. Action resolution is
-  independent of event trust. Normal `upload` now resolves local and anonymous
-  public JavaScript/composite actions and transports exact, major-validated Node
-  20 and 24 executable bytes for action workflows; the repository distribution
-  pins these runtimes to 20.20.2 and 24.18.0. Shell-only uploads remain
-  unchanged and require no Node runtime. This path remains `EventUntrusted`,
-  fixed to the ambient-clean, tokenless hosted queue, and accepts no capability,
-  `network`, or the Phase 5 compiler-proven Dockerfile-action provenance.
+  complete source trees, execute nested composites and JavaScript pre/main/post
+  lifecycle through exact mise-managed Node 20.20.2 or 24.18.0, and fail closed
+  on private sources or provider-dependent authentication. Action resolution is
+  independent of event trust. Normal `upload` resolves local and anonymous
+  public JavaScript/composite actions without transporting Node executable
+  bytes; generated agents use the exact content-addressed importer mise
+  executable to resolve compatibility versions through `mise --no-config`.
+  This path remains `EventUntrusted`, fixed to the
+  ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
+  or the Phase 5 compiler-proven Dockerfile-action provenance.
   Private remote action or repository source, provider tokens, secrets, job- or
   service-container provenance, privileged queues, and other protected
   capabilities fail closed.

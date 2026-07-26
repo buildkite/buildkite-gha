@@ -1,0 +1,45 @@
+version: 2
+
+builds:
+  - id: buildkite-gha-linux
+    main: ./cmd/buildkite-gha
+    binary: buildkite-gha
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: buildkite-gha
+    ids: [buildkite-gha-linux]
+    formats: [tar.gz]
+    name_template: buildkite-gha_Linux_x86_64
+    builds_info:
+      mtime: "{{ .CommitDate }}"
+      owner: root
+      group: root
+    files:
+      - src: LICENSE
+        info:
+          mtime: "{{ .CommitDate }}"
+          mode: 0644
+          owner: root
+          group: root
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs(?:\\([^)]*\\))?:"
+      - "^test(?:\\([^)]*\\))?:"
+      - "^chore(?:\\([^)]*\\))?:"
+      - "^ci(?:\\([^)]*\\))?:"
+      - "^Merge "

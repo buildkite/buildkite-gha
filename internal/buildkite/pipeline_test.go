@@ -95,69 +95,56 @@ func TestEmitGolden(t *testing.T) {
 	}
 }
 
-func TestEmitManagedNodeRuntimes(t *testing.T) {
+func TestEmitMiseBootstrap(t *testing.T) {
+	digest := testDigest("mise")
 	pipeline := Pipeline{
-		CompilerStep:       "trusted-importer",
+		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		NodeRuntimeDigests: map[int]string{24: testDigest("node 24"), 20: testDigest("node 20")},
-		Jobs:               []Job{{Key: "job", Label: "Job", Queue: "queue", PlanDigest: testDigest("plan")}},
+		MiseDigest:         digest,
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan")}},
 	}
-	first, err := Emit(pipeline)
+	output, err := Emit(pipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Emit(pipeline)
+	path, err := MisePath(digest)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatal("runtime emission was not deterministic")
 	}
 	var document struct {
 		Steps []struct {
 			Command string `yaml:"command"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(first, &document); err != nil {
-		t.Fatal(err)
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse emitted YAML: %v", err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("emitted steps = %#v", document.Steps)
 	}
 	command := document.Steps[0].Command
-	path20, _ := NodeRuntimePath(20, pipeline.NodeRuntimeDigests[20])
-	path24, _ := NodeRuntimePath(24, pipeline.NodeRuntimeDigests[24])
-	if strings.Index(command, path20) >= strings.Index(command, path24) {
-		t.Fatalf("Node runtimes are not sorted by major:\n%s", first)
-	}
-	for major, path := range map[int]string{20: path20, 24: path24} {
-		archive := "node" + fmt.Sprint(major) + "_archive"
-		if !strings.Contains(command, "artifact download '"+path+`' "$bootstrap_dir" --step 'trusted-importer'`) ||
-			!strings.Contains(command, `sha256sum "$`+archive+`"`) ||
-			!strings.Contains(command, `gzip -dc "$`+archive+`" > "$node`+fmt.Sprint(major)+`"`) ||
-			!strings.Contains(command, `chmod 0500 "$node`+fmt.Sprint(major)+`"`) ||
-			!strings.Contains(command, `export BUILDKITE_GHA_NODE`+fmt.Sprint(major)+`="$node`+fmt.Sprint(major)+`"`) {
-			t.Fatalf("Node %d bootstrap is incomplete:\n%s", major, first)
+	for _, want := range []string{
+		"artifact download '" + path + `' "$bootstrap_dir" --step 'importer'`,
+		`sha256sum "$mise_archive"`,
+		`test "$actual_mise_digest" = '` + digest + `'`,
+		`gzip -dc "$mise_archive" > "$mise"`,
+		`chmod 0500 "$mise"`,
+		`export PATH="$bootstrap_dir:$PATH"`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("mise bootstrap missing %q:\n%s", want, command)
 		}
-	}
-	if strings.Count(command, "--step 'trusted-importer'") != 4 {
-		t.Fatalf("all downloads are not attributed to the importer:\n%s", first)
 	}
 }
 
-func TestNodeRuntimePathValidation(t *testing.T) {
-	digest := testDigest("node")
-	path, err := NodeRuntimePath(24, digest)
-	if err != nil || path != ".buildkite-gha/runtimes/node24/"+strings.TrimPrefix(digest, "sha256:")+"/node.gz" {
-		t.Fatalf("NodeRuntimePath() = %q, %v", path, err)
+func TestMisePathValidation(t *testing.T) {
+	digest := testDigest("mise")
+	path, err := MisePath(digest)
+	if err != nil || path != ".buildkite-gha/tools/mise/"+strings.TrimPrefix(digest, "sha256:")+"/mise.gz" {
+		t.Fatalf("MisePath() = %q, %v", path, err)
 	}
-	for _, test := range []struct {
-		major  int
-		digest string
-	}{
-		{major: 18, digest: digest},
-		{major: 24, digest: "sha256:nope"},
-	} {
-		if _, err := NodeRuntimePath(test.major, test.digest); err == nil {
-			t.Fatalf("NodeRuntimePath(%d, %q) succeeded", test.major, test.digest)
-		}
+	if _, err := MisePath("sha256:nope"); err == nil {
+		t.Fatal("MisePath() accepted an invalid digest")
 	}
 }
 
@@ -215,8 +202,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Env["MISE_JOBS"] != "1" {
 		t.Fatalf("default pipeline MISE_JOBS = %q, want serial tool installation", document.Env["MISE_JOBS"])
 	}
-	if len(document.Steps) != 10 {
-		t.Fatalf("default pipeline = %#v, want nine gated loaders plus repository checks", document.Steps)
+	if len(document.Steps) != 12 {
+		t.Fatalf("default pipeline = %#v, want nine gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command   string
@@ -232,6 +219,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
+	}
+	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" || got.queue != "elastic-runners" {
+		t.Fatalf("release publisher = %#v", got)
 	}
 	if got := steps["phase-0-shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml" || got.condition != `build.env("PHASE0_PROBE") == "shell"` {
 		t.Fatalf("shell oracle loader = %#v", got)
@@ -601,12 +591,12 @@ func TestPhase5HostedDockerCapabilityProbeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(probe)
-	for _, fragment := range []string{"set -euo pipefail", `commit=${PHASE5_COMMIT:-${SMOKE_COMMIT:-}}`, `scripts/phase-0-shell-oracle-checkout "$commit"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
+	for _, fragment := range []string{"set -euo pipefail", `commit=${PHASE5_COMMIT:-${SMOKE_COMMIT:-}}`, `scripts/phase-0-shell-oracle-checkout "$commit"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://phase5-server:8080/phase5-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record httpd-applet pass execution-confirmed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("Phase 5 probe lacks %q", fragment)
 		}
 	}
-	for _, forbidden := range []string{"--privileged", "--network host", "/var/run/docker.sock", "docker prune", "docker system prune", "docker image prune", "docker container prune", "docker network prune", "printenv", " env"} {
+	for _, forbidden := range []string{"--privileged", "--network host", "/var/run/docker.sock", "docker prune", "docker system prune", "docker image prune", "docker container prune", "docker network prune", "busybox --list", "printenv", " env"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("Phase 5 probe contains forbidden %q", forbidden)
 		}

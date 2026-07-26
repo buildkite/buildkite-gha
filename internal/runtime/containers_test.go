@@ -1383,7 +1383,9 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
+	node20 := filepath.Join(t.TempDir(), "node20")
+	writeNodeExecutable(t, node20, 20)
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node20: node20, Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Outputs["lazy"] != "ready" {
 		t.Fatalf("lazy container action result = %#v, error = %v", result, err)
 	}

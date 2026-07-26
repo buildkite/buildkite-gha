@@ -43,9 +43,11 @@ type Options struct {
 	// ResolveActions enables immutable remote action locking independently of
 	// event trust. Workspace-local actions are always locked without network
 	// access. ActionSource is required only when a workflow uses remote actions.
-	ResolveActions     bool
-	ActionSource       ActionSource
-	NodeRuntimeDigests map[int]string
+	ResolveActions bool
+	ActionSource   ActionSource
+	// MiseDigest is runtime transport policy only. It is emitted into generated
+	// pipeline bootstrap commands and never changes compiler IR or plans.
+	MiseDigest string
 }
 
 func defaultOptions() Options {

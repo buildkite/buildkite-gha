@@ -37,10 +37,6 @@ jq -e '
 ' "$manifest" >/dev/null
 
 CGO_ENABLED=0 mise exec -- go build -o "$work/buildkite-gha" ./cmd/buildkite-gha
-if [[ -n "$profile" ]]; then
-  node20="$(mise where node@20)/bin/node"
-  node24="$(mise where node@24)/bin/node"
-fi
 
 while IFS=$'\t' read -r id workflow event expectation action_preflight; do
   [[ -f "$root/$workflow" ]] || { echo "$id: missing workflow $workflow" >&2; exit 1; }
@@ -67,8 +63,7 @@ while IFS=$'\t' read -r id workflow event expectation action_preflight; do
   echo "$id: validate=pass compile=deterministic"
   if [[ -n "$profile" && "$action_preflight" == "$profile" ]]; then
     profile_status=0
-    BUILDKITE_GHA_NODE20="$node20" BUILDKITE_GHA_NODE24="$node24" \
-      "$work/buildkite-gha" validate --profile "$profile" --format json \
+    "$work/buildkite-gha" validate --profile "$profile" --format json \
       --event-path "$root/$event" "$root/$workflow" >"$work/$id.profile.json" || profile_status=$?
     if [[ "$expectation" == runtime-unsupported ]]; then
       [[ "$profile_status" == 1 ]] || { echo "$id: profile unexpectedly exited $profile_status" >&2; exit 1; }

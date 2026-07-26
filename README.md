@@ -11,6 +11,35 @@ runtime, and Phase 5 container runtime are implemented. The compiler validates
 the supported graph, expands local reusable workflows and matrices, applies
 queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
+## Quick start
+
+For a public GitHub repository on a Linux x86-64 Buildkite importer agent with
+`mise` on `PATH`, add the
+[GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
+to `pipeline.yml`:
+
+```yaml
+steps:
+  - label: ":github: GitHub Actions"
+    plugins:
+      - github-actions#v0.1.0:
+          workflow: .github/workflows/ci.yml
+```
+
+The plugin downloads and verifies the matching public CLI distribution. The
+CLI derives the event snapshot from Buildkite, compiles the workflow, and
+uploads native Buildkite jobs to the fixed `hosted` queue. GitHub Actions `on:`
+does not configure Buildkite triggers; configure those on the Buildkite
+pipeline and select the workflow explicitly in the plugin.
+
+This v0.1 preview is intended for public, tokenless workflows. It covers shell,
+JavaScript, composite, local, and supported Dockerfile actions, plus matrices,
+local reusable workflows, conditions, job dependencies, concurrent steps,
+services, and job containers in the underlying runtime. The drop-in upload
+path remains narrower: private actions, workflow secrets, GitHub-compatible
+OIDC, artifact/cache actions, privileged queues, and job or service containers
+fail closed. Use a disposable job VM when the workflow needs host isolation.
+
 ## Commands
 
 The current command surface is:
@@ -18,7 +47,7 @@ The current command surface is:
 ```text
 buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>
 buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>
-buildkite-gha upload --event-path <path> --runtime-queue hosted <workflow>
+buildkite-gha upload [--event-path <path>] --runtime-queue hosted <workflow>
 buildkite-gha run-job --plan <path> [--result <path>]
 ```
 
@@ -33,10 +62,16 @@ target only the untrusted queue. The emitted YAML references content-addressed
 plans and the exact compiler executable, but `compile` does not materialize or
 upload those artifacts.
 
-`upload` is the Buildkite importer path for local, unattested event files. It
-requires `BUILDKITE_STEP_KEY`, compiles the deterministic bundle, materializes
-and uploads the exact executable, every content-addressed plan, and, for action
-workflows, the managed Node runtimes, then uses
+`upload` is the Buildkite importer path for unattested compatibility events. It
+requires `BUILDKITE_STEP_KEY`. With `--event-path`, it reads an explicit event
+file; without one, it derives a bounded GitHub compatibility snapshot from the
+current Buildkite repository, commit, branch, tag, or pull-request environment.
+Buildkite repository and author fields can be modified or unverified, and pull
+requests deliberately use the exact Buildkite commit with a
+`refs/pull/<number>/head` compatibility ref rather than claiming GitHub merge
+semantics. Neither input mode authorizes protected capabilities. The command
+compiles the deterministic bundle, materializes and uploads the exact
+executable and every content-addressed plan, then uses
 `buildkite-agent pipeline upload --no-interpolation --reject-secrets`. Generated
 jobs skip checkout, download their artifacts from the exact importer into a
 fresh temporary directory, verify their digests, and run the plan.
@@ -54,16 +89,18 @@ closed.
 The path is intentionally unsigned: ordinary Buildkite dynamic uploads do not
 need plan signing merely to run public, tokenless code.
 
-For workflows containing actions, normal `upload` resolves local and anonymous
-public JavaScript and composite actions and packages exact, major-validated
-Node 20 and 24 executable bytes. The repository distribution pins these to
-20.20.2 and 24.18.0. Runtime lookup uses `BUILDKITE_GHA_NODE20` and
-`BUILDKITE_GHA_NODE24` when explicitly set, otherwise
-`BUILDKITE_GHA_RUNTIME_ROOT`, otherwise the fixed `runtimes/` directory beside
-the real compiler executable. The exact executable bytes are copied and
-version-checked, deterministically archived and digested, uploaded, and
-reverified by generated jobs. There is no PATH or network runtime fallback.
-Shell-only uploads are unchanged and require no managed Node runtimes.
+For workflows containing JavaScript actions, `mise` selects exactly Node
+20.20.2 or 24.18.0. Host actions run as `mise --no-config exec
+node@<exact-version> -- node <entry>`, so repository mise configuration cannot
+change compatibility selection. `MISE_*` workflow environment overrides are
+not passed through this compatibility launcher; shell steps are unaffected.
+For action workflows, the importer requires mise 2026.5.12, validates its
+executable, and uploads a deterministic compressed copy as a content-addressed
+artifact. Generated jobs verify and use that copy, so the fixed hosted queue
+does not need mise preinstalled. Job
+containers resolve the exact host mise installation and bind-mount its Node
+executable; mise is not required in the image. Node executables are never
+release or Buildkite artifacts.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The runtime supports env and working-directory
@@ -136,6 +173,36 @@ a narrow, expiring grant. Canonical plan digests protect transport integrity;
 they do not authorize those capabilities. Buildkite pipeline signing remains
 optional installation-specific defence in depth.
 
+## Installation
+
+The plugin in [Quick start](#quick-start) is the recommended installation. For
+direct CLI use, install `mise`; the runtime asks it to install and cache exact
+Node 20.20.2 and 24.18.0 versions as needed. The official mise-installed Node
+binaries used by JavaScript actions require glibc 2.28 or newer; the static Go
+CLI does not. Download
+`buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt`
+from the GitHub release, verify the archive against the checksum file, and
+extract it to a stable location. The archive contains only `buildkite-gha` and
+`LICENSE`.
+
+Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
+and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
+publisher creates the GitHub release after repository checks pass.
+The source repository must be public before the initial tag is pushed because
+the companion plugin intentionally downloads release assets without a GitHub
+token.
+
+The release step's tag condition prevents accidental publication; it is not a
+secret boundary because pull-request code can upload arbitrary Buildkite
+steps. `BUILDKITE_GHA_GITHUB_RELEASE_TOKEN` must be a Buildkite Secret that is
+unavailable to the public CI pipeline. Run tagged releases in a dedicated
+release pipeline configured to build upstream tags only, and restrict the
+secret's access policy to that pipeline's immutable `pipeline_id` and webhook
+`build_source`. The webhook policy does not distinguish tag and pull-request
+webhooks, so the release pipeline's tag-only provider filter is a load-bearing
+part of this boundary. Do not expose the token through a shared agent
+environment hook or to ordinary branch and pull-request jobs.
+
 ## Development
 
 The repository pins Go and its lint tools with mise. Trust the configuration
@@ -180,12 +247,12 @@ For an opt-in public-network preflight, run:
 mise run smoke:profile
 ```
 
-This anonymously resolves the selected public actions, prepares the managed
-Node runtimes, and applies the same `hosted-tokenless` production admission
-policy used by `upload`. The known official artifact and cache actions compile
-but fail admission until the Phase 6 adapters exist. An `admitted` result is
-not runtime proof and does not imply that an arbitrary admitted action is
-executable or independent of GitHub-only services.
+This anonymously resolves the selected public actions and applies the same
+`hosted-tokenless` production admission policy used by `upload`, without
+installing or executing Node. The known official artifact and cache actions
+compile but fail admission until the Phase 6 adapters exist. An `admitted`
+result is not runtime proof and does not imply that an arbitrary admitted
+action is executable or independent of GitHub-only services.
 
 Use the same policy as a focused workflow compatibility preflight, with either
 human-readable or machine-readable output:
