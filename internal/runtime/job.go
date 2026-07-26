@@ -589,7 +589,7 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	return nil
 }
 
-func (r Runner) actionContainerMounts(ctx context.Context, actions *actionLockResolver) ([]containerMount, error) {
+func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockResolver) ([]containerMount, error) {
 	byTarget := map[string]containerMount{}
 	requiredNode := map[int]bool{}
 	unknownWorkspaceRuntime := false
@@ -641,34 +641,52 @@ func (r Runner) actionContainerMounts(ctx context.Context, actions *actionLockRe
 			requiredNode[24] = true
 		}
 	}
-	for major, path := range map[int]string{20: r.Node20, 24: r.Node24} {
-		if path == "" || (!unknownWorkspaceRuntime && !requiredNode[major]) {
+	if unknownWorkspaceRuntime {
+		requiredNode[20], requiredNode[24] = true, true
+	}
+	for _, major := range []int{20, 24} {
+		if !requiredNode[major] {
 			continue
 		}
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return nil, err
+		explicit := r.Node24
+		if major == 20 {
+			explicit = r.Node20
 		}
-		info, err := os.Stat(abs)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		if explicit != "" {
+			abs, err := filepath.Abs(explicit)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Stat(abs)
+			if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+				continue
+			}
+			byTarget[fmt.Sprintf("/__buildkite-gha/node%d", major)] = containerMount{host: abs, target: fmt.Sprintf("/__buildkite-gha/node%d", major), readonly: true}
 			continue
 		}
-		byTarget[fmt.Sprintf("/__buildkite-gha/node%d", major)] = containerMount{host: abs, target: fmt.Sprintf("/__buildkite-gha/node%d", major), readonly: true}
-	}
-	needManagedNodeRoot := unknownWorkspaceRuntime && (r.Node20 == "" || r.Node24 == "")
-	for major := range requiredNode {
-		if map[int]string{20: r.Node20, 24: r.Node24}[major] == "" {
-			needManagedNodeRoot = true
+		if r.ManagedNodeRoot != "" {
+			abs, err := filepath.Abs(r.ManagedNodeRoot)
+			if err != nil {
+				return nil, err
+			}
+			if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+				byTarget["/__buildkite-gha/nodes"] = containerMount{host: abs, target: "/__buildkite-gha/nodes", readonly: true}
+			}
+			continue
 		}
-	}
-	if r.ManagedNodeRoot != "" && needManagedNodeRoot {
-		abs, err := filepath.Abs(r.ManagedNodeRoot)
-		if err != nil {
-			return nil, err
+		if explicit == "" {
+			var err error
+			explicit, err = r.resolveMiseNodePath(ctx, major)
+			if err != nil {
+				return nil, err
+			}
+			if major == 20 {
+				r.Node20 = explicit
+			} else {
+				r.Node24 = explicit
+			}
 		}
-		if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
-			byTarget["/__buildkite-gha/nodes"] = containerMount{host: abs, target: "/__buildkite-gha/nodes", readonly: true}
-		}
+		byTarget[fmt.Sprintf("/__buildkite-gha/node%d", major)] = containerMount{host: explicit, target: fmt.Sprintf("/__buildkite-gha/node%d", major), readonly: true}
 	}
 	keys := sortedKeys(byTarget)
 	out := make([]containerMount, 0, len(keys))
@@ -743,7 +761,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
 			invocation.action = javascript
-			node, err := DiscoverNode(major, explicit, r.ManagedNodeRoot)
+			node, err := r.discoverNode(ctx, major, explicit)
 			if err != nil {
 				return result, err
 			}
@@ -926,7 +944,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if actionRuntime == metadata.RuntimeNode20 {
 			major, explicit = 20, r.Node20
 		}
-		node, err := DiscoverNode(major, explicit, r.ManagedNodeRoot)
+		node, err := r.discoverNode(ctx, major, explicit)
 		if err != nil {
 			return result, err
 		}

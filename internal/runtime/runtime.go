@@ -36,6 +36,7 @@ type Runner struct {
 	Node20            string
 	Node24            string
 	ManagedNodeRoot   string
+	Mise              string
 	Docker            string
 	RuntimeExecutable string
 	Git               string
@@ -477,7 +478,19 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		node = r.jobContainer.containerPath(absNode)
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, node, entrypoint); err != nil {
+	name, args := node, []string{entrypoint}
+	if r.usesMiseNode(action.nodeMajor) && r.jobContainer == nil {
+		name = node
+		args = []string{"--no-config", "exec", nodeTool(action.nodeMajor), "--", "node", entrypoint}
+		// The compatibility runtime owns mise configuration. Workflow values
+		// remain available to shell steps but cannot redirect Node selection.
+		for key := range env {
+			if strings.HasPrefix(key, "MISE_") {
+				delete(env, key)
+			}
+		}
+	}
+	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, name, args...); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil
@@ -659,10 +672,92 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 	}
 }
 
+const (
+	Node20Version = "20.20.2"
+	Node24Version = "24.18.0"
+)
+
+func nodeTool(major int) string {
+	switch major {
+	case 20:
+		return "node@" + Node20Version
+	case 24:
+		return "node@" + Node24Version
+	default:
+		return ""
+	}
+}
+
+func (r Runner) usesMiseNode(major int) bool {
+	explicit := r.Node24
+	if major == 20 {
+		explicit = r.Node20
+	}
+	return explicit == "" && r.ManagedNodeRoot == ""
+}
+
+func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (string, error) {
+	if explicit != "" || r.ManagedNodeRoot != "" {
+		return discoverNodeContext(ctx, major, explicit, r.ManagedNodeRoot)
+	}
+	tool := nodeTool(major)
+	if tool == "" {
+		return "", fmt.Errorf("unsupported Node runtime major %d", major)
+	}
+	mise := r.Mise
+	var err error
+	if mise == "" {
+		mise, err = exec.LookPath("mise")
+		if err != nil {
+			return "", fmt.Errorf("mise is required to run JavaScript actions: %w", err)
+		}
+	}
+	cmd := exec.CommandContext(ctx, mise, "--no-config", "exec", tool, "--", "node", "--version")
+	cmd.Env = processEnv(nil)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("verify exact %s with mise: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+	}
+	want := strings.TrimPrefix(tool, "node@")
+	if strings.TrimSpace(string(out)) != "v"+want {
+		return "", fmt.Errorf("mise %s reported %q, want %q", tool, strings.TrimSpace(string(out)), "v"+want)
+	}
+	return mise, nil
+}
+
+func (r Runner) resolveMiseNodePath(ctx context.Context, major int) (string, error) {
+	mise, err := r.discoverNode(ctx, major, "")
+	if err != nil {
+		return "", err
+	}
+	tool := nodeTool(major)
+	cmd := exec.CommandContext(ctx, mise, "--no-config", "where", tool)
+	cmd.Env = processEnv(nil)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("resolve exact %s installation with mise: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+	}
+	return discoverNodeContext(ctx, major, filepath.Join(strings.TrimSpace(string(out)), "bin", "node"), "")
+}
+
 // DiscoverNode resolves an explicit Node binary or a binary in the managed
 // runtime root, and rejects binaries that do not report the requested major.
 // It deliberately does not fall back to PATH.
 func DiscoverNode(major int, explicit, managedRoot string) (string, error) {
+	return discoverNodeContext(context.Background(), major, explicit, managedRoot)
+}
+
+func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot string) (string, error) {
 	var candidates []string
 	if explicit != "" {
 		candidates = append(candidates, explicit)
@@ -683,7 +778,7 @@ func DiscoverNode(major int, explicit, managedRoot string) (string, error) {
 
 	var failures []string
 	for _, candidate := range candidates {
-		command := exec.Command(candidate, "--version")
+		command := exec.CommandContext(ctx, candidate, "--version")
 		command.Env = processEnv(nil)
 		output, err := command.CombinedOutput()
 		if err != nil {

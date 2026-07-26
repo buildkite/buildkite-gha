@@ -2,14 +2,12 @@ package cli
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -228,13 +226,13 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	t.Setenv("BUILDKITE_GHA_NODE20", filepath.Join(root, "missing-node20"))
 	stdout.Reset()
 	stderr.Reset()
-	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("environment Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("environment override affected production profile: code = %d; stderr = %q", code, stderr.String())
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Result != "indeterminate" || report.Admission.Result != "not-evaluated" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_ENVIRONMENT" {
+	if report.Result != "admitted" {
 		t.Fatalf("environment profile report = %#v", report)
 	}
 }
@@ -402,18 +400,17 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	}
 }
 
-func TestRunUploadLocalJavaScriptActionUploadsExactManagedNodes(t *testing.T) {
+func TestRunUploadJavaScriptActionLeavesNodeInstallationToMise(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "local")
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	workflow := "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"
-	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
@@ -422,76 +419,25 @@ func TestRunUploadLocalJavaScriptActionUploadsExactManagedNodes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actionRoot, "main.js"), []byte("console.log('local')\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	node20 := writeFakeNode(t, root, 20)
-	node24 := writeFakeNode(t, root, 24)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
-	t.Setenv("BUILDKITE_GHA_NODE20", node20)
-	t.Setenv("BUILDKITE_GHA_NODE24", node24)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 5 {
-		t.Fatalf("commands = %d, want compiler, plan, two Node artifacts, and pipeline", len(runner.commands))
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands = %d, want distribution, plan, and pipeline", len(runner.commands))
 	}
-	wantPaths := make([]string, 0, 2)
-	for i, major := range []int{20, 24} {
-		source, err := os.ReadFile([]string{node20, node24}[i])
-		if err != nil {
-			t.Fatal(err)
-		}
-		archive, err := deterministicGzip(source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		digest := transport.Digest(archive)
-		path := fmt.Sprintf(".buildkite-gha/runtimes/node%d/%s/node.gz", major, strings.TrimPrefix(digest, "sha256:"))
-		wantPaths = append(wantPaths, path)
-		if !bytes.Equal(runner.uploaded[path], archive) || transport.Digest(runner.uploaded[path]) != digest {
-			t.Fatalf("uploaded Node %d archive path/digest/contents mismatch", major)
-		}
-		reader, err := gzip.NewReader(bytes.NewReader(runner.uploaded[path]))
-		if err != nil {
-			t.Fatal(err)
-		}
-		uncompressed, err := io.ReadAll(reader)
-		_ = reader.Close()
-		if err != nil || !bytes.Equal(uncompressed, source) {
-			t.Fatalf("uploaded Node %d bytes = %q, %v", major, uncompressed, err)
-		}
-	}
-	var planPath string
 	for path := range runner.uploaded {
-		if strings.HasSuffix(path, ".json") {
-			planPath = path
-			break
+		if strings.Contains(path, "/runtimes/") || strings.HasSuffix(path, ".gz") {
+			t.Fatalf("upload contains a Node runtime artifact %q", path)
 		}
 	}
-	if planPath == "" {
-		t.Fatalf("uploaded artifacts contain no plan: %#v", runner.uploaded)
-	}
-	job, err := plan.Decode(runner.uploaded[planPath])
-	if err != nil {
-		t.Fatalf("decode uploaded action plan: %v", err)
-	}
-	if job.Schema != plan.SchemaV3 || len(job.Actions) == 0 || len(job.Steps) != 1 || job.Steps[0].Action == nil {
-		t.Fatalf("uploaded action plan does not contain v3 action locks/selectors: %#v", job)
-	}
-	var pipeline struct {
-		Steps []struct {
-			Command string `yaml:"command"`
-		} `yaml:"steps"`
-	}
-	if err := yaml.Unmarshal(runner.commands[4].stdin, &pipeline); err != nil || len(pipeline.Steps) != 1 {
-		t.Fatalf("uploaded action pipeline = %#v, %v", pipeline, err)
-	}
-	for _, path := range wantPaths {
-		if !strings.Contains(pipeline.Steps[0].Command, "artifact download '"+path+"'") {
-			t.Fatalf("pipeline does not fetch exact managed Node artifact %q:\n%s", path, pipeline.Steps[0].Command)
-		}
+	command := string(runner.commands[2].stdin)
+	if !strings.Contains(command, "command -v mise") || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
+		t.Fatalf("generated pipeline does not use the mise runtime boundary:\n%s", command)
 	}
 }
 
@@ -538,37 +484,6 @@ func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
 	}
 	if !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) || len(job.Actions) != 1 || job.Actions[0].Source != "workspace" {
 		t.Fatalf("uploaded Docker action plan = %#v", job)
-	}
-}
-
-func TestRunUploadWrongNodeFailsBeforeAgentSideEffects(t *testing.T) {
-	root := t.TempDir()
-	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
-	actionRoot := filepath.Join(root, ".github", "actions", "local")
-	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
-	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, root, 24))
-	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, root, 24))
-	runner := &cliCaptureRunner{}
-	var stdout, stderr bytes.Buffer
-	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
-		t.Fatalf("run() code = %d, want 1", code)
-	}
-	if len(runner.commands) != 0 || !strings.Contains(stderr.String(), `reported "v24.0.0"`) {
-		t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
 	}
 }
 
@@ -663,27 +578,6 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				t.Fatalf("validateUnprivilegedBundle(%q) error = %v", repository, err)
 			}
 		})
-	}
-}
-
-func TestDeterministicGzip(t *testing.T) {
-	source := []byte("exact node executable bytes\n")
-	first, err := deterministicGzip(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := deterministicGzip(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(first, second) {
-		t.Fatal("gzip output changed between calls")
-	}
-}
-
-func TestValidateNodeBytesRejectsWrongExactBytes(t *testing.T) {
-	if err := validateNodeBytes(20, []byte("#!/bin/sh\nprintf 'v24.0.0\\n'\n")); err == nil || !strings.Contains(err.Error(), `reported "v24.0.0"`) {
-		t.Fatalf("validateNodeBytes() error = %v, want exact-byte major rejection", err)
 	}
 }
 

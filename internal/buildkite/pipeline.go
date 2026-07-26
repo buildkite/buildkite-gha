@@ -13,7 +13,6 @@ import (
 
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
-const runtimeDirectory = ".buildkite-gha/runtimes"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -23,7 +22,6 @@ var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string
-	NodeRuntimeDigests map[int]string
 	Jobs               []Job
 }
 
@@ -34,17 +32,6 @@ func DistributionPath(digest string) (string, error) {
 		return "", fmt.Errorf("invalid distribution digest %q", digest)
 	}
 	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
-}
-
-// NodeRuntimePath returns the fixed artifact path for a managed Node runtime.
-func NodeRuntimePath(major int, digest string) (string, error) {
-	if major != 20 && major != 24 {
-		return "", fmt.Errorf("unsupported Node runtime major %d", major)
-	}
-	if !digestPattern.MatchString(digest) {
-		return "", fmt.Errorf("invalid Node runtime digest %q", digest)
-	}
-	return fmt.Sprintf("%s/node%d/%s/node.gz", runtimeDirectory, major, strings.TrimPrefix(digest, "sha256:")), nil
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -82,23 +69,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtimeMajors := make([]int, 0, len(pipeline.NodeRuntimeDigests))
-	runtimePaths := make(map[int]string, len(pipeline.NodeRuntimeDigests))
-	runtimeDigests := make(map[string]int, len(pipeline.NodeRuntimeDigests))
-	for major, digest := range pipeline.NodeRuntimeDigests {
-		path, err := NodeRuntimePath(major, digest)
-		if err != nil {
-			return nil, err
-		}
-		if other, exists := runtimeDigests[digest]; exists {
-			return nil, fmt.Errorf("node runtime majors %d and %d share digest %s", other, major, digest)
-		}
-		runtimeDigests[digest] = major
-		runtimeMajors = append(runtimeMajors, major)
-		runtimePaths[major] = path
-	}
-	sort.Ints(runtimeMajors)
-
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
 	for _, job := range jobs {
@@ -110,6 +80,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
 		commands := []string{
 			"set -euo pipefail",
+			`command -v mise >/dev/null 2>&1 || { echo "buildkite-gha: mise is required to run JavaScript actions" >&2; exit 1; }`,
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
 			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
 			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
@@ -119,21 +90,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			`actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"`,
 			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
-		}
-		for _, major := range runtimeMajors {
-			path := runtimePaths[major]
-			archive := fmt.Sprintf("node%d_archive", major)
-			executable := fmt.Sprintf("node%d", major)
-			commands = append(commands,
-				"buildkite-agent artifact download "+shellQuote(path)+` "$bootstrap_dir" --step `+shellQuote(pipeline.CompilerStep),
-				archive+"=\"$bootstrap_dir/"+path+`"`,
-				executable+`="$bootstrap_dir/`+executable+`"`,
-				"actual_"+archive+`_digest="$(sha256sum "$`+archive+`" | awk '{print "sha256:" $1}')"`,
-				`test "$actual_`+archive+`_digest" = `+shellQuote(pipeline.NodeRuntimeDigests[major]),
-				`gzip -dc "$`+archive+`" > "$`+executable+`"`,
-				`chmod 0500 "$`+executable+`"`,
-				`export BUILDKITE_GHA_NODE`+fmt.Sprint(major)+`="$`+executable+`"`,
-			)
 		}
 		commands = append(commands, `"$distribution" run-job --plan "$plan"`)
 		command := strings.Join(commands, "\n")

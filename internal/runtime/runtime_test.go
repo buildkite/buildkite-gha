@@ -2187,6 +2187,99 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	}
 }
 
+func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(root, "args")
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nprintf 'mise install progress\\n' >&2\ncase \"$*\" in *node@20.20.2*) printf 'v20.20.2\\n';; *) exit 9;; esac\n", log))
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := Runner{Mise: mise}
+	got, err := r.discoverNode(context.Background(), 20, "")
+	if err != nil || got != mise {
+		t.Fatalf("discoverNode() = %q, %v", got, err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "--no-config exec node@20.20.2 -- node --version\n" {
+		t.Fatalf("mise arguments = %q", data)
+	}
+}
+
+func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
+	root := t.TempDir()
+	nodeRoot := filepath.Join(root, "node")
+	if err := os.MkdirAll(filepath.Join(nodeRoot, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(nodeRoot, "bin", "node")
+	writeNodeExecutable(t, node, 24)
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf 'mise progress\\n' >&2\ncase \"$2\" in exec) printf 'v24.18.0\\n';; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", nodeRoot))
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (Runner{Mise: mise}).resolveMiseNodePath(context.Background(), 24)
+	if err != nil || got != filepath.Join(nodeRoot, "bin", "node") {
+		t.Fatalf("resolveMiseNodePath() = %q, %v", got, err)
+	}
+}
+
+func TestJavaScriptPhaseUsesMiseForItsMajorWhenOtherMajorIsExplicit(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(root, "args")
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q\ncase \"$*\" in *--version) printf 'v24.18.0\\n';; esac\n", log))
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, root, "main.js", "")
+	node20 := filepath.Join(root, "node20")
+	writeNodeExecutable(t, node20, 20)
+	runner := Runner{Mise: mise, Node20: node20}
+	node, err := runner.discoverNode(context.Background(), 24, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := newResult()
+	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
+	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), node, action, action.Main, nil, nil, &result); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--no-config exec node@24.18.0 -- node --version|MISE_DATA_DIR=unset\n--no-config exec node@24.18.0 -- node " + filepath.Join(root, "main.js") + "|MISE_DATA_DIR=unset\n"
+	if string(data) != want {
+		t.Fatalf("mise invocations = %q, want %q", data, want)
+	}
+}
+
+func TestMiseMissingIsClear(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := (Runner{}).discoverNode(context.Background(), 24, "")
+	if err == nil || !strings.Contains(err.Error(), "mise is required") {
+		t.Fatalf("discoverNode() error = %v", err)
+	}
+}
+
+func TestMiseNodeSelectionRejectsWrongExactVersion(t *testing.T) {
+	root := t.TempDir()
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", "#!/bin/sh\nprintf 'v24.18.1\\n'\n")
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Runner{Mise: mise}).discoverNode(context.Background(), 24, "")
+	if err == nil || !strings.Contains(err.Error(), `reported "v24.18.1", want "v24.18.0"`) {
+		t.Fatalf("discoverNode() error = %v", err)
+	}
+}
+
 func TestDockerAction(t *testing.T) {
 	docker := requireDocker(t)
 	var logs bytes.Buffer
@@ -3231,6 +3324,16 @@ func writeFixtureFile(t *testing.T, root, path, contents string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeNodeExecutable(t *testing.T, path string, major int) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("#!/bin/sh\nprintf 'v%d.99.0\\n'\n", major)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }

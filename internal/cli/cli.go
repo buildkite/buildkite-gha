@@ -2,8 +2,6 @@
 package cli
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -12,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -206,16 +203,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		actionMaterializer = store
 	}
 	runner := gharuntime.Runner{
-		Stdout:          stdout,
-		Stderr:          stderr,
-		Node20:          os.Getenv("BUILDKITE_GHA_NODE20"),
-		Node24:          os.Getenv("BUILDKITE_GHA_NODE24"),
-		ManagedNodeRoot: os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT"),
-		Docker:          os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:             os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:         gharuntime.EnvironmentSecrets{},
-		Redactor:        gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-		Actions:         actionMaterializer,
+		Stdout:   stdout,
+		Stderr:   stderr,
+		Docker:   os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:      os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets:  gharuntime.EnvironmentSecrets{},
+		Redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:  actionMaterializer,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -404,7 +398,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		return 1
 	}
 	if profile != "" {
-		executablePath, _, distributionDigest, executableErr := executable()
+		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
 			if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
@@ -413,7 +407,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", executablePath)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer")
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -560,20 +554,19 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, executablePath)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	bundle := preflight.Bundle
-	artifacts := make([]transport.Artifact, 0, 1+len(preflight.NodeArtifacts)+len(bundle.Plans))
+	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
-	artifacts = append(artifacts, preflight.NodeArtifacts...)
 	for _, jobPlan := range bundle.Plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
@@ -593,9 +586,8 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 }
 
 type hostedTokenlessCompilation struct {
-	Bundle        compiler.Bundle
-	NodeArtifacts []transport.Artifact
-	HasActions    bool
+	Bundle     compiler.Bundle
+	HasActions bool
 }
 
 type hostedTokenlessFailureKind string
@@ -618,7 +610,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, executablePath string) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep string) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -639,7 +631,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 			UntrustedQueues: []string{unprivilegedRuntimeQueue},
 		},
 	}
-	var nodeArtifacts []transport.Artifact
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
@@ -656,12 +647,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		}
 		options.ResolveActions = true
 		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
-		var digests map[int]string
-		nodeArtifacts, digests, err = managedNodeArtifacts(executablePath)
-		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, err)
-		}
-		options.NodeRuntimeDigests = digests
 	}
 	bundle, err := compiler.CompileBundleContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options)
 	if err != nil {
@@ -673,7 +658,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	if !hasActions && bundleUsesActions(bundle) {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
-	return hostedTokenlessCompilation{Bundle: bundle, NodeArtifacts: nodeArtifacts, HasActions: hasActions}, nil
+	return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
@@ -731,76 +716,6 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 		}
 	}
 	return false
-}
-
-func managedNodeArtifacts(executablePath string) ([]transport.Artifact, map[int]string, error) {
-	root := os.Getenv("BUILDKITE_GHA_RUNTIME_ROOT")
-	if root == "" {
-		realExecutable, err := filepath.EvalSymlinks(executablePath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve real compiler executable: %w", err)
-		}
-		root = filepath.Join(filepath.Dir(realExecutable), "runtimes")
-	}
-	artifacts := make([]transport.Artifact, 0, 2)
-	digests := make(map[int]string, 2)
-	for _, major := range []int{20, 24} {
-		node, err := gharuntime.DiscoverNode(major, os.Getenv(fmt.Sprintf("BUILDKITE_GHA_NODE%d", major)), root)
-		if err != nil {
-			return nil, nil, err
-		}
-		contents, err := os.ReadFile(node)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read Node %d executable: %w", major, err)
-		}
-		if err := validateNodeBytes(major, contents); err != nil {
-			return nil, nil, err
-		}
-		archive, err := deterministicGzip(contents)
-		if err != nil {
-			return nil, nil, fmt.Errorf("archive Node %d executable: %w", major, err)
-		}
-		digest := transport.Digest(archive)
-		path, err := buildkitepipeline.NodeRuntimePath(major, digest)
-		if err != nil {
-			return nil, nil, err
-		}
-		digests[major] = digest
-		artifacts = append(artifacts, transport.Artifact{Path: path, Digest: digest, Contents: archive})
-	}
-	return artifacts, digests, nil
-}
-
-func validateNodeBytes(major int, contents []byte) error {
-	dir, err := os.MkdirTemp("", fmt.Sprintf("buildkite-gha-node%d-validation-", major))
-	if err != nil {
-		return fmt.Errorf("create Node %d validation directory: %w", major, err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	copyPath := filepath.Join(dir, "node")
-	if err := os.WriteFile(copyPath, contents, 0o700); err != nil {
-		return fmt.Errorf("materialize Node %d executable for validation: %w", major, err)
-	}
-	if _, err := gharuntime.DiscoverNode(major, copyPath, ""); err != nil {
-		return fmt.Errorf("validate exact Node %d executable bytes: %w", major, err)
-	}
-	return nil
-}
-
-func deterministicGzip(source []byte) ([]byte, error) {
-	var out bytes.Buffer
-	w, err := gzip.NewWriterLevel(&out, gzip.BestCompression)
-	if err != nil {
-		return nil, err
-	}
-	w.OS = 255
-	if _, err := w.Write(source); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, err error) {

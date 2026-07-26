@@ -13,8 +13,8 @@ queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
 ## Quick start
 
-For a public GitHub repository on a Linux x86-64 Buildkite agent with glibc
-2.28 or newer, add the
+For a public GitHub repository on a Linux x86-64 Buildkite agent with `mise`
+on `PATH`, add the
 [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
 to `pipeline.yml`:
 
@@ -71,8 +71,7 @@ requests deliberately use the exact Buildkite commit with a
 `refs/pull/<number>/head` compatibility ref rather than claiming GitHub merge
 semantics. Neither input mode authorizes protected capabilities. The command
 compiles the deterministic bundle, materializes and uploads the exact
-executable, every content-addressed plan, and, for action workflows, the managed
-Node runtimes, then uses
+executable and every content-addressed plan, then uses
 `buildkite-agent pipeline upload --no-interpolation --reject-secrets`. Generated
 jobs skip checkout, download their artifacts from the exact importer into a
 fresh temporary directory, verify their digests, and run the plan.
@@ -90,16 +89,15 @@ closed.
 The path is intentionally unsigned: ordinary Buildkite dynamic uploads do not
 need plan signing merely to run public, tokenless code.
 
-For workflows containing actions, normal `upload` resolves local and anonymous
-public JavaScript and composite actions and packages exact, major-validated
-Node 20 and 24 executable bytes. The repository distribution pins these to
-20.20.2 and 24.18.0. Runtime lookup uses `BUILDKITE_GHA_NODE20` and
-`BUILDKITE_GHA_NODE24` when explicitly set, otherwise
-`BUILDKITE_GHA_RUNTIME_ROOT`, otherwise the fixed `runtimes/` directory beside
-the real compiler executable. The exact executable bytes are copied and
-version-checked, deterministically archived and digested, uploaded, and
-reverified by generated jobs. There is no PATH or network runtime fallback.
-Shell-only uploads are unchanged and require no managed Node runtimes.
+For workflows containing JavaScript actions, `mise` selects exactly Node
+20.20.2 or 24.18.0. Host actions run as `mise --no-config exec
+node@<exact-version> -- node <entry>`, so repository mise configuration cannot
+change compatibility selection. `MISE_*` workflow environment overrides are
+not passed through this compatibility launcher; shell steps are unaffected.
+Job containers do not need mise: the host resolves the exact mise installation
+and bind-mounts its Node executable into the container. Generated jobs fail
+early with a clear error when mise is missing. Node executables are never
+release or Buildkite artifacts.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The runtime supports env and working-directory
@@ -175,12 +173,14 @@ optional installation-specific defence in depth.
 ## Installation
 
 The plugin in [Quick start](#quick-start) is the recommended installation. For
-direct CLI use, the v0 release distribution supports Linux x86-64 with glibc
-2.28 or newer. Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt`
+direct CLI use, install `mise`; the runtime asks it to install and cache exact
+Node 20.20.2 and 24.18.0 versions as needed. The official mise-installed Node
+binaries used by JavaScript actions require glibc 2.28 or newer; the static Go
+CLI does not. Download
+`buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt`
 from the GitHub release, verify the archive against the checksum file, and
-extract it to a stable location. Keep the bundled `runtimes/` directory beside
-`buildkite-gha`; it contains the pinned Node 20 and Node 24 executables required
-by actions.
+extract it to a stable location. The archive contains only `buildkite-gha` and
+`LICENSE`.
 
 Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
 and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite

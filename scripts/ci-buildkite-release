@@ -3,7 +3,7 @@ set -euo pipefail
 
 die() { printf '[ci-buildkite-release] error: %s\n' "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
-for command in awk buildkite-agent git goreleaser curl sha256sum tar; do require_command "$command"; done
+for command in awk buildkite-agent git goreleaser; do require_command "$command"; done
 
 : "${BUILDKITE_TAG:?BUILDKITE_TAG is required}"
 : "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
@@ -23,7 +23,6 @@ tag_commit="$(git rev-list -n 1 "$BUILDKITE_TAG^{commit}")" || die 'release tag 
 [[ "$tag_commit" == "$BUILDKITE_COMMIT" ]] || die "tag resolves to ${tag_commit}, not BUILDKITE_COMMIT"
 [[ "$(git rev-parse HEAD)" == "$BUILDKITE_COMMIT" ]] || die 'checked-out HEAD does not match BUILDKITE_COMMIT'
 
-scripts/stage-release-runtimes
 github_token="$(buildkite-agent secret get BUILDKITE_GHA_GITHUB_RELEASE_TOKEN)"
 github_token="${github_token//$'\r'/}"
 [[ -n "$github_token" ]] || die 'BUILDKITE_GHA_GITHUB_RELEASE_TOKEN is empty'

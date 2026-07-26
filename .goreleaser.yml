@@ -30,34 +30,6 @@ archives:
           mode: 0644
           owner: root
           group: root
-      - src: .release/runtimes/node20/bin/node
-        dst: runtimes/node20/bin/node
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0755
-          owner: root
-          group: root
-      - src: .release/runtimes/node20/LICENSE
-        dst: runtimes/node20/LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
-      - src: .release/runtimes/node24/bin/node
-        dst: runtimes/node24/bin/node
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0755
-          owner: root
-          group: root
-      - src: .release/runtimes/node24/LICENSE
-        dst: runtimes/node24/LICENSE
-        info:
-          mtime: "{{ .CommitDate }}"
-          mode: 0644
-          owner: root
-          group: root
 
 checksum:
   name_template: checksums.txt
