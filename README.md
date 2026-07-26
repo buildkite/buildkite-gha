@@ -199,14 +199,21 @@ token.
 
 The release step's tag condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
-steps. `BUILDKITE_GHA_GITHUB_RELEASE_TOKEN` must be a Buildkite Secret that is
-unavailable to the public CI pipeline. Run tagged releases in a dedicated
-release pipeline configured to build upstream tags only, and restrict the
-secret's access policy to that pipeline's immutable `pipeline_id` and webhook
-`build_source`. The webhook policy does not distinguish tag and pull-request
-webhooks, so the release pipeline's tag-only provider filter is a load-bearing
-part of this boundary. Do not expose the token through a shared agent
-environment hook or to ordinary branch and pull-request jobs.
+steps. Create a fine-grained GitHub token scoped only to this repository with
+Contents read/write permission, then store it as the `GITHUB_RELEASE_TOKEN`
+Buildkite Secret in the release pipeline's cluster. Run tagged releases in a
+dedicated release pipeline configured to build upstream tags only, and use an
+access policy containing only that pipeline's immutable ID and webhook source:
+
+```yaml
+- pipeline_id: "<release-pipeline-uuid>"
+  build_source: "webhook"
+```
+
+The webhook policy does not distinguish tag and pull-request webhooks, so the
+release pipeline's tag-only provider filter is a load-bearing part of this
+boundary. Do not expose the token through a shared agent environment hook or to
+ordinary branch and pull-request jobs.
 
 ## Development
 
