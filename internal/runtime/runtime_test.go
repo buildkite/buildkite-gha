@@ -2190,21 +2190,32 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 	root := t.TempDir()
 	log := filepath.Join(root, "args")
+	dataDir := filepath.Join(root, "data")
+	installation := filepath.Join(dataDir, "installs", "node", Node20Version)
+	node := filepath.Join(installation, "bin", "node")
+	nodeBytes := []byte("#!/bin/sh\nprintf 'v20.20.2\\n'\n")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	mise := filepath.Join(root, "mise")
-	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nprintf 'mise install progress\\n' >&2\ncase \"$*\" in *node@20.20.2*) printf 'v20.20.2\\n';; *) exit 9;; esac\n", log))
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\nprintf 'mise progress\\n' >&2\ncase \"$2\" in install) :;; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", log, installation))
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	r := Runner{Mise: mise}
+	digest := sha256.Sum256(nodeBytes)
+	r := Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{20: hex.EncodeToString(digest[:])}}
 	got, err := r.discoverNode(context.Background(), 20, "")
-	if err != nil || got != mise {
+	if err != nil || got != node {
 		t.Fatalf("discoverNode() = %q, %v", got, err)
 	}
 	data, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != "--no-config exec node@20.20.2 -- node --version\n" {
+	if string(data) != "--no-config install core:node@20.20.2\n--no-config where core:node@20.20.2\n" {
 		t.Fatalf("mise arguments = %q", data)
 	}
 }
@@ -2218,50 +2229,136 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 	node := filepath.Join(nodeRoot, "bin", "node")
 	writeNodeExecutable(t, node, 24)
 	mise := filepath.Join(root, "mise")
-	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf 'mise progress\\n' >&2\ncase \"$2\" in exec) printf 'v24.18.0\\n';; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", nodeRoot))
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf 'mise progress\\n' >&2\ncase \"$2\" in install) :;; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", nodeRoot))
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Runner{Mise: mise}).resolveMiseNodePath(context.Background(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
-		t.Fatalf("resolveMiseNodePath() error = %v, want exact executable version rejection", err)
-	}
-	if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n"), 0o755); err != nil {
+	wrongBytes, err := os.ReadFile(node)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := (Runner{Mise: mise}).resolveMiseNodePath(context.Background(), 24)
+	wrongDigest := sha256.Sum256(wrongBytes)
+	if _, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(wrongDigest[:])}}).resolveMiseNodePath(context.Background(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
+		t.Fatalf("resolveMiseNodePath() error = %v, want exact executable version rejection", err)
+	}
+	correctBytes := []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n")
+	if err := os.WriteFile(node, correctBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	correctDigest := sha256.Sum256(correctBytes)
+	got, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(correctDigest[:])}}).resolveMiseNodePath(context.Background(), 24)
 	if err != nil || got != filepath.Join(nodeRoot, "bin", "node") {
 		t.Fatalf("resolveMiseNodePath() = %q, %v", got, err)
 	}
 }
 
-func TestJavaScriptPhaseUsesMiseForItsMajorWhenOtherMajorIsExplicit(t *testing.T) {
+func TestManagedMiseCacheReplacesNodeWithWrongDigest(t *testing.T) {
 	root := t.TempDir()
-	log := filepath.Join(root, "args")
+	dataDir := filepath.Join(root, "data")
+	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
+	node := filepath.Join(installation, "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	poisoned := []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n# poisoned\n")
+	if err := os.WriteFile(node, poisoned, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n# replacement\n")
+	digest := sha256.Sum256(replacement)
 	mise := filepath.Join(root, "mise")
-	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q\ncase \"$*\" in *--version) printf 'v24.18.0\\n';; esac\n", log))
+	script := fmt.Sprintf(`#!/bin/sh
+node=%q
+installation=%q
+case "$2" in
+  install)
+    if [ ! -x "$node" ]; then
+      mkdir -p "$(dirname "$node")"
+      cat > "$node" <<'NODE'
+%sNODE
+      chmod 0755 "$node"
+    fi
+    ;;
+  where) printf '%%s\n' "$installation" ;;
+  *) exit 9 ;;
+esac
+`, node, installation, replacement)
+	if err := os.WriteFile(mise, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	verification := &managedNodeVerification{paths: make(map[int]string)}
+	runner := Runner{
+		Mise:             mise,
+		MiseDataDir:      dataDir,
+		nodeDigests:      map[int]string{24: hex.EncodeToString(digest[:])},
+		nodeVerification: verification,
+	}
+	if got, err := runner.discoverNode(context.Background(), 24, ""); err != nil || got != node {
+		t.Fatalf("discoverNode() = %q, %v", got, err)
+	}
+	got, err := os.ReadFile(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, replacement) || verification.paths[24] != node {
+		t.Fatalf("replacement node = %q, verified = %#v", got, verification.paths)
+	}
+}
+
+func TestManagedMiseCacheRefusesSymlinkedRemoval(t *testing.T) {
+	dataDir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dataDir, "installs")); err != nil {
+		t.Fatal(err)
+	}
+	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
+	if err := removeManagedNodeInstallation(dataDir, installation); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("removeManagedNodeInstallation() error = %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside directory was affected: %v", err)
+	}
+}
+
+func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(root, "node-args")
+	dataDir := filepath.Join(root, "mise-data")
+	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
+	node := filepath.Join(installation, "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodeBytes := []byte(fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log))
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\ncase \"$2\" in install) :;; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", installation))
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	writeFixtureFile(t, root, "main.js", "")
 	node20 := filepath.Join(root, "node20")
 	writeNodeExecutable(t, node20, 20)
-	runner := Runner{Mise: mise, Node20: node20}
-	node, err := runner.discoverNode(context.Background(), 24, "")
+	digest := sha256.Sum256(nodeBytes)
+	runner := Runner{Mise: mise, MiseDataDir: dataDir, Node20: node20, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}
+	resolvedNode, err := runner.discoverNode(context.Background(), 24, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := newResult()
 	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), node, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "--no-config exec node@24.18.0 -- node --version|MISE_DATA_DIR=unset\n--no-config exec node@24.18.0 -- node " + filepath.Join(root, "main.js") + "|MISE_DATA_DIR=unset\n"
+	want := filepath.Join(root, "main.js") + "|MISE_DATA_DIR=/workflow-controlled\n"
 	if string(data) != want {
-		t.Fatalf("mise invocations = %q, want %q", data, want)
+		t.Fatalf("Node invocations = %q, want %q", data, want)
 	}
 }
 
@@ -2275,12 +2372,22 @@ func TestMiseMissingIsClear(t *testing.T) {
 
 func TestMiseNodeSelectionRejectsWrongExactVersion(t *testing.T) {
 	root := t.TempDir()
+	installation := filepath.Join(root, "node")
+	node := filepath.Join(installation, "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodeBytes := []byte("#!/bin/sh\nprintf 'v24.18.1\\n'\n")
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	mise := filepath.Join(root, "mise")
-	writeFixtureFile(t, root, "mise", "#!/bin/sh\nprintf 'v24.18.1\\n'\n")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\ncase \"$2\" in install) :;; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", installation))
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (Runner{Mise: mise}).discoverNode(context.Background(), 24, "")
+	digest := sha256.Sum256(nodeBytes)
+	_, err := (Runner{Mise: mise, nodeDigests: map[int]string{24: hex.EncodeToString(digest[:])}}).discoverNode(context.Background(), 24, "")
 	if err == nil || !strings.Contains(err.Error(), `reported "v24.18.1", want "v24.18.0"`) {
 		t.Fatalf("discoverNode() error = %v", err)
 	}

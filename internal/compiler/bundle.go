@@ -88,6 +88,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 			Queue:        ir.Jobs[i].Queue,
 			PlanDigest:   digest,
 			Dependencies: append([]string(nil), ir.Jobs[i].Needs...),
+			UsesActions:  planUsesActions(job),
 		}
 		if ir.Jobs[i].MaxParallel != nil {
 			jobs[i].Concurrency = *ir.Jobs[i].MaxParallel
@@ -98,10 +99,20 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
 		MiseDigest:         options.MiseDigest,
+		MiseVersion:        options.MiseVersion,
 		Jobs:               jobs,
 	})
 	if err != nil {
 		return Bundle{}, fmt.Errorf("emit Buildkite pipeline: %w", err)
 	}
 	return Bundle{IR: ir, Plans: artifacts, Pipeline: pipeline}, nil
+}
+
+func planUsesActions(job plan.Job) bool {
+	for _, step := range job.Steps {
+		if step.Action != nil {
+			return true
+		}
+	}
+	return false
 }

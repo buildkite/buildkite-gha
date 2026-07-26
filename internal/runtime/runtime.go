@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ type Runner struct {
 	Node24            string
 	ManagedNodeRoot   string
 	Mise              string
+	MiseDataDir       string
 	Docker            string
 	RuntimeExecutable string
 	Git               string
@@ -51,6 +53,13 @@ type Runner struct {
 	explicitJobPATH   bool
 	jobContainer      *jobContainerBackend
 	jobDocker         *jobContainerBackend
+	nodeVerification  *managedNodeVerification
+	nodeDigests       map[int]string
+}
+
+type managedNodeVerification struct {
+	mu    sync.Mutex
+	paths map[int]string
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -479,17 +488,6 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	if r.usesMiseNode(action.nodeMajor) && r.jobContainer == nil {
-		name = node
-		args = []string{"--no-config", "exec", nodeTool(action.nodeMajor), "--", "node", entrypoint}
-		// The compatibility runtime owns mise configuration. Workflow values
-		// remain available to shell steps but cannot redirect Node selection.
-		for key := range env {
-			if strings.HasPrefix(key, "MISE_") {
-				delete(env, key)
-			}
-		}
-	}
 	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, name, args...); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
@@ -675,25 +673,20 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 const (
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
+	// Digests are for bin/node in the official Linux x86-64 release archives.
+	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
+	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
 )
 
 func nodeTool(major int) string {
 	switch major {
 	case 20:
-		return "node@" + Node20Version
+		return "core:node@" + Node20Version
 	case 24:
-		return "node@" + Node24Version
+		return "core:node@" + Node24Version
 	default:
 		return ""
 	}
-}
-
-func (r Runner) usesMiseNode(major int) bool {
-	explicit := r.Node24
-	if major == 20 {
-		explicit = r.Node20
-	}
-	return explicit == "" && r.ManagedNodeRoot == ""
 }
 
 func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (string, error) {
@@ -712,61 +705,206 @@ func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (s
 			return "", fmt.Errorf("mise is required to run JavaScript actions: %w", err)
 		}
 	}
-	cmd := exec.CommandContext(ctx, mise, "--no-config", "exec", tool, "--", "node", "--version")
-	cmd.Env = processEnv(nil)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", fmt.Errorf("verify exact %s with mise: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
-	}
-	want := strings.TrimPrefix(tool, "node@")
-	if strings.TrimSpace(string(out)) != "v"+want {
-		return "", fmt.Errorf("mise %s reported %q, want %q", tool, strings.TrimSpace(string(out)), "v"+want)
-	}
-	return mise, nil
+	return r.installAndVerifyMiseNode(ctx, major, mise)
 }
 
 func (r Runner) resolveMiseNodePath(ctx context.Context, major int) (string, error) {
-	mise, err := r.discoverNode(ctx, major, "")
+	return r.discoverNode(ctx, major, "")
+}
+
+func (r Runner) miseEnv() map[string]string {
+	if r.MiseDataDir == "" {
+		return nil
+	}
+	return map[string]string{"MISE_DATA_DIR": r.MiseDataDir}
+}
+
+func (r Runner) installAndVerifyMiseNode(ctx context.Context, major int, mise string) (string, error) {
+	if r.nodeVerification != nil {
+		r.nodeVerification.mu.Lock()
+		defer r.nodeVerification.mu.Unlock()
+		if path := r.nodeVerification.paths[major]; path != "" {
+			return path, nil
+		}
+	}
+	tool := nodeTool(major)
+	if err := r.installMiseNode(ctx, mise, tool); err != nil {
+		return "", err
+	}
+	installation, node, err := r.miseNodeInstallation(ctx, major, mise)
+	if err == nil {
+		err = verifyManagedNodeExecutable(ctx, major, node, r.nodeDigest(major))
+	}
+	if err != nil && r.MiseDataDir != "" {
+		if removeErr := removeManagedNodeInstallation(r.MiseDataDir, installation); removeErr != nil {
+			return "", errors.Join(fmt.Errorf("cached Node %d failed validation: %w", major, err), removeErr)
+		}
+		if installErr := r.installMiseNode(ctx, mise, tool); installErr != nil {
+			return "", fmt.Errorf("replace invalid cached %s: %w", tool, installErr)
+		}
+		_, node, err = r.miseNodeInstallation(ctx, major, mise)
+		if err == nil {
+			err = verifyManagedNodeExecutable(ctx, major, node, r.nodeDigest(major))
+		}
+		if err != nil {
+			return "", fmt.Errorf("replacement %s failed validation: %w", tool, err)
+		}
+	}
 	if err != nil {
 		return "", err
 	}
+	if r.nodeVerification != nil {
+		r.nodeVerification.paths[major] = node
+	}
+	return node, nil
+}
+
+func (r Runner) installMiseNode(ctx context.Context, mise, tool string) error {
+	cmd := exec.CommandContext(ctx, mise, "--no-config", "install", tool)
+	cmd.Env = processEnv(r.miseEnv())
+	var output strings.Builder
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("install exact %s with mise: %w: %s", tool, err, strings.TrimSpace(output.String()))
+	}
+	return nil
+}
+
+func (r Runner) nodeDigest(major int) string {
+	if digest := r.nodeDigests[major]; digest != "" {
+		return digest
+	}
+	switch major {
+	case 20:
+		return node20Digest
+	case 24:
+		return node24Digest
+	default:
+		return ""
+	}
+}
+
+func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string) (string, string, error) {
 	tool := nodeTool(major)
 	cmd := exec.CommandContext(ctx, mise, "--no-config", "where", tool)
+	cmd.Env = processEnv(r.miseEnv())
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve cached %s installation: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+	}
+	installation, err := filepath.Abs(strings.TrimSpace(string(out)))
+	if err != nil {
+		return "", "", fmt.Errorf("resolve %s installation path: %w", tool, err)
+	}
+	if r.MiseDataDir != "" {
+		dataDir, err := filepath.Abs(r.MiseDataDir)
+		if err != nil {
+			return "", "", fmt.Errorf("resolve mise data directory: %w", err)
+		}
+		resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
+		if err != nil || resolvedDataDir != dataDir {
+			return "", "", errors.New("mise data directory contains a symlink")
+		}
+		resolvedInstallation, err := filepath.EvalSymlinks(installation)
+		if err != nil || resolvedInstallation != installation {
+			return "", "", fmt.Errorf("mise-resolved %s installation contains a symlink", tool)
+		}
+		relative, err := filepath.Rel(dataDir, installation)
+		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return "", "", fmt.Errorf("mise resolved %s outside its runtime-owned data directory", tool)
+		}
+	}
+	node := filepath.Join(installation, "bin", "node")
+	info, err := os.Lstat(node)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return installation, node, fmt.Errorf("mise-resolved %s executable is not a regular file", tool)
+	}
+	resolvedNode, err := filepath.EvalSymlinks(node)
+	if err != nil || resolvedNode != node {
+		return installation, node, fmt.Errorf("mise-resolved %s executable contains a symlink", tool)
+	}
+	return installation, node, nil
+}
+
+func removeManagedNodeInstallation(dataDir, installation string) error {
+	dataDir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return fmt.Errorf("resolve mise data directory: %w", err)
+	}
+	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil || resolvedDataDir != dataDir {
+		return errors.New("refusing to remove Node installation through a symlinked mise data directory")
+	}
+	installation, err = filepath.Abs(installation)
+	if err != nil {
+		return fmt.Errorf("resolve cached Node installation: %w", err)
+	}
+	relative, err := filepath.Rel(dataDir, installation)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("refusing to remove Node installation outside the mise data directory")
+	}
+	current := dataDir
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect cached Node installation: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refusing to remove cached Node installation through symlink %q", current)
+		}
+	}
+	if err := os.RemoveAll(installation); err != nil {
+		return fmt.Errorf("remove invalid cached Node installation: %w", err)
+	}
+	return nil
+}
+
+func verifyManagedNodeExecutable(ctx context.Context, major int, path, want string) error {
+	if want == "" {
+		return fmt.Errorf("unsupported Node runtime major %d", major)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open Node %d executable: %w", major, err)
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		return fmt.Errorf("hash Node %d executable: %w", major, err)
+	}
+	got := hex.EncodeToString(hash.Sum(nil))
+	if got != want {
+		return fmt.Errorf("node %d executable digest %s does not match expected digest %s", major, got, want)
+	}
+	cmd := exec.CommandContext(ctx, path, "--version")
 	cmd.Env = processEnv(nil)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", fmt.Errorf("resolve exact %s installation with mise: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("verify exact Node %d executable: %w: %s", major, err, strings.TrimSpace(stderr.String()))
 	}
-	node, err := discoverNodeContext(ctx, major, filepath.Join(strings.TrimSpace(string(out)), "bin", "node"), "")
-	if err != nil {
-		return "", err
+	var wantVersion string
+	switch major {
+	case 20:
+		wantVersion = "v" + Node20Version
+	case 24:
+		wantVersion = "v" + Node24Version
+	default:
+		wantVersion = fmt.Sprintf("v%d", major)
 	}
-	cmd = exec.CommandContext(ctx, node, "--version")
-	cmd.Env = processEnv(nil)
-	stderr.Reset()
-	cmd.Stderr = &stderr
-	out, err = cmd.Output()
-	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-		return "", fmt.Errorf("verify exact %s executable: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+	if strings.TrimSpace(string(out)) != wantVersion {
+		return fmt.Errorf("node %d executable reported %q, want %q", major, strings.TrimSpace(string(out)), wantVersion)
 	}
-	want := "v" + strings.TrimPrefix(tool, "node@")
-	if strings.TrimSpace(string(out)) != want {
-		return "", fmt.Errorf("mise-resolved %s executable reported %q, want %q", tool, strings.TrimSpace(string(out)), want)
-	}
-	return node, nil
+	return nil
 }
 
 // DiscoverNode resolves an explicit Node binary or a binary in the managed
@@ -854,6 +992,8 @@ func mapEnv(values map[string]string) []string {
 }
 
 func processEnv(overrides map[string]string) []string {
+	// This allowlist is also the mise trust boundary: ambient MISE_* values must
+	// never redirect compatibility runtime downloads or verification.
 	values := make(map[string]string, 6+len(overrides))
 	for _, name := range []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE"} {
 		if value, ok := os.LookupEnv(name); ok {

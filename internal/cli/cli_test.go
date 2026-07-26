@@ -293,6 +293,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		Steps []struct {
 			Key     string `yaml:"key"`
 			Command string `yaml:"command"`
+			Cache   any    `yaml:"cache"`
 			Agents  struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
@@ -312,6 +313,9 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
 	for _, step := range pipeline.Steps {
+		if step.Cache != nil {
+			t.Fatalf("shell-only step %q unexpectedly configures a runtime cache: %#v", step.Key, step.Cache)
+		}
 		if !step.Checkout.Skip || step.Agents.Queue != "hosted" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
@@ -449,6 +453,11 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 	var pipeline struct {
 		Steps []struct {
 			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+			} `yaml:"cache"`
+			Env map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
@@ -460,6 +469,41 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 	command := pipeline.Steps[0].Command
 	if !strings.Contains(command, ".buildkite-gha/tools/mise/") || !strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
 		t.Fatalf("generated pipeline does not use the mise runtime boundary:\n%s", command)
+	}
+	step := pipeline.Steps[0]
+	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != ".buildkite-gha/cache-volume" {
+		t.Fatalf("generated action cache = %#v", step.Cache)
+	}
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	}
+}
+
+func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
+	var stderr bytes.Buffer
+	dir := filepath.Join(t.TempDir(), "mise")
+	if got := prepareMiseDataDir(dir, &stderr); got != dir || stderr.Len() != 0 {
+		t.Fatalf("prepareMiseDataDir() = %q, stderr = %q", got, stderr.String())
+	}
+
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if got := prepareMiseDataDir(file, &stderr); got != "" || !strings.Contains(stderr.String(), "using the ephemeral agent cache") {
+		t.Fatalf("prepareMiseDataDir(file) = %q, stderr = %q", got, stderr.String())
+	}
+
+	parent := t.TempDir()
+	target := t.TempDir()
+	link := filepath.Join(parent, "linked-cache")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if got := prepareMiseDataDir(filepath.Join(link, "mise"), &stderr); got != "" || !strings.Contains(stderr.String(), "not a real directory") {
+		t.Fatalf("prepareMiseDataDir(symlink) = %q, stderr = %q", got, stderr.String())
 	}
 }
 

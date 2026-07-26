@@ -93,6 +93,9 @@ func VerifyWorkflow(job plan.Job, workspace string) error {
 // RunJob executes the plan's ordered steps and always drains registered post actions.
 func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (final JobResult, runJobErr error) {
 	callerWorkspace := workspace != ""
+	if r.nodeVerification == nil {
+		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 2)}
+	}
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
