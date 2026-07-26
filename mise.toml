@@ -42,7 +42,7 @@ description = "Build all Go commands"
 run = "go build ./..."
 
 [tasks.release]
-description = "Tag and push the next pre-1.0 release"
+description = "Request the next pre-1.0 release from main"
 depends = ["check"]
 run = "scripts/release"
 

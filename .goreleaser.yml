@@ -34,6 +34,10 @@ archives:
 checksum:
   name_template: checksums.txt
 
+release:
+  target_commitish: "{{ .Commit }}"
+  replace_existing_artifacts: true
+
 changelog:
   sort: asc
   filters:

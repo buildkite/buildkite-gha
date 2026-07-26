@@ -3,28 +3,51 @@ set -euo pipefail
 
 die() { printf '[ci-buildkite-release] error: %s\n' "$*" >&2; exit 1; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
-for command in awk buildkite-agent git goreleaser; do require_command "$command"; done
+for command in awk buildkite-agent git goreleaser svu; do require_command "$command"; done
 
-: "${BUILDKITE_TAG:?BUILDKITE_TAG is required}"
 : "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}"
-semver_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-semver_prerelease="${semver_identifier}(\\.${semver_identifier})*"
-[[ "$BUILDKITE_TAG" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-${semver_prerelease})?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] \
-  || die 'BUILDKITE_TAG must be a pre-1.0 semantic version tag'
+: "${RELEASE_VERSION:?RELEASE_VERSION is required}"
+[[ "${BUILDKITE_BRANCH:-}" == main ]] || die 'release build must use the main branch'
+[[ "${BUILDKITE_SOURCE:-}" == api ]] || die 'release build must be created through the API'
+[[ "${BUILDKITE_PULL_REQUEST:-false}" == false ]] || die 'release build must not be a pull request'
+[[ -z "${BUILDKITE_TAG:-}" ]] || die 'release build must not be a tag build'
+[[ "$RELEASE_VERSION" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+  || die 'RELEASE_VERSION must be a stable pre-1.0 semantic version tag'
 [[ "$BUILDKITE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die 'BUILDKITE_COMMIT must be a full lowercase commit ID'
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-git fetch --force --tags origin
-remote_tag_commit="$(git ls-remote --exit-code origin "refs/tags/${BUILDKITE_TAG}" "refs/tags/${BUILDKITE_TAG}^{}" | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { tag=$1 } END { print peeled != "" ? peeled : tag }')" \
-  || die 'release tag does not exist on origin'
-tag_commit="$(git rev-list -n 1 "$BUILDKITE_TAG^{commit}")" || die 'release tag does not resolve to a commit'
-[[ "$remote_tag_commit" == "$tag_commit" ]] || die "origin tag resolves to ${remote_tag_commit}, not ${tag_commit}"
-[[ "$tag_commit" == "$BUILDKITE_COMMIT" ]] || die "tag resolves to ${tag_commit}, not BUILDKITE_COMMIT"
+git fetch --force origin main --tags
+if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
+  git fetch --unshallow origin
+fi
 [[ "$(git rev-parse HEAD)" == "$BUILDKITE_COMMIT" ]] || die 'checked-out HEAD does not match BUILDKITE_COMMIT'
+[[ "$(git rev-parse origin/main)" == "$BUILDKITE_COMMIT" ]] || die 'release commit is not the current origin/main'
+[[ -z "$(git status --porcelain --untracked-files=all)" ]] || die 'working tree is not clean'
+
+remote_tag_commit="$(git ls-remote origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { tag=$1 } END { print peeled != "" ? peeled : tag }')"
+if [[ -n "$remote_tag_commit" ]]; then
+  [[ "$remote_tag_commit" == "$BUILDKITE_COMMIT" ]] \
+    || die "origin tag resolves to ${remote_tag_commit}, not BUILDKITE_COMMIT"
+else
+  current="$(svu current)"
+  if [[ -z "$(git tag --list 'v*')" ]]; then
+    next=v0.1.0
+  else
+    next="$(svu next)"
+  fi
+  if [[ "$current" == v0.* && "$next" == v1.* ]]; then next="$(svu minor)"; fi
+  [[ "$RELEASE_VERSION" == "$next" ]] \
+    || die "RELEASE_VERSION is ${RELEASE_VERSION}, expected ${next}"
+  git tag --force "$RELEASE_VERSION" "$BUILDKITE_COMMIT"
+fi
+
+tag_commit="$(git rev-list -n 1 "$RELEASE_VERSION^{commit}")" || die 'release tag does not resolve to a commit'
+[[ "$tag_commit" == "$BUILDKITE_COMMIT" ]] || die "tag resolves to ${tag_commit}, not BUILDKITE_COMMIT"
 
 github_token="$(buildkite-agent secret get GHA_GITHUB_RELEASE_TOKEN)"
 github_token="${github_token//$'\r'/}"
 [[ -n "$github_token" ]] || die 'GHA_GITHUB_RELEASE_TOKEN is empty'
 export GITHUB_TOKEN="$github_token"
+export GORELEASER_CURRENT_TAG="$RELEASE_VERSION"
 goreleaser release --clean

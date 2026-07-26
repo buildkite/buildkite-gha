@@ -190,30 +190,38 @@ from the GitHub release, verify the archive against the checksum file, and
 extract it to a stable location. The archive contains only `buildkite-gha` and
 `LICENSE`.
 
-Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
-and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
-publisher creates the GitHub release after repository checks pass.
+Maintainers run `mise run release` from a clean, up-to-date `main`. This starts
+an API-sourced Buildkite build of that exact commit with the next
+conventional-commit-derived v0 version. After repository checks pass, the
+publisher creates the tag and GitHub release together and uploads the archive
+and checksum. A failed publication can be retried with the same release version;
+existing assets are replaced.
 The source repository must be public before the initial tag is pushed because
 the companion plugin intentionally downloads release assets without a GitHub
 token.
 
-The release step's tag condition prevents accidental publication; it is not a
+The release step's build condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
 steps. Create a fine-grained GitHub token scoped only to this repository with
 Contents read/write permission, then store it as the `GHA_GITHUB_RELEASE_TOKEN`
-Buildkite Secret in the release pipeline's cluster. Run tagged releases in a
-dedicated release pipeline configured to build upstream tags only, and use an
-access policy containing only that pipeline's immutable ID and webhook source:
+Buildkite Secret in the pipeline's cluster. Restrict it to authenticated API
+release builds of `main` created by the Pipelines team:
 
 ```yaml
-- pipeline_id: "<release-pipeline-uuid>"
-  build_source: "webhook"
+- pipeline_id: "019f8835-5873-4a64-850e-ba117a339d87"
+  build_source: "api"
+  build_branch: "main"
+  build_creator_team: "7dbc8bd0-e1e3-40c3-96fd-4a058c24e755"
 ```
 
-The webhook policy does not distinguish tag and pull-request webhooks, so the
-release pipeline's tag-only provider filter is a load-bearing part of this
-boundary. Do not expose the token through a shared agent environment hook or to
-ordinary branch and pull-request jobs.
+Because API callers supply the build's branch and commit, the pipeline's
+Terraform-managed bootstrap verifies that API builds labeled `main` have
+checked out the current `origin/main` before uploading repository-controlled
+pipeline YAML. That external check and the Secret policy form the credential
+boundary. The publisher repeats the commit check and verifies that the requested
+version is the next v0 release before retrieving the token. Do not expose the
+token through a shared agent environment hook or to webhook, ordinary branch,
+or pull-request jobs.
 
 ## Development
 
