@@ -13,8 +13,8 @@ queue policy, produces immutable job plans, and emits a Buildkite pipeline.
 
 ## Quick start
 
-For a public GitHub repository on a Linux x86-64 Buildkite importer agent with
-`mise` on `PATH`, add the
+For a public GitHub repository on a Linux x86-64 Buildkite importer agent, add
+the
 [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/github-actions-buildkite-plugin)
 to `pipeline.yml`:
 
@@ -94,10 +94,10 @@ For workflows containing JavaScript actions, `mise` selects exactly Node
 node@<exact-version> -- node <entry>`, so repository mise configuration cannot
 change compatibility selection. `MISE_*` workflow environment overrides are
 not passed through this compatibility launcher; shell steps are unaffected.
-For action workflows, the importer requires mise 2026.5.12, validates its
-executable, and uploads a deterministic compressed copy as a content-addressed
-artifact. Generated jobs verify and use that copy, so the fixed hosted queue
-does not need mise preinstalled. Job
+For action workflows, the plugin installs and verifies mise 2026.5.12 when
+needed. The importer uploads a deterministic compressed copy as a
+content-addressed artifact. Generated jobs verify and use that copy, so neither
+the importer nor the fixed hosted queue needs mise preinstalled. Job
 containers resolve the exact host mise installation and bind-mount its Node
 executable; mise is not required in the image. Node executables are never
 release or Buildkite artifacts.

@@ -834,10 +834,12 @@ at barriers, and the cross-stream masking race.
 - managed Node distributions rather than assuming the host's `node` is
   compatible.
 
-The release archive contains only the static Go CLI and LICENSE. Agents require
-mise 2026.5.12 on the importer PATH. For action workflows, upload validates and
-deterministically archives that pinned importer mise executable, transports it
-as a content-addressed artifact, and re-verifies it in every generated job. Host
+The release archive contains only the static Go CLI and LICENSE. The installer
+plugin bootstraps mise 2026.5.12, verifies its pinned release archive and exact
+cached executable tree by SHA-256, and follows the shared Buildkite hosted-cache
+and agent-cache conventions. For action workflows, upload deterministically
+archives that pinned importer mise executable, transports it as a
+content-addressed artifact, and re-verifies it in every generated job. Host
 actions execute with configuration disabled using exactly `mise --no-config
 exec node@20.20.2 -- node <entry>` or Node 24.18.0, never a fuzzy major and
 never repository mise configuration. `MISE_*` workflow environment overrides
@@ -1022,20 +1024,21 @@ Publish checksummed releases. Add signatures, provenance attestations, and
 SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
 arm64 can follow once action/runtime compatibility is measured.
 
-Distributions provide the static bridge CLI and LICENSE. The importer requires
-the pinned mise version, and action workflows transport its verified executable
-as a content-addressed artifact so generated hosted jobs can resolve exact Node
-versions without preinstalled mise. Every generated job must execute the same
-bridge version that produced its plan unless the plan schema explicitly permits
-a compatible newer runtime.
+Distributions provide the static bridge CLI and LICENSE. The installer plugin
+provides the pinned, verified mise executable, and action workflows transport
+it as a content-addressed artifact so generated hosted jobs can resolve exact
+Node versions without preinstalled mise. Every generated job must execute the
+same bridge version that produced its plan unless the plan schema explicitly
+permits a compatible newer runtime.
 
 The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
-distribution, verifies the importer mise version, and invokes the fixed
-hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are installed by mise on
-demand; official mise-installed Node binaries require glibc 2.28 or newer.
+distribution, installs and digest-verifies the pinned mise executable, and
+invokes the fixed hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are
+installed by mise on demand; official mise-installed Node binaries require
+glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
 signatures, provenance attestations, and SBOMs remain Phase 9 work and are not
