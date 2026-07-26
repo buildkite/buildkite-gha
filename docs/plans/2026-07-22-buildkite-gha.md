@@ -1018,21 +1018,24 @@ be issued.
 
 ### Installation and release model
 
-Publish signed, checksummed releases with SBOMs. The initial supported
-distribution is Linux x86-64; Linux arm64 can follow once action/runtime
-compatibility is measured.
+Publish checksummed releases. Add signatures, provenance attestations, and
+SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
+arm64 can follow once action/runtime compatibility is measured.
 
-Distributions provide both pinned managed Node runtimes under the fixed layout.
-Hosted Agents may include that complete bridge distribution; customer-managed
-agents can install a pinned version through a small Buildkite plugin. Every
-generated job must execute the same bridge version that produced its plan
-unless the plan schema explicitly permits a compatible newer runtime.
+Distributions provide the static bridge CLI and LICENSE. The importer requires
+the pinned mise version, and action workflows transport its verified executable
+as a content-addressed artifact so generated hosted jobs can resolve exact Node
+versions without preinstalled mise. Every generated job must execute the same
+bridge version that produced its plan unless the plan schema explicitly permits
+a compatible newer runtime.
 
-The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64,
-glibc 2.28+ archive containing the CLI and digest-pinned Node 20 and 24
-runtimes, plus the `github-actions#v0.1.0` installer plugin. The plugin downloads
-an exact public release, verifies its checksum and fixed archive layout, caches
-the verified distribution, and invokes the fixed hosted-tokenless upload path.
+The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
+archive containing only the static CLI and LICENSE, plus the
+`github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
+release, verifies its checksum and fixed archive layout, caches the verified
+distribution, verifies the importer mise version, and invokes the fixed
+hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are installed by mise on
+demand; official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
 signatures, provenance attestations, and SBOMs remain Phase 9 work and are not
