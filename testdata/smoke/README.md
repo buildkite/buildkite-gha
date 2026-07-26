@@ -39,10 +39,10 @@ The default harness does not parse emitted YAML, fetch actions, or execute
 workflows; successful compilation is not runtime evidence.
 
 Run `mise run smoke:profile` for the opt-in networked preflight of entries marked
-`hosted-tokenless`. It anonymously resolves actions, prepares the managed Node
-runtimes, compiles plans, and applies the same admission policy as production
-upload. Admission does not execute action code or prove that a generic action
-is independent of GitHub-only artifact, cache, token, or OIDC services.
+`hosted-tokenless`. It anonymously resolves actions, compiles plans, and applies
+the same admission policy as production upload without installing or executing
+Node. Admission does not execute action code or prove that a generic action is
+independent of GitHub-only artifact, cache, token, or OIDC services.
 Known official cache and artifact actions are rejected until their Phase 6
 adapters exist; the profile leaves unknown generic service dependencies as an
 explicit warning rather than guessing from arbitrary action source. Runtime-pass

@@ -2222,6 +2222,12 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 	if err := os.Chmod(mise, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := (Runner{Mise: mise}).resolveMiseNodePath(context.Background(), 24); err == nil || !strings.Contains(err.Error(), `reported "v24.99.0", want "v24.18.0"`) {
+		t.Fatalf("resolveMiseNodePath() error = %v, want exact executable version rejection", err)
+	}
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nprintf 'v24.18.0\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	got, err := (Runner{Mise: mise}).resolveMiseNodePath(context.Background(), 24)
 	if err != nil || got != filepath.Join(nodeRoot, "bin", "node") {
 		t.Fatalf("resolveMiseNodePath() = %q, %v", got, err)

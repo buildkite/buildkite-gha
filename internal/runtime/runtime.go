@@ -747,7 +747,26 @@ func (r Runner) resolveMiseNodePath(ctx context.Context, major int) (string, err
 		}
 		return "", fmt.Errorf("resolve exact %s installation with mise: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
 	}
-	return discoverNodeContext(ctx, major, filepath.Join(strings.TrimSpace(string(out)), "bin", "node"), "")
+	node, err := discoverNodeContext(ctx, major, filepath.Join(strings.TrimSpace(string(out)), "bin", "node"), "")
+	if err != nil {
+		return "", err
+	}
+	cmd = exec.CommandContext(ctx, node, "--version")
+	cmd.Env = processEnv(nil)
+	stderr.Reset()
+	cmd.Stderr = &stderr
+	out, err = cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("verify exact %s executable: %w: %s", tool, err, strings.TrimSpace(stderr.String()))
+	}
+	want := "v" + strings.TrimPrefix(tool, "node@")
+	if strings.TrimSpace(string(out)) != want {
+		return "", fmt.Errorf("mise-resolved %s executable reported %q, want %q", tool, strings.TrimSpace(string(out)), want)
+	}
+	return node, nil
 }
 
 // DiscoverNode resolves an explicit Node binary or a binary in the managed

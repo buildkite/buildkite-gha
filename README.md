@@ -247,12 +247,12 @@ For an opt-in public-network preflight, run:
 mise run smoke:profile
 ```
 
-This anonymously resolves the selected public actions, prepares the managed
-Node runtimes, and applies the same `hosted-tokenless` production admission
-policy used by `upload`. The known official artifact and cache actions compile
-but fail admission until the Phase 6 adapters exist. An `admitted` result is
-not runtime proof and does not imply that an arbitrary admitted action is
-executable or independent of GitHub-only services.
+This anonymously resolves the selected public actions and applies the same
+`hosted-tokenless` production admission policy used by `upload`, without
+installing or executing Node. The known official artifact and cache actions
+compile but fail admission until the Phase 6 adapters exist. An `admitted`
+result is not runtime proof and does not imply that an arbitrary admitted
+action is executable or independent of GitHub-only services.
 
 Use the same policy as a focused workflow compatibility preflight, with either
 human-readable or machine-readable output:
