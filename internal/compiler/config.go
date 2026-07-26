@@ -47,7 +47,8 @@ type Options struct {
 	ActionSource   ActionSource
 	// MiseDigest is runtime transport policy only. It is emitted into generated
 	// pipeline bootstrap commands and never changes compiler IR or plans.
-	MiseDigest string
+	MiseDigest  string
+	MiseVersion string
 }
 
 func defaultOptions() Options {

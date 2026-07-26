@@ -89,18 +89,21 @@ closed.
 The path is intentionally unsigned: ordinary Buildkite dynamic uploads do not
 need plan signing merely to run public, tokenless code.
 
-For workflows containing JavaScript actions, `mise` selects exactly Node
-20.20.2 or 24.18.0. Host actions run as `mise --no-config exec
-node@<exact-version> -- node <entry>`, so repository mise configuration cannot
-change compatibility selection. `MISE_*` workflow environment overrides are
-not passed through this compatibility launcher; shell steps are unaffected.
+For workflows containing JavaScript actions, `mise --no-config` installs
+exactly Node 20.20.2 or 24.18.0 through its pinned core backend. The runtime
+digest-verifies and directly invokes that Node executable, so repository mise
+configuration and `MISE_*` workflow environment overrides cannot change
+compatibility selection. Shell-step environments are unaffected.
 For action workflows, the plugin installs and verifies mise 2026.5.12 when
 needed. The importer uploads a deterministic compressed copy as a
 content-addressed artifact. Generated jobs verify and use that copy, so neither
-the importer nor the fixed hosted queue needs mise preinstalled. Job
-containers resolve the exact host mise installation and bind-mount its Node
-executable; mise is not required in the image. Node executables are never
-release or Buildkite artifacts.
+the importer nor the fixed hosted queue needs mise preinstalled. Generated
+action jobs automatically attach a pipeline-scoped Buildkite cache volume for
+mise-managed Node installations. Cache misses remain correct, and cached Node
+executables are checked against the official Linux x86-64 release digest and
+reinstalled on mismatch before use. Job containers bind-mount that verified
+host Node executable; mise is not required in the image. Node executables are
+never release or Buildkite artifacts.
 
 `run-job` consumes a versioned job plan and executes Linux Bash and sh steps in
 a fresh checkout-free workspace. The runtime supports env and working-directory
@@ -177,7 +180,9 @@ optional installation-specific defence in depth.
 
 The plugin in [Quick start](#quick-start) is the recommended installation. For
 direct CLI use, install `mise`; the runtime asks it to install and cache exact
-Node 20.20.2 and 24.18.0 versions as needed. The official mise-installed Node
+Node 20.20.2 and 24.18.0 versions as needed. Direct `upload` invocation requires
+mise 2026.5.12 on the importer `PATH` for action workflows; `validate` and
+`compile` do not install Node or require mise. The official mise-installed Node
 binaries used by JavaScript actions require glibc 2.28 or newer; the static Go
 CLI does not. Download
 `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt`

@@ -209,13 +209,14 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		actionMaterializer = store
 	}
 	runner := gharuntime.Runner{
-		Stdout:   stdout,
-		Stderr:   stderr,
-		Docker:   os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:      os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:  gharuntime.EnvironmentSecrets{},
-		Redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-		Actions:  actionMaterializer,
+		Stdout:      stdout,
+		Stderr:      stderr,
+		MiseDataDir: prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		Docker:      os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:         os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets:     gharuntime.EnvironmentSecrets{},
+		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:     actionMaterializer,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -256,6 +257,28 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+func prepareMiseDataDir(path string, stderr io.Writer) string {
+	if path == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is invalid; using the ephemeral agent cache: %v\n", path, err)
+		return ""
+	}
+	if err := os.MkdirAll(absolute, 0o755); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is unavailable; using the ephemeral agent cache: %v\n", path, err)
+		return ""
+	}
+	resolved, resolveErr := filepath.EvalSymlinks(absolute)
+	info, statErr := os.Lstat(absolute)
+	if resolveErr != nil || resolved != absolute || statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is not a real directory; using the ephemeral agent cache\n", path)
+		return ""
+	}
+	return absolute
 }
 
 func hasGitHubActionLocks(locks []plan.ActionLock) bool {
@@ -666,6 +689,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		}
 		miseArtifact = &artifact
 		options.MiseDigest = artifact.Digest
+		options.MiseVersion = managedMiseVersion
 	}
 	bundle, err := compiler.CompileBundleContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options)
 	if err != nil {

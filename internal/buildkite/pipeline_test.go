@@ -84,7 +84,9 @@ func TestEmitGolden(t *testing.T) {
 	}
 	if !strings.Contains(string(first), `artifact download '.buildkite-gha/distributions/`) ||
 		!strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
-		strings.Contains(string(first), "go run") {
+		strings.Contains(string(first), "go run") ||
+		strings.Contains(string(first), "cache:") ||
+		strings.Contains(string(first), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("generated jobs are not self-contained:\n%s", first)
 	}
 	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
@@ -101,7 +103,8 @@ func TestEmitMiseBootstrap(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		MiseDigest:         digest,
-		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan")}},
+		MiseVersion:        "2026.5.12",
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), UsesActions: true}},
 	}
 	output, err := Emit(pipeline)
 	if err != nil {
@@ -114,6 +117,11 @@ func TestEmitMiseBootstrap(t *testing.T) {
 	var document struct {
 		Steps []struct {
 			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+			} `yaml:"cache"`
+			Env map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
@@ -135,6 +143,13 @@ func TestEmitMiseBootstrap(t *testing.T) {
 			t.Fatalf("mise bootstrap missing %q:\n%s", want, command)
 		}
 	}
+	step := document.Steps[0]
+	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != ".buildkite-gha/cache-volume" {
+		t.Fatalf("mise cache volume = %#v", step.Cache)
+	}
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	}
 }
 
 func TestMisePathValidation(t *testing.T) {
@@ -145,6 +160,48 @@ func TestMisePathValidation(t *testing.T) {
 	}
 	if _, err := MisePath("sha256:nope"); err == nil {
 		t.Fatal("MisePath() accepted an invalid digest")
+	}
+	dataDir, err := MiseDataDir("2026.5.12")
+	if err != nil || dataDir != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+		t.Fatalf("MiseDataDir() = %q, %v", dataDir, err)
+	}
+	if _, err := MiseDataDir("latest"); err == nil {
+		t.Fatal("MiseDataDir() accepted an unpinned version")
+	}
+}
+
+func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		MiseDigest:         testDigest("mise"),
+		MiseVersion:        "2026.5.12",
+		Jobs: []Job{
+			{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("action-plan"), UsesActions: true},
+			{Key: "shell", Label: "Shell", Queue: "hosted", PlanDigest: testDigest("shell-plan")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Key     string            `yaml:"key"`
+			Command string            `yaml:"command"`
+			Cache   any               `yaml:"cache"`
+			Env     map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range document.Steps {
+		if step.Key == "action" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] == "" || !strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("action job lacks managed mise: %#v", step)
+		}
+		if step.Key == "shell" && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("shell job gained managed mise: %#v", step)
+		}
 	}
 }
 
@@ -157,6 +214,8 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 	}{
 		{name: "empty", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest}, want: "at least one generated job"},
 		{name: "bad distribution digest", in: Pipeline{CompilerStep: "compiler", DistributionDigest: "sha256:nope", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid distribution digest"},
+		{name: "mise digest without version", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, MiseDigest: digest, Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("mise-plan")}}}, want: "invalid mise version"},
+		{name: "mise version without digest", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, MiseVersion: "2026.5.12", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("mise-version-plan")}}}, want: "mise version requires a mise digest"},
 		{name: "unknown dependency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Dependencies: []string{"missing"}}}}, want: "unknown dependency"},
 		{name: "cycle", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("one"), Dependencies: []string{"two"}}, {Key: "two", Label: "Two", Queue: "queue", PlanDigest: testDigest("two"), Dependencies: []string{"one"}}}}, want: "contains a cycle"},
 		{name: "duplicate key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("one")}, {Key: "one", Label: "Other", Queue: "queue", PlanDigest: testDigest("other")}}}, want: "duplicate generated step key"},
