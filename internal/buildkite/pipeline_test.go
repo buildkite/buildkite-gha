@@ -95,6 +95,59 @@ func TestEmitGolden(t *testing.T) {
 	}
 }
 
+func TestEmitMiseBootstrap(t *testing.T) {
+	digest := testDigest("mise")
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		MiseDigest:         digest,
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan")}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := MisePath(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse emitted YAML: %v", err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("emitted steps = %#v", document.Steps)
+	}
+	command := document.Steps[0].Command
+	for _, want := range []string{
+		"artifact download '" + path + `' "$bootstrap_dir" --step 'importer'`,
+		`sha256sum "$mise_archive"`,
+		`test "$actual_mise_digest" = '` + digest + `'`,
+		`gzip -dc "$mise_archive" > "$mise"`,
+		`chmod 0500 "$mise"`,
+		`export PATH="$bootstrap_dir:$PATH"`,
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("mise bootstrap missing %q:\n%s", want, command)
+		}
+	}
+}
+
+func TestMisePathValidation(t *testing.T) {
+	digest := testDigest("mise")
+	path, err := MisePath(digest)
+	if err != nil || path != ".buildkite-gha/tools/mise/"+strings.TrimPrefix(digest, "sha256:")+"/mise.gz" {
+		t.Fatalf("MisePath() = %q, %v", path, err)
+	}
+	if _, err := MisePath("sha256:nope"); err == nil {
+		t.Fatal("MisePath() accepted an invalid digest")
+	}
+}
+
 func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 	digest := testDigest("plan")
 	tests := []struct {

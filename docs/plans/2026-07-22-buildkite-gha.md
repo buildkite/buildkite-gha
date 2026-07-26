@@ -835,15 +835,18 @@ at barriers, and the cross-stream masking race.
   compatible.
 
 The release archive contains only the static Go CLI and LICENSE. Agents require
-`mise` on PATH. Host actions execute with configuration disabled using exactly
-`mise --no-config exec node@20.20.2 -- node <entry>` or Node 24.18.0, never a
-fuzzy major and never repository mise configuration. `MISE_*` workflow
-environment overrides are withheld from that launcher, while ordinary shell
-steps retain them. For job containers, the host resolves that exact mise
-installation and mounts the Node executable; mise is not required in the
-image. Node runtime bytes are not release or Buildkite artifacts. Official
-mise-installed Node binaries require glibc 2.28+ when JavaScript actions run;
-that is not a requirement of the static Go CLI.
+mise 2026.5.12 on the importer PATH. For action workflows, upload validates and
+deterministically archives that pinned importer mise executable, transports it
+as a content-addressed artifact, and re-verifies it in every generated job. Host
+actions execute with configuration disabled using exactly `mise --no-config
+exec node@20.20.2 -- node <entry>` or Node 24.18.0, never a fuzzy major and
+never repository mise configuration. `MISE_*` workflow environment overrides
+are withheld from that launcher, while ordinary shell steps retain them. For
+job containers, the host resolves that exact mise installation and mounts the
+Node executable; mise is not required in the image. Node runtime bytes are not
+release or Buildkite artifacts. Official mise-installed Node binaries require
+glibc 2.28+ when JavaScript actions run; that is not a requirement of the
+static Go CLI.
 
 #### Composite actions
 
@@ -1223,8 +1226,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
   on private sources or provider-dependent authentication. Action resolution is
   independent of event trust. Normal `upload` resolves local and anonymous
   public JavaScript/composite actions without transporting Node executable
-  bytes; generated agents resolve the exact compatibility version through
-  `mise --no-config`. This path remains `EventUntrusted`, fixed to the
+  bytes; generated agents use the exact content-addressed importer mise
+  executable to resolve compatibility versions through `mise --no-config`.
+  This path remains `EventUntrusted`, fixed to the
   ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
   or the Phase 5 compiler-proven Dockerfile-action provenance.
   Private remote action or repository source, provider tokens, secrets, job- or

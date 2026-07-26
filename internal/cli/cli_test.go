@@ -2,12 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -401,7 +403,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	}
 }
 
-func TestRunUploadJavaScriptActionLeavesNodeInstallationToMise(t *testing.T) {
+func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "local")
@@ -422,22 +424,41 @@ func TestRunUploadJavaScriptActionLeavesNodeInstallationToMise(t *testing.T) {
 	}
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
+	setFakeMise(t)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 3 {
-		t.Fatalf("commands = %d, want distribution, plan, and pipeline", len(runner.commands))
+	if len(runner.commands) != 4 {
+		t.Fatalf("commands = %d, want distribution, mise, plan, and pipeline", len(runner.commands))
 	}
+	miseArtifacts := 0
 	for path := range runner.uploaded {
-		if strings.Contains(path, "/runtimes/") || strings.HasSuffix(path, ".gz") {
+		if strings.Contains(path, "/runtimes/") {
 			t.Fatalf("upload contains a Node runtime artifact %q", path)
 		}
+		if strings.Contains(path, "/tools/mise/") && strings.HasSuffix(path, "/mise.gz") {
+			miseArtifacts++
+		}
 	}
-	command := string(runner.commands[2].stdin)
-	if !strings.Contains(command, "command -v mise") || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
+	if miseArtifacts != 1 {
+		t.Fatalf("uploaded mise artifacts = %d, want 1: %#v", miseArtifacts, runner.uploaded)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
+		t.Fatalf("parse uploaded pipeline: %v", err)
+	}
+	if len(pipeline.Steps) != 1 {
+		t.Fatalf("uploaded pipeline steps = %#v", pipeline.Steps)
+	}
+	command := pipeline.Steps[0].Command
+	if !strings.Contains(command, ".buildkite-gha/tools/mise/") || !strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
 		t.Fatalf("generated pipeline does not use the mise runtime boundary:\n%s", command)
 	}
 }
@@ -464,8 +485,7 @@ func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
 	}
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "docker-importer")
-	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, root, 20))
-	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, root, 24))
+	setFakeMise(t)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -496,6 +516,55 @@ func writeFakeNode(t *testing.T, root string, major int) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func setFakeMise(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	mise := filepath.Join(root, "mise")
+	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf '2026.5.12 linux-x64 (test)\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestManagedMiseArtifactRequiresPinnedVersionAndIsDeterministic(t *testing.T) {
+	setFakeMise(t)
+	first, err := managedMiseArtifact(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := managedMiseArtifact(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Path != second.Path || first.Digest != second.Digest || !bytes.Equal(first.Contents, second.Contents) {
+		t.Fatalf("mise artifacts differ: first = %#v, second = %#v", first, second)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(first.Contents))
+	if err != nil {
+		t.Fatal(err)
+	}
+	uncompressed, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(uncompressed, []byte(managedMiseVersion)) {
+		t.Fatalf("mise artifact does not contain pinned executable: %q", uncompressed)
+	}
+
+	root := t.TempDir()
+	wrong := filepath.Join(root, "mise")
+	if err := os.WriteFile(wrong, []byte("#!/bin/sh\nprintf '2026.5.13 linux-x64 (test)\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := managedMiseArtifact(context.Background()); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
+		t.Fatalf("managedMiseArtifact() error = %v", err)
+	}
 }
 
 func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
