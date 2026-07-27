@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -147,6 +148,42 @@ func TestProtocolSaveRestoreAndRanges(t *testing.T) {
 	}
 }
 
+func TestLookupFailsClosedWhenDownloadURLRedactionFails(t *testing.T) {
+	backend := newMemoryBackend(nil)
+	namespace := Namespace{"o", "c", "p"}
+	putMemoryEntry(t, backend, namespace, "branch", "key", "version", "owner", []byte("archive"))
+	var redacted string
+	handler, err := NewHandler(backend, Config{
+		Token: "token", Session: "job", BaseURL: "http://example.test/", TempDir: t.TempDir(),
+		Namespace: namespace, ReadScopes: []Scope{"branch"}, WriteScope: "branch",
+		RegisterRedaction: func(_ context.Context, value string) error {
+			redacted = value
+			return errors.New("redactor unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		server.Close()
+		if err := handler.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	status(t, request(t, server, http.MethodGet, "/_apis/artifactcache/cache?keys=key&version=version", "", nil), http.StatusServiceUnavailable)
+	if !strings.HasPrefix(redacted, "http://example.test/downloads/") {
+		t.Fatalf("registered redaction = %q", redacted)
+	}
+	handler.mu.Lock()
+	downloads := len(handler.downloads)
+	handler.mu.Unlock()
+	if downloads != 0 {
+		t.Fatalf("download capabilities after redaction failure = %d, want 0", downloads)
+	}
+}
+
 func TestValidationAuthMissAndFaults(t *testing.T) {
 	_, b, s := testHandler(t)
 	req, _ := http.NewRequest("GET", s.URL+"/_apis/artifactcache/cache?keys=k&version=v", nil)
@@ -251,6 +288,13 @@ func (b *blockingReserveBackend) Reserve(ctx context.Context, request ReserveReq
 	return b.Backend.Reserve(ctx, request)
 }
 
+func (b *blockingReserveBackend) Abort(ctx context.Context, id ReservationID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return b.Backend.Abort(ctx, id)
+}
+
 func TestCloseRacingReserveAbortsWithoutLeakingTempFile(t *testing.T) {
 	tempDir := t.TempDir()
 	memory := newMemoryBackend(nil)
@@ -262,18 +306,28 @@ func TestCloseRacingReserveAbortsWithoutLeakingTempFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(handler)
-	response := make(chan *http.Response, 1)
+	request := httptest.NewRequest(http.MethodPost, "/_apis/artifactcache/caches", strings.NewReader(`{"key":"race","version":"v","cacheSize":1}`))
+	request.Header.Set("Authorization", "Bearer token")
+	request.Header.Set("Accept", mediaType)
+	request.Header.Set("Content-Type", "application/json")
+	requestContext, cancelRequest := context.WithCancel(request.Context())
+	request = request.WithContext(requestContext)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
 	go func() {
-		response <- request(t, server, http.MethodPost, "/_apis/artifactcache/caches", `{"key":"race","version":"v","cacheSize":1}`, nil)
+		handler.ServeHTTP(recorder, request)
+		close(done)
 	}()
 	<-backend.entered
 	if err := handler.Close(); err != nil {
 		t.Fatal(err)
 	}
+	cancelRequest()
 	close(backend.release)
-	status(t, <-response, 503)
-	server.Close()
+	<-done
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("response status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
 
 	files, err := os.ReadDir(tempDir)
 	if err != nil {

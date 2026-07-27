@@ -29,6 +29,7 @@ type Config struct {
 	ReadOnly                                   bool
 	MaxKey, MaxVersion, MaxCandidates, MaxList int
 	MaxBody, MaxChunk, MaxArchive              int64
+	RegisterRedaction                          func(context.Context, string) error
 	random                                     io.Reader
 }
 type Handler struct {
@@ -153,7 +154,7 @@ func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	id, err := h.downloadID(e.ID)
+	id, err := h.downloadID(r.Context(), e.ID)
 	if err != nil {
 		mapError(w, ErrUnavailable)
 		return
@@ -209,7 +210,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		_ = h.backend.Abort(r.Context(), br.ID)
+		_ = h.backend.Abort(context.WithoutCancel(r.Context()), br.ID)
 		mapError(w, ErrUnavailable)
 		return
 	}
@@ -222,7 +223,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := os.CreateTemp(h.cfg.TempDir, "gha-cache-*")
 	if err != nil {
-		_ = h.backend.Abort(r.Context(), br.ID)
+		_ = h.backend.Abort(context.WithoutCancel(r.Context()), br.ID)
 		mapError(w, ErrUnavailable)
 		return
 	}
@@ -440,7 +441,7 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, rc)
 	}
 }
-func (h *Handler) downloadID(e EntryID) (string, error) {
+func (h *Handler) downloadID(ctx context.Context, e EntryID) (string, error) {
 	for range 8 {
 		b := make([]byte, 16)
 		if _, err := io.ReadFull(h.cfg.random, b); err != nil {
@@ -451,6 +452,14 @@ func (h *Handler) downloadID(e EntryID) (string, error) {
 		if _, exists := h.downloads[id]; !exists {
 			h.downloads[id] = e
 			h.mu.Unlock()
+			if h.cfg.RegisterRedaction != nil {
+				if err := h.cfg.RegisterRedaction(ctx, h.cfg.BaseURL+"downloads/"+id); err != nil {
+					h.mu.Lock()
+					delete(h.downloads, id)
+					h.mu.Unlock()
+					return "", err
+				}
+			}
 			return id, nil
 		}
 		h.mu.Unlock()

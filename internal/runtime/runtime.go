@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
 )
 
 const (
@@ -48,13 +49,26 @@ type Runner struct {
 	Secrets           SecretResolver
 	Redactor          Redactor
 	Actions           ActionMaterializer
+	Cache             *CacheConfig
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
+	actionCacheEnv    map[string]string
 	jobContainer      *jobContainerBackend
 	jobDocker         *jobContainerBackend
 	nodeVerification  *managedNodeVerification
 	nodeDigests       map[int]string
+}
+
+// CacheConfig supplies a trusted cache backend session to RunJob. Production
+// construction remains disabled until the Cache v2 and scope-grant contracts
+// are available; tests can inject a backend without exposing it to actions.
+type CacheConfig struct {
+	Backend    ghacache.Backend
+	Namespace  ghacache.Namespace
+	ReadScopes []ghacache.Scope
+	WriteScope ghacache.Scope
+	ReadOnly   bool
 }
 
 type managedNodeVerification struct {
@@ -474,6 +488,11 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	env["GITHUB_ACTION_PATH"] = action.Path
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
+	}
+	if r.actionCacheEnv != nil {
+		delete(env, "ACTIONS_CACHE_SERVICE_V2")
+		delete(env, "ACTIONS_RESULTS_URL")
+		mergeInto(env, r.actionCacheEnv)
 	}
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {

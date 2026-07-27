@@ -1,5 +1,5 @@
 // Package cache implements the job-local GitHub Actions cache v1 protocol.
-// It is not wired into the production runtime.
+// The production runtime does not yet select a durable backend.
 package cache
 
 import (

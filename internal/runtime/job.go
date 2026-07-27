@@ -2,10 +2,13 @@ package runtime
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
+	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -55,6 +59,12 @@ type remotePreparations map[string]*preparedInvocation
 
 type remotePreparationStatus struct {
 	unsuccessful bool
+}
+
+type jobCacheService struct {
+	handler *ghacache.Handler
+	server  *http.Server
+	done    chan error
 }
 
 func (r *postRegistry) register(post *registeredPost) {
@@ -199,6 +209,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
 		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
+	}
+	if r.Cache != nil && jobHasActions(job) {
+		if job.Container != nil {
+			return jobResult, errors.New("cache service for job-container actions requires container routing support")
+		}
+		service, cacheErr := r.startCacheService(runCtx, processor, runnerTemp)
+		if cacheErr != nil {
+			return jobResult, cacheErr
+		}
+		defer func() { runJobErr = errors.Join(runJobErr, service.close(r.cleanupTimeout())) }()
 	}
 	if job.HasCapability("docker") {
 		r.runnerTemp = runnerTemp
@@ -488,6 +508,88 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 		values[name] = value
 	}
 	return values, nil
+}
+
+func jobHasActions(job plan.Job) bool {
+	for _, step := range job.Steps {
+		if step.Kind == "uses" {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) startCacheService(ctx context.Context, processor *commandProcessor, tempDir string) (*jobCacheService, error) {
+	if r.Cache == nil || r.Cache.Backend == nil {
+		return nil, errors.New("cache backend is not configured")
+	}
+	if r.Redactor == nil {
+		return nil, errors.New("cache service requires a redactor")
+	}
+	token, err := randomCacheValue(32)
+	if err != nil {
+		return nil, fmt.Errorf("generate cache token: %w", err)
+	}
+	if err := r.Redactor.AddRedaction(ctx, token); err != nil {
+		return nil, fmt.Errorf("register cache token redaction: %w", err)
+	}
+	processor.addMask(token)
+	session, err := randomCacheValue(16)
+	if err != nil {
+		return nil, fmt.Errorf("generate cache session: %w", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, fmt.Errorf("listen for cache service: %w", err)
+	}
+	baseURL := "http://" + listener.Addr().String() + "/"
+	registerRedaction := func(redactionCtx context.Context, value string) error {
+		if err := r.Redactor.AddRedaction(redactionCtx, value); err != nil {
+			return fmt.Errorf("register cache URL redaction: %w", err)
+		}
+		processor.addMask(value)
+		return nil
+	}
+	handler, err := ghacache.NewHandler(r.Cache.Backend, ghacache.Config{
+		Token: token, Session: session, BaseURL: baseURL, TempDir: tempDir,
+		Namespace: r.Cache.Namespace, ReadScopes: r.Cache.ReadScopes,
+		WriteScope: r.Cache.WriteScope, ReadOnly: r.Cache.ReadOnly,
+		RegisterRedaction: registerRedaction,
+	})
+	if err != nil {
+		_ = listener.Close()
+		return nil, fmt.Errorf("configure cache service: %w", err)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	r.actionCacheEnv = map[string]string{
+		"ACTIONS_CACHE_URL":     baseURL,
+		"ACTIONS_RUNTIME_TOKEN": token,
+	}
+	return &jobCacheService{handler: handler, server: server, done: done}, nil
+}
+
+func (s *jobCacheService) close(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	shutdownErr := s.server.Shutdown(ctx)
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, s.server.Close())
+	}
+	serveErr := <-s.done
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(shutdownErr, serveErr, s.handler.Close())
+}
+
+func randomCacheValue(size int) (string, error) {
+	value := make([]byte, size)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
 }
 
 func durationMinutes(minutes float64) time.Duration {

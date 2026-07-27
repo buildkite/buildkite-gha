@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -3412,6 +3414,463 @@ func remoteLifecycleLock(id, path, digest string, children map[string]plan.Actio
 		Path:         path,
 		SourceDigest: digest,
 		Children:     children,
+	}
+}
+
+type runtimeCacheBackend struct {
+	mu           sync.Mutex
+	next         int
+	reservations map[ghacache.ReservationID]*runtimeCacheReservation
+	entries      map[ghacache.EntryID]ghacache.Entry
+	blobs        map[string][]byte
+	aborted      int
+}
+
+type runtimeCacheReservation struct {
+	ghacache.Reservation
+	blob      ghacache.Blob
+	committed ghacache.Entry
+	aborted   bool
+}
+
+func newRuntimeCacheBackend() *runtimeCacheBackend {
+	return &runtimeCacheBackend{
+		reservations: make(map[ghacache.ReservationID]*runtimeCacheReservation),
+		entries:      make(map[ghacache.EntryID]ghacache.Entry),
+		blobs:        make(map[string][]byte),
+	}
+}
+
+func (b *runtimeCacheBackend) Lookup(_ context.Context, request ghacache.LookupRequest) (ghacache.Entry, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, scope := range request.Scopes {
+		for _, candidate := range request.Candidates {
+			for _, entry := range b.entries {
+				if entry.Namespace == request.Namespace && entry.Scope == scope && entry.Version == request.Version && entry.Key == candidate {
+					return entry, true, nil
+				}
+			}
+			for _, entry := range b.entries {
+				if entry.Namespace == request.Namespace && entry.Scope == scope && entry.Version == request.Version && strings.HasPrefix(entry.Key, candidate) {
+					return entry, true, nil
+				}
+			}
+		}
+	}
+	return ghacache.Entry{}, false, nil
+}
+
+func (b *runtimeCacheBackend) List(_ context.Context, request ghacache.ListRequest) ([]ghacache.Entry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	allowed := make(map[ghacache.Scope]bool, len(request.Scopes))
+	for _, scope := range request.Scopes {
+		allowed[scope] = true
+	}
+	entries := make([]ghacache.Entry, 0, len(b.entries))
+	for _, entry := range b.entries {
+		if entry.Namespace == request.Namespace && allowed[entry.Scope] && (request.Key == "" || strings.HasPrefix(entry.Key, request.Key)) {
+			entries = append(entries, entry)
+		}
+	}
+	if len(entries) > request.Limit {
+		entries = entries[:request.Limit]
+	}
+	return entries, nil
+}
+
+func (b *runtimeCacheBackend) Reserve(_ context.Context, request ghacache.ReserveRequest) (ghacache.Reservation, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, entry := range b.entries {
+		if sameRuntimeCacheIdentity(entry.Namespace, entry.Scope, entry.Key, entry.Version, request.Namespace, request.Scope, request.Key, request.Version) {
+			return ghacache.Reservation{}, ghacache.ErrContention
+		}
+	}
+	for _, reservation := range b.reservations {
+		if !reservation.aborted && reservation.committed.ID == "" && sameRuntimeCacheIdentity(reservation.Namespace, reservation.Scope, reservation.Key, reservation.Version, request.Namespace, request.Scope, request.Key, request.Version) {
+			if reservation.Owner == request.Owner {
+				return reservation.Reservation, nil
+			}
+			return ghacache.Reservation{}, ghacache.ErrContention
+		}
+	}
+	b.next++
+	id := ghacache.ReservationID(fmt.Sprintf("reservation-%d", b.next))
+	reservation := ghacache.Reservation{
+		ID: id, Namespace: request.Namespace, Scope: request.Scope,
+		Key: request.Key, Version: request.Version, Owner: request.Owner,
+		Generation: fmt.Sprintf("generation-%d", b.next), DeclaredSize: request.DeclaredSize,
+		LeaseExpiresAt: time.Now().Add(time.Minute),
+	}
+	b.reservations[id] = &runtimeCacheReservation{Reservation: reservation}
+	return reservation, nil
+}
+
+func (b *runtimeCacheBackend) Upload(_ context.Context, id ghacache.ReservationID, source ghacache.BlobSource) (ghacache.Blob, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	reservation := b.reservations[id]
+	if reservation == nil || reservation.aborted || reservation.Generation != source.Generation {
+		return ghacache.Blob{}, ghacache.ErrNotFound
+	}
+	contents, err := io.ReadAll(io.LimitReader(source.Reader, source.Size+1))
+	if err != nil || int64(len(contents)) != source.Size {
+		return ghacache.Blob{}, ghacache.ErrConflict
+	}
+	digest := sha256.Sum256(contents)
+	encoded := hex.EncodeToString(digest[:])
+	if source.SHA256 != encoded {
+		return ghacache.Blob{}, ghacache.ErrConflict
+	}
+	blob := ghacache.Blob{Locator: "blob:" + encoded, SHA256: encoded, Size: source.Size, Generation: source.Generation}
+	b.blobs[blob.Locator] = bytes.Clone(contents)
+	reservation.blob = blob
+	return blob, nil
+}
+
+func (b *runtimeCacheBackend) Commit(_ context.Context, id ghacache.ReservationID, blob ghacache.Blob) (ghacache.Entry, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	reservation := b.reservations[id]
+	if reservation == nil || reservation.aborted || reservation.blob != blob {
+		return ghacache.Entry{}, ghacache.ErrConflict
+	}
+	if reservation.committed.ID != "" {
+		return reservation.committed, nil
+	}
+	b.next++
+	entry := ghacache.Entry{
+		ID: ghacache.EntryID(fmt.Sprintf("entry-%020d", b.next)), Namespace: reservation.Namespace,
+		Scope: reservation.Scope, Key: reservation.Key, Version: reservation.Version,
+		CreationTime: time.Now(), Blob: blob,
+	}
+	reservation.committed = entry
+	b.entries[entry.ID] = entry
+	return entry, nil
+}
+
+func (b *runtimeCacheBackend) Abort(_ context.Context, id ghacache.ReservationID) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if reservation := b.reservations[id]; reservation != nil && !reservation.aborted && reservation.committed.ID == "" {
+		reservation.aborted = true
+		b.aborted++
+	}
+	return nil
+}
+
+func (b *runtimeCacheBackend) Open(_ context.Context, id ghacache.EntryID, byteRange *ghacache.ByteRange) (io.ReadCloser, ghacache.BlobInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry, ok := b.entries[id]
+	if !ok {
+		return nil, ghacache.BlobInfo{}, ghacache.ErrNotFound
+	}
+	contents := b.blobs[entry.Blob.Locator]
+	if byteRange != nil {
+		contents = contents[byteRange.Start : byteRange.End+1]
+	}
+	return io.NopCloser(bytes.NewReader(bytes.Clone(contents))), ghacache.BlobInfo{SHA256: entry.Blob.SHA256, Size: entry.Blob.Size}, nil
+}
+
+func sameRuntimeCacheIdentity(leftNamespace ghacache.Namespace, leftScope ghacache.Scope, leftKey, leftVersion string, rightNamespace ghacache.Namespace, rightScope ghacache.Scope, rightKey, rightVersion string) bool {
+	return leftNamespace == rightNamespace && leftScope == rightScope && leftKey == rightKey && leftVersion == rightVersion
+}
+
+func runtimeCacheConfig(backend ghacache.Backend) *CacheConfig {
+	return &CacheConfig{
+		Backend: backend, Namespace: ghacache.Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"},
+		ReadScopes: []ghacache.Scope{"branch", "default"}, WriteScope: "branch",
+	}
+}
+
+type runtimeCacheRedactor struct {
+	mu     sync.Mutex
+	values []string
+}
+
+func (r *runtimeCacheRedactor) AddRedaction(_ context.Context, value string) error {
+	r.mu.Lock()
+	r.values = append(r.values, value)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *runtimeCacheRedactor) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.values)
+}
+
+func TestRunJobCacheSavesInPostAndRestoresAcrossJobs(t *testing.T) {
+	node := requireNode24(t)
+	backend := newRuntimeCacheBackend()
+	redactor := &runtimeCacheRedactor{}
+	archive := []byte{0, 1, 2, 3, 0xff, 'c', 'a', 'c', 'h', 'e'}
+	var logs bytes.Buffer
+
+	writeCacheAction := func(workspace string) {
+		writeFixtureFile(t, workspace, ".github/actions/cache/action.yml", "name: Direct cache client\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+		check := `function checkEnvironment() {
+  if (!/^http:\/\/127\.0\.0\.1:\d+\/$/.test(process.env.ACTIONS_CACHE_URL || '')) throw new Error('missing runtime cache URL')
+  if (!/^[0-9a-f]{64}$/.test(process.env.ACTIONS_RUNTIME_TOKEN || '')) throw new Error('missing runtime cache token')
+  if (process.env.ACTIONS_CACHE_SERVICE_V2 !== undefined) throw new Error('v2 selector leaked')
+  if (process.env.ACTIONS_RESULTS_URL !== undefined) throw new Error('results selector leaked')
+}
+`
+		writeFixtureFile(t, workspace, ".github/actions/cache/pre.js", check+`checkEnvironment()
+require('fs').appendFileSync(process.env.GITHUB_STATE, 'cache_token=' + process.env.ACTIONS_RUNTIME_TOKEN + '\n')
+`)
+		writeFixtureFile(t, workspace, ".github/actions/cache/main.js", check+`checkEnvironment()
+async function main() {
+  if (process.env.CACHE_MODE !== 'restore') return
+  const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1'}
+  const lookup = new URL('_apis/artifactcache/cache', process.env.ACTIONS_CACHE_URL)
+  lookup.searchParams.set('keys', process.env.CACHE_KEY)
+  lookup.searchParams.set('version', process.env.CACHE_VERSION)
+  const response = await fetch(lookup, {headers})
+  if (response.status !== 200) throw new Error('cache lookup failed: ' + response.status)
+  const hit = await response.json()
+  console.log('cache-token=' + process.env.ACTIONS_RUNTIME_TOKEN)
+  console.log('cache-download=' + hit.archiveLocation)
+  const download = await fetch(hit.archiveLocation)
+  if (!download.ok) throw new Error('cache download failed: ' + download.status)
+  require('fs').writeFileSync(process.env.CACHE_ARCHIVE, Buffer.from(await download.arrayBuffer()))
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })
+`)
+		writeFixtureFile(t, workspace, ".github/actions/cache/post.js", check+`checkEnvironment()
+async function post() {
+	  if (process.env.STATE_cache_token !== process.env.ACTIONS_RUNTIME_TOKEN) throw new Error('cache token changed during job')
+  if (process.env.CACHE_MODE !== 'save') return
+  const contents = require('fs').readFileSync(process.env.CACHE_ARCHIVE)
+  const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1'}
+  const reserve = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {
+    method: 'POST', headers: {...headers, 'Content-Type': 'application/json'},
+    body: JSON.stringify({key: process.env.CACHE_KEY, version: process.env.CACHE_VERSION, cacheSize: contents.length})
+  })
+  if (reserve.status !== 201) throw new Error('cache reserve failed: ' + reserve.status)
+  const {cacheId} = await reserve.json()
+  const target = new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL)
+  const patch = await fetch(target, {method: 'PATCH', headers: {...headers, 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 0-' + (contents.length - 1) + '/*'}, body: contents})
+  if (patch.status !== 204) throw new Error('cache patch failed: ' + patch.status)
+  const commit = await fetch(target, {method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({size: contents.length})})
+  if (commit.status !== 204) throw new Error('cache commit failed: ' + commit.status)
+}
+post().catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	}
+
+	run := func(mode string, contents []byte) (JobResult, string) {
+		workspace := t.TempDir()
+		workflowPath := ".github/workflows/test.yml"
+		writeFixtureFile(t, workspace, workflowPath, "name: cache runtime test\n")
+		writeCacheAction(workspace)
+		archivePath := filepath.Join(workspace, "archive.bin")
+		if contents != nil {
+			if err := os.WriteFile(archivePath, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+			{ID: "before", Kind: "run", Command: `test -z "${ACTIONS_CACHE_URL+x}"; test -z "${ACTIONS_RUNTIME_TOKEN+x}"`},
+			{ID: "cache", Kind: "uses", Uses: "./.github/actions/cache", Env: map[string]string{
+				"ACTIONS_CACHE_URL": "http://workflow.invalid/", "ACTIONS_RUNTIME_TOKEN": "workflow-token",
+				"ACTIONS_CACHE_SERVICE_V2": "true", "ACTIONS_RESULTS_URL": "https://workflow.invalid/results",
+			}},
+			{ID: "after", Kind: "run", Command: `test -z "${ACTIONS_CACHE_URL+x}"; test -z "${ACTIONS_RUNTIME_TOKEN+x}"`},
+		})
+		job.Env = map[string]string{"CACHE_MODE": mode, "CACHE_KEY": "linux-runtime", "CACHE_VERSION": "opaque-v1", "CACHE_ARCHIVE": archivePath}
+		result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, Redactor: redactor, Cache: runtimeCacheConfig(backend)}).RunJob(context.Background(), job, workspace)
+		if err != nil || result.Conclusion != "success" {
+			t.Fatalf("RunJob(%s) result = %#v, error = %v\nlogs:\n%s", mode, result, err, logs.String())
+		}
+		for _, name := range []string{"ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL"} {
+			if _, exists := result.Env[name]; exists {
+				t.Fatalf("RunJob(%s) leaked %s through job result: %#v", mode, name, result.Env)
+			}
+		}
+		for _, value := range redactor.snapshot() {
+			if value != "" && strings.Contains(fmt.Sprintf("%#v", result), value) {
+				t.Fatalf("RunJob(%s) leaked a cache capability through its result: %#v", mode, result)
+			}
+		}
+		return result, archivePath
+	}
+
+	_, savedPath := run("save", archive)
+	if saved, err := os.ReadFile(savedPath); err != nil || !bytes.Equal(saved, archive) {
+		t.Fatalf("source archive changed = %v, error = %v", !bytes.Equal(saved, archive), err)
+	}
+	_, restoredPath := run("restore", nil)
+	restored, err := os.ReadFile(restoredPath)
+	if err != nil || !bytes.Equal(restored, archive) {
+		t.Fatalf("restored archive matches = %v, error = %v", bytes.Equal(restored, archive), err)
+	}
+	if !strings.Contains(logs.String(), "cache-token=***") || !strings.Contains(logs.String(), "cache-download=***") {
+		t.Fatalf("cache capabilities were not masked: %q", logs.String())
+	}
+	redactions := redactor.snapshot()
+	if len(redactions) < 2 || redactions[0] == redactions[1] {
+		t.Fatalf("per-job cache token redactions = %#v", redactions)
+	}
+	for _, value := range redactions {
+		if value != "" && strings.Contains(logs.String(), value) {
+			t.Fatalf("cache capability %q leaked in logs %q", value, logs.String())
+		}
+	}
+}
+
+func TestRunJobCacheEnvironmentIsActionOnlyForNestedComposite(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: cache environment test\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Cache composite
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: test -z "${ACTIONS_CACHE_URL+x}" && test -z "${ACTIONS_RUNTIME_TOKEN+x}"
+    - uses: ./.github/actions/probe
+      env:
+        ACTIONS_CACHE_URL: http://workflow.invalid/
+        ACTIONS_RUNTIME_TOKEN: workflow-token
+        ACTIONS_CACHE_SERVICE_V2: "true"
+        ACTIONS_RESULTS_URL: https://workflow.invalid/results
+`)
+	writeFixtureFile(t, workspace, ".github/actions/probe/action.yml", "name: Cache probe\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	probe := `
+if (!/^http:\/\/127\.0\.0\.1:\d+\/$/.test(process.env.ACTIONS_CACHE_URL || '')) throw new Error('missing runtime cache URL')
+if (!/^[0-9a-f]{64}$/.test(process.env.ACTIONS_RUNTIME_TOKEN || '')) throw new Error('missing runtime cache token')
+if (process.env.ACTIONS_CACHE_SERVICE_V2 !== undefined || process.env.ACTIONS_RESULTS_URL !== undefined) throw new Error('unsupported service selector leaked')
+require('fs').appendFileSync(process.env.GITHUB_ENV, process.env.CACHE_PHASE + '=true\n')
+`
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, workspace, ".github/actions/probe/"+phase+".js", "process.env.CACHE_PHASE='CACHE_"+strings.ToUpper(phase)+"'\n"+probe)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "nested", Kind: "uses", Uses: "./.github/actions/composite"},
+		{ID: "shell", Kind: "run", Command: `test -z "${ACTIONS_CACHE_URL+x}"; test -z "${ACTIONS_RUNTIME_TOKEN+x}"`},
+	})
+	result, err := (Runner{Node24: node, Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if result.Env["CACHE_PRE"] != "true" || result.Env["CACHE_MAIN"] != "true" || result.Env["CACHE_POST"] != "true" {
+		t.Fatalf("nested action lifecycle environment = %#v", result.Env)
+	}
+}
+
+func TestRunJobCacheEnvironmentOverridesGitHubEnvWithoutPropagating(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: cache GITHUB_ENV test\n")
+	writeFixtureFile(t, workspace, ".github/actions/probe/action.yml", "name: Cache environment probe\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/probe/main.js", `
+if (!/^http:\/\/127\.0\.0\.1:\d+\/$/.test(process.env.ACTIONS_CACHE_URL || '')) throw new Error('runtime cache URL did not override GITHUB_ENV')
+if (!/^[0-9a-f]{64}$/.test(process.env.ACTIONS_RUNTIME_TOKEN || '')) throw new Error('runtime cache token did not override GITHUB_ENV')
+if (process.env.ACTIONS_CACHE_SERVICE_V2 !== undefined || process.env.ACTIONS_RESULTS_URL !== undefined) throw new Error('unsupported selector from GITHUB_ENV leaked')
+`)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "poison", Kind: "run", Command: `
+printf '%s\n' 'ACTIONS_CACHE_URL=http://workflow.invalid/' >> "$GITHUB_ENV"
+printf '%s\n' 'ACTIONS_RUNTIME_TOKEN=workflow-token' >> "$GITHUB_ENV"
+printf '%s\n' 'ACTIONS_CACHE_SERVICE_V2=true' >> "$GITHUB_ENV"
+printf '%s\n' 'ACTIONS_RESULTS_URL=https://workflow.invalid/results' >> "$GITHUB_ENV"`},
+		{ID: "probe", Kind: "uses", Uses: "./.github/actions/probe"},
+		{ID: "shell", Kind: "run", Command: `
+test "$ACTIONS_CACHE_URL" = http://workflow.invalid/
+test "$ACTIONS_RUNTIME_TOKEN" = workflow-token
+test "$ACTIONS_CACHE_SERVICE_V2" = true
+test "$ACTIONS_RESULTS_URL" = https://workflow.invalid/results`},
+	})
+	redactor := &runtimeCacheRedactor{}
+	result, err := (Runner{Node24: node, Redactor: redactor, Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	for _, value := range redactor.snapshot() {
+		if value != "" && strings.Contains(fmt.Sprintf("%#v", result), value) {
+			t.Fatalf("runtime cache capability propagated through JobResult: %#v", result)
+		}
+	}
+}
+
+func TestRunJobCacheShutdownAbortsIncompleteReservation(t *testing.T) {
+	node := requireNode24(t)
+	backend := newRuntimeCacheBackend()
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: cache shutdown test\n")
+	writeFixtureFile(t, workspace, ".github/actions/reserve/action.yml", "name: Incomplete cache upload\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/reserve/main.js", `
+async function main() {
+  const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1', 'Content-Type': 'application/json'}
+  const response = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {method: 'POST', headers, body: JSON.stringify({key: 'incomplete', version: 'v1', cacheSize: 10})})
+  if (response.status !== 201) throw new Error('reserve failed: ' + response.status)
+  require('fs').writeFileSync(process.env.SERVICE_URL_FILE, process.env.ACTIONS_CACHE_URL)
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	serviceURLFile := filepath.Join(workspace, "service-url")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "reserve", Kind: "uses", Uses: "./.github/actions/reserve"}})
+	job.Env = map[string]string{"SERVICE_URL_FILE": serviceURLFile}
+	result, err := (Runner{Node24: node, Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend)}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	backend.mu.Lock()
+	aborted := backend.aborted
+	backend.mu.Unlock()
+	if aborted != 1 {
+		t.Fatalf("aborted reservations = %d, want 1", aborted)
+	}
+	serviceURL, err := os.ReadFile(serviceURLFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := http.Client{Timeout: time.Second}
+	if response, requestErr := client.Get(string(serviceURL)); requestErr == nil {
+		_ = response.Body.Close()
+		t.Fatalf("cache service remained reachable after RunJob: %s", serviceURL)
+	}
+}
+
+func TestRunJobDoesNotStartCacheServiceWithoutActions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: shell-only cache test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "shell", Kind: "run", Command: `test -z "${ACTIONS_CACHE_URL+x}"; test -z "${ACTIONS_RUNTIME_TOKEN+x}"`,
+	}})
+	result, err := (Runner{Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobCacheFailsClosedForJobContainerUntilRoutingExists(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: container cache test\n")
+	writeFixtureFile(t, workspace, ".github/actions/probe/action.yml", "name: Probe\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/probe/main.js", "")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "probe", Kind: "uses", Uses: "./.github/actions/probe"}})
+	job.Schema = plan.SchemaV4
+	job.Steps[0].Action = &plan.ActionSelector{Lock: "a-0000000000000001"}
+	job.Actions = []plan.ActionLock{{
+		ID: "a-0000000000000001", Source: "workspace", Path: ".github/actions/probe",
+		SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "probe")),
+	}}
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "alpine"}
+	_, err := (Runner{Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "requires container routing support") {
+		t.Fatalf("RunJob() error = %v, want host-only cache boundary", err)
 	}
 }
 
