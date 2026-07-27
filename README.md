@@ -22,14 +22,19 @@ to your Buildkite `pipeline.yml`:
 ```yaml
 steps:
   - label: ":github: Test"
+    key: "gha-ci"
     plugins:
-      - github-actions#v0.1.0:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
           workflow: .github/workflows/ci.yml
 ```
 
-The plugin downloads and verifies the matching `buildkite-gha` release,
-derives the event context from the Buildkite build, and uploads the generated
-jobs to the fixed `hosted` queue.
+The companion plugin has not published a `v0.1.0` tag yet, so this preview
+example pins its reviewed initial commit. Use `github-actions#v0.1.0` after that
+tag is published; do not replace the pin with a floating branch.
+
+The plugin downloads and verifies `buildkite-gha` v0.1.0 by default, derives the
+event context from the Buildkite build, and uploads the generated jobs to the
+fixed `hosted` queue.
 
 Configure push, pull request, schedule, and manual triggers in Buildkite.
 The workflow's `on:` block describes GitHub Actions events; it does not create
@@ -45,7 +50,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.1.0:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -67,15 +72,15 @@ The plugin path currently supports:
 - supported local and public Dockerfile actions;
 - static matrices, `needs`, conditions, outputs, and local reusable workflows;
 - background, wait, cancellation, and parallel step controls;
-- timeouts, `continue-on-error`, masking, summaries, and pre/main/post actions;
-  and
+- timeouts, `continue-on-error`, masking, and pre/main/post actions; and
 - public, credential-free checkout of the event repository at its exact commit.
 
-It does **not** currently admit:
+It does **not** currently support:
 
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
 - `actions/cache`, `actions/upload-artifact`, or `actions/download-artifact`;
+- publishing `GITHUB_STEP_SUMMARY` content to the Buildkite UI;
 - job containers or service containers through the production plugin path;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
 - Windows or macOS jobs.
