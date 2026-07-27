@@ -1,4 +1,5 @@
 [tools]
+"github:buildkite/cli" = "3.54.1"
 go = "1.26.5"
 golangci-lint = "2.12.2"
 jq = "1.8.2"

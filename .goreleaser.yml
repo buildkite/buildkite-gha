@@ -35,7 +35,9 @@ checksum:
   name_template: checksums.txt
 
 release:
+  name_template: "{{ .Tag }}"
   target_commitish: "{{ .Commit }}"
+  use_existing_draft: true
   replace_existing_artifacts: true
 
 changelog:

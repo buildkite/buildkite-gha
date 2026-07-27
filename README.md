@@ -232,6 +232,13 @@ mise trust mise.toml
 mise install
 ```
 
+The pinned `bk` CLI is required to request release builds. Maintainers must
+authenticate it once before running `mise run release`:
+
+```sh
+mise exec -- bk auth login
+```
+
 Run the repository checks with:
 
 ```sh
