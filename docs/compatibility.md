@@ -33,7 +33,7 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
 | Local reusable workflows | Supported when statically resolvable | Remote and runtime-dependent reusable workflows are deferred. |
-| Job and step conditions | Supported subset | Unsupported expression forms fail validation rather than being approximated. |
+| Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
 | JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |
 | Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
@@ -193,9 +193,13 @@ not call Buildkite, install Node, or execute workflow code.
 }
 ```
 
-This snapshot keeps compile-time and runtime Actions contexts consistent. It is
-compatibility data, not proof that the event is trustworthy, and cannot
-authorize a protected capability.
+The snapshot supplies the compile-time Actions context. Generated plans retain
+the event name, repository, ref, SHA, actor, and a payload digest, but not the
+payload object itself. Runtime conditions can use those retained identity fields
+but cannot currently access `github.event`; an expression such as
+`github.event.action` may therefore pass validation and fail when the job runs.
+The snapshot is compatibility data, not proof that the event is trustworthy,
+and cannot authorize a protected capability.
 
 ### Compile
 

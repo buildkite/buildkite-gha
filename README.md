@@ -72,7 +72,8 @@ The plugin path currently supports:
 - Linux Bash and `sh` steps;
 - JavaScript, composite, local, and anonymous public actions;
 - supported local and public Dockerfile actions;
-- static matrices, `needs`, conditions, outputs, and local reusable workflows;
+- static matrices, `needs`, outputs, and local reusable workflows;
+- the currently implemented job and step condition subset;
 - background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, and pre/main/post actions; and
 - public, credential-free checkout of the event repository at its exact commit.
@@ -82,6 +83,8 @@ It does **not** currently support:
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
 - `actions/cache`, `actions/upload-artifact`, or `actions/download-artifact`;
+- runtime condition access to the `github.event` payload;
+- exhaustive validation of condition functions before execution;
 - publishing `GITHUB_STEP_SUMMARY` content to the Buildkite UI;
 - job containers or service containers through the production plugin path;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
@@ -120,7 +123,9 @@ buildkite-gha validate \
 
 An `admitted` result means the plans satisfy upload policy. It does not execute
 the workflow or prove that arbitrary action code is independent of GitHub-only
-services. JSON output is available with `--format json`.
+services. Condition validation is also not yet exhaustive: some unsupported
+functions or runtime contexts fail only when the job runs. JSON output is
+available with `--format json`.
 
 ## What gets translated?
 
