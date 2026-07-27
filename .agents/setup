@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mise_bin="$HOME/.local/bin/mise"
+bk_version="3.54.1"
+gh_version="2.96.0"
 docker_packages=(docker.io uidmap dbus-user-session fuse-overlayfs slirp4netns rootlesskit)
 
 missing_packages=()
@@ -99,15 +101,39 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
 esac
+# buildkite-gha mise shims
+case ":$PATH:" in
+  *":$HOME/.local/share/mise/shims:"*) ;;
+  *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;;
+esac
 if [[ -x "$HOME/.local/bin/mise" ]]; then
   eval "$("$HOME/.local/bin/mise" activate bash)"
 fi
 EOF
 fi
 
+shims_marker="# buildkite-gha mise shims"
+if ! grep -Fqx "$shims_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# buildkite-gha mise shims
+case ":$PATH:" in
+  *":$HOME/.local/share/mise/shims:"*) ;;
+  *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;;
+esac
+EOF
+fi
+
 echo "Installing pinned development tools..."
 "$mise_bin" trust "$repo_root/mise.toml"
 "$mise_bin" install
+
+echo "Installing pinned orb CLIs..."
+"$mise_bin" use --global --pin --yes \
+  "aqua:buildkite/cli@$bk_version" \
+  "gh@$gh_version"
+"$mise_bin" exec -- bk version >/dev/null
+"$mise_bin" exec -- gh --version >/dev/null
 
 echo "Downloading Go modules..."
 "$mise_bin" exec -- go mod download
