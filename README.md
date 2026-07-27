@@ -204,14 +204,13 @@ The release step's build condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
 steps. Create a fine-grained GitHub token scoped only to this repository with
 Contents read/write permission, then store it as the `GHA_GITHUB_RELEASE_TOKEN`
-Buildkite Secret in the pipeline's cluster. Restrict it to authenticated API
-release builds of `main` created by the Pipelines team:
+Buildkite Secret in the pipeline's cluster. Restrict it to API release builds
+of `main` in this pipeline:
 
 ```yaml
 - pipeline_id: "019f8835-5873-4a64-850e-ba117a339d87"
   build_source: "api"
   build_branch: "main"
-  build_creator_team: "7dbc8bd0-e1e3-40c3-96fd-4a058c24e755"
 ```
 
 Because API callers supply the build's branch and commit, the pipeline's
