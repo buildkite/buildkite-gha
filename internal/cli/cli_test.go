@@ -477,6 +477,9 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
 		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
+	if step.Env["BUILDKITE_GHA_CACHE_DIR"] != "/cache/bkcache/buildkite-gha/gha-cache" {
+		t.Fatalf("generated experimental GHA cache directory = %q", step.Env["BUILDKITE_GHA_CACHE_DIR"])
+	}
 }
 
 func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
@@ -676,22 +679,28 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
-	for repository, service := range map[string]string{
-		"actions/upload-artifact":   "artifact",
-		"actions/download-artifact": "artifact",
-		"actions/cache":             "cache",
-	} {
+func TestUnprivilegedUploadRejectsKnownGitHubArtifactActions(t *testing.T) {
+	for _, repository := range []string{"actions/upload-artifact", "actions/download-artifact"} {
 		t.Run(repository, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 				Workflow: plan.Workflow{LogicalJobID: "service-action"},
 				Actions:  []plan.ActionLock{{Source: "github", Repository: repository}},
 			}}}}
 			err := validateUnprivilegedBundle(bundle)
-			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+service+" service") || !strings.Contains(err.Error(), "Phase 6") {
+			if err == nil || !strings.Contains(err.Error(), "GitHub Actions artifact service") || !strings.Contains(err.Error(), "Phase 6") {
 				t.Fatalf("validateUnprivilegedBundle(%q) error = %v", repository, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadAllowsGitHubCacheAction(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow: plan.Workflow{LogicalJobID: "cache-action"},
+		Actions:  []plan.ActionLock{{Source: "github", Repository: "actions/cache"}},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatalf("validateUnprivilegedBundle(actions/cache) error = %v", err)
 	}
 }
 

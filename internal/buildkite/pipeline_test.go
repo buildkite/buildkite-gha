@@ -150,6 +150,9 @@ func TestEmitMiseBootstrap(t *testing.T) {
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
 		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
+	if step.Env["BUILDKITE_GHA_CACHE_DIR"] != "/cache/bkcache/buildkite-gha/gha-cache" {
+		t.Fatalf("experimental GHA cache directory = %q", step.Env["BUILDKITE_GHA_CACHE_DIR"])
+	}
 }
 
 func TestMisePathValidation(t *testing.T) {
@@ -196,10 +199,10 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range document.Steps {
-		if step.Key == "action" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] == "" || !strings.Contains(step.Command, "/tools/mise/")) {
+		if step.Key == "action" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] == "" || step.Env["BUILDKITE_GHA_CACHE_DIR"] == "" || !strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("action job lacks managed mise: %#v", step)
 		}
-		if step.Key == "shell" && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+		if step.Key == "shell" && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || step.Env["BUILDKITE_GHA_CACHE_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("shell job gained managed mise: %#v", step)
 		}
 	}

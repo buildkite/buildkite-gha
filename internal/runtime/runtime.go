@@ -65,9 +65,8 @@ type Runner struct {
 	nodeDigests       map[int]string
 }
 
-// CacheConfig supplies a trusted cache backend session to RunJob. Production
-// construction remains disabled until the Cache v2 and scope-grant contracts
-// are available; tests can inject a backend without exposing it to actions.
+// CacheConfig supplies a cache backend session to RunJob. The caller owns the
+// trust and visibility policy represented by its namespace and scopes.
 type CacheConfig struct {
 	Backend    ghacache.Backend
 	Namespace  ghacache.Namespace

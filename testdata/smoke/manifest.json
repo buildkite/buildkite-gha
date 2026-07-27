@@ -65,12 +65,12 @@
       "action_preflight": "none"
     },
     {
-      "id": "unsupported-cache-service",
-      "workflow": "testdata/unsupported/.github/workflows/cache.yml",
+      "id": "smoke-cache",
+      "workflow": "testdata/smoke/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "runtime-unsupported",
-      "evidence": "The production hosted-tokenless policy rejects the known GitHub Actions cache service dependency.",
-      "note": "Phase 6 owns the Buildkite cache compatibility adapter.",
+      "expectation": "compile-pass",
+      "evidence": "The hosted-tokenless profile admits the pinned cache action and generated action jobs configure the experimental directory backend.",
+      "note": "Hosted cross-build save/restore evidence remains required before upgrading this fixture to runtime-pass.",
       "action_preflight": "hosted-tokenless"
     },
     {

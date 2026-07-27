@@ -14,6 +14,7 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 const toolDirectory = ".buildkite-gha/tools"
+const experimentalGHACacheDirectory = "/cache/bkcache/buildkite-gha/gha-cache"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -160,6 +161,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
 		if usesMise {
 			_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_MISE_DATA_DIR: %s\n", yamlScalar(miseDataDir))
+			_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_CACHE_DIR: %s\n", yamlScalar(experimentalGHACacheDirectory))
 		}
 		if job.Concurrency != 0 {
 			_, _ = fmt.Fprintf(&out, "    concurrency: %d\n", job.Concurrency)

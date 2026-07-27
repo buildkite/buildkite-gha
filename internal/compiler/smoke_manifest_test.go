@@ -45,7 +45,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action", "phase5-container-runtime", "unsupported-cache-service", "unsupported-job-container", "unsupported-service-container"}
+	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "phase4-public-actions", "phase5-docker-action", "phase5-container-runtime", "smoke-cache", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}

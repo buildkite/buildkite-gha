@@ -208,6 +208,16 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		actionMaterializer = store
 	}
+	cacheConfig, err := experimentalDirectoryCacheConfig(job, os.Getenv)
+	if err != nil {
+		if errors.Is(err, errExperimentalCacheBackend) {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %v; continuing without GitHub cache\n", err)
+			cacheConfig = nil
+		} else {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+			return 1
+		}
+	}
 	runner := gharuntime.Runner{
 		Stdout:      stdout,
 		Stderr:      stderr,
@@ -217,6 +227,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Secrets:     gharuntime.EnvironmentSecrets{},
 		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:     actionMaterializer,
+		Cache:       cacheConfig,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -721,15 +732,9 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			if action.Source != "github" {
 				continue
 			}
-			var service string
 			switch strings.ToLower(action.Repository) {
 			case "actions/upload-artifact", "actions/download-artifact":
-				service = "artifact"
-			case "actions/cache":
-				service = "cache"
-			}
-			if service != "" {
-				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, service)
+				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions artifact service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository)
 			}
 		}
 	}

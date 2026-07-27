@@ -72,6 +72,8 @@ The plugin path currently supports:
 - Linux Bash and `sh` steps;
 - JavaScript, composite, local, and anonymous public actions;
 - supported local and public Dockerfile actions;
+- `actions/cache` and actions using the GitHub Actions Cache v1 protocol when
+  the experimental cache backend is enabled;
 - static matrices, `needs`, outputs, and local reusable workflows;
 - the currently implemented job and step condition subset;
 - background, wait, cancellation, and parallel step controls;
@@ -82,7 +84,7 @@ It does **not** currently support:
 
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
-- `actions/cache`, `actions/upload-artifact`, or `actions/download-artifact`;
+- `actions/upload-artifact` or `actions/download-artifact`;
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
 - publishing `GITHUB_STEP_SUMMARY` content to the Buildkite UI;

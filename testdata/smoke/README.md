@@ -17,6 +17,8 @@ workflow is executable:
    output, environment-file, masking, summary, and post-action events.
 4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
+5. `cache.yml` adds the pinned GitHub cache action. Hosted profile admission is
+   required; cross-build runtime evidence remains pending.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
 these workflows and the related Phase 4 and Phase 5 fixtures. Every entry names
@@ -30,7 +32,7 @@ Expectations have these precise meanings:
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently GitHub artifact and cache services).
+  intentionally unsupported (currently the GitHub artifact service).
 - `future`: the fixture is inventoried but not yet required to compile.
 
 Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
@@ -43,10 +45,11 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 the same admission policy as production upload without installing or executing
 Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
-Known official cache and artifact actions are rejected until their Phase 6
-adapters exist; the profile leaves unknown generic service dependencies as an
-explicit warning rather than guessing from arbitrary action source. Runtime-pass
-job and service container fixtures are deliberately not marked for this profile:
+Known official artifact actions are rejected until their adapter exists. The
+pinned cache action is admitted through the experimental directory backend;
+the profile leaves unknown generic service dependencies as an explicit warning
+rather than guessing from arbitrary action source. Runtime-pass job and service
+container fixtures are deliberately not marked for this profile:
 their execution is proven separately, while production hosted-tokenless
 admission continues to reject their container provenance.
 
