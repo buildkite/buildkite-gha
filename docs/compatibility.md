@@ -94,6 +94,13 @@ Buildkite. `buildkite-gha` uses the event snapshot to populate Actions contexts;
 it does not subscribe to GitHub events or turn workflow `on:` entries into
 Buildkite triggers.
 
+The plugin derives `pull_request` for Buildkite pull request builds and `push`
+for branch, tag, scheduled, and manual builds. It does not currently provide
+`schedule` or `workflow_dispatch` contexts or dispatch inputs. A scheduled or
+manual trigger is therefore compatible only when the workflow expects push
+semantics. The direct CLI accepts explicit event snapshots as documented below,
+but the plugin does not expose that option yet.
+
 For pull requests, the plugin uses the exact Buildkite commit and a
 `refs/pull/<number>/head` compatibility ref. It does not claim GitHub's merge-ref
 semantics when Buildkite has not supplied them.

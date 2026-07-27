@@ -36,9 +36,11 @@ The plugin downloads and verifies `buildkite-gha` v0.1.0 by default, derives the
 event context from the Buildkite build, and uploads the generated jobs to the
 fixed `hosted` queue.
 
-Configure push, pull request, schedule, and manual triggers in Buildkite.
-The workflow's `on:` block describes GitHub Actions events; it does not create
-or change Buildkite triggers.
+Configure branch, tag, and pull request triggers in Buildkite. The plugin
+derives a `pull_request` context for pull request builds and a `push` context
+for every other build. Scheduled and manual Buildkite builds therefore do not
+receive `schedule` or `workflow_dispatch` contexts or dispatch inputs. The
+workflow's `on:` block does not create or change Buildkite triggers.
 
 ### Mix imported and native jobs
 
