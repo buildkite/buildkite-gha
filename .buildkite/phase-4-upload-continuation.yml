@@ -1,9 +1,10 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":white_check_mark: Phase 4 native dependency extension"
     key: "phase-4-native-after-actions"
     depends_on:
       - step: "gha-public-actions"
         allow_failure: true
-    agents:
-      queue: "elastic-runners"
     command: "echo 'Phase 4 actions jobs settled before native continuation'"

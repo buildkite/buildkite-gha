@@ -1,9 +1,10 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":pipeline: Phase 0 transport importer"
     key: "phase0-transport-importer"
     command: ".buildkite/phase-0-transport-probe/probe.sh bootstrap"
-    agents:
-      queue: "elastic-runners"
     env:
       PHASE0_SIGN_JSON: "scripts/phase-0-sign-json"
       PHASE0_VERIFY_JSON: "scripts/phase-0-verify-json"
@@ -15,5 +16,3 @@ steps:
     key: "phase0-native-after-import"
     depends_on: "phase0-transport-importer"
     command: ".buildkite/phase-0-transport-probe/probe.sh native"
-    agents:
-      queue: "elastic-runners"

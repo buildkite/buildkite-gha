@@ -1,62 +1,49 @@
 env:
   MISE_JOBS: "1"
 
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":test_tube: Load Phase 0 shell oracle"
     key: "phase-0-shell-oracle-loader"
     if: build.env("PHASE0_PROBE") == "shell"
     command: "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":test_tube: Load Phase 0 transport probe"
     key: "phase-0-transport-probe-loader"
     if: build.env("PHASE0_PROBE") == "transport"
     command: "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":pipeline: Load Phase 2 upload proof"
     key: "phase-2-upload-loader"
     if: build.env("PHASE2_PROBE") == "upload" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":pipeline: Load Phase 3 concurrent proof"
     key: "phase-3-upload-loader"
     if: build.env("PHASE3_PROBE") == "concurrent" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":pipeline: Load Phase 4 actions proof"
     key: "phase-4-upload-loader"
     if: build.env("PHASE4_PROBE") == "actions" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":docker: Load Phase 5 hosted Docker probe"
     key: "phase-5-capabilities-loader"
     if: build.env("PHASE5_PROBE") == "capabilities" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":docker: Load Phase 5 Dockerfile action proof"
     key: "phase-5-docker-action-loader"
     if: build.env("PHASE5_PROBE") == "docker-action" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":docker: Load Phase 5 container runtime proof"
     key: "phase-5-runtime-loader"
     if: build.env("PHASE5_PROBE") == "runtime" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-runtime.yml"
-    agents:
-      queue: "elastic-runners"
 
   - label: ":pipeline: Load consolidated hosted smoke proof"
     key: "hosted-smoke-loader"
@@ -86,8 +73,6 @@ steps:
       buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml
       buildkite-agent pipeline upload .buildkite/phase-5-runtime.yml
       buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
-    agents:
-      queue: "elastic-runners"
 
   - label: ":go: Repository checks"
     key: "checks"
@@ -95,8 +80,6 @@ steps:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
     command: "mise run --jobs 1 check"
-    agents:
-      queue: "elastic-runners"
 
   - wait: ~
 
@@ -109,5 +92,3 @@ steps:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
     command: "mise exec -- scripts/ci-buildkite-release"
-    agents:
-      queue: "elastic-runners"
