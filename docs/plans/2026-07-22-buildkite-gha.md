@@ -492,13 +492,23 @@ resolved values into the plan so compile-time and runtime expressions agree.
 
 ### Protected capability control plane
 
-Public, anonymous, tokenless workflows have no control-plane dependency. A
-supporting service is introduced only for capabilities that ordinary pipeline
-code cannot already access. The service authenticates every caller with a
-short-lived Buildkite Job OIDC token whose audience is exactly the service. It
-validates the Buildkite issuer and JWKS, time bounds, immutable organization,
-pipeline, build, and job IDs, step identity, runner environment, cluster, and
-queue as required by policy.
+Public, anonymous workflows that need only local execution have no control-plane
+dependency. A supporting service is introduced only for capabilities that
+ordinary pipeline code cannot already access, including protected provider
+access and trusted cross-build cache visibility. The service authenticates every
+caller with a short-lived Buildkite Job OIDC token whose audience is exactly the
+service. It validates the Buildkite issuer and JWKS, time bounds, immutable
+organization, pipeline, build, and job IDs, step identity, runner environment,
+cluster, and queue as required by policy.
+
+Job OIDC is bootstrap identity held by trusted `run-job` code or a trusted
+job-local runtime service. It is never assigned directly to `GITHUB_TOKEN`,
+`ACTIONS_RUNTIME_TOKEN`, or another action-visible variable. A static OIDC value
+would leak a Buildkite assertion to GitHub or any action-selected endpoint,
+could not be refreshed safely during a long job/post-action lifecycle, and
+would make unrelated services accept the same bearer. The trusted runtime
+obtains and refreshes OIDC only for the capability gateway's exact audience and
+exchanges it for service-specific capabilities.
 
 Buildkite OIDC proves which Buildkite job is asking. It does not by itself prove
 the complete GitHub event type, actor, fork relationship, workflow source, or
@@ -523,12 +533,47 @@ workflow request
 ∩ queue policy
 ```
 
-The service may then broker narrowly scoped GitHub App installation tokens,
-private repository or action access, selected secrets, environment grants, or
-explicitly supported compatible OIDC credentials. Direct Buildkite OIDC is
-preferred for cloud providers that can trust `https://agent.buildkite.com`. A
-compatibility issuer must use its own issuer and only emit claims established by
-the service; it must never impersonate GitHub's OIDC issuer.
+The network capability gateway holds the GitHub App private key and may create
+or refresh installation tokens, proxy GitHub REST/GraphQL/upload requests,
+broker private repository or action access, issue signed Cache v2 visibility
+grants, provide selected secrets or environment grants, and mint explicitly
+supported compatible OIDC credentials. Direct Buildkite OIDC is preferred for
+cloud providers that can trust `https://agent.buildkite.com`. A compatibility
+issuer must use its own issuer and only emit claims established by the service;
+it must never impersonate GitHub's OIDC issuer.
+
+Workflow code receives only narrow service-specific capabilities. In
+particular:
+
+```text
+GITHUB_TOKEN=<opaque GitHub API proxy capability>
+ACTIONS_RUNTIME_TOKEN=<independent random local cache capability>
+ACTIONS_CACHE_URL=<job-local cache adapter>
+```
+
+GitHub proxy and cache capabilities have different audiences, values, routes,
+protocols, permissions, expiries, and replay boundaries. Neither can authorize
+the other service. The signed Cache v2 scope grant remains inside the trusted
+adapter and is not `ACTIONS_RUNTIME_TOKEN`. Any brokered direct GitHub token is
+an explicit weaker compatibility fallback, not the default token shape.
+
+Use a hybrid placement rather than putting every concern in one process:
+
+- **Job-local runtime or daemon:** provides cache v1 and any useful local
+  GitHub-compatible frontend, holds stable action-facing capabilities, obtains
+  and refreshes Job OIDC, routes containers, and remains alive through
+  post-actions. It does not hold the GitHub App private key.
+- **Network capability/GitHub gateway:** verifies Job OIDC and provider
+  provenance, holds provider credential material, refreshes installation
+  tokens, proxies provider API traffic, signs Cache v2 visibility/scope grants,
+  and centralizes policy, audit, expiry, revocation, and replay controls.
+- **Service data planes:** GitHub API traffic goes through the provider proxy;
+  cache metadata and archive bytes go directly from the trusted adapter through
+  the Cache v2/Agent storage path. The gateway is not a second durable cache
+  index or blob relay.
+
+One local daemon may host several frontends, but credentials, routes, audiences,
+and authorization checks remain service-separated.
 
 This service does not compile workflows, upload pipelines, schedule jobs,
 interpret ordinary tokenless plans, provide per-step isolation, or make public
@@ -974,6 +1019,53 @@ repository metadata while preserving the action's documented inputs and
 outputs. Cache and artifact support should use Buildkite storage semantics
 without exposing GitHub's private service credentials.
 
+### GitHub API compatibility tiers
+
+There is no universal transparent GitHub API proxy because clients do not all
+honor the same endpoint variables. Support token-requiring GitHub access in
+explicit tiers:
+
+1. **API proxy mode — preferred.** Put an opaque, job-bound proxy capability in
+   `github.token` and `GITHUB_TOKEN`, and set:
+
+   ```text
+   GITHUB_API_URL=https://<gateway>/api/v3
+   GITHUB_GRAPHQL_URL=https://<gateway>/api/graphql
+   ```
+
+   This covers `@actions/github`, Octokit, and `actions/github-script` when
+   they honor the standard URLs. The gateway accepts normal forms such as
+   `Authorization: token <capability>`, enforces repository and permission
+   grants, injects or refreshes the upstream GitHub App installation token, and
+   strips it from responses and logs. Release asset upload URLs may require
+   response rewriting and proxying because cross-host redirects can discard
+   authorization headers.
+2. **`gh` CLI emulation.** The CLI primarily routes by `GH_HOST`; a non-
+   `github.com` host uses enterprise token variables such as
+   `GH_ENTERPRISE_TOKEN`. Supporting it requires a stable TLS hostname and
+   GHES-shaped `/api/v3` and `/api/graphql` routes in addition to the proxy
+   capability.
+3. **Brokered direct-token fallback.** For actions that hard-code
+   `api.github.com`, ignore endpoint overrides, or require an unsupported GitHub
+   surface, policy may place a real short-lived repository- and
+   permission-limited GitHub App installation token in `GITHUB_TOKEN`. This
+   weakens credential isolation and must be explicit, auditable, and deny by
+   default rather than silently broadening proxy mode. A static action
+   environment cannot transparently refresh that token during one long-running
+   process, so its maximum useful lifetime and failure behavior must be
+   documented.
+4. **Dedicated provider-source path.** Private checkout, private actions, and
+   reusable-workflow source fetches remain separate. `actions/checkout` mixes
+   API calls with Git smart HTTP and Basic `x-access-token:<token>` credentials;
+   do not require the generic API proxy to emulate every GitHub web and git
+   endpoint.
+
+`GITHUB_TOKEN` is mechanically opaque to most compatible clients, which is why
+the proxy capability can occupy that variable. Raw Buildkite Job OIDC cannot:
+it is a reusable identity assertion rather than GitHub API authority, must stay
+refreshable in the trusted runtime, and must never be sent to GitHub or a
+client-selected endpoint.
+
 ### Triggers and workflow `on`
 
 `buildkite-gha` does not itself listen for repository events. A Buildkite
@@ -1008,6 +1100,8 @@ authority.
 - The service verifies immutable Buildkite identity, queue, provider provenance,
   fork status, ref, commit, workflow policy, and any environment approval before
   issuing a narrow, short-lived grant or credential.
+- Job OIDC remains in trusted runtime code and is never used as an
+  action-visible provider or cache bearer.
 - The runtime verifies that the grant matches its own job, plan digest, queue,
   requested capability, audience, and expiry before resolving a value.
 - Fork pull requests receive no privileged secrets by default.
@@ -1030,13 +1124,16 @@ self-declared event, trust classification, signature, or capability list as
 sufficient authority.
 
 When GitHub is the repository provider, populate `github.token` and
-`GITHUB_TOKEN` only from a repository- and permission-scoped GitHub App
-installation token brokered for the authenticated job. This approximates but
-does not duplicate native `GITHUB_TOKEN`: app identity, endpoint support,
-expiration, and event-recursion behavior can differ and must be documented. Do
-not invent a token or silently grant write access. Validation must identify
-actions and expressions requiring a provider token when no compatible grant can
-be issued.
+`GITHUB_TOKEN` with an opaque repository- and permission-scoped API proxy
+capability by default, together with the compatible REST and GraphQL gateway
+URLs. The gateway injects a GitHub App installation token upstream without
+exposing it to workflow code. Only the explicit compatibility fallback may
+return the real short-lived installation token to the job. Neither mode exactly
+duplicates native `GITHUB_TOKEN`: app identity, endpoint support, expiration,
+event-recursion behavior, `gh` routing, and hard-coded API hosts can differ and
+must be documented. Do not invent a token or silently grant write access.
+Validation must identify actions and expressions requiring provider access when
+no compatible proxy or approved direct-token grant can be issued.
 
 ### Installation and release model
 
@@ -1728,8 +1825,9 @@ Definition of done:
 
 ### Phase 6 — Core services and protected capability control plane
 
-Deliver two explicit tracks. Tokenless Buildkite-backed adapters remain local to
-the job:
+Deliver protocol adapters and the shared capability plane as explicit tracks.
+Buildkite-backed service frontends remain local to the job and do not expose
+GitHub credentials:
 
 - cache restore/save;
 - artifact upload/download;
@@ -1740,6 +1838,12 @@ Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
 requires an HTTP protocol, run a job-local compatibility endpoint or provide a
 well-defined adapter rather than proxying GitHub's private service.
 
+Cache itself requires no GitHub credential, but production GHA ref visibility
+does require trusted provider provenance. Reuse the capability gateway to issue
+a signed, cache-audience visibility grant to the trusted adapter. Do not expose
+that grant or Job OIDC as `ACTIONS_RUNTIME_TOKEN`, and do not route cache archive
+bytes through the GitHub proxy.
+
 The immediate Phase 6 slice is the
 [focused GitHub Actions cache-service plan](./2026-07-27-github-actions-cache-service.md):
 implement the public cache v1 protocol as a job-local adapter, keep v2/results
@@ -1748,9 +1852,11 @@ names, and place a semantic backend interface between the protocol and
 Buildkite Cache v2. Protocol/runtime work can begin against deterministic test
 backends. Production enablement depends on a narrow Cache v2/Agent feature for
 opaque archive transfer, policy-checked GHA lookup, conditional immutable
-reservation/commit, verified ref visibility, integrity/retention/quota
-hardening, and a supported programmatic boundary; do not build a second durable
-index inside `buildkite-gha`.
+reservation/commit, validation of a signed visibility/scope grant,
+integrity/retention/quota hardening, and a supported programmatic boundary; do
+not build a second durable index inside `buildkite-gha`. This slice needs the
+gateway's OIDC/provenance/cache-grant foundation, not the complete GitHub API
+proxy.
 Artifact v4/results compatibility is not part of this cache slice.
 
 Protected provider features use the supporting control-plane service:
@@ -1762,25 +1868,37 @@ Protected provider features use the supporting control-plane service:
 - evaluate organization, event, environment, queue, and requested-permission
   policy;
 - issue signed, expiring grants bound to exact plan digests and jobs;
-- broker private checkout and action access, selected secrets, and scoped
-  GitHub App installation tokens; and
+- issue separate GitHub API proxy capabilities and Cache v2 visibility grants
+  with non-interchangeable audiences and routes;
+- proxy supported GitHub REST, GraphQL, and upload traffic while retaining and
+  refreshing scoped GitHub App installation tokens upstream;
+- broker dedicated private checkout/action access, selected secrets, and an
+  explicit direct-token fallback where proxy routing is impossible; and
 - maintain audit records, expiry, revocation, key rotation, and fail-closed
   behavior.
 
 Delivery slices:
 
-1. Ship cache v1 compatibility through the focused plan: protocol fixtures,
-   job-local adapter, narrow Cache v2/Agent opaque-entry and reservation/lookup
-   extension, trusted branch/PR/fork scope, container reachability, bounded
-   post-action saves, and unchanged direct and transitive cache canaries.
-2. Ship artifact/results, summary, and public-checkout adapters as separate
-   tokenless deliverables; do not couple their protocols or lifecycle to cache.
-3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
-   policy evaluation, and signed no-op grants before returning credentials.
-4. Add private checkout, private actions, and private reusable-workflow source
-   access through the narrowest practical credential or download interface.
-5. Add scoped GitHub tokens, selected secrets, and environment grants.
-6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
+1. Ship C0/C1 of the focused cache plan: protocol fixtures, job-local adapter,
+   host actions, and deterministic backends while production cache remains
+   disabled.
+2. Ship production cache by combining the minimum gateway foundation—Job OIDC
+   authentication, provider provenance, and signed cache grants—with the narrow
+   Cache v2/Agent opaque-entry, reservation/lookup, grant-validation, and
+   storage extension. Then add trusted branch/PR/fork policy, containers,
+   bounded post-action saves, and unchanged direct/transitive cache canaries.
+3. Ship artifact/results, summary, and public-checkout adapters as separate
+   deliverables; do not couple their protocols or lifecycle to cache.
+4. Add the preferred GitHub REST/GraphQL/upload proxy with an opaque
+   `GITHUB_TOKEN`, then `gh` routing support and an explicit policy-controlled
+   direct-installation-token fallback. Produce a focused compatibility plan
+   before implementing this slice.
+5. Add private checkout, private actions, and private reusable-workflow source
+   access through a dedicated provider-source interface rather than making the
+   API proxy emulate all Git/web behavior.
+6. Add selected secrets and environment grants through service-specific
+   capabilities.
+7. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
 Definition of done:
@@ -1798,7 +1916,13 @@ Definition of done:
 - A forged event, wrong build/job/queue, expired grant, broadened permission,
   and fork-to-privileged transition all fail before a protected value is
   returned.
-- Public tokenless workflows still run when the control-plane service is absent.
+- Raw Job OIDC never enters action environment, and GitHub proxy, local cache,
+  and signed Cache v2 grants cannot authenticate one another's services.
+- Compatible Octokit and `actions/github-script` calls use the proxy without
+  exposing the upstream installation token; hard-coded-host clients receive an
+  explicit diagnostic or an approved direct-token fallback.
+- Public workflows that use no protected provider capability or persistent
+  cache still run when the control-plane service is absent.
 - The validator distinguishes portable and provider-dependent actions and names
   any unavailable protected capability.
 
@@ -2054,8 +2178,8 @@ compatibility may justify Buildkite additions:
 - richer logical sub-step/timeline presentation inside one command job;
 - targeted matrix-sibling cancellation;
 - Buildkite-backed cache APIs suitable for Actions toolkit adapters;
-- Buildkite Job OIDC claims and APIs sufficient for short-lived provider token
-  brokering;
+- Buildkite Job OIDC claims and APIs sufficient for gateway authentication,
+  provider provenance binding, and signed cache/provider grant issuance;
 - Origin event/context integration;
 - imported-job and native-job output contracts; and
 - UI treatment for generated/imported pipelines and compatibility findings.
@@ -2164,6 +2288,13 @@ unknown plan.
   capability service. It proves Buildkite job identity but needs provider facts
   for GitHub event type, actor, fork relationship, workflow source, and
   environment policy.
+- Job OIDC belongs only in trusted runtime-to-gateway exchange. Action code
+  receives service-specific capabilities: an opaque GitHub proxy token, a
+  separate random local cache token, or an explicitly approved direct provider
+  credential fallback.
+- Cache and GitHub access can share gateway identity, provenance, audit, and
+  grant machinery without sharing credentials or data planes. Cache v2 remains
+  the durable cache authority and validates a cache-specific visibility grant.
 - Plan-envelope signing proved bounded canonical signing, tamper rejection, and
   build/job/queue binding in Phase 0. It is retained as an integrity mechanism,
   not as production capability authorization.
@@ -2232,9 +2363,11 @@ them in the phase that first needs the capability:
 3. Cache now uses a job-local GitHub cache v1 protocol adapter over a pluggable
    semantic backend, as specified by the focused cache-service plan. Buildkite
    Cache v2 is the selected durable registry/blob substrate; a narrow
-   opaque-entry, GHA lookup, conditional reservation/commit, and ref-visibility
-   Cache v2/Agent extension gates production enablement. Artifact v4/results
-   protocol selection remains a separate Phase 6 decision.
+   opaque-entry, GHA lookup, conditional reservation/commit, signed visibility-
+   grant validation, and Agent extension gates production enablement. The
+   shared gateway is the preferred verified ref resolver, but full GitHub API
+   proxy support does not block cache C0/C1. Artifact v4/results protocol
+   selection remains a separate Phase 6 decision.
 4. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
 5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
@@ -2243,10 +2376,13 @@ them in the phase that first needs the capability:
    and the Phase 5 probe are sufficient for tokenless, non-privileged Dockerfile
    actions built on the local driver. Phases 6 and 9 still own authorization and
    queue policy for protected Docker capabilities and privileged workloads.
-7. Phase 6 will define the GitHub App installation-token compatibility contract
-   for `github.token` and `GITHUB_TOKEN`, including repository/permission
-   narrowing and documented differences from native Actions tokens. Tokenless
-   workflows remain the default until then.
+7. Phase 6 uses an opaque GitHub API proxy capability in `github.token` and
+   `GITHUB_TOKEN` by default, with standard REST/GraphQL endpoint overrides.
+   `gh` needs separate host emulation, hard-coded API clients need an explicit
+   direct short-lived installation-token fallback, and private checkout/action
+   source access keeps a dedicated provider path. A focused plan must specify
+   these contracts before implementation. Tokenless workflows remain the
+   default until then.
 
 ## Recommended first product milestone
 
