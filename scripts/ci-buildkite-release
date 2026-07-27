@@ -22,7 +22,8 @@ if [[ "$(git rev-parse --is-shallow-repository)" == true ]]; then
   git fetch --unshallow origin
 fi
 [[ "$(git rev-parse HEAD)" == "$BUILDKITE_COMMIT" ]] || die 'checked-out HEAD does not match BUILDKITE_COMMIT'
-[[ "$(git rev-parse origin/main)" == "$BUILDKITE_COMMIT" ]] || die 'release commit is not the current origin/main'
+git merge-base --is-ancestor "$BUILDKITE_COMMIT" origin/main \
+  || die 'release commit is not reachable from origin/main'
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die 'working tree is not clean'
 
 remote_tag_commit="$(git ls-remote origin "refs/tags/${RELEASE_VERSION}" "refs/tags/${RELEASE_VERSION}^{}" | awk '$2 ~ /\^\{\}$/ { peeled=$1 } $2 !~ /\^\{\}$/ { tag=$1 } END { print peeled != "" ? peeled : tag }')"

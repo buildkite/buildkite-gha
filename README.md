@@ -215,12 +215,13 @@ of `main` in this pipeline:
 
 Because API callers supply the build's branch and commit, the pipeline's
 Terraform-managed bootstrap verifies that API builds labeled `main` have
-checked out the current `origin/main` before uploading repository-controlled
-pipeline YAML. That external check and the Secret policy form the credential
-boundary. The publisher repeats the commit check and verifies that the requested
-version is the next v0 release before retrieving the token. Do not expose the
-token through a shared agent environment hook or to webhook, ordinary branch,
-or pull-request jobs.
+checked out a commit reachable from the current `origin/main` before uploading
+repository-controlled pipeline YAML. That external check and the Secret policy
+form the credential boundary while allowing failed builds to be retried after
+`main` advances. The publisher repeats the ancestry check and verifies that the
+requested version is the next v0 release before retrieving the token. Do not
+expose the token through a shared agent environment hook or to webhook, ordinary
+branch, or pull-request jobs.
 
 ## Development
 
