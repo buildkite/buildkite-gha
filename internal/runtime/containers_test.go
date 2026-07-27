@@ -1955,6 +1955,97 @@ runs:
 	}
 }
 
+func TestLiveJobContainerAndDockerActionCacheRouting(t *testing.T) {
+	docker := requireDocker(t)
+	node := requireNode24(t)
+	backend := newRuntimeCacheBackend()
+	putRuntimeCacheEntry(t, backend, "live-job-container-restore", "1", []byte("job-container archive"))
+	putRuntimeCacheEntry(t, backend, "live-docker-restore", "1", []byte("Docker action archive"))
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: live cache routing\n")
+	writeFixtureFile(t, workspace, ".github/actions/javascript/action.yml", "name: job container cache\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/docker/action.yml", "name: Docker action cache\nruns:\n  using: docker\n  image: Dockerfile\n")
+	writeFixtureFile(t, workspace, ".github/actions/docker/Dockerfile", "FROM node:24-bookworm-slim\nCOPY probe.js /probe.js\nCMD [\"node\", \"/probe.js\"]\n")
+	client := `
+const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1'}
+function checkEnvironment() {
+  if (!/^http:\/\/buildkite-gha\.internal:\d+\/$/.test(process.env.ACTIONS_CACHE_URL || '')) throw new Error('missing container cache URL')
+  if (!/^[0-9a-f]{64}$/.test(process.env.ACTIONS_RUNTIME_TOKEN || '')) throw new Error('missing cache token')
+  if (process.env.ACTIONS_CACHE_SERVICE_V2 !== undefined || process.env.ACTIONS_RESULTS_URL !== undefined) throw new Error('unsupported cache selector leaked')
+}
+async function restore(key, expected) {
+  const response = await fetch(new URL('_apis/artifactcache/cache?keys=' + key + '&version=1', process.env.ACTIONS_CACHE_URL), {headers})
+  if (response.status !== 200) throw new Error('restore lookup failed: ' + response.status)
+  const hit = await response.json()
+  if (!hit.archiveLocation.startsWith(process.env.ACTIONS_CACHE_URL)) throw new Error('untrusted archive location')
+  const download = await fetch(hit.archiveLocation)
+  if (download.status !== 200 || await download.text() !== expected) throw new Error('restore download failed')
+}
+async function save(key, contents) {
+  const archive = Buffer.from(contents)
+  const reserve = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {
+    method: 'POST', headers: {...headers, 'Content-Type': 'application/json'},
+    body: JSON.stringify({key, version: '1', cacheSize: archive.length})
+  })
+  if (reserve.status !== 201) throw new Error('reserve failed: ' + reserve.status)
+  const {cacheId} = await reserve.json()
+  const target = new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL)
+  const upload = await fetch(target, {
+    method: 'PATCH', headers: {...headers, 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 0-' + (archive.length - 1) + '/*'}, body: archive
+  })
+  if (upload.status !== 204) throw new Error('upload failed: ' + upload.status)
+  const commit = await fetch(target, {
+    method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({size: archive.length})
+  })
+  if (commit.status !== 204) throw new Error('commit failed: ' + commit.status)
+}
+`
+	writeFixtureFile(t, workspace, ".github/actions/javascript/main.js", client+`
+checkEnvironment()
+restore('live-job-container-restore', 'job-container archive').catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	writeFixtureFile(t, workspace, ".github/actions/javascript/post.js", client+`
+checkEnvironment()
+save('live-job-container-save', 'saved from job container post').catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	writeFixtureFile(t, workspace, ".github/actions/docker/probe.js", client+`
+async function run() {
+  checkEnvironment()
+  await restore('live-docker-restore', 'Docker action archive')
+  await save('live-docker-save', 'saved from one-shot Docker action')
+}
+run().catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	javascriptID, dockerID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
+		{ID: "javascript", Kind: "uses", Uses: "./.github/actions/javascript", Action: &plan.ActionSelector{Lock: javascriptID}},
+		{ID: "docker", Kind: "uses", Uses: "./.github/actions/docker", Action: &plan.ActionSelector{Lock: dockerID}},
+	})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "node:24-bookworm-slim"}
+	job.Actions = []plan.ActionLock{
+		{ID: javascriptID, Source: "workspace", Path: ".github/actions/javascript", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/javascript"))},
+		{ID: dockerID, Source: "workspace", Path: ".github/actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/docker"))},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var logs bytes.Buffer
+	result, err := (Runner{
+		Docker: docker, RuntimeExecutable: buildLiveContainerRuntime(t), Node24: node,
+		Stdout: &logs, Stderr: &logs, Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend),
+	}).RunJob(ctx, job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("live cache routing result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if contents := getRuntimeCacheEntry(t, backend, "live-job-container-save", "1"); string(contents) != "saved from job container post" {
+		t.Fatalf("live job-container cache save = %q", contents)
+	}
+	if contents := getRuntimeCacheEntry(t, backend, "live-docker-save", "1"); string(contents) != "saved from one-shot Docker action" {
+		t.Fatalf("live Docker action cache save = %q", contents)
+	}
+}
+
 func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "phase5", "runtime"))); err != nil {
