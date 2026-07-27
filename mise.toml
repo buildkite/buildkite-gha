@@ -1,5 +1,4 @@
 [tools]
-"github:buildkite/cli" = "3.54.1"
 go = "1.26.5"
 golangci-lint = "2.12.2"
 jq = "1.8.2"
@@ -43,7 +42,7 @@ description = "Build all Go commands"
 run = "go build ./..."
 
 [tasks.release]
-description = "Request the next pre-1.0 release from main"
+description = "Tag and push the next pre-1.0 release"
 depends = ["check"]
 run = "scripts/release"
 

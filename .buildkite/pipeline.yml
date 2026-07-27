@@ -104,9 +104,7 @@ steps:
     key: "publish-release"
     # Credential isolation is enforced by the external Buildkite Secret policy,
     # not by this scheduling condition. See README.md.
-    if: build.branch == "main" && build.source == "api" && build.env("RELEASE_VERSION") != null
-    concurrency: 1
-    concurrency_group: "buildkite-gha/release"
+    if: build.tag != null
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"

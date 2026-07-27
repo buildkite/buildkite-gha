@@ -247,12 +247,10 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	var document struct {
 		Env   map[string]string `yaml:"env"`
 		Steps []struct {
-			Key              string `yaml:"key"`
-			Command          string `yaml:"command"`
-			If               string `yaml:"if"`
-			Concurrency      int    `yaml:"concurrency"`
-			ConcurrencyGroup string `yaml:"concurrency_group"`
-			Agents           struct {
+			Key     string `yaml:"key"`
+			Command string `yaml:"command"`
+			If      string `yaml:"if"`
+			Agents  struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 		} `yaml:"steps"`
@@ -267,25 +265,21 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		t.Fatalf("default pipeline = %#v, want nine gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
-		command          string
-		condition        string
-		queue            string
-		concurrency      int
-		concurrencyGroup string
+		command   string
+		condition string
+		queue     string
 	}, len(document.Steps))
 	for _, step := range document.Steps {
 		steps[step.Key] = struct {
-			command          string
-			condition        string
-			queue            string
-			concurrency      int
-			concurrencyGroup string
-		}{step.Command, step.If, step.Agents.Queue, step.Concurrency, step.ConcurrencyGroup}
+			command   string
+			condition string
+			queue     string
+		}{step.Command, step.If, step.Agents.Queue}
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
 	}
-	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != `build.branch == "main" && build.source == "api" && build.env("RELEASE_VERSION") != null` || got.queue != "elastic-runners" || got.concurrency != 1 || got.concurrencyGroup != "buildkite-gha/release" {
+	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" || got.queue != "elastic-runners" {
 		t.Fatalf("release publisher = %#v", got)
 	}
 	if got := steps["phase-0-shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml" || got.condition != `build.env("PHASE0_PROBE") == "shell"` {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 die() { printf '[release] error: %s\n' "$*" >&2; exit 1; }
-for command in bk git svu; do command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"; done
+for command in git svu; do command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"; done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -21,11 +21,7 @@ if [[ "$current" == v0.* && "$next" == v1.* ]]; then next="$(svu minor)"; fi
 [[ "$next" =~ ^v0\.[0-9]+\.[0-9]+$ ]] || die "refusing non-v0 release: $next"
 [[ "$next" != "$current" ]] || die "no version bump detected (current: $current)"
 
-printf 'Requesting release %s -> %s\n' "$current" "$next"
-bk build create \
-  --yes \
-  --pipeline buildkite/buildkite-gha \
-  --branch main \
-  --commit "$(git rev-parse HEAD)" \
-  --message "Release $next" \
-  --env "RELEASE_VERSION=$next"
+printf 'Releasing %s -> %s\n' "$current" "$next"
+git tag "$next"
+git push origin "$next"
+printf 'Tagged and pushed %s; Buildkite will publish it.\n' "$next"

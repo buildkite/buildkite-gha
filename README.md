@@ -190,38 +190,33 @@ from the GitHub release, verify the archive against the checksum file, and
 extract it to a stable location. The archive contains only `buildkite-gha` and
 `LICENSE`.
 
-Maintainers run `mise run release` from a clean, up-to-date `main`. This starts
-an API-sourced Buildkite build of that exact commit with the next
-conventional-commit-derived v0 version. After repository checks pass, the
-publisher creates the tag and GitHub release together and uploads the archive
-and checksum. A failed publication can be retried with the same release version;
-existing assets are replaced.
+Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
+and pushes the next conventional-commit-derived v0 tag. The resulting webhook
+build runs the repository checks, then creates the GitHub release and uploads
+the archive and checksum. A failed publication can be retried from the same tag
+build; existing draft assets are replaced.
 The source repository must be public before the initial tag is pushed because
 the companion plugin intentionally downloads release assets without a GitHub
 token.
 
-The release step's build condition prevents accidental publication; it is not a
+The release step's tag condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
 steps. Create a fine-grained GitHub token scoped only to this repository with
 Contents read/write permission, then store it as the `GHA_GITHUB_RELEASE_TOKEN`
-Buildkite Secret in the pipeline's cluster. Restrict it to API release builds
-of `main` in this pipeline:
+Buildkite Secret in the pipeline's cluster. Restrict it to webhook-created `v*`
+tag builds in this pipeline:
 
 ```yaml
 - pipeline_id: "019f8835-5873-4a64-850e-ba117a339d87"
-  build_source: "api"
-  build_branch: "main"
+  build_source: "webhook"
+  build_branch: "v*"
 ```
 
-Because API callers supply the build's branch and commit, the pipeline's
-Terraform-managed bootstrap verifies that API builds labeled `main` have
-checked out a commit reachable from the current `origin/main` before uploading
-repository-controlled pipeline YAML. That external check and the Secret policy
-form the credential boundary while allowing failed builds to be retried after
-`main` advances. The publisher repeats the ancestry check and verifies that the
-requested version is the next v0 release before retrieving the token. Do not
-expose the token through a shared agent environment hook or to webhook, ordinary
-branch, or pull-request jobs.
+Buildkite records a tag webhook's tag name as its build branch, so the source and
+branch claims exclude ordinary branch and pull-request webhook builds. The
+publisher independently verifies that the upstream tag, checked-out commit, and
+Buildkite commit agree before retrieving the token. Do not expose the token
+through a shared agent environment hook.
 
 ## Development
 
@@ -231,13 +226,6 @@ once, then install the toolchain:
 ```sh
 mise trust mise.toml
 mise install
-```
-
-The pinned `bk` CLI is required to request release builds. Maintainers must
-authenticate it once before running `mise run release`:
-
-```sh
-mise exec -- bk auth login
 ```
 
 Run the repository checks with:
