@@ -191,8 +191,10 @@ extract it to a stable location. The archive contains only `buildkite-gha` and
 `LICENSE`.
 
 Maintainers run `mise run release` from a clean, up-to-date `main`. This creates
-and pushes the next conventional-commit-derived v0 tag; the tag-only Buildkite
-publisher creates the GitHub release after repository checks pass.
+and pushes the next conventional-commit-derived v0 tag. The resulting webhook
+build runs the repository checks, then creates the GitHub release and uploads
+the archive and checksum. A failed publication can be retried from the same tag
+build; existing draft assets are replaced.
 The source repository must be public before the initial tag is pushed because
 the companion plugin intentionally downloads release assets without a GitHub
 token.
@@ -201,19 +203,20 @@ The release step's tag condition prevents accidental publication; it is not a
 secret boundary because pull-request code can upload arbitrary Buildkite
 steps. Create a fine-grained GitHub token scoped only to this repository with
 Contents read/write permission, then store it as the `GHA_GITHUB_RELEASE_TOKEN`
-Buildkite Secret in the release pipeline's cluster. Run tagged releases in a
-dedicated release pipeline configured to build upstream tags only, and use an
-access policy containing only that pipeline's immutable ID and webhook source:
+Buildkite Secret in the pipeline's cluster. Restrict it to webhook-created `v*`
+tag builds in this pipeline:
 
 ```yaml
-- pipeline_id: "<release-pipeline-uuid>"
+- pipeline_id: "019f8835-5873-4a64-850e-ba117a339d87"
   build_source: "webhook"
+  build_branch: "v*"
 ```
 
-The webhook policy does not distinguish tag and pull-request webhooks, so the
-release pipeline's tag-only provider filter is a load-bearing part of this
-boundary. Do not expose the token through a shared agent environment hook or to
-ordinary branch and pull-request jobs.
+Buildkite records a tag webhook's tag name as its build branch, so the source and
+branch claims exclude ordinary branch and pull-request webhook builds. The
+publisher independently verifies that the upstream tag, checked-out commit, and
+Buildkite commit agree before retrieving the token. Do not expose the token
+through a shared agent environment hook.
 
 ## Development
 
