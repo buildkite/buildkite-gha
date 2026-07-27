@@ -103,7 +103,7 @@ steps:
   - label: ":rocket: Publish release"
     key: "publish-release"
     # Credential isolation is enforced by the external Buildkite Secret policy,
-    # not by this scheduling condition. See README.md.
+    # not by this scheduling condition. See docs/development.md.
     if: build.tag != null
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:

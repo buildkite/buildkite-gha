@@ -2,8 +2,14 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-24
+Last reviewed: 2026-07-27
 Target repository: `buildkite/buildkite-gha`
+
+> This is the active product and implementation plan. It records future UX,
+> implementation detail, delivery evidence, and deferred decisions together.
+> For behavior users can rely on today, start with the [README](../../README.md)
+> and [compatibility guide](../compatibility.md). A planned example is not a
+> support promise until it is reflected in those user-facing docs.
 
 ## Summary
 
@@ -194,6 +200,12 @@ them out of metadata, artifacts, generated YAML, and debug diagnostics.
   into that trust model.
 
 ## User experience
+
+This section preserves the intended product experience, including future
+syntax and migration features. The implemented command surface and current
+examples are documented in the [README](../../README.md) and [compatibility
+guide](../compatibility.md); implementation mechanics remain in this plan and
+the architecture records.
 
 ### Commands
 
