@@ -24,7 +24,10 @@ import (
 )
 
 const (
-	defaultCleanupTimeout = 10 * time.Second
+	defaultCleanupTimeout    = 10 * time.Second
+	defaultPostActionTimeout = 10 * time.Minute
+	cacheContainerHostname   = "buildkite-gha.internal"
+	cacheContainerHost       = cacheContainerHostname + ":host-gateway"
 	// Match actions/runner ProcessInvoker's graceful cancellation windows.
 	defaultInterruptGrace = 7500 * time.Millisecond
 	defaultTerminateGrace = 2500 * time.Millisecond
@@ -44,6 +47,7 @@ type Runner struct {
 	RuntimeExecutable string
 	Git               string
 	CleanupTimeout    time.Duration
+	PostActionTimeout time.Duration
 	InterruptGrace    time.Duration
 	TerminateGrace    time.Duration
 	Secrets           SecretResolver
@@ -54,6 +58,7 @@ type Runner struct {
 	implicitJobPATH   string
 	explicitJobPATH   bool
 	actionCacheEnv    map[string]string
+	containerCacheEnv map[string]string
 	jobContainer      *jobContainerBackend
 	jobDocker         *jobContainerBackend
 	nodeVerification  *managedNodeVerification
@@ -293,6 +298,9 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
+	if r.containerCacheEnv != nil {
+		args = append(args, "--add-host", cacheContainerHost)
+	}
 	if r.jobDocker != nil {
 		args = append(args, "--network", r.jobDocker.network)
 	}
@@ -489,11 +497,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
-	if r.actionCacheEnv != nil {
-		delete(env, "ACTIONS_CACHE_SERVICE_V2")
-		delete(env, "ACTIONS_RESULTS_URL")
-		mergeInto(env, r.actionCacheEnv)
-	}
+	r.applyActionCacheEnvironment(env, r.jobContainer != nil)
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {
 		if err := r.jobContainer.probeNode(ctx, node, action.nodeMajor); err != nil {

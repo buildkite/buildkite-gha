@@ -22,7 +22,8 @@ import (
 const mediaType = "application/json;api-version=6.0-preview.1"
 
 type Config struct {
-	Token, Session, BaseURL, TempDir           string
+	Token, Session, BaseURL, ContainerBaseURL  string
+	TempDir                                    string
 	Namespace                                  Namespace
 	ReadScopes                                 []Scope
 	WriteScope                                 Scope
@@ -35,6 +36,7 @@ type Config struct {
 type Handler struct {
 	backend      Backend
 	cfg          Config
+	baseURLs     map[string]string
 	mu           sync.Mutex
 	next         int64
 	reservations map[int64]*localReservation
@@ -89,11 +91,25 @@ func NewHandler(backend Backend, cfg Config) (*Handler, error) {
 	if cfg.MaxKey < 1 || cfg.MaxVersion < 1 || cfg.MaxCandidates < 1 || cfg.MaxList < 1 || cfg.MaxBody < 1 || cfg.MaxChunk < 1 || cfg.MaxArchive < 1 {
 		return nil, fmt.Errorf("cache limits must be positive")
 	}
-	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/" {
+	baseURLs := make(map[string]string, 2)
+	for _, baseURL := range []string{cfg.BaseURL, cfg.ContainerBaseURL} {
+		if baseURL == "" {
+			continue
+		}
+		u, err := url.Parse(baseURL)
+		if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/" {
+			return nil, fmt.Errorf("safe cache base URL with trailing slash is required")
+		}
+		host := strings.ToLower(u.Host)
+		if old := baseURLs[host]; old != "" && old != baseURL {
+			return nil, fmt.Errorf("cache base URLs must have distinct hosts")
+		}
+		baseURLs[host] = baseURL
+	}
+	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("safe cache base URL with trailing slash is required")
 	}
-	return &Handler{backend: backend, cfg: cfg, reservations: map[int64]*localReservation{}, downloads: map[string]EntryID{}}, nil
+	return &Handler{backend: backend, cfg: cfg, baseURLs: baseURLs, reservations: map[int64]*localReservation{}, downloads: map[string]EntryID{}}, nil
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
@@ -154,12 +170,17 @@ func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(204)
 		return
 	}
-	id, err := h.downloadID(r.Context(), e.ID)
+	baseURL, ok := h.responseBaseURL(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unrecognized cache service host")
+		return
+	}
+	id, err := h.downloadID(r.Context(), e.ID, baseURL)
 	if err != nil {
 		mapError(w, ErrUnavailable)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"cacheKey": e.Key, "cacheVersion": e.Version, "scope": e.Scope, "creationTime": e.CreationTime, "archiveLocation": h.cfg.BaseURL + "downloads/" + id})
+	writeJSON(w, 200, map[string]any{"cacheKey": e.Key, "cacheVersion": e.Version, "scope": e.Scope, "creationTime": e.CreationTime, "archiveLocation": baseURL + "downloads/" + id})
 }
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
@@ -441,7 +462,15 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(w, rc)
 	}
 }
-func (h *Handler) downloadID(ctx context.Context, e EntryID) (string, error) {
+func (h *Handler) responseBaseURL(r *http.Request) (string, bool) {
+	if h.cfg.ContainerBaseURL == "" {
+		return h.cfg.BaseURL, true
+	}
+	baseURL, ok := h.baseURLs[strings.ToLower(r.Host)]
+	return baseURL, ok
+}
+
+func (h *Handler) downloadID(ctx context.Context, e EntryID, baseURL string) (string, error) {
 	for range 8 {
 		b := make([]byte, 16)
 		if _, err := io.ReadFull(h.cfg.random, b); err != nil {
@@ -453,7 +482,7 @@ func (h *Handler) downloadID(ctx context.Context, e EntryID) (string, error) {
 			h.downloads[id] = e
 			h.mu.Unlock()
 			if h.cfg.RegisterRedaction != nil {
-				if err := h.cfg.RegisterRedaction(ctx, h.cfg.BaseURL+"downloads/"+id); err != nil {
+				if err := h.cfg.RegisterRedaction(ctx, baseURL+"downloads/"+id); err != nil {
 					h.mu.Lock()
 					delete(h.downloads, id)
 					h.mu.Unlock()

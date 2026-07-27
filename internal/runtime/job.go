@@ -211,10 +211,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
 	}
 	if r.Cache != nil && jobHasActions(job) {
-		if job.Container != nil {
-			return jobResult, errors.New("cache service for job-container actions requires container routing support")
-		}
-		service, cacheErr := r.startCacheService(runCtx, processor, runnerTemp)
+		service, cacheErr := r.startCacheService(runCtx, processor, runnerTemp, job.HasCapability("docker"))
 		if cacheErr != nil {
 			return jobResult, cacheErr
 		}
@@ -410,8 +407,25 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = errors.Join(runErr, runCtx.Err())
 	}
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
-	defer cancel()
+	postCtx, cancelPosts := context.WithTimeout(context.Background(), r.postActionTimeout())
+	postDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			timer := time.NewTimer(r.cleanupTimeout())
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancelPosts()
+			case <-postDone:
+			}
+		case <-postDone:
+		}
+	}()
+	defer func() {
+		close(postDone)
+		cancelPosts()
+	}()
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
@@ -430,7 +444,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
-		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
+		postErr := r.runJavaScriptPhase(postCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		jobResult.Summary += postResult.Summary
@@ -519,7 +533,7 @@ func jobHasActions(job plan.Job) bool {
 	return false
 }
 
-func (r *Runner) startCacheService(ctx context.Context, processor *commandProcessor, tempDir string) (*jobCacheService, error) {
+func (r *Runner) startCacheService(ctx context.Context, processor *commandProcessor, tempDir string, containerRouting bool) (*jobCacheService, error) {
 	if r.Cache == nil || r.Cache.Backend == nil {
 		return nil, errors.New("cache backend is not configured")
 	}
@@ -538,11 +552,20 @@ func (r *Runner) startCacheService(ctx context.Context, processor *commandProces
 	if err != nil {
 		return nil, fmt.Errorf("generate cache session: %w", err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listenAddress := "127.0.0.1:0"
+	if containerRouting {
+		listenAddress = "0.0.0.0:0"
+	}
+	listener, err := net.Listen("tcp4", listenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("listen for cache service: %w", err)
 	}
-	baseURL := "http://" + listener.Addr().String() + "/"
+	port := listener.Addr().(*net.TCPAddr).Port
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	containerBaseURL := ""
+	if containerRouting {
+		containerBaseURL = fmt.Sprintf("http://%s:%d/", cacheContainerHostname, port)
+	}
 	registerRedaction := func(redactionCtx context.Context, value string) error {
 		if err := r.Redactor.AddRedaction(redactionCtx, value); err != nil {
 			return fmt.Errorf("register cache URL redaction: %w", err)
@@ -551,7 +574,7 @@ func (r *Runner) startCacheService(ctx context.Context, processor *commandProces
 		return nil
 	}
 	handler, err := ghacache.NewHandler(r.Cache.Backend, ghacache.Config{
-		Token: token, Session: session, BaseURL: baseURL, TempDir: tempDir,
+		Token: token, Session: session, BaseURL: baseURL, ContainerBaseURL: containerBaseURL, TempDir: tempDir,
 		Namespace: r.Cache.Namespace, ReadScopes: r.Cache.ReadScopes,
 		WriteScope: r.Cache.WriteScope, ReadOnly: r.Cache.ReadOnly,
 		RegisterRedaction: registerRedaction,
@@ -566,6 +589,12 @@ func (r *Runner) startCacheService(ctx context.Context, processor *commandProces
 	r.actionCacheEnv = map[string]string{
 		"ACTIONS_CACHE_URL":     baseURL,
 		"ACTIONS_RUNTIME_TOKEN": token,
+	}
+	if containerRouting {
+		r.containerCacheEnv = map[string]string{
+			"ACTIONS_CACHE_URL":     containerBaseURL,
+			"ACTIONS_RUNTIME_TOKEN": token,
+		}
 	}
 	return &jobCacheService{handler: handler, server: server, done: done}, nil
 }
@@ -1122,6 +1151,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 				invocationEnv[name] = value
 			}
 		}
+		r.applyActionCacheEnvironment(invocationEnv, true)
 		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
 		return result, err
 	}
@@ -1378,6 +1408,26 @@ func (r Runner) cleanupTimeout() time.Duration {
 		return r.CleanupTimeout
 	}
 	return defaultCleanupTimeout
+}
+
+func (r Runner) postActionTimeout() time.Duration {
+	if r.PostActionTimeout > 0 {
+		return r.PostActionTimeout
+	}
+	return defaultPostActionTimeout
+}
+
+func (r Runner) applyActionCacheEnvironment(env map[string]string, container bool) {
+	cacheEnv := r.actionCacheEnv
+	if container {
+		cacheEnv = r.containerCacheEnv
+	}
+	if cacheEnv == nil {
+		return
+	}
+	delete(env, "ACTIONS_CACHE_SERVICE_V2")
+	delete(env, "ACTIONS_RESULTS_URL")
+	mergeInto(env, cacheEnv)
 }
 
 func cloneStrings(in map[string]string) map[string]string {

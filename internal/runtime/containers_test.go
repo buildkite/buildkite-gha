@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,6 +290,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "run":
+		if err := probeFakeContainerCache(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(49)
+		}
 		var files string
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "type=bind,source=") && strings.HasSuffix(arg, ",target=/github/file_commands") {
@@ -443,6 +449,9 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		}
 	}
 	for k, v := range env {
+		if k == "ACTIONS_CACHE_URL" {
+			v = strings.Replace(v, cacheContainerHostname, "127.0.0.1", 1)
+		}
 		if k == "PATH" {
 			parts := strings.Split(v, ":")
 			for j := range parts {
@@ -458,6 +467,129 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		_ = os.Chdir(translate(wd))
 	}
 	os.Exit(RunContainerProcessHelper(helper))
+}
+
+func probeFakeContainerCache(args []string) error {
+	environment := map[string]string{}
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--env" {
+			continue
+		}
+		name, value, ok := strings.Cut(args[i+1], "=")
+		if ok {
+			environment[name] = value
+		}
+	}
+	cacheURL, token := environment["ACTIONS_CACHE_URL"], environment["ACTIONS_RUNTIME_TOKEN"]
+	if cacheURL == "" && token == "" {
+		return nil
+	}
+	if cacheURL == "" || token == "" || environment["ACTIONS_CACHE_SERVICE_V2"] != "" || environment["ACTIONS_RESULTS_URL"] != "" {
+		return errors.New("incomplete or invalid Docker action cache environment")
+	}
+	containerCacheURL := cacheURL
+	cacheURL = strings.Replace(cacheURL, cacheContainerHostname, "127.0.0.1", 1)
+	cacheHost := strings.TrimSuffix(strings.TrimPrefix(containerCacheURL, "http://"), "/")
+	requestCache := func(method, path, contentType, contentRange string, body io.Reader) (*http.Response, error) {
+		request, err := http.NewRequest(method, cacheURL+path, body)
+		if err != nil {
+			return nil, err
+		}
+		request.Host = cacheHost
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Accept", "application/json;api-version=6.0-preview.1")
+		if contentType != "" {
+			request.Header.Set("Content-Type", contentType)
+		}
+		if contentRange != "" {
+			request.Header.Set("Content-Range", contentRange)
+		}
+		return http.DefaultClient.Do(request)
+	}
+	key := environment["BUILDKITE_GHA_TEST_CACHE_KEY"]
+	if key == "" {
+		key = "fake-container"
+	}
+	expected := environment["BUILDKITE_GHA_TEST_CACHE_CONTENT"]
+	endpoint := "_apis/artifactcache/caches?key=" + key
+	if expected != "" {
+		endpoint = "_apis/artifactcache/cache?keys=" + key + "&version=1"
+	}
+	response, err := requestCache(http.MethodGet, endpoint, "", "", nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("cache probe status %d: %s", response.StatusCode, body)
+	}
+	if expected == "" {
+		return nil
+	}
+	var lookup struct {
+		ArchiveLocation string `json:"archiveLocation"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&lookup); err != nil {
+		return fmt.Errorf("decode cache lookup: %w", err)
+	}
+	if !strings.HasPrefix(lookup.ArchiveLocation, containerCacheURL) {
+		return fmt.Errorf("cache lookup returned untrusted archive location %q", lookup.ArchiveLocation)
+	}
+	downloadURL := strings.Replace(lookup.ArchiveLocation, cacheContainerHostname, "127.0.0.1", 1)
+	download, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	download.Header.Set("Authorization", "Bearer "+token)
+	archive, err := http.DefaultClient.Do(download)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = archive.Body.Close() }()
+	contents, err := io.ReadAll(archive.Body)
+	if err != nil {
+		return err
+	}
+	if archive.StatusCode != http.StatusOK || string(contents) != expected {
+		return fmt.Errorf("cache download status %d, contents %q", archive.StatusCode, contents)
+	}
+	saved := []byte("saved by Docker")
+	reservationBody, err := json.Marshal(map[string]any{"key": key + "-saved", "version": "1", "cacheSize": len(saved)})
+	if err != nil {
+		return err
+	}
+	reserve, err := requestCache(http.MethodPost, "_apis/artifactcache/caches", "application/json", "", bytes.NewReader(reservationBody))
+	if err != nil {
+		return err
+	}
+	var reservation struct {
+		CacheID int64 `json:"cacheId"`
+	}
+	decodeErr := json.NewDecoder(reserve.Body).Decode(&reservation)
+	_ = reserve.Body.Close()
+	if reserve.StatusCode != http.StatusCreated || decodeErr != nil || reservation.CacheID <= 0 {
+		return fmt.Errorf("cache reserve status %d, ID %d: %v", reserve.StatusCode, reservation.CacheID, decodeErr)
+	}
+	reservationPath := fmt.Sprintf("_apis/artifactcache/caches/%d", reservation.CacheID)
+	upload, err := requestCache(http.MethodPatch, reservationPath, "application/octet-stream", fmt.Sprintf("bytes 0-%d/*", len(saved)-1), bytes.NewReader(saved))
+	if err != nil {
+		return err
+	}
+	_ = upload.Body.Close()
+	if upload.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("cache upload status %d", upload.StatusCode)
+	}
+	commitBody := strings.NewReader(fmt.Sprintf(`{"size":%d}`, len(saved)))
+	commit, err := requestCache(http.MethodPost, reservationPath, "application/json", "", commitBody)
+	if err != nil {
+		return err
+	}
+	_ = commit.Body.Close()
+	if commit.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("cache commit status %d", commit.StatusCode)
+	}
+	return nil
 }
 
 func jobContainerPlan(t *testing.T, workspace string, steps []plan.Step) plan.Job {
@@ -1201,6 +1333,147 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerNestedJavaScriptUsesCacheService(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	backend := newRuntimeCacheBackend()
+	putRuntimeCacheEntry(t, backend, "container-restore", "1", []byte("restored from the cache"))
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: nested container cache\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", `name: Cache composite
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: test -z "${ACTIONS_CACHE_URL+x}" && test -z "${ACTIONS_RUNTIME_TOKEN+x}"
+    - uses: ./.github/actions/probe
+`)
+	writeFixtureFile(t, workspace, ".github/actions/probe/action.yml", "name: Cache probe\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	probe := `
+async function probe() {
+  if (!/^http:\/\/(?:buildkite-gha\.internal|127\.0\.0\.1):\d+\/$/.test(process.env.ACTIONS_CACHE_URL || '')) throw new Error('missing container cache URL')
+  if (!/^[0-9a-f]{64}$/.test(process.env.ACTIONS_RUNTIME_TOKEN || '')) throw new Error('missing cache token')
+  if (process.env.ACTIONS_CACHE_SERVICE_V2 !== undefined || process.env.ACTIONS_RESULTS_URL !== undefined) throw new Error('unsupported cache selector leaked')
+  const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1'}
+  const response = await fetch(new URL('_apis/artifactcache/caches?key=container-probe', process.env.ACTIONS_CACHE_URL), {
+    headers
+  })
+  if (response.status !== 200) throw new Error('cache probe failed: ' + response.status)
+  const lookup = await fetch(new URL('_apis/artifactcache/cache?keys=container-restore&version=1', process.env.ACTIONS_CACHE_URL), {
+    headers
+  })
+  const hit = await lookup.json()
+  if (!hit.archiveLocation.startsWith(process.env.ACTIONS_CACHE_URL)) throw new Error('cache returned an untrusted download URL')
+  const download = await fetch(hit.archiveLocation, {headers: {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN}})
+  if (download.status !== 200 || await download.text() !== 'restored from the cache') throw new Error('cache restore failed')
+  if (process.env.CACHE_PHASE === 'CACHE_MAIN') {
+    const archive = Buffer.from('saved from the container')
+    const reserve = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {
+      method: 'POST', headers: {...headers, 'Content-Type': 'application/json'},
+      body: JSON.stringify({key: 'container-save', version: '1', cacheSize: archive.length})
+    })
+    if (reserve.status !== 201) throw new Error('cache reserve failed: ' + reserve.status)
+    const {cacheId} = await reserve.json()
+    const upload = await fetch(new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL), {
+      method: 'PATCH', headers: {...headers, 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 0-' + (archive.length - 1) + '/*'}, body: archive
+    })
+    if (upload.status !== 204) throw new Error('cache upload failed: ' + upload.status)
+    const commit = await fetch(new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL), {
+      method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({size: archive.length})
+    })
+    if (commit.status !== 204) throw new Error('cache commit failed: ' + commit.status)
+  }
+  require('fs').appendFileSync(process.env.GITHUB_ENV, process.env.CACHE_PHASE + '=true\n')
+}
+probe().catch(error => { console.error(error); process.exitCode = 1 })
+`
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, workspace, ".github/actions/probe/"+phase+".js", "process.env.CACHE_PHASE='CACHE_"+strings.ToUpper(phase)+"'\n"+probe)
+	}
+	compositeID, probeID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := jobContainerPlan(t, workspace, []plan.Step{
+		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
+		{ID: "shell", Kind: "run", Shell: "sh", Command: `test -z "${ACTIONS_CACHE_URL+x}"; test -z "${ACTIONS_RUNTIME_TOKEN+x}"`},
+	})
+	job.Actions = []plan.ActionLock{
+		{ID: compositeID, Source: "workspace", Path: ".github/actions/composite", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "composite")), Children: map[string]plan.ActionSelector{"./.github/actions/probe": {Lock: probeID}}},
+		{ID: probeID, Source: "workspace", Path: ".github/actions/probe", SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "probe"))},
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{
+		Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t),
+		Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend), Stdout: &logs, Stderr: &logs,
+	}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\n%s", result, err, logs.String())
+	}
+	if result.Env["CACHE_PRE"] != "true" || result.Env["CACHE_MAIN"] != "true" || result.Env["CACHE_POST"] != "true" {
+		t.Fatalf("container cache lifecycle = %#v", result.Env)
+	}
+	if contents := getRuntimeCacheEntry(t, backend, "container-save", "1"); string(contents) != "saved from the container" {
+		t.Fatalf("container cache save = %q", contents)
+	}
+	calls := f.calls(t)
+	create := jobDockerCallIndex(calls, "create")
+	if create < 0 || argumentAfter(t, calls[create].Args, "--add-host") != cacheContainerHost {
+		t.Fatalf("job container host-gateway mapping absent: %#v", calls)
+	}
+	lifecycleCalls := 0
+	for _, call := range calls {
+		joined := strings.Join(call.Args, "\x00")
+		if strings.Contains(joined, "/probe/") {
+			lifecycleCalls++
+			if !strings.Contains(joined, "ACTIONS_CACHE_URL=http://"+cacheContainerHostname+":") || !strings.Contains(joined, "ACTIONS_RUNTIME_TOKEN=") {
+				t.Fatalf("container action cache environment absent: %#v", call.Args)
+			}
+		} else if strings.Contains(joined, "test -z") && strings.Contains(joined, "ACTIONS_CACHE_URL=") {
+			t.Fatalf("container shell received runtime cache environment: %#v", call.Args)
+		}
+	}
+	if lifecycleCalls != 3 {
+		t.Fatalf("container cache lifecycle calls = %d, want 3", lifecycleCalls)
+	}
+}
+
+func TestRunJobDockerActionUsesCacheServiceWithoutJobNetwork(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := fixturePath(t)
+	backend := newRuntimeCacheBackend()
+	putRuntimeCacheEntry(t, backend, "docker-restore", "1", []byte("restored by Docker"))
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./actions/docker", Env: map[string]string{
+			"BUILDKITE_GHA_TEST_CACHE_KEY":     "docker-restore",
+			"BUILDKITE_GHA_TEST_CACHE_CONTENT": "restored by Docker",
+		}, Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.SchemaV4
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions", "docker"))}}
+	var logs bytes.Buffer
+	result, err := (Runner{
+		Docker: f.path, RuntimeExecutable: os.Args[0],
+		Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend), Stdout: &logs, Stderr: &logs,
+	}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v\n%s", result, err, logs.String())
+	}
+	calls := f.calls(t)
+	run := jobDockerCallIndex(calls, "run")
+	if run < 0 {
+		t.Fatalf("Docker action run absent: %#v", calls)
+	}
+	args := calls[run].Args
+	if argumentAfter(t, args, "--add-host") != cacheContainerHost || !strings.Contains(strings.Join(args, "\x00"), "ACTIONS_CACHE_URL=http://"+cacheContainerHostname+":") || !strings.Contains(strings.Join(args, "\x00"), "ACTIONS_RUNTIME_TOKEN=") {
+		t.Fatalf("Docker action cache routing absent: %#v", args)
+	}
+	if slices.Contains(args, "--network") {
+		t.Fatalf("host-job Docker action unexpectedly joined a job network: %#v", args)
+	}
+	if contents := getRuntimeCacheEntry(t, backend, "docker-restore-saved", "1"); string(contents) != "saved by Docker" {
+		t.Fatalf("Docker action cache save = %q", contents)
+	}
+}
+
 func TestRunJobContainerCompositeAndNestedJavaScript(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
@@ -1407,7 +1680,10 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		job.Env = map[string]string{"WORKSPACE_CHILD": filepath.Join(workspace, "child")}
 		job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
 		job.Outputs = map[string]string{"container": "${{ steps.docker.outputs.container }}"}
-		result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+		result, err := (Runner{
+			Docker: f.path, RuntimeExecutable: os.Args[0], Stdout: &logs, Stderr: &logs,
+			Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(newRuntimeCacheBackend()),
+		}).RunJob(context.Background(), job, workspace)
 		if err != nil || result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.Summary != "docker action summary\n" || !strings.HasPrefix(result.Env["PATH"], "/fake/action/bin:") {
 			t.Fatalf("workspace Docker action result = %#v, error = %v", result, err)
 		}
@@ -1423,8 +1699,11 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		if got := argumentAfter(t, calls[run].Args, "--network"); got != network {
 			t.Fatalf("sibling network = %q, want %q", got, network)
 		}
+		if argumentAfter(t, calls[create].Args, "--add-host") != cacheContainerHost || argumentAfter(t, calls[run].Args, "--add-host") != cacheContainerHost {
+			t.Fatalf("sibling cache host mapping absent: create=%#v run=%#v", calls[create].Args, calls[run].Args)
+		}
 		joined := strings.Join(calls[run].Args, " ")
-		for _, want := range []string{"source=" + workspace + ",target=/github/workspace", "target=/github/runner_temp", "target=/github/file_commands", "WORKSPACE_CHILD=/github/workspace/child"} {
+		for _, want := range []string{"source=" + workspace + ",target=/github/workspace", "target=/github/runner_temp", "target=/github/file_commands", "WORKSPACE_CHILD=/github/workspace/child", "ACTIONS_CACHE_URL=http://" + cacheContainerHostname + ":", "ACTIONS_RUNTIME_TOKEN="} {
 			if !strings.Contains(joined, want) {
 				t.Fatalf("sibling run missing %q: %#v", want, calls[run].Args)
 			}

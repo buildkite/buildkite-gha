@@ -184,6 +184,62 @@ func TestLookupFailsClosedWhenDownloadURLRedactionFails(t *testing.T) {
 	}
 }
 
+func TestLookupUsesOnlyConfiguredRequestHostForDownloadURL(t *testing.T) {
+	backend := newMemoryBackend(nil)
+	namespace := Namespace{"o", "c", "p"}
+	putMemoryEntry(t, backend, namespace, "branch", "key", "version", "owner", []byte("archive"))
+	handler, err := NewHandler(backend, Config{
+		Token: "token", Session: "job", BaseURL: "http://127.0.0.1:1234/", ContainerBaseURL: "http://buildkite-gha.internal:1234/", TempDir: t.TempDir(),
+		Namespace: namespace, ReadScopes: []Scope{"branch"}, WriteScope: "branch",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		server.Close()
+		if err := handler.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	lookup := func(host string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/_apis/artifactcache/cache?keys=key&version=version", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		req.Header.Set("Authorization", "Bearer token")
+		req.Header.Set("Accept", mediaType)
+		response, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	for _, test := range []struct {
+		host, wantBase string
+	}{
+		{host: "127.0.0.1:1234", wantBase: "http://127.0.0.1:1234/downloads/"},
+		{host: "buildkite-gha.internal:1234", wantBase: "http://buildkite-gha.internal:1234/downloads/"},
+	} {
+		response := lookup(test.host)
+		if response.StatusCode != http.StatusOK {
+			status(t, response, http.StatusOK)
+		}
+		var hit struct{ ArchiveLocation string }
+		if err := json.NewDecoder(response.Body).Decode(&hit); err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if !strings.HasPrefix(hit.ArchiveLocation, test.wantBase) {
+			t.Fatalf("host %q archive location = %q, want prefix %q", test.host, hit.ArchiveLocation, test.wantBase)
+		}
+	}
+	status(t, lookup("attacker.invalid:1234"), http.StatusBadRequest)
+}
+
 func TestValidationAuthMissAndFaults(t *testing.T) {
 	_, b, s := testHandler(t)
 	req, _ := http.NewRequest("GET", s.URL+"/_apis/artifactcache/cache?keys=k&version=v", nil)

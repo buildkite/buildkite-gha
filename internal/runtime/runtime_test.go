@@ -1859,14 +1859,14 @@ func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 	}
 }
 
-func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
+func TestPostActionsUseBoundedPostContext(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Slow post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/main.js", "console.log('main completed')\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/post.js", "setTimeout(() => console.log('slow post completed'), 30000)\n")
-	runner := Runner{Node24: node, CleanupTimeout: 200 * time.Millisecond}
+	runner := Runner{Node24: node, PostActionTimeout: 200 * time.Millisecond}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
 	started := time.Now()
 	_, err := runner.RunJob(context.Background(), job, workspace)
@@ -1874,7 +1874,55 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 		t.Fatalf("RunJob() error = %v, want context deadline exceeded", err)
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
-		t.Errorf("bounded cleanup took %s, want under 3s", elapsed)
+		t.Errorf("bounded post phase took %s, want under 3s", elapsed)
+	}
+}
+
+func TestPostActionsCanExceedResourceCleanupTimeout(t *testing.T) {
+	node := requireNode24(t)
+	backend := newRuntimeCacheBackend()
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: post timeout separation\n")
+	writeFixtureFile(t, workspace, ".github/actions/post/action.yml", "name: Post timeout separation\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/post/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/post/post.js", `
+async function save() {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const archive = Buffer.from('saved after the cleanup budget')
+  const headers = {Authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN, Accept: 'application/json;api-version=6.0-preview.1'}
+  const reserve = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {
+    method: 'POST', headers: {...headers, 'Content-Type': 'application/json'},
+    body: JSON.stringify({key: 'slow-post-save', version: '1', cacheSize: archive.length})
+  })
+  if (reserve.status !== 201) throw new Error('reserve failed: ' + reserve.status)
+  const {cacheId} = await reserve.json()
+  const upload = await fetch(new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL), {
+    method: 'PATCH', headers: {...headers, 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 0-' + (archive.length - 1) + '/*'}, body: archive
+  })
+  if (upload.status !== 204) throw new Error('upload failed: ' + upload.status)
+  const commit = await fetch(new URL('_apis/artifactcache/caches/' + cacheId, process.env.ACTIONS_CACHE_URL), {
+    method: 'POST', headers: {...headers, 'Content-Type': 'application/json'}, body: JSON.stringify({size: archive.length})
+  })
+  if (commit.status !== 204) throw new Error('commit failed: ' + commit.status)
+  require('fs').writeFileSync(process.env.POST_MARKER, 'done')
+}
+save().catch(error => { console.error(error); process.exitCode = 1 })
+`)
+	marker := filepath.Join(workspace, "post-ran")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "post", Kind: "uses", Uses: "./.github/actions/post"}})
+	job.Env = map[string]string{"POST_MARKER": marker}
+	result, err := (Runner{
+		Node24: node, CleanupTimeout: 50 * time.Millisecond, PostActionTimeout: 2 * time.Second,
+		Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend),
+	}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "done" {
+		t.Fatalf("post marker = %q, %v", contents, err)
+	}
+	if contents := getRuntimeCacheEntry(t, backend, "slow-post-save", "1"); string(contents) != "saved after the cleanup budget" {
+		t.Fatalf("slow post cache save = %q", contents)
 	}
 }
 
@@ -1892,6 +1940,28 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs}).RunJob(ctx, job, workspace)
 	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" || !strings.Contains(logs.String(), "post-after-cancel") {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
+func TestExplicitCancellationBoundsStuckPostBeforeResourceCleanup(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: explicit cancellation post bound\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/action.yml", "name: Stuck cancellation cleanup\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/main.js", "setTimeout(() => {}, 30000)\n")
+	writeFixtureFile(t, workspace, ".github/actions/cancel/post.js", "setTimeout(() => {}, 30000)\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "cancel", Kind: "uses", Uses: "./.github/actions/cancel"}})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	result, err := (Runner{
+		Node24: node, CleanupTimeout: 150 * time.Millisecond, PostActionTimeout: 5 * time.Second,
+	}).RunJob(ctx, job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("explicit cancellation took %s, want the short cleanup grace rather than the post timeout", elapsed)
 	}
 }
 
@@ -3586,6 +3656,56 @@ func runtimeCacheConfig(backend ghacache.Backend) *CacheConfig {
 	}
 }
 
+func putRuntimeCacheEntry(t *testing.T, backend ghacache.Backend, key, version string, contents []byte) {
+	t.Helper()
+	config := runtimeCacheConfig(backend)
+	size := int64(len(contents))
+	reservation, err := backend.Reserve(context.Background(), ghacache.ReserveRequest{
+		Namespace: config.Namespace, Scope: config.WriteScope, Key: key, Version: version, Owner: "fixture", DeclaredSize: &size,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(contents)
+	blob, err := backend.Upload(context.Background(), reservation.ID, ghacache.BlobSource{
+		Reader: bytes.NewReader(contents), Size: size, SHA256: hex.EncodeToString(digest[:]), Generation: reservation.Generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Commit(context.Background(), reservation.ID, blob); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func getRuntimeCacheEntry(t *testing.T, backend ghacache.Backend, key, version string) []byte {
+	t.Helper()
+	config := runtimeCacheConfig(backend)
+	entry, ok, err := backend.Lookup(context.Background(), ghacache.LookupRequest{
+		Namespace: config.Namespace, Scopes: config.ReadScopes, Candidates: []string{key}, Version: version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("cache entry %q version %q was not committed", key, version)
+	}
+	archive, _, err := backend.Open(context.Background(), entry.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := archive.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	contents, err := io.ReadAll(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return contents
+}
+
 type runtimeCacheRedactor struct {
 	mu     sync.Mutex
 	values []string
@@ -3800,7 +3920,7 @@ test "$ACTIONS_RESULTS_URL" = https://workflow.invalid/results`},
 	}
 }
 
-func TestRunJobCacheShutdownAbortsIncompleteReservation(t *testing.T) {
+func TestRunJobCacheCancellationShutsDownAndAbortsIncompleteReservation(t *testing.T) {
 	node := requireNode24(t)
 	backend := newRuntimeCacheBackend()
 	workspace := t.TempDir()
@@ -3813,14 +3933,33 @@ async function main() {
   const response = await fetch(new URL('_apis/artifactcache/caches', process.env.ACTIONS_CACHE_URL), {method: 'POST', headers, body: JSON.stringify({key: 'incomplete', version: 'v1', cacheSize: 10})})
   if (response.status !== 201) throw new Error('reserve failed: ' + response.status)
   require('fs').writeFileSync(process.env.SERVICE_URL_FILE, process.env.ACTIONS_CACHE_URL)
+  await new Promise(resolve => setTimeout(resolve, 30000))
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })
 `)
 	serviceURLFile := filepath.Join(workspace, "service-url")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "reserve", Kind: "uses", Uses: "./.github/actions/reserve"}})
 	job.Env = map[string]string{"SERVICE_URL_FILE": serviceURLFile}
-	result, err := (Runner{Node24: node, Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend)}).RunJob(context.Background(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		for {
+			if _, err := os.Stat(serviceURLFile); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-deadline.C:
+				cancel()
+				return
+			}
+		}
+	}()
+	result, err := (Runner{Node24: node, Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(backend)}).RunJob(ctx, job, workspace)
+	if !errors.Is(err, context.Canceled) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	backend.mu.Lock()
@@ -3850,27 +3989,6 @@ func TestRunJobDoesNotStartCacheServiceWithoutActions(t *testing.T) {
 	result, err := (Runner{Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-}
-
-func TestRunJobCacheFailsClosedForJobContainerUntilRoutingExists(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: container cache test\n")
-	writeFixtureFile(t, workspace, ".github/actions/probe/action.yml", "name: Probe\nruns:\n  using: node24\n  main: main.js\n")
-	writeFixtureFile(t, workspace, ".github/actions/probe/main.js", "")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "probe", Kind: "uses", Uses: "./.github/actions/probe"}})
-	job.Schema = plan.SchemaV4
-	job.Steps[0].Action = &plan.ActionSelector{Lock: "a-0000000000000001"}
-	job.Actions = []plan.ActionLock{{
-		ID: "a-0000000000000001", Source: "workspace", Path: ".github/actions/probe",
-		SourceDigest: digestTree(t, filepath.Join(workspace, ".github", "actions", "probe")),
-	}}
-	job.RequiredCapabilities = []string{"docker", "network"}
-	job.Container = &plan.Container{Image: "alpine"}
-	_, err := (Runner{Redactor: &runtimeCacheRedactor{}, Cache: runtimeCacheConfig(newRuntimeCacheBackend())}).RunJob(context.Background(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "requires container routing support") {
-		t.Fatalf("RunJob() error = %v, want host-only cache boundary", err)
 	}
 }
 
