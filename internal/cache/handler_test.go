@@ -83,6 +83,12 @@ func patchCache(t *testing.T, server *httptest.Server, cacheID, start int64, bod
 	})
 }
 
+func TestProtocolRejectsNonUTF8LookupValues(t *testing.T) {
+	_, _, server := testHandler(t)
+	status(t, request(t, server, http.MethodGet, "/_apis/artifactcache/cache?keys=%FF&version=v1", "", nil), http.StatusBadRequest)
+	status(t, request(t, server, http.MethodGet, "/_apis/artifactcache/cache?keys=key&version=%FF", "", nil), http.StatusBadRequest)
+}
+
 func TestProtocolSaveRestoreAndRanges(t *testing.T) {
 	_, _, s := testHandler(t)
 	res := request(t, s, "POST", "/_apis/artifactcache/caches", `{"key":"linux-abc","version":"opaque","cacheSize":6}`, nil)

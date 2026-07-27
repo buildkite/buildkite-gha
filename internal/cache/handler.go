@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const mediaType = "application/json;api-version=6.0-preview.1"
@@ -157,7 +158,7 @@ func (h *Handler) auth(r *http.Request) bool {
 func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) {
 	keys := strings.Split(r.URL.Query().Get("keys"), ",")
 	v := r.URL.Query().Get("version")
-	if len(keys) > h.cfg.MaxCandidates || !validStrings(keys, h.cfg.MaxKey) || v == "" || len(v) > h.cfg.MaxVersion {
+	if len(keys) > h.cfg.MaxCandidates || !validStrings(keys, h.cfg.MaxKey) || v == "" || len(v) > h.cfg.MaxVersion || !utf8.ValidString(v) {
 		writeError(w, 400, "invalid cache lookup")
 		return
 	}
@@ -215,7 +216,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request) {
 	if !decode(r, w, h.cfg.MaxBody, &q) {
 		return
 	}
-	if !validStrings([]string{q.Key}, h.cfg.MaxKey) || q.Version == "" || len(q.Version) > h.cfg.MaxVersion || q.CacheSize != nil && *q.CacheSize < 0 {
+	if !validStrings([]string{q.Key}, h.cfg.MaxKey) || q.Version == "" || len(q.Version) > h.cfg.MaxVersion || !utf8.ValidString(q.Version) || q.CacheSize != nil && *q.CacheSize < 0 {
 		writeError(w, 400, "invalid reservation")
 		return
 	}
@@ -525,7 +526,7 @@ func validStrings(v []string, maxLen int) bool {
 		return false
 	}
 	for _, s := range v {
-		if s == "" || len(s) > maxLen || strings.Contains(s, ",") {
+		if s == "" || len(s) > maxLen || !utf8.ValidString(s) || strings.Contains(s, ",") {
 			return false
 		}
 	}
