@@ -1286,6 +1286,17 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `docker://`, Docker lifecycle overrides, private registries, arbitrary
   options, credentials, protected capabilities, and privileged queues continue
   to fail closed.
+- The next executable slice is GitHub Actions cache v1 compatibility, specified
+  in the [focused cache-service plan](./2026-07-27-github-actions-cache-service.md).
+  It adds a job-local v1 HTTP adapter for direct and transitive `@actions/cache`
+  clients, an action-only job token, and a semantic backend over Buildkite Cache
+  v2. The backend choice is settled, but production enablement requires a narrow
+  Cache v2/Agent extension for opaque archives, GHA-compatible ordered lookup,
+  conditional immutable reservation/commit, verified PR/fork/default/base ref
+  visibility, integrity hardening, quotas, and a supported caller boundary.
+  This bounded slice is separate from the remaining Phase 6 artifact/results,
+  provider-token, protected-secret, private-source, and capability-control-plane
+  work.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1334,10 +1345,12 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - The profile is also exposed as the text/JSON workflow preflight
   `buildkite-gha validate --profile hosted-tokenless --event-path <path>
   --format text|json <workflow>`. Expected-negative fixtures preserve current
-  boundaries: official GitHub artifact/cache actions compile but are denied
-  admission pending Phase 6. Job and service containers compile to schema-v4
-  plans and have hosted runtime evidence, while production admission rejects
-  their container provenance.
+  boundaries: official GitHub artifact/cache actions compile but are currently
+  denied admission. Cache denial remains until the focused next slice has a
+  production backend and live evidence; artifact denial remains for later
+  Phase 6 work. Job and service containers compile to schema-v4 plans and have
+  hosted runtime evidence, while production admission rejects their container
+  provenance.
 - A consolidated exact-commit hosted dispatcher is available with
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
@@ -1727,6 +1740,19 @@ Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
 requires an HTTP protocol, run a job-local compatibility endpoint or provide a
 well-defined adapter rather than proxying GitHub's private service.
 
+The immediate Phase 6 slice is the
+[focused GitHub Actions cache-service plan](./2026-07-27-github-actions-cache-service.md):
+implement the public cache v1 protocol as a job-local adapter, keep v2/results
+variables unset, provision it for Actions jobs rather than recognized action
+names, and place a semantic backend interface between the protocol and
+Buildkite Cache v2. Protocol/runtime work can begin against deterministic test
+backends. Production enablement depends on a narrow Cache v2/Agent feature for
+opaque archive transfer, policy-checked GHA lookup, conditional immutable
+reservation/commit, verified ref visibility, integrity/retention/quota
+hardening, and a supported programmatic boundary; do not build a second durable
+index inside `buildkite-gha`.
+Artifact v4/results compatibility is not part of this cache slice.
+
 Protected provider features use the supporting control-plane service:
 
 - authenticate callers with Buildkite Job OIDC and an exact service audience;
@@ -1743,14 +1769,18 @@ Protected provider features use the supporting control-plane service:
 
 Delivery slices:
 
-1. Ship tokenless cache, artifact, summary, and public-checkout adapters without
-   a service dependency.
-2. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
+1. Ship cache v1 compatibility through the focused plan: protocol fixtures,
+   job-local adapter, narrow Cache v2/Agent opaque-entry and reservation/lookup
+   extension, trusted branch/PR/fork scope, container reachability, bounded
+   post-action saves, and unchanged direct and transitive cache canaries.
+2. Ship artifact/results, summary, and public-checkout adapters as separate
+   tokenless deliverables; do not couple their protocols or lifecycle to cache.
+3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
    policy evaluation, and signed no-op grants before returning credentials.
-3. Add private checkout, private actions, and private reusable-workflow source
+4. Add private checkout, private actions, and private reusable-workflow source
    access through the narrowest practical credential or download interface.
-4. Add scoped GitHub tokens, selected secrets, and environment grants.
-5. Prefer direct Buildkite OIDC migration, then add only explicitly supported
+5. Add scoped GitHub tokens, selected secrets, and environment grants.
+6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
 Definition of done:
@@ -1759,8 +1789,9 @@ Definition of done:
   producer and verifies the same contents in both consumer matrix instances on
   GitHub Actions and `buildkite-gha`.
 - Common official cache and artifact actions work without a GitHub Actions run.
-- Artifact and cache keys cannot cross organization/build boundaries
-  unexpectedly.
+- Artifacts cannot cross their authorized build boundary. Cache entries cross
+  builds only within their authorized organization, cluster, pipeline, and ref
+  scopes.
 - Cursor Origin checkout does not require a GitHub repository mirror.
 - Private checkout and actions use repository-scoped, least-privilege access
   without exposing a reusable service credential to the compiler.
@@ -1852,8 +1883,10 @@ buildkite-gha validate --profile hosted-tokenless \
 ```
 
 Admission is policy evidence, not execution evidence. In particular, known
-official artifact and cache actions compile but must be rejected until Phase 6
-provides their service adapters. Unknown generic action dependencies are not
+official artifact and cache actions compile but are currently rejected. Cache
+rejection is removed only after the focused cache-service plan has a production
+backend and live compatibility evidence; artifact rejection remains until its
+later Phase 6 adapter exists. Unknown generic action dependencies are not
 declared executable merely because the profile admits them.
 
 The manual hosted aggregate is dispatched against one exact full commit:
@@ -2196,8 +2229,12 @@ them in the phase that first needs the capability:
    the local `default` Docker driver and queue prerequisites; build 136 proved
    the complete container runtime. A compatibility image remains deferred until
    tool-cache differences demonstrate a concrete need.
-3. Phase 6 will choose job-local protocol adapters versus recognized built-ins
-   for cache and artifact actions.
+3. Cache now uses a job-local GitHub cache v1 protocol adapter over a pluggable
+   semantic backend, as specified by the focused cache-service plan. Buildkite
+   Cache v2 is the selected durable registry/blob substrate; a narrow
+   opaque-entry, GHA lookup, conditional reservation/commit, and ref-visibility
+   Cache v2/Agent extension gates production enablement. Artifact v4/results
+   protocol selection remains a separate Phase 6 decision.
 4. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
 5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,

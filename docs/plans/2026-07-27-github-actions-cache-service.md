@@ -1,0 +1,1163 @@
+# GitHub Actions cache compatibility service
+
+Status: **Proposed — next implementation slice**
+Date: 2026-07-27
+Parent plan: [`buildkite-gha`: GitHub Actions compatibility for Buildkite](./2026-07-22-buildkite-gha.md)
+Backend decision: **Extend Buildkite Cache v2 through a narrow opaque-entry API/Agent feature**
+
+## Summary
+
+Make cache-dependent GitHub Actions workflows run unchanged under
+`buildkite-gha` by providing the GitHub Actions cache v1 HTTP contract from a
+job-local adapter. The adapter presents the protocol expected by
+`@actions/cache`, while a pluggable backend stores metadata and opaque cache
+archives using a Buildkite-owned cache service.
+
+The first production implementation should:
+
+- start one cache adapter inside each `buildkite-gha run-job` process;
+- provision it for every admitted job containing Actions, because cache usage
+  is frequently transitive and cannot be inferred reliably from action names;
+- inject only `ACTIONS_CACHE_URL` and a random, job-scoped
+  `ACTIONS_RUNTIME_TOKEN` into action invocations;
+- deliberately leave `ACTIONS_CACHE_SERVICE_V2` and `ACTIONS_RESULTS_URL`
+  unset so current cache clients select the v1 protocol;
+- keep the adapter alive through JavaScript post-actions, where cache saves
+  normally occur;
+- derive storage namespace, read scopes, and write scope from trusted
+  Buildkite identity rather than workflow-controlled environment or plan
+  fields; and
+- use Buildkite Cache v2 as the durable registry/blob substrate after adding a
+  narrow opaque-entry, GHA-compatible lookup, reservation/commit, and ref
+  visibility surface.
+
+The backend choice is settled: extend Cache v2 rather than build a second
+durable metadata/reservation service. Cache v2 already provides a cluster-owned
+registry, server-stamped Buildkite identity, cross-build entries, policy-ordered
+scope fallback, content-addressed blobs, Hosted Namespace storage, and
+self-hosted S3-compatible storage. Its shipped high-level interface is not yet
+sufficient: it re-archives target paths, uses structured whole-part fallback,
+publishes mutable last-writer-wins metadata, and lacks trusted PR/fork/base and
+dynamic default-branch scope inputs. The production gate is therefore the
+small platform/Agent delta specified below, not another backend-selection
+exercise.
+
+A temporary-disk/in-memory backend remains useful for protocol and runtime
+tests. A generated Cache v2 YAML file wrapping one staged GHA archive is an
+acceptable spike for validating Hosted connectivity, but is not a production
+path: it double-wraps and recompresses the archive, stages both complete files,
+always extracts on restore, and does not fix lookup or publication semantics.
+
+This is the next bounded delivery slice from Phase 6 of the parent plan. GitHub
+artifact v4/results compatibility, GitHub/provider tokens, protected secrets,
+private checkout/actions, and the protected-capability control plane remain
+separate later work.
+
+## User outcome
+
+After this slice, users should not have to identify or disable transitive cache
+use. These should work without workflow edits:
+
+- `actions/cache@v3` and `actions/cache@v4` restore and save;
+- setup actions such as `actions/setup-node` and `actions/setup-go` with their
+  cache inputs enabled;
+- actions that call the public `@actions/cache` package internally; and
+- the existing `lox/notion-cli` workflow with `jdx/mise-action` caching left at
+  its default, rather than setting `cache: false` for Buildkite.
+
+Cache misses, evictions, and save contention remain normal non-fatal cache
+outcomes. A cache hit is an accelerator and never an authority for executable
+identity, action source integrity, plan integrity, or protected credentials.
+
+## Why action-name special-casing is insufficient
+
+The current hosted-tokenless admission check explicitly rejects a resolved
+`actions/cache` action. That protects a known failure mode but does not describe
+the actual compatibility boundary:
+
+- `jdx/mise-action` can invoke `@actions/cache` from its bundled JavaScript;
+- setup actions provide cache options without containing an
+  `actions/cache` step in the workflow;
+- local, composite, and third-party actions can use the toolkit package; and
+- scanning bundled JavaScript is incomplete, brittle, and would turn
+  implementation details into policy.
+
+Therefore the runtime should provision cache as a baseline service for every
+admitted Actions job. It must not scan action repository names, refs, metadata,
+or JavaScript bundles to decide whether to start the service. Once the service
+is production-ready, remove only the known cache-service rejection from
+`validateUnprivilegedBundle`; retain the explicit artifact-service rejection
+until the artifact adapter exists.
+
+## Goals
+
+- Support the public cache v1 wire contract used by current `@actions/cache`
+  clients.
+- Make direct and transitive cache use work without action-specific runtime
+  code.
+- Preserve exact cache `version` matching and GitHub-compatible ordered key
+  fallback.
+- Support immutable cache entries, concurrent writers, parallel chunk uploads,
+  client retries, and post-action saves safely.
+- Persist entries across Buildkite jobs and builds within an explicitly allowed
+  pipeline/ref scope.
+- Isolate organizations, clusters, pipelines, normal branches, pull requests,
+  forks, and tags according to a documented server-side policy.
+- Give action code only a job-scoped cache capability, never the Buildkite
+  Agent/backend authority used by the parent runtime.
+- Work for host JavaScript actions, JavaScript actions in job containers,
+  Docker actions, and nested composite actions.
+- Bound storage, upload size, request rate, reservation lifetime, retention,
+  and post-action execution time.
+- Keep a stable internal semantic backend contract so GitHub cache service v2
+  can be added as a second frontend later.
+
+## Non-goals
+
+- Do not proxy GitHub's cache service or use GitHub runtime credentials.
+- Do not implement GitHub cache service v2/Twirp in this slice.
+- Do not set `ACTIONS_CACHE_SERVICE_V2` or `ACTIONS_RESULTS_URL`.
+- Do not implement `actions/upload-artifact`, `actions/download-artifact`, or
+  the GitHub Actions results service. Artifact v4 uses a different protocol and
+  lifecycle.
+- Do not special-case `actions/cache`, setup actions, or `mise-action` in the
+  executor.
+- Do not inspect, extract, normalize, or execute cache archives server-side.
+  Cache bytes are opaque.
+- Do not make a cache hit authoritative. Existing action-source and managed
+  runtime digest checks still run on hits.
+- Do not expose a general-purpose Buildkite cache credential to action code.
+- Do not claim compatibility for Windows, macOS, GHES, or cache v2 in this
+  Linux-first slice.
+- Do not make the existing `.buildkite-gha/cache-volume`/`MiseDataDir` volume
+  the production GHA cache backend merely because it persists managed Node
+  installations. It has a different purpose and no established GHA cache
+  metadata or concurrency contract.
+
+## Compatibility target: cache v1 first
+
+Current cache clients select the legacy v1 protocol when
+`ACTIONS_CACHE_SERVICE_V2` is absent. `actions/cache@v4` retains this path for
+GHES and other runners that expose only `ACTIONS_CACHE_URL`; v4 does not require
+the v2 service merely because it uses Node 20.
+
+For every action invocation, the runtime supplies:
+
+```text
+ACTIONS_CACHE_URL=http://<runtime-owned-address>:<random-port>/
+ACTIONS_RUNTIME_TOKEN=<cryptographically-random-job-token>
+```
+
+The URL must end in `/` because the public client appends
+`_apis/artifactcache/...` directly. The runtime must leave these unset:
+
+```text
+ACTIONS_CACHE_SERVICE_V2
+ACTIONS_RESULTS_URL
+```
+
+Do not set `ACTIONS_CACHE_SERVICE_V2=false`: the JavaScript client treats any
+non-empty value as enabling v2.
+
+The v1 adapter is a compatibility frontend. The internal entry model must not
+embed v1-specific numeric IDs or URLs so a later v2/Twirp frontend can reuse
+the same backend and policy.
+
+## Architecture and trust boundaries
+
+```diagram
+┌───────────────────────────────────────────────────────────────────┐
+│ buildkite-gha run-job                                             │
+│                                                                   │
+│  ┌──────────────────┐      trusted calls       ┌───────────────┐  │
+│  │ Runner / actions │◀────────────────────────▶│ cache runtime │  │
+│  └────────┬─────────┘                          └───────┬───────┘  │
+│           │ action-only env                            │          │
+│           │ cache URL + random bearer token            │          │
+│           ▼                                            ▼          │
+│  ┌──────────────────┐   GitHub cache v1 HTTP   ┌───────────────┐  │
+│  │ action process   │─────────────────────────▶│ v1 adapter    │  │
+│  │ host/container  │◀─────────────────────────│ + policy      │  │
+│  └──────────────────┘   opaque archive bytes   └───────┬───────┘  │
+└────────────────────────────────────────────────────────┼──────────┘
+                                                         │ private
+                                                         │ Buildkite
+                                                         │ authority
+                                                         ▼
+                                                ┌─────────────────┐
+                                                │ cache backend   │
+                                                │ metadata + blob │
+                                                └─────────────────┘
+```
+
+The boundaries are:
+
+1. **The action-facing capability is the job token.** Generate at least 256
+   random bits, retain it only in memory, compare it in constant time, bind all
+   reservation IDs to it, and invalidate it when `RunJob` exits.
+2. **The runtime-facing capability remains private.** Any Agent token, Job OIDC
+   token, backend session, signed storage URL, or service credential used to
+   reach the Buildkite backend remains in the parent process and is never
+   copied into action environment, plans, generated pipeline YAML, result
+   manifests, artifacts, or logs.
+3. **Workflow fields are compatibility data, not storage authority.** The
+   current plan `Event`, `github.*` context, `GITHUB_*`, `BUILDKITE_*` values
+   visible to steps, request headers, cache keys, and request bodies must not
+   select organization, cluster, pipeline, or ref namespace.
+4. **Actions share job authority.** Restricting the token to action invocation
+   environments prevents accidental exposure and matches the service contract;
+   it is not a sandbox boundary against a hostile shell step in the same Unix
+   account/job. That matches the project's existing job-level trust model.
+5. **Downloads use a narrower opaque URL.** The public client does not attach
+   `ACTIONS_RUNTIME_TOKEN` when fetching `archiveLocation`. Return a random,
+   short-lived, job-local download URL which names no backend locator and is
+   valid only for the adapter lifetime.
+
+The adapter listens only for the job lifetime. Host actions use loopback.
+Container actions use a runtime-owned Docker host alias and the same server
+port. Container reachability broadens the listener from loopback to the
+disposable job VM's Docker interfaces, so every control request still requires
+the bearer token and every download URL must be unguessable and short-lived.
+
+## GitHub cache v1 HTTP contract
+
+All control endpoints require:
+
+```http
+Authorization: Bearer <ACTIONS_RUNTIME_TOKEN>
+Accept: application/json;api-version=6.0-preview.1
+```
+
+Reject missing, malformed, or incorrect authorization before reading a large
+body. Apply request-body and header limits before decoding.
+
+### Restore lookup
+
+```http
+GET /_apis/artifactcache/cache?keys=<comma-separated-candidates>&version=<opaque-version>
+```
+
+The client sends `[primary key, restore key 1, restore key 2, ...]` as one
+URL-encoded comma-separated query value. Support no more than ten candidates,
+reject empty candidates and commas in decoded keys, and enforce the public
+512-character key limit.
+
+A miss returns:
+
+```http
+204 No Content
+```
+
+A hit returns a 2xx JSON body:
+
+```json
+{
+  "cacheKey": "the-complete-stored-key",
+  "cacheVersion": "the-exact-requested-version",
+  "scope": "non-authoritative-display-scope",
+  "creationTime": "2026-07-27T00:00:00Z",
+  "archiveLocation": "http://<job-adapter>/downloads/<opaque-random-id>"
+}
+```
+
+`cacheKey` must be the complete key of the selected entry, not the matching
+restore prefix. `actions/cache` uses equality with the primary key to determine
+`cache-hit` and whether its post phase should save a replacement.
+
+The optional debug path should also be implemented because the toolkit calls it
+after some misses when debug logging is enabled:
+
+```http
+GET /_apis/artifactcache/caches?key=<primary-key>
+```
+
+Return the bounded v1 `ArtifactCacheList` shape. This endpoint is diagnostic,
+must obey the same scope rules, and must not reveal entries outside the caller's
+read scopes.
+
+### Reservation
+
+```http
+POST /_apis/artifactcache/caches
+Content-Type: application/json
+
+{
+  "key": "primary-key",
+  "version": "opaque-version",
+  "cacheSize": 123456
+}
+```
+
+On success, return a positive numeric job-local ID:
+
+```json
+{"cacheId": 123}
+```
+
+The numeric ID exists only because v1 requires it. Map it inside the adapter to
+an opaque backend reservation ID and bind that mapping to the current job token
+and write scope. Never expose a sequential backend primary key.
+
+Reservation is atomic for:
+
+```text
+trusted namespace + write ref scope + key + version
+```
+
+Only one writer may hold or commit that identity. If an immutable committed
+entry exists, or another unexpired writer owns the reservation, report
+contention without replacing the entry. `409 Conflict` is the preferred local
+status for contention; the client does not require that exact status and treats
+an unusable reservation as a normal concurrent-save failure. Use `400` or
+`413` for malformed/oversized requests, with bounded non-sensitive messages.
+
+### Chunk upload
+
+```http
+PATCH /_apis/artifactcache/caches/{cacheId}
+Content-Type: application/octet-stream
+Content-Range: bytes <inclusive-start>-<inclusive-end>/*
+```
+
+The toolkit uploads chunks concurrently. The server must:
+
+- validate the inclusive range and exact request-body length;
+- accept chunks arriving and completing out of order;
+- write by explicit offset rather than appending;
+- accept an identical replay of an already stored range;
+- reject inconsistent overlapping bytes;
+- reject ranges outside the reservation's declared/allowed maximum;
+- avoid retaining the entire archive in memory; and
+- keep partial bytes invisible to restore lookup and download.
+
+The client's default is four concurrent 32 MiB chunks, but environment options
+can increase concurrency and chunk size. The implementation must not depend on
+those defaults.
+
+### Commit
+
+```http
+POST /_apis/artifactcache/caches/{cacheId}
+Content-Type: application/json
+
+{"size": 123456}
+```
+
+Before publishing the entry, verify that:
+
+- `size` is non-negative and within configured limits;
+- it agrees with the reservation's supplied size when one was supplied;
+- uploaded ranges cover exactly `0..size-1` with no holes;
+- replayed/overlapping ranges did not introduce inconsistent bytes; and
+- the backend blob has the expected length.
+
+Commit atomically changes the entry from reserved/uploading to committed.
+Lookup can observe only the committed state. A retry of the same commit and
+size must return success; a retry with a different size must fail. Once
+committed, the entry is immutable.
+
+### Download
+
+`archiveLocation` is fetched without the runtime bearer token. Implement:
+
+```http
+GET  /downloads/{opaque-random-id}
+HEAD /downloads/{opaque-random-id}
+```
+
+Return accurate `Content-Length`. Support standard single byte ranges and
+`206 Partial Content` so the endpoint remains compatible with concurrent
+download clients and future storage URL choices. Stream from the backend; do
+not buffer whole archives in the adapter.
+
+The opaque URL must:
+
+- contain at least 128 random bits;
+- be mapped only in memory to one committed backend entry;
+- expire no later than the job adapter;
+- be scoped to GET/HEAD for that entry; and
+- never expose a backend object key, credential, tenant ID, or signed URL in
+  logs.
+
+### Errors, retries, and idempotency
+
+The public client retries transport failures and 502/503/504 responses. A
+response can be lost after the server has applied it, so these operations must
+be replay-safe:
+
+| Operation | Required replay behavior |
+| --- | --- |
+| Lookup/list | Naturally idempotent |
+| Reserve | Return contention or the same still-valid job-local reservation; never create two writable entries |
+| PATCH range | Accept identical bytes at the same range; reject inconsistent overlap |
+| Commit | Repeating the same reservation and size succeeds |
+| Download | GET/HEAD/range requests are side-effect free |
+
+Use `429` for rate limits, `401` for invalid job tokens, `403` for a valid token
+whose server-side mode denies the operation, `404` for unknown/expired local
+IDs, `409` for contention/inconsistent replay, `413` for size limits, and
+`503` for a temporarily unavailable backend. Error bodies and logs must remain
+bounded and must not contain raw tokens, backend locators, or archive content.
+
+## Entry identity and lookup semantics
+
+The production identity is:
+
+```text
+organization UUID
++ cluster UUID
++ pipeline UUID
++ canonical ref scope
++ key
++ version
+```
+
+Repository names, pipeline slugs, branch names, and action-supplied keys may be
+stored as bounded display metadata, but immutable IDs and canonical ref scopes
+form the lookup boundary. Moving or renaming a pipeline must not accidentally
+merge it with another pipeline's cache.
+
+Treat `version` as an opaque exact-match value. The toolkit derives it from
+path patterns, compression, platform, cross-OS mode, and a client format
+version. The adapter does not reproduce or normalize that calculation.
+
+For each permitted read scope, select in this order:
+
+1. exact primary key;
+2. newest primary-key prefix match;
+3. each restore key in request order, selecting an exact match first and then
+   the newest prefix match for that restore key; and
+4. no match.
+
+Search the current scope completely before moving to its permitted fallback
+scope. Use committed creation time descending and immutable entry ID as a
+stable final tie-breaker. Never let backend enumeration order decide a hit.
+
+The selected full key is returned as `cacheKey`. Partial uploads, failed
+commits, expired entries, disallowed scopes, and versions other than the exact
+requested version are never candidates.
+
+## Trusted scope policy
+
+The backend session must receive immutable organization, cluster, pipeline,
+build, and job identity from a Buildkite-authenticated source. Canonical
+branch/PR/tag/default-branch facts must come from a trusted Buildkite build or
+provider-event record. The current `buildkiteEventSource` and plan `Event` are
+explicitly compatibility snapshots and are not sufficient as storage
+authorization inputs.
+
+Cache v2 currently stamps organization owner slug, pipeline slug, branch,
+agent UUID, job UUID, and build UUID from authenticated job identity; cluster is
+implicit in the cluster-owned registry. Its policy scopes are limited to
+`pipeline`, `branch`, and `build`. The GHA entry mode still needs immutable
+organization/pipeline IDs in its durable namespace so slug reuse cannot inherit
+old entries. Although policy CEL can observe build tag/source and other job
+facts, it does not currently receive pipeline default branch, PR ID, PR base
+branch, PR head repository, fork status, provider event, or canonical ref kind.
+The policy below is therefore the required target, not a claim that current
+Cache v2 can enforce it. Production enablement is blocked until the Cache v2
+scope resolver receives those verified facts or exposes a dedicated GHA
+visibility resolver.
+
+Initial policy:
+
+| Build type | Ordered read scopes | Write scope |
+| --- | --- | --- |
+| Default branch | default branch | default branch |
+| Normal branch | exact branch, then default branch | exact branch |
+| Same-repository pull request | exact PR, then trusted base branch, then default branch | exact PR |
+| Fork pull request | trusted base/default branch only | denied initially |
+| Tag | exact tag, then default branch | exact tag |
+
+Deduplicate scopes when the base branch is the default branch. A later policy
+may allow writes to an isolated fork/PR namespace, but must not allow fork code
+to populate base/default or same-repository PR caches.
+
+Read/write mode is server-side authority:
+
+```text
+disabled | read-only | read-write
+```
+
+Do not merely send a mode hint to the client. A read-only token receives `403`
+from reserve/PATCH/commit regardless of request data. A disabled service is not
+advertised to actions. The runtime should fail before action execution if it
+claims read-write cache availability but cannot establish a backend session;
+rollout modes that intentionally provide no cache should leave the cache
+environment unset rather than expose a dead URL.
+
+## Internal backend contract
+
+The v1 HTTP frontend owns job-local chunk assembly. Cache v2 owns durable
+cross-job metadata, reservation, policy, and blob storage. This separation lets
+the adapter accept GHA's out-of-order/retried PATCH requests without requiring
+the durable store to expose a chunk protocol.
+
+The HTTP handler should depend on a semantic interface, not on generated YAML,
+Agent commands, Namespace/S3 URLs, or Cache v2 wire details. The exact Go
+spelling can follow repository conventions, but the contract should be
+equivalent to:
+
+```go
+type Backend interface {
+    Lookup(context.Context, LookupRequest) (Entry, bool, error)
+    List(context.Context, ListRequest) ([]Entry, error)
+    Reserve(context.Context, ReserveRequest) (Reservation, error)
+    Upload(context.Context, ReservationID, BlobSource) (Blob, error)
+    Commit(context.Context, ReservationID, Blob) (Entry, error)
+    Abort(context.Context, ReservationID) error
+    Open(context.Context, EntryID, *ByteRange) (io.ReadCloser, BlobInfo, error)
+}
+```
+
+Requests passed to this interface contain already-derived trusted namespace,
+ordered read scopes or one write scope, validated key/version, and bounded
+sizes. The action-facing HTTP request cannot populate namespace fields.
+
+`Reserve` is a server-side conditional operation over verified scope, key, and
+version; only its winner receives upload authority. The adapter maps that
+opaque reservation to the positive numeric v1 `cacheId`, writes PATCH ranges
+into one bounded sparse temporary file, validates complete coverage at v1
+commit, and computes size plus SHA-256. `Upload` transfers that complete opaque
+file through the privileged Agent/store boundary. `Commit` conditionally
+publishes the exact reserved generation as immutable metadata. `Open` performs
+policy-checked retrieval, verifies the downloaded digest, and either streams or
+stages the opaque archive so the job-local HTTP server can satisfy GET/HEAD and
+range requests.
+
+Required metadata:
+
+```text
+entry ID
+organization/cluster/pipeline namespace
+canonical ref scope
+full key
+opaque version
+creation time
+committed size
+blob locator/digest
+expiration/retention metadata
+state: reserved | committed | expired
+```
+
+Reservations also require owner/session identity, lease expiry, declared size,
+received byte ranges, and enough integrity metadata to reject inconsistent
+replays. Chunk ranges are job-local adapter state; the durable reservation needs
+the expected entry identity, generation, lease, and eventual blob digest/size.
+Backend object IDs and locators remain private.
+
+The interface expresses required behavior, not necessarily one Agent or server
+call per method. The Cache v2 integration may use a narrow public Agent package
+or subprocess protocol, but must not import `github.com/buildkite/agent/v3`
+`internal/cache` packages. Do not add a second durable index inside
+`buildkite-gha`; extend the cluster cache registry so policy, retention,
+generation, and contention have one source of truth.
+
+An in-memory backend and a bounded temporary-disk blob implementation should
+be used for protocol, runtime, race, and fault-injection tests. They must be
+impossible to select accidentally in production builds.
+
+## Buildkite Cache v2 integration decision
+
+The Cache v2 assessment supporting this decision inspected Buildkite Agent
+commit `ba4e2b665c9501a3f81eb276aa1796ee20775f09`, current Cache registry models,
+Notion policy decisions, and Linear delivery status on 2026-07-27. Reconfirm
+the resulting API and delivery assumptions against the owning repositories
+before implementing C2 because Cache v2 remains pre-preview work.
+
+### Confirmed reusable substrate
+
+- One metadata registry belongs to a Buildkite cluster. Save scope values are
+  stamped from verified Agent/job identity, and clients cannot select another
+  organization, pipeline, or branch with legacy flags.
+- Cache entries persist across builds. Hosted storage is Buildkite-managed
+  Namespace storage; self-hosted agents can use an S3-compatible store with
+  ambient credentials.
+- Metadata moves through the Buildkite Cache API while archive bytes move
+  Agent-to-store. Blobs are content-addressed by caller-computed digest.
+- Restore applies registry-policy scopes in order, then exact structured key,
+  then longest-to-shortest whole-key-part fallback, selecting newest
+  `created_at` within a prefix on a best-effort eventually consistent scan.
+- The low-level importable
+  [`agent/v3/api` cache surface](https://github.com/buildkite/agent/blob/ba4e2b665c9501a3f81eb276aa1796ee20775f09/api/cache.go#L134-L263)
+  accepts runtime target paths, structured keys, blob digest/size/compression,
+  and exposes peek/create/commit/retrieve/expire. It does not transfer bytes;
+  Agent orchestration and Namespace/S3 stores remain internal packages.
+- `run-job` can retain Agent and Namespace authority in its stripped parent
+  environment and expose only the local cache token to action processes.
+  Current container jobs do not mount the Agent.
+
+### Confirmed incompatibilities
+
+| Required by this plan | Shipped Cache v2 behavior | Required change |
+| --- | --- | --- |
+| Store one already-created opaque archive | High-level CLI requires YAML, archives target paths into ZIP/Zstd, stages the complete wrapper, and extracts on restore | Public opaque blob put/get path with no wrapper or extraction |
+| Identity independent of ephemeral local paths | Permanent address includes a hash of the configured target-path set | Opaque-entry address based on immutable organization/cluster/pipeline identity plus verified ref scope, key, and version only |
+| Immutable organization/pipeline namespace | Server stamps organization owner and pipeline slugs; registry implies cluster | Stamp immutable organization/cluster/pipeline IDs for GHA entries so rename/reuse cannot merge authority |
+| Ordered arbitrary GHA key candidates | Structured key parts with contiguous trailing whole-part fallback | One policy-checked lookup accepting primary key, ordered restore keys, exact opaque version, and flat string-prefix matching |
+| Newest matching entry deterministically | Exact reads are strongly consistent; fallback scans are eventually consistent and bounded by 256 RCUs | Explicit consistency/newest contract suitable for GHA lookup |
+| Atomic reservation and immutable first commit | Five-minute temporary upload record followed by unconditional metadata `PutItem`; concurrent later commit overwrites earlier metadata | Conditional reserve/commit with generation token and first-writer-wins immutability |
+| Dynamic default/base and PR/fork visibility | Policy scopes only `pipeline`, `branch`, `build`; no default branch, PR/base/head repository, fork, provider event, or canonical ref-kind claims | Add verified ref facts or a dedicated server-side GHA visibility resolver |
+| Verified opaque bytes | Backend trusts caller digest; restore checksum verification is open | Verify digest before publication/use and generation-guard invalidation/TTL changes |
+| Stable supported integration | Hidden experimental CLI plus generated YAML; public API is metadata-only and stores are internal | Narrow supported Agent package or machine-safe subprocess/API contract |
+
+Do not use Cache v2 `peek` as an authorization-bearing restore operation: it is
+metadata-only and bypasses registry restore policy. Use a policy-checked
+retrieve/lookup operation. Do not encode a GHA string into one Cache v2 key part
+and assume fallback works: current fallback searches descendants at whole-part
+boundaries and cannot match an arbitrary prefix such as `npm-linux-` against
+`npm-linux-abc`.
+
+Current publication is explicitly not a reservation. Two jobs can both miss,
+upload, and commit; the later unconditional commit replaces metadata. The stock
+Agent's pre-save peek narrows but does not close that race. Open hardening work
+includes checksum verification
+([A-1494](https://linear.app/buildkite/issue/A-1494/verify-cache-checksum-on-restore)),
+content upload deduplication
+([A-1495](https://linear.app/buildkite/issue/A-1495/skip-re-uploading-a-cache-when-the-content-already-exists)),
+and generation-safe invalidation
+([A-1496](https://linear.app/buildkite/issue/A-1496/prevent-cache-invalidation-from-deleting-a-freshly-re-uploaded-entry)).
+
+### Required narrow Cache v2 extension
+
+Deliver these as one reviewed Cache v2/Agent contract rather than a second
+`buildkite-gha` service:
+
+1. **Opaque entry transfer and identity.** Accept runtime key/version and one
+   input/output archive path or stream without YAML, re-archiving, or
+   extraction. Address the entry by immutable organization/cluster/pipeline
+   identity, verified ref scope, key, and version—not the ephemeral archive
+   path. Add an explicit opaque content/compression type. Hash on upload and
+   verify on download. Keep Namespace/S3 authority inside the Agent-side
+   implementation.
+2. **GHA-compatible policy lookup.** In one policy-checked server operation,
+   accept an exact version plus ordered primary/restore candidate strings;
+   evaluate current/fallback ref scopes in server policy order; perform
+   exact-then-flat-string-prefix matching for each ordered candidate; and return
+   the deterministic newest committed match and its complete key. Do not
+   approximate this with sequential `peek` calls.
+3. **Conditional reservation and commit.** Reserve verified
+   scope+key+version atomically, expose an expiring opaque generation only to
+   the winner, keep uploads invisible, conditionally commit that generation
+   once, make committed entries immutable, and make same-generation retries
+   idempotent. Generation-guard expiration, invalidation, and TTL refresh.
+4. **Verified ref visibility.** Supply pipeline default branch, canonical ref
+   kind, PR ID/base branch/head repository/fork status, and tag identity from
+   authenticated Buildkite/provider records. Either expose them to Cache policy
+   or implement a dedicated GHA visibility resolver.
+5. **Integrity and preview hardening.** Land checksum verification and
+   generation-safe invalidation, define prefix consistency/newest behavior,
+   decide whether fallback hits refresh TTL, and publish archive/entry/byte
+   quotas plus retention semantics.
+6. **Supported Agent boundary.** Expose the operations through a public Agent
+   package or a versioned machine-safe command/API intended for callers such as
+   `buildkite-gha`. Avoid credentials, tokens, or unbounded request JSON on
+   command lines. Document Hosted Namespace and self-hosted S3 support.
+
+The feature can remain generic where semantics are genuinely shared, but the
+lookup and visibility contract must represent GHA behavior directly rather
+than forcing it through Cache v2's current structured key encoding.
+
+### Agent and rollout prerequisites
+
+Hosted execution needs the Agent binary, job-scoped Agent access token and
+endpoint, cluster-default registry, injected `nsc://` cache store URL, and
+ambient `nsc` authority. These remain in `run-job`; action code receives none of
+them. Source history places Cache v2 wire support at Agent v3.128.0, Hosted
+Namespace storage at v3.130.0, and complete assessed behavior at v3.134.0.
+Hosted deployment of v3.133.0 is confirmed by
+[A-1555](https://linear.app/buildkite/issue/A-1555/deploy-buildkite-agent-v31330-to-hosted-agent);
+confirm v3.134+ coverage or the eventual new-feature version before enabling
+the profile.
+
+Cache archive format v2 remains in review under
+[A-1584](https://linear.app/buildkite/issue/A-1584/cache-archive-format-v2-manifest-based-layout),
+and Cache v2 end-to-end coverage remains tracked by
+[A-1545](https://linear.app/buildkite/issue/A-1545/bring-up-e2e-coverage-for-cache-v2-restoresave-flows).
+The opaque mode should not depend on Agent-created archive format, but preview
+still requires Cache v2 feature enablement, Hosted Agent rollout, storage/TMPDIR
+tests, quotas/retention, and operational ownership.
+
+## Runtime integration
+
+### Lifecycle
+
+For every admitted job containing one or more `uses` steps, including local
+actions:
+
+1. `run-job` establishes a trusted backend session and scope policy before
+   executing workflow code.
+2. `Runner.RunJob` creates the random bearer token and registers it with both
+   the in-process command processor and Buildkite Agent redaction before any
+   action can print it.
+3. Start the HTTP server on a random OS-assigned port and wait until it is ready
+   before action preparation/pre phases.
+4. Keep one service/session for the complete job so pre, main, nested composite
+   children, concurrent actions, and post phases share reservation state.
+5. Drain all registered action post phases before shutting down the adapter.
+6. Stop accepting new reservations, finish or cancel in-flight requests under
+   a bounded deadline, abort incomplete reservations, revoke download IDs, and
+   close the backend session.
+7. Perform ordinary short resource cleanup after the cache/post-action phase.
+
+If a job has no Actions, do not start the adapter. Do not infer use from only
+remote action locks: a local action can contain a cache client.
+
+### Environment injection
+
+Add cache variables at the action invocation boundary in
+`internal/runtime/job.go`, after workflow/job/step environment evaluation so a
+workflow cannot override the runtime-owned values:
+
+- JavaScript pre/main/post actions receive them;
+- JavaScript children of composite actions receive them;
+- Docker action processes receive a container-reachable URL;
+- JavaScript actions running in a job container receive a container-reachable
+  URL; and
+- shell `run` steps, including shell children in composite actions, do not
+  receive them.
+
+The runtime-owned values win over workflow, job, step, action metadata, and
+`GITHUB_ENV` attempts to set the same names. Add validation tests for this
+precedence. Explicitly remove workflow-supplied `ACTIONS_RESULTS_URL` and
+`ACTIONS_CACHE_SERVICE_V2` from action invocation environments; allowing a
+workflow to set either would switch the toolkit away from the supported v1
+frontend.
+
+Do not copy the cache environment into `jobResult.Env`. That map is propagated
+between steps and serialized into bounded result handling. Keep cache
+environment in a separate runtime-owned action overlay.
+
+### Host and container networking
+
+Host JavaScript actions use:
+
+```text
+http://127.0.0.1:<port>/
+```
+
+Loopback does not reach the host from a job container or Docker action. For
+container action invocations:
+
+- bind the adapter to the disposable job VM interfaces on the same random
+  port;
+- add one runtime-owned Docker host alias, for example
+  `buildkite-gha.internal:host-gateway`, to persistent job containers and
+  one-shot Docker action containers;
+- use `http://buildkite-gha.internal:<port>/` in their action-only environment;
+- allow only the runtime-owned hostnames when constructing absolute download
+  URLs; do not trust an arbitrary HTTP `Host` header; and
+- require the bearer token on every control request even though the network is
+  job-local.
+
+Probe `host-gateway` support on the supported Hosted Docker version. A host job
+with a Docker action but no job container/services must still receive the alias
+and reach the adapter. Preserve the existing private Docker configuration,
+fixed mount, local builder, and owned-resource cleanup boundaries.
+
+### Post-action timeout
+
+The current `defaultCleanupTimeout` is ten seconds and one shared context
+bounds all registered post-actions. That is too short for cache archive
+creation and upload.
+
+Split the concerns:
+
+- retain the short cleanup timeout for Docker/process/resource cleanup;
+- add a separately configurable post-action drain timeout with a multi-minute
+  default;
+- keep one bounded LIFO post phase, rather than granting each action the full
+  budget independently;
+- keep the cache server and backend session alive through that phase;
+- preserve `post-if` evaluation and job timeout/cancellation semantics; and
+- allow explicit build/agent shutdown to cancel a stuck post upload without
+  skipping final resource cleanup.
+
+Choose the production default after measuring representative cache uploads;
+ten minutes is the proposed starting ceiling. Add a test whose save exceeds the
+old ten-second cleanup budget and completes within the new post budget.
+
+## Plan, admission, and reporting changes
+
+No job-plan schema change is required for the first slice. Cache is a baseline
+runtime facility for Actions jobs, not a workflow-selected protected
+capability, and service credentials must not appear in immutable plans.
+
+The compiler and runtime still need auditable behavior:
+
+- generated jobs continue to carry whether they use Actions;
+- the fixed `hosted-tokenless` profile reports cache service availability only
+  when the production backend and scope policy are enabled on that queue;
+- `validateUnprivilegedBundle` stops rejecting `actions/cache` only at the
+  out-of-box compatibility release gate;
+- artifact actions remain rejected with a precise artifact-service diagnostic;
+- unknown transitive cache users are not rejected or specially classified;
+- runtime startup says whether cache is disabled, read-only, or read-write
+  without logging namespace IDs, keys, token, or backend locators; and
+- the existing unsupported-cache smoke fixture becomes a runtime compatibility
+  fixture after the service is enabled.
+
+If future installations need per-job service declarations, add a versioned,
+non-secret plan field such as:
+
+```yaml
+services:
+  cache:
+    protocol: gha-v1
+    mode: read-write
+```
+
+Do not add that schema now without a consumer that needs it. Such a declaration
+would be an auditable request only; the runtime/backend would still derive and
+enforce actual authority.
+
+## Operational controls
+
+The production backend must enforce, server-side:
+
+- maximum archive size and per-request body size;
+- maximum keys per lookup and key/version lengths;
+- per-pipeline and per-organization retained-byte/entry quotas;
+- per-job concurrent reservations and in-flight byte limits;
+- upload/download request and byte-rate limits;
+- short reservation leases and abandoned-upload cleanup;
+- retention and deterministic LRU/expiration policy;
+- immutable first-successful-commit-wins behavior;
+- fork write denial and ref-scope read policy;
+- bounded metadata/list responses; and
+- backend/session revocation when the Buildkite job finishes.
+
+Limits must be configurable by trusted installation policy, not action inputs.
+Publish the selected defaults before enabling the hosted profile. Reject over
+limit work before receiving large bodies where possible.
+
+Emit low-cardinality metrics and structured events for:
+
+- adapter/backend session start and failure;
+- lookup hit/miss/error and match class (exact/primary-prefix/restore-prefix);
+- reserve success/contention/denial;
+- uploaded/downloaded bytes and duration;
+- commit success/validation failure/backend failure;
+- abandoned reservations and eviction; and
+- post-action timeout/cancellation.
+
+Dimensions may include backend kind, queue, mode, scope class, result, and
+protocol version. Do not put tokens, full organization/pipeline IDs, raw cache
+keys, versions, refs, URLs, or backend locators in logs or metric labels. A
+stable one-way namespace hash may be used only where operational correlation
+requires it.
+
+## Implementation slices
+
+### C0 — Protocol fixture and differential harness
+
+Deliver:
+
+- an `internal/cache` semantic model and deterministic in-memory backend;
+- an `httptest` v1 handler implementing lookup/list/reserve/PATCH/commit and
+  download;
+- request/response fixtures captured from pinned current toolkit clients;
+- a small harness that runs the real v1 client against the adapter and records
+  method, path, bounded headers, body shape, and result;
+- fault injection for retries, contention, out-of-order chunks, dropped commit
+  responses, missing ranges, and backend failures; and
+- package-level race tests for parallel uploads and lookups.
+
+Exit criteria:
+
+- `actions/cache@v3` and v4 client fixtures produce the documented v1 traffic;
+- leaving v2 variables unset is asserted; and
+- no production backend or admission claim is made.
+
+### C1 — Job-local adapter and host JavaScript actions
+
+Deliver:
+
+- cache service lifecycle in `Runner.RunJob`;
+- random token generation, constant-time authentication, redaction, local
+  numeric reservation mapping, and opaque download URLs;
+- action-only environment injection for JavaScript pre/main/post and nested
+  composite action invocations;
+- streaming temporary-disk chunk assembly for integration tests;
+- clean adapter shutdown and reservation abort; and
+- a two-job test that saves and then restores a direct `actions/cache` archive
+  through a shared test backend.
+
+Exit criteria:
+
+- host JavaScript actions save during post and restore exact bytes;
+- a shell step cannot observe cache variables through its supplied environment
+  or job result;
+- token and download URL masking tests pass; and
+- the production hosted profile still rejects the known cache action.
+
+### C2 — Cache v2 opaque-entry extension and integration
+
+Deliver the narrow Cache v2/Agent platform contract and its `buildkite-gha`
+adapter together:
+
+- opaque archive put/get without generated YAML, wrapping, recompression, or
+  extraction;
+- one policy-checked GHA-compatible ordered lookup operation;
+- conditional expiring reservation, generation-bound immutable commit, abort,
+  and stale-reservation cleanup;
+- digest verification on upload/download and generation-safe invalidation/TTL
+  updates;
+- a supported public Agent package or versioned machine-safe subprocess/API
+  boundary for Namespace and S3-compatible stores;
+- authenticated backend-session setup in `run-job` without forwarding Agent or
+  Namespace authority;
+- the semantic `Backend` implementation over that boundary; and
+- Hosted and supported self-hosted capability/version diagnostics.
+
+The server-side verified ref facts or dedicated visibility resolver from
+extension item 4 land in this reviewed Cache v2 platform contract. C3 owns the
+`buildkite-gha` adoption, enforcement of the policy table, and security/live
+tests; it does not derive PR/fork/default/base authority from adapter inputs.
+
+Exit criteria:
+
+- two separate Buildkite jobs/builds restore a committed entry;
+- concurrent jobs cannot both reserve or commit one verified
+  scope+key+version identity;
+- an opaque GHA archive reaches and returns from the store without byte changes
+  or an Agent archive wrapper;
+- ordered flat-string prefix lookup returns the deterministic newest committed
+  match through the policy-checked operation;
+- backend outage and retry behavior is bounded and observable; and
+- no test-only backend can be selected in a production invocation.
+
+Until this Cache v2 extension ships, C0/C1 remain useful compatibility evidence
+but are not enough to remove admission rejection. Do not replace the missing
+contract with sequential policy-bypassing `peek` calls, last-writer-wins commit,
+or a durable index owned by `buildkite-gha`.
+
+### C3 — Trusted scoping and abuse controls
+
+Deliver:
+
+- authenticated organization/cluster/pipeline identity derivation;
+- authoritative normal branch, default branch, PR/base/fork, and tag scope
+  derivation;
+- the ordered read/write policy table in this plan;
+- disabled/read-only/read-write enforcement;
+- size, rate, entry, byte, and reservation limits;
+- stable newest-prefix ordering and expiry; and
+- security tests proving client-selected fields cannot cross namespaces.
+
+Exit criteria:
+
+- default, branch, same-repository PR, fork PR, and tag tests observe only their
+  permitted scopes;
+- pipeline/organization rename and slug reuse cannot inherit another immutable
+  pipeline namespace;
+- fork writes are denied;
+- raw compatibility event/plan/env changes cannot alter storage authority; and
+- cache entries intentionally cross builds only inside the same permitted
+  pipeline/ref namespace.
+
+### C4 — Containers and post-action lifecycle
+
+Deliver:
+
+- the runtime-owned Docker host alias and container-specific cache URL;
+- reachability from persistent job containers and one-shot Docker actions,
+  including host jobs with no service containers;
+- separate multi-minute post-action and short resource-cleanup budgets;
+- cancellation and service-shutdown ordering; and
+- no cache environment on composite shell children.
+
+Exit criteria:
+
+- host action, job-container action, Docker action, and nested composite
+  fixtures save and restore;
+- a post save can run longer than ten seconds without making cleanup unbounded;
+  and
+- cancellation leaves no adapter listener, reservation, container, network, or
+  temporary archive behind.
+
+### C5 — Out-of-box compatibility and rollout
+
+Deliver:
+
+- removal of the cache branch from the known-service admission rejection while
+  preserving artifact rejection;
+- conversion of the unsupported-cache smoke fixture to runtime-pass evidence;
+- real pinned `actions/cache@v3` and v4 canaries;
+- setup-node and setup-go fixtures with caching enabled;
+- an unchanged `jdx/mise-action` cache path;
+- an unchanged pinned `lox/notion-cli` workflow canary;
+- compatibility report and user documentation updates; and
+- hosted feature rollout with rollback to disabled/read-only mode.
+
+Exit criteria:
+
+- cache-dependent workflows run without Buildkite-specific YAML edits;
+- all security, backend, container, and post-action gates are green on an exact
+  release commit; and
+- disabling cache removes the action environment cleanly without exposing a
+  dead or partially authorized service.
+
+### Later — GitHub cache service v2 and artifacts
+
+Only after v1 is reliable:
+
+- add a cache v2/Twirp frontend over the same entry/backend model;
+- add the required Azure Blob-compatible upload/download behavior if current
+  v2 clients require it;
+- set `ACTIONS_CACHE_SERVICE_V2`/`ACTIONS_RESULTS_URL` only for jobs served by
+  that complete frontend; and
+- design artifact v4/results compatibility as a separate service with its own
+  identity, retention, cross-job, and UI semantics.
+
+## Test matrix
+
+### Protocol and storage
+
+- v1 URL trailing-slash behavior and authorization headers;
+- miss, exact hit, primary-prefix hit, and ordered restore exact/prefix hit;
+- an exact restore-key hit preferred over a newer prefix match for that same
+  restore key;
+- exact opaque version mismatch;
+- deterministic newest-entry and tie-break ordering;
+- debug list endpoint scope filtering and bounds;
+- atomic reservation and committed-entry contention;
+- concurrent out-of-order chunk upload;
+- identical PATCH replay and inconsistent overlap rejection;
+- missing range, wrong body length, wrong commit size, and oversize rejection;
+- response loss followed by reserve/PATCH/commit retry;
+- partial upload invisibility and lease expiry;
+- immutable first-commit-wins behavior;
+- GET, HEAD, byte ranges, accurate content length, and interrupted download;
+- zero-byte archive if the client permits it; and
+- backend failures before reserve, during upload, commit, lookup, and download.
+
+### Runtime and compatibility
+
+- real pinned `actions/cache@v3` and `actions/cache@v4` save/restore across two
+  runtime jobs;
+- v4 selecting v1 because v2 variables are absent;
+- cache save in a JavaScript post phase;
+- pre/main/post and nested composite action cache environment;
+- no cache environment in ordinary or composite `run` steps;
+- workflow/job/step/`GITHUB_ENV` attempts cannot override runtime values;
+- two parallel cache-using actions share the service safely;
+- setup-node npm caching and setup-go module/build caching;
+- `jdx/mise-action` with its default cache behavior; and
+- the pinned `lox/notion-cli` workflow without its temporary `cache: false`
+  compatibility edit.
+
+### Scope and security
+
+- organization, cluster, and pipeline isolation;
+- default branch read/write;
+- branch own-first/default-fallback reads and own-only writes;
+- same-repository PR own/base/default reads and PR-only writes;
+- fork PR base/default reads and denied writes;
+- tag exact/default reads and tag-only writes;
+- forged plan event, `GITHUB_*`, `BUILDKITE_*`, query, header, and body scope
+  inputs cannot change authority;
+- wrong/missing/expired token and cross-job reservation IDs fail;
+- token, opaque download ID, backend locator, and error bodies are masked or
+  omitted from all output/result paths;
+- body, header, list, range, concurrency, rate, and storage limits; and
+- cache contents are never interpreted or made authoritative.
+
+### Execution environments
+
+- host JavaScript action;
+- JavaScript action in a persistent job container;
+- Docker action in a host job without services;
+- Docker action sharing the job runtime network;
+- nested remote/local composite action;
+- cancellation during restore, chunk upload, commit, and post save; and
+- agent/process loss followed by abandoned reservation cleanup.
+
+Run protocol/unit/race tests locally. Run real action, Buildkite Cache v2,
+container networking, cross-build persistence, and unchanged external workflow
+canaries in an explicit networked/live lane against one exact commit. A
+successful static compile or admission result is not runtime cache evidence.
+
+## Rollout
+
+1. Land C0/C1 with production cache disabled.
+2. Land the Cache v2 opaque-entry, lookup, reservation/commit, ref-visibility,
+   and supported Agent boundary behind feature flags.
+3. Enable C2/C3 in a private read-only canary to observe lookups and namespace
+   derivation without accepting writes.
+4. Enable read-write for dedicated test pipelines with strict quotas.
+5. Run C4/C5 direct, transitive, container, PR/fork, and external workflow
+   canaries on exact commits.
+6. Enable the fixed hosted-tokenless profile and remove cache admission
+   rejection together, so validation never promises an unavailable service.
+7. Expand to supported self-hosted installations only after their backend and
+   Docker networking contracts are explicit.
+
+Rollback is server-side mode `disabled` or `read-only`, plus restoring the
+hosted-profile admission diagnostic if the service is no longer guaranteed.
+Rollback must not require a workflow edit or expose stale credentials. Existing
+committed cache entries may expire normally and are never migration authority.
+
+## Definition of done
+
+- Direct and transitive public `@actions/cache` v1 clients work without GitHub
+  service credentials or workflow-specific executor code.
+- `actions/cache@v3` and v4 restore/save exact bytes across Buildkite jobs and
+  builds; v4 is explicitly proven on the v1 path.
+- The unchanged pinned `lox/notion-cli` workflow works with the default
+  `jdx/mise-action` cache behavior.
+- Setup-node and setup-go caching work without disabling their cache inputs.
+- The required Buildkite Cache v2/Agent contract, availability, limits,
+  retention, atomicity, and support ownership are documented and tested.
+- Namespace and ref policy is based on trusted Buildkite identity, with fork
+  writes denied and no unexpected cross-organization/cluster/pipeline/ref
+  access.
+- Concurrent reservations, out-of-order/retried chunks, commit replay,
+  abandoned uploads, expiry, and quota failures are deterministic and bounded.
+- Cache tokens and backend authority never enter plans, pipeline artifacts,
+  result manifests, ordinary run-step environment, or logs.
+- Host, job-container, Docker, and nested composite actions pass live cache
+  canaries.
+- Cache post saves have a bounded multi-minute budget, while process/container
+  cleanup retains its independent short bound.
+- The hosted profile no longer rejects cache use, continues to reject artifact
+  service use, and reports service availability honestly.
+- Cache misses, evictions, contention, and backend outages remain observable
+  cache outcomes rather than integrity or authorization bypasses.
+
+## Open questions
+
+Backend selection, cross-build persistence, verified basic identity, and the
+current Agent/registry/store architecture are now understood. Resolve these
+remaining product/API questions while C0/C1 proceeds:
+
+1. Must the first preview exactly preserve GHA v1 first-writer/ref visibility,
+   as this plan requires, or will Cache v2 accept a temporary documented
+   best-effort mode? Do not remove admission rejection for best-effort mode.
+2. Should the new lookup be a generic Cache v2 ordered-candidate operation or
+   an explicitly GHA-shaped operation? Either must provide exact version,
+   flat-string prefix, policy scope order, and deterministic newest semantics.
+3. Will verified default branch, PR/base/head repository/fork, tag, and ref-kind
+   facts become general Cache policy claims or remain inside a dedicated GHA
+   visibility resolver?
+4. What exact Namespace authority does the Hosted job possess? In particular,
+   can a process with that authority retrieve any known cluster digest
+   independently of registry policy? The adapter must always authorize through
+   policy-checked metadata before blob access.
+5. What Agent version will contain the supported opaque/cache integration
+   boundary, and can every target Hosted/self-hosted queue prove that capability
+   before `run-job` starts the adapter?
+6. Which GHA archive compression variants and maximum object sizes must opaque
+   mode accept? What temporary disk preflight and streaming behavior prevents
+   two complete staged copies from exhausting `$TMPDIR`?
+7. What retained-byte/entry quotas, three-day registry TTL, Namespace object
+   lifetime, fallback-hit TTL refresh, eviction, and prefix consistency contract
+   will the preview expose?
+8. Which service owns metrics, abuse response, stale reservation reaping,
+   support, and rollout/rollback across Cache v2, Agent, Hosted, and
+   `buildkite-gha`?
+
+None blocks C0/C1 protocol work. All block C5 production enablement unless
+explicitly resolved, and none should be papered over by embedding customer
+storage credentials, Agent/Namespace authority, or a second durable index in
+`buildkite-gha`.
