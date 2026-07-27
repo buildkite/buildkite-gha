@@ -1,4 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "No persistent services require restart."
+socket_group="$(id -gn)"
+
+for command in amp docker sudo; do
+  if ! command -v "$command" >/dev/null; then
+    echo "Missing $command; run .agents/setup before .agents/resume" >&2
+    exit 1
+  fi
+done
+if [[ ! -x /usr/sbin/dockerd ]]; then
+  echo "Missing dockerd; run .agents/setup before .agents/resume" >&2
+  exit 1
+fi
+
+printf -v daemon_command \
+  'exec sudo /usr/sbin/dockerd --group %q' \
+  "$socket_group"
+
+echo "Starting supervised Docker service..."
+amp orb service start docker --cwd "$HOME" --command "$daemon_command"
+env -u DOCKER_HOST -u DOCKER_CONTEXT docker context use default >/dev/null
+
+docker_ready=0
+for _ in {1..30}; do
+  if env -u DOCKER_HOST -u DOCKER_CONTEXT docker info >/dev/null 2>&1; then
+    docker_ready=1
+    break
+  fi
+  sleep 1
+done
+if ((docker_ready == 0)); then
+  echo "Docker did not become ready" >&2
+  amp orb service status docker >&2 || true
+  amp orb service logs docker >&2 || true
+  exit 1
+fi
+
+buildx_inspect="$(env -u DOCKER_HOST -u DOCKER_CONTEXT docker buildx inspect default)"
+if ! grep -Eq '^Driver:[[:space:]]+docker$' <<<"$buildx_inspect"; then
+  echo "Docker Buildx default builder is not using the docker driver" >&2
+  printf '%s\n' "$buildx_inspect" >&2
+  exit 1
+fi
+
+echo "Docker is ready on the default context."
