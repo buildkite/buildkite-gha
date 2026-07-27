@@ -3,6 +3,87 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mise_bin="$HOME/.local/bin/mise"
+docker_packages=(docker.io uidmap dbus-user-session fuse-overlayfs slirp4netns rootlesskit)
+
+missing_packages=()
+for package in "${docker_packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -Fqx 'ii '; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]} > 0)); then
+  echo "Installing rootless Docker packages..."
+  policy_rc_created=0
+  cleanup_policy_rc() {
+    if ((policy_rc_created)); then
+      sudo rm -f /usr/sbin/policy-rc.d
+    fi
+  }
+  trap cleanup_policy_rc EXIT
+  if [[ ! -e /usr/sbin/policy-rc.d ]]; then
+    printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+    sudo chmod 0755 /usr/sbin/policy-rc.d
+    policy_rc_created=1
+  fi
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get update
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}"
+  cleanup_policy_rc
+  policy_rc_created=0
+  trap - EXIT
+fi
+
+# The package units are not used: the rootless daemon is supervised by Amp.
+sudo systemctl disable --now docker.service docker.socket containerd.service >/dev/null
+
+username="$(id -un)"
+for subid_file in /etc/subuid /etc/subgid; do
+  if ! awk -F: -v username="$username" '
+    $1 == username && $3 >= 65536 { found = 1 }
+    END { exit !found }
+  ' "$subid_file"; then
+    printf '%s:100000:65536\n' "$username" | sudo tee -a "$subid_file" >/dev/null
+  fi
+done
+
+docker_data_dir="$HOME/.local/share/docker-rootless"
+install -d -m 0700 "$docker_data_dir"
+
+buildx_version="v0.35.0"
+case "$(uname -m)" in
+  x86_64)
+    buildx_arch="amd64"
+    buildx_sha256="d41ece72044243b4f58b343441ae37446d9c29a7d6b5e11c61847bbcf8f7dfda"
+    ;;
+  aarch64|arm64)
+    buildx_arch="arm64"
+    buildx_sha256="c4248d6cbc4a619a7e0b4609c11e509ad4ac0b475e1c64817c0ac20c5d90c766"
+    ;;
+  *)
+    echo "Unsupported architecture for Docker Buildx: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+buildx_dir="$HOME/.docker/cli-plugins"
+buildx_plugin="$buildx_dir/docker-buildx"
+install -d -m 0755 "$buildx_dir"
+if [[ ! -f "$buildx_plugin" ]] || [[ "$(sha256sum "$buildx_plugin" | awk '{print $1}')" != "$buildx_sha256" ]]; then
+  echo "Installing Docker Buildx $buildx_version..."
+  buildx_temp="$(mktemp)"
+  if ! curl -fsSL \
+    "https://github.com/docker/buildx/releases/download/$buildx_version/buildx-$buildx_version.linux-$buildx_arch" \
+    -o "$buildx_temp"; then
+    rm -f "$buildx_temp"
+    exit 1
+  fi
+  if ! printf '%s  %s\n' "$buildx_sha256" "$buildx_temp" | sha256sum -c - >/dev/null; then
+    rm -f "$buildx_temp"
+    exit 1
+  fi
+  install -m 0755 "$buildx_temp" "$buildx_plugin"
+  rm -f "$buildx_temp"
+fi
 
 echo "Installing mise if needed..."
 if [[ ! -x "$mise_bin" ]]; then
@@ -30,5 +111,7 @@ echo "Installing pinned development tools..."
 
 echo "Downloading Go modules..."
 "$mise_bin" exec -- go mod download
+
+"$repo_root/.agents/resume"
 
 echo "Orb setup complete."

@@ -1,4 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "No persistent services require restart."
+uid="$(id -u)"
+runtime_dir="/tmp/user-$uid"
+docker_data_dir="$HOME/.local/share/docker-rootless"
+docker_context="buildkite-gha-rootless"
+docker_endpoint="unix://$runtime_dir/docker.sock"
+default_socket="/var/run/docker.sock"
+rootless_socket="$runtime_dir/docker.sock"
+
+for command in amp docker rootlesskit slirp4netns fuse-overlayfs; do
+  if ! command -v "$command" >/dev/null; then
+    echo "Missing $command; run .agents/setup before .agents/resume" >&2
+    exit 1
+  fi
+done
+if [[ ! -x /usr/share/docker.io/contrib/dockerd-rootless.sh ]]; then
+  echo "Missing dockerd-rootless.sh; run .agents/setup before .agents/resume" >&2
+  exit 1
+fi
+if [[ ! -d "$docker_data_dir" ]] || [[ "$(stat -c %u "$docker_data_dir")" != "$uid" ]]; then
+  echo "Docker data directory is missing or not owned by the current user; run .agents/setup" >&2
+  exit 1
+fi
+if [[ ! -c /dev/net/tun ]]; then
+  echo "/dev/net/tun is unavailable; rootless Docker cannot start" >&2
+  exit 1
+fi
+
+if [[ "$(stat -c %a /dev/net/tun)" != "666" ]]; then
+  sudo chmod 0666 /dev/net/tun
+fi
+if [[ -L "$runtime_dir" ]] || { [[ -e "$runtime_dir" ]] && [[ ! -d "$runtime_dir" ]]; }; then
+  echo "Refusing to use unsafe runtime directory at $runtime_dir" >&2
+  exit 1
+elif [[ -d "$runtime_dir" ]]; then
+  if [[ "$(stat -c %u "$runtime_dir")" != "$uid" ]]; then
+    echo "Runtime directory is not owned by the current user: $runtime_dir" >&2
+    exit 1
+  fi
+  chmod 0700 "$runtime_dir"
+else
+  install -d -m 0700 "$runtime_dir"
+fi
+
+# Buildx reserves "default" for this conventional endpoint; live tests inspect it explicitly.
+if [[ -e "$default_socket" ]] || [[ -L "$default_socket" ]]; then
+  if [[ ! -L "$default_socket" ]] || [[ "$(readlink "$default_socket")" != "$rootless_socket" ]]; then
+    echo "Refusing to replace unrelated Docker socket at $default_socket" >&2
+    exit 1
+  fi
+else
+  sudo ln -s "$rootless_socket" "$default_socket"
+fi
+
+printf -v daemon_command \
+  'export PATH=/usr/sbin:/usr/bin:/sbin:/bin; export XDG_RUNTIME_DIR=%q; export DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns; export DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS="--disable-host-loopback=false"; exec /usr/share/docker.io/contrib/dockerd-rootless.sh --data-root %q --storage-driver=fuse-overlayfs --exec-opt native.cgroupdriver=cgroupfs --host-gateway-ip=10.0.2.2' \
+  "$runtime_dir" "$docker_data_dir"
+
+echo "Starting supervised rootless Docker service..."
+amp orb service start docker-rootless --cwd "$HOME" --command "$daemon_command"
+
+if env -u DOCKER_HOST -u DOCKER_CONTEXT docker context inspect "$docker_context" >/dev/null 2>&1; then
+  current_endpoint="$(env -u DOCKER_HOST -u DOCKER_CONTEXT docker context inspect "$docker_context" --format '{{.Endpoints.docker.Host}}')"
+  if [[ "$current_endpoint" != "$docker_endpoint" ]]; then
+    env -u DOCKER_HOST -u DOCKER_CONTEXT docker context update "$docker_context" --docker "host=$docker_endpoint" >/dev/null
+  fi
+else
+  env -u DOCKER_HOST -u DOCKER_CONTEXT docker context create "$docker_context" --docker "host=$docker_endpoint" >/dev/null
+fi
+env -u DOCKER_HOST -u DOCKER_CONTEXT docker context use "$docker_context" >/dev/null
+
+docker_ready=0
+for _ in {1..30}; do
+  if env -u DOCKER_HOST -u DOCKER_CONTEXT docker --context "$docker_context" info >/dev/null 2>&1; then
+    docker_ready=1
+    break
+  fi
+  sleep 1
+done
+if ((docker_ready == 0)); then
+  echo "Rootless Docker did not become ready" >&2
+  amp orb service status docker-rootless >&2 || true
+  amp orb service logs docker-rootless >&2 || true
+  exit 1
+fi
+
+buildx_inspect="$(env -u DOCKER_HOST -u DOCKER_CONTEXT docker buildx inspect default)"
+if ! grep -Eq '^Driver:[[:space:]]+docker$' <<<"$buildx_inspect"; then
+  echo "Docker Buildx default builder is not using the docker driver" >&2
+  printf '%s\n' "$buildx_inspect" >&2
+  exit 1
+fi
+
+echo "Rootless Docker is ready on context $docker_context."
