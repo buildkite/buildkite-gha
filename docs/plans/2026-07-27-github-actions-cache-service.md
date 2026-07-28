@@ -1142,7 +1142,16 @@ named volume, so cross-build Hosted restore remains open pending the production
 backend or a demonstrated later volume parent. The runtime now admits and
 executes exact managed Node 16.20.2 for the final `actions/cache@v3` release;
 all v3 releases declare `runs.using: node16`, so v3 cannot be covered honestly
-by the existing Node 20/24 runtime set.
+by the existing Node 20/24 runtime set. At exact implementation commit
+`9f76ae18aa492511fa436cce74f3c7c3f6cfb6fe`, the generated canary jobs in
+[build 217](https://buildkite.com/buildkite/buildkite-gha/builds/217),
+[build 216](https://buildkite.com/buildkite/buildkite-gha/builds/216), and
+[build 218](https://buildkite.com/buildkite/buildkite-gha/builds/218) passed
+real pinned cache-v3, setup-node v6.5.0, and setup-go v6.5.0 miss/workload/save
+paths respectively. Their logs confirmed successful v1 saves of 309-,
+26,729,250-, and 84,673,891-byte archives. These generated-job results do not
+claim that unrelated parent-build checks passed or that a later build can
+restore the directory-backed entries.
 
 Deliver:
 
