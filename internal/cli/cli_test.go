@@ -1115,7 +1115,7 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, err := uploadArgs([]string{"workflow.yml"}); err == nil || !strings.Contains(err.Error(), "is required") {
 		t.Fatalf("uploadArgs() error = %v, want required runtime queue error", err)
 	}
-	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "elastic-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
+	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want fixed runtime queue error", err)
 	}
 }

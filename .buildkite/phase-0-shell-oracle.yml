@@ -1,3 +1,6 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":git: Materialize exact shell fixture"
     key: phase-0-shell-prepare

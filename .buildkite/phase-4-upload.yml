@@ -1,8 +1,9 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":pipeline: Phase 4 actions importer"
     key: "phase-4-upload-importer"
-    agents:
-      queue: "elastic-runners"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
@@ -26,6 +27,4 @@ steps:
     key: "phase-4-continuation-loader"
     depends_on: "phase-4-upload-importer"
     allow_dependency_failure: true
-    agents:
-      queue: "elastic-runners"
     command: "buildkite-agent pipeline upload .buildkite/phase-4-upload-continuation.yml"

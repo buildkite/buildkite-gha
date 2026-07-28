@@ -1,8 +1,9 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":docker: Phase 5 container runtime"
     key: "phase-5-hosted-runtime-probe"
-    agents:
-      queue: "hosted"
     timeout_in_minutes: 25
     retry:
       automatic: false

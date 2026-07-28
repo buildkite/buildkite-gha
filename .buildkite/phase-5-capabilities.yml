@@ -1,8 +1,9 @@
+agents:
+  queue: "hosted"
+
 steps:
   - label: ":pipeline: Phase 5 capability importer"
     key: "phase-5-capabilities-importer"
-    agents:
-      queue: "elastic-runners"
     command: |
       set -euo pipefail
       commit="$${PHASE5_COMMIT:-$${SMOKE_COMMIT:-}}"
@@ -14,6 +15,4 @@ steps:
     key: "phase-5-continuation-loader"
     depends_on: "phase-5-capabilities-importer"
     allow_dependency_failure: true
-    agents:
-      queue: "elastic-runners"
     command: "buildkite-agent pipeline upload .buildkite/phase-5-capabilities-continuation.yml"
