@@ -46,7 +46,8 @@ func newJobDocker(t *testing.T, scenario string) fakeJobDocker {
 		t.Fatal(err)
 	}
 	wrapper := filepath.Join(root, "docker")
-	text := "#!/bin/sh\nJOB_DOCKER_ROOT=" + strconv.Quote(root) + " JOB_DOCKER_SCENARIO=" + strconv.Quote(scenario) + " exec " + strconv.Quote(exe) + " -test.run=^TestJobContainerFakeDockerProcess$ -- \"$@\"\n"
+	// Avoid the race runtime's one-second exit sleep on every fake Docker call.
+	text := "#!/bin/sh\nGORACE=atexit_sleep_ms=0 JOB_DOCKER_ROOT=" + strconv.Quote(root) + " JOB_DOCKER_SCENARIO=" + strconv.Quote(scenario) + " exec " + strconv.Quote(exe) + " -test.run=^TestJobContainerFakeDockerProcess$ -- \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(text), 0o700); err != nil {
 		t.Fatal(err)
 	}
