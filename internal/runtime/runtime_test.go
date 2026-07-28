@@ -3391,6 +3391,26 @@ func TestRuntimeMapDiagnosticsAreSorted(t *testing.T) {
 	}
 }
 
+func TestUnavailableGitHubTokenResolvesToEmptyWithoutEnvironmentCredential(t *testing.T) {
+	defaultValue := "${{ github.token }}"
+	job := plan.Job{Event: plan.Event{Repository: "buildkite/example", Ref: "refs/heads/main", SHA: strings.Repeat("a", 40)}}
+	inputs, err := resolveActionInputs(metadata.Metadata{Inputs: map[string]metadata.Input{
+		"github_token": {Default: &defaultValue},
+	}}, nil, expression.Context{GitHub: githubContext(job)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, ok := inputs["github_token"]; !ok || token != "" {
+		t.Fatalf("github_token input = %q, present = %t; want a present empty input", token, ok)
+	}
+	if _, ok := standardEnvironment(job, t.TempDir(), t.TempDir())["GITHUB_TOKEN"]; ok {
+		t.Fatal("standard action environment unexpectedly contains GITHUB_TOKEN")
+	}
+	if _, err := expression.Evaluate("${{ github.run_id }}", expression.Context{GitHub: githubContext(job)}); err == nil || !strings.Contains(err.Error(), `unavailable github value "run_id"`) {
+		t.Fatalf("unlisted github value error = %v", err)
+	}
+}
+
 func TestLivePortableSetupActions(t *testing.T) {
 	if os.Getenv("BUILDKITE_GHA_LIVE_ACTIONS") != "1" {
 		t.Skip("set BUILDKITE_GHA_LIVE_ACTIONS=1 to execute public setup actions with anonymous downloads")

@@ -557,6 +557,8 @@ func parseEvent(source []byte) (Event, error) {
 func compileContext(event Event, vars map[string]string) expression.CompileContext {
 	repository := event.Repository.Owner + "/" + event.Repository.Name
 	return expression.CompileContext{
+		// github.token is deliberately runtime-only: a future provider proxy
+		// capability must never be evaluated into a persistent plan.
 		GitHub: map[string]any{
 			"event_name":       event.Event,
 			"event":            event.Payload,

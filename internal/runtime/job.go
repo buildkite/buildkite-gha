@@ -644,6 +644,10 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":        job.Event.SHA,
 		"actor":      job.Event.Actor,
 		"event_name": job.Event.Name,
+		// The provider proxy is not implemented yet. Represent its absent token
+		// as null-to-string rather than inventing a credential; action defaults
+		// can then choose their documented unauthenticated path.
+		"token": "",
 	}
 }
 
