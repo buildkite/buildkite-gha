@@ -78,9 +78,11 @@ As of 2026-07-28:
   archive, then the workflow's `mise run test` and `mise run lint` passed; this
   proves the transitive miss/save path but not a later restore;
 - the independent Rails backend and seven job-authenticated Agent API endpoints
-  are implemented in [`buildkite/buildkite` PR
-  #31646](https://github.com/buildkite/buildkite/pull/31646), but are not
-  merged, deployed, or enabled; and
+  are review-ready at commit `bf9475e3e1d7d22a1149f733d1467877d7352f43`
+  in [`buildkite/buildkite` PR
+  #31646](https://github.com/buildkite/buildkite/pull/31646): all 226 executed
+  CI jobs and Buildsworth review build 9021 passed, but human review, merge,
+  deployment, migration, and feature activation remain open; and
 - the `buildkite-gha` remote backend client is implemented behind the explicit
   `BUILDKITE_GHA_CACHE_BACKEND=agent` selector but generated jobs still select
   the directory bridge. Production object-store/IAM confirmation, GC
@@ -811,8 +813,10 @@ undeployed, preview-gated, and disabled by default. Before a Hosted preview:
 3. confirm retention, byte/entry, archive-size, and reservation policy values;
 4. verify webhook-backed PR repository/base/fork fields for all admitted
    GitHub and GHES paths;
-5. implement the `buildkite-gha` client without exposing job authority or
-   transfer URLs to workflow children; and
+5. switch generated jobs to the implemented
+   `BUILDKITE_GHA_CACHE_BACKEND=agent` backend and validate absent, disabled,
+   and read-only capability modes without exposing job authority or transfer
+   instructions to workflow children; and
 6. run direct, transitive, container, race, and cross-build canaries before
    enabling selected Hosted organizations.
 
@@ -1042,9 +1046,10 @@ Exit criteria:
 
 ### C2 — Independent backend and authenticated client
 
-Status: **Platform side is open in `buildkite/buildkite` PR #31646 and the
-`buildkite-gha` client is implemented; merge, deployment, and production
-selection remain open.**
+Status: **The platform side is review-ready and green at commit `bf9475e3e1d`
+in `buildkite/buildkite` PR #31646, and the exact-contract `buildkite-gha`
+client is implemented. Human review, merge, deployment, migration, feature
+activation, and production selection remain open.**
 
 Deliver the standalone Rails domain and its `buildkite-gha` adapter:
 
@@ -1080,8 +1085,9 @@ Exit criteria:
 
 ### C3 — Trusted scoping and abuse controls
 
-Status: **Implemented in `buildkite/buildkite` PR #31646; merge, operational
-approval, and production-field validation remain open.**
+Status: **Implemented and review-green at commit `bf9475e3e1d` in
+`buildkite/buildkite` PR #31646; human review, merge, operational approval, and
+production-field validation remain open.**
 
 Deliver:
 
@@ -1271,9 +1277,10 @@ A successful static compile or admission result is not runtime cache evidence.
    job-authenticated Agent API while the preview remains disabled.
 4. Confirm object-store IAM/lifecycle, ship GC worker and schedule, validate
    webhook provider fields, and approve quotas/retention.
-5. Implement the production `buildkite-gha` backend client and exercise the
-   capability in disabled and read-only modes without exposing action cache
-   variables when unavailable.
+5. Switch generated production jobs to the implemented
+   `BUILDKITE_GHA_CACHE_BACKEND=agent` backend and exercise the capability in
+   absent, disabled, and read-only modes without exposing action cache variables
+   when unavailable.
 6. Enable read-write for dedicated test organizations and run direct,
    transitive, container, PR/fork, and external workflow canaries on exact
    commits.
@@ -1326,9 +1333,9 @@ the Agent API shape are settled. These operational/product questions remain:
    encryption, capacity monitoring, and object-lifecycle policy will apply?
 2. What worker cadence and batch limits should garbage collection use, and what
    storage lifecycle backstop covers abandoned objects if the worker is down?
-3. Are seven-day retention, 10 GiB archive and namespace-byte limits, 1,000
-   entries per namespace, and the current reservation limits the approved
-   preview values?
+3. Are seven-day retention, the 5 GiB inclusive archive limit, the 10 GiB
+   retained-byte namespace quota, 1,000 retained records per namespace, and the
+   current reservation limits the approved preview values?
 4. Are webhook-derived PR base branch, head repository, and fork fields present
    and authoritative for every GitHub and GHES event path admitted by the
    feature gate?
