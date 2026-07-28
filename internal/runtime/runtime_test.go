@@ -904,6 +904,40 @@ func TestEnvironmentSecretsCannotReadAmbientAgentVariables(t *testing.T) {
 	}
 }
 
+func TestAgentRedactorStreamsSecretOnStdin(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "buildkite-agent")
+	argsPath := filepath.Join(dir, "args")
+	stdinPath := filepath.Join(dir, "stdin")
+	writeFixtureFile(t, dir, "buildkite-agent", `#!/bin/sh
+printf '%s\n' "$@" > "$TEST_REDACTOR_ARGS"
+cat > "$TEST_REDACTOR_STDIN"
+`)
+	if err := os.Chmod(executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_REDACTOR_ARGS", argsPath)
+	t.Setenv("TEST_REDACTOR_STDIN", stdinPath)
+	const secret = "must-not-appear-in-process-arguments"
+	if err := (AgentRedactor{Executable: executable}).AddRedaction(context.Background(), secret); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(args) != "redactor\nadd\n" || strings.Contains(string(args), secret) {
+		t.Fatalf("redactor arguments = %q, want command only", args)
+	}
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdin) != secret {
+		t.Fatalf("redactor stdin = %q, want exact secret", stdin)
+	}
+}
+
 func TestFailureConditionsAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
