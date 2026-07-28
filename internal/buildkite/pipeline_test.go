@@ -402,9 +402,13 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
-		`--event-path testdata/smoke/events/push.json`,
+		`--event-path "$$event"`,
 		`--runtime-queue hosted`,
 		`testdata/smoke/.github/workflows/shell.yml`,
+		`testdata/smoke/.github/workflows/cache.yml`,
+		`testdata/smoke/events/push.json`,
+		`testdata/notion-cli/.github/workflows/ci.yml`,
+		`testdata/notion-cli/events/push.json`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)
@@ -423,6 +427,9 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	if len(document.Steps) != 2 || document.Steps[0].Key != "phase-2-upload-importer" {
 		t.Fatalf("Phase 2 upload proof = %#v", document.Steps)
+	}
+	if !strings.Contains(text, `if: build.env("PHASE2_WORKFLOW") == null || build.env("PHASE2_WORKFLOW") == "shell"`) {
+		t.Fatalf("Phase 2 continuation loader is not limited to the shell fixture:\n%s", source)
 	}
 	if document.Steps[1].Key != "phase-2-continuation-loader" || document.Steps[1].DependsOn != "phase-2-upload-importer" || !document.Steps[1].AllowDependencyFailure || document.Steps[1].Command != "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml" {
 		t.Fatalf("Phase 2 continuation loader = %#v", document.Steps[1])
@@ -483,6 +490,40 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	if len(generatedConsumers) != 0 {
 		t.Fatalf("Phase 2 continuation omits generated consumers: %#v", generatedConsumers)
+	}
+}
+
+func TestNotionCLICanaryPinsUpstreamSource(t *testing.T) {
+	root := filepath.Join("..", "..")
+	workflowSource, err := os.ReadFile(filepath.Join(root, "testdata", "notion-cli", ".github", "workflows", "ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWorkflow := "name: CI\n\non:\n  pull_request:\n  push:\n    branches: [main]\n\npermissions:\n  contents: read\n\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: jdx/mise-action@v2\n\n      - run: mise run test\n\n      - run: mise run lint\n"
+	if string(workflowSource) != wantWorkflow {
+		t.Fatalf("notion-cli workflow fixture drifted from the pinned copy of upstream 9e2dcfdacad890e63da77da2850452aeacb61e41:\n%s", workflowSource)
+	}
+
+	eventSource, err := os.ReadFile(filepath.Join(root, "testdata", "notion-cli", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Provider   string `json:"provider"`
+		Event      string `json:"event"`
+		Ref        string `json:"ref"`
+		SHA        string `json:"sha"`
+		Repository struct {
+			Owner    string `json:"owner"`
+			Name     string `json:"name"`
+			CloneURL string `json:"clone_url"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(eventSource, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Provider != "github" || event.Event != "push" || event.Ref != "refs/heads/main" || event.SHA != "9e2dcfdacad890e63da77da2850452aeacb61e41" || event.Repository.Owner != "lox" || event.Repository.Name != "notion-cli" || event.Repository.CloneURL != "https://github.com/lox/notion-cli.git" {
+		t.Fatalf("notion-cli event identity drifted: %#v", event)
 	}
 }
 

@@ -1,0 +1,16 @@
+{
+  "provider": "github",
+  "event": "push",
+  "repository": {
+    "owner": "lox",
+    "name": "notion-cli",
+    "clone_url": "https://github.com/lox/notion-cli.git",
+    "default_branch": "main"
+  },
+  "ref": "refs/heads/main",
+  "sha": "9e2dcfdacad890e63da77da2850452aeacb61e41",
+  "actor": "lox",
+  "payload": {
+    "ref": "refs/heads/main"
+  }
+}

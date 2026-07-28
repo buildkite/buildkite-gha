@@ -87,6 +87,7 @@ phase selector only for targeted diagnosis:
 | --- | --- |
 | Sequential shell and upload | `PHASE2_PROBE=upload`, `PHASE2_COMMIT=<commit>` |
 | GitHub Cache v1 miss/save | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=cache`, `PHASE2_COMMIT=<commit>` |
+| Unchanged `lox/notion-cli` workflow | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=notion-cli`, `PHASE2_COMMIT=<commit>` |
 | Concurrent step controls | `PHASE3_PROBE=concurrent`, `PHASE3_COMMIT=<commit>` |
 | Public JavaScript/composite actions | `PHASE4_PROBE=actions`, `PHASE4_COMMIT=<commit>` |
 | Hosted Docker prerequisites | `PHASE5_PROBE=capabilities`, `PHASE5_COMMIT=<commit>` |
@@ -97,6 +98,11 @@ The cache selector runs pinned `actions/cache@v4`. A first run must miss,
 create `deterministic-cache-payload-v1`, and save it from the action's post
 phase. A later run against a durable production backend must hit and restore
 the payload before the smoke classification can become `runtime-pass`.
+
+The `notion-cli` selector runs the upstream workflow unchanged at commit
+`9e2dcfdacad890e63da77da2850452aeacb61e41`. It covers public checkout,
+`jdx/mise-action@v2`'s transitive cache client, and the repository's real test
+and lint tasks; a cache miss remains valid until durable storage is enabled.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
