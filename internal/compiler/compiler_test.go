@@ -1114,22 +1114,26 @@ func TestCollectNestedActionCapabilities(t *testing.T) {
 	}
 }
 
-func TestCompilePlansAcceptsNode20LocalAction(t *testing.T) {
-	repository := t.TempDir()
-	workflowPath := filepath.Join(repository, ".github", "workflows", "node20.yml")
-	actionDir := filepath.Join(repository, ".github", "actions", "node20")
-	if err := os.MkdirAll(actionDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: node20\n  main: index.js\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(actionDir, "index.js"), []byte("// fixture\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	source := []byte("on: push\njobs:\n  node20:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/node20\n")
-	if _, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted"); err != nil {
-		t.Fatalf("CompilePlans() error = %v, want node20 support", err)
+func TestCompilePlansAcceptsSupportedJavaScriptLocalActions(t *testing.T) {
+	for _, runtime := range []string{"node16", "node20", "node24"} {
+		t.Run(runtime, func(t *testing.T) {
+			repository := t.TempDir()
+			workflowPath := filepath.Join(repository, ".github", "workflows", runtime+".yml")
+			actionDir := filepath.Join(repository, ".github", "actions", runtime)
+			if err := os.MkdirAll(actionDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionDir, "action.yml"), []byte("runs:\n  using: "+runtime+"\n  main: index.js\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actionDir, "index.js"), []byte("// fixture\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := []byte("on: push\njobs:\n  javascript:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/" + runtime + "\n")
+			if _, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted"); err != nil {
+				t.Fatalf("CompilePlans() error = %v, want %s support", err, runtime)
+			}
+		})
 	}
 }
 

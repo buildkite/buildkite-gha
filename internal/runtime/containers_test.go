@@ -1152,17 +1152,17 @@ func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := newJobDocker(t, scenario)
 			w := t.TempDir()
-			writeFixtureFile(t, w, "unused/action.yml", "name: probe\nruns:\n  using: node24\n  main: main.js\n")
+			writeFixtureFile(t, w, "unused/action.yml", "name: probe\nruns:\n  using: node16\n  main: main.js\n")
 			writeFixtureFile(t, w, "unused/main.js", "")
 			node := filepath.Join(t.TempDir(), "node")
-			if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.0.0\n"), 0o700); err != nil {
+			if err := os.WriteFile(node, []byte("#!/bin/sh\necho v16.20.2\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			j := jobContainerPlan(t, w, nil)
 			lockID := remoteLifecycleLockID(1)
 			j.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "./unused", Action: &plan.ActionSelector{Lock: lockID}}}
 			j.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "unused", SourceDigest: digestTree(t, filepath.Join(w, "unused"))}}
-			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node24: node}).RunJob(context.Background(), j, w)
+			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node16: node}).RunJob(context.Background(), j, w)
 			if err == nil || (!strings.Contains(err.Error(), "exact major") && !strings.Contains(err.Error(), "incompatible")) {
 				t.Fatalf("error = %v", err)
 			}
@@ -1660,9 +1660,11 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
+	node16 := filepath.Join(t.TempDir(), "node16")
+	writeNodeExecutable(t, node16, 16)
 	node20 := filepath.Join(t.TempDir(), "node20")
 	writeNodeExecutable(t, node20, 20)
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node20: node20, Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node16: node16, Node20: node20, Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Outputs["lazy"] != "ready" {
 		t.Fatalf("lazy container action result = %#v, error = %v", result, err)
 	}

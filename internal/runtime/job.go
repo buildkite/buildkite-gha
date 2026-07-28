@@ -67,6 +67,23 @@ type jobCacheService struct {
 	done    chan error
 }
 
+func supportedNodeMajors() [3]int {
+	return [3]int{16, 20, 24}
+}
+
+func actionNodeMajor(runtime metadata.Runtime) (int, bool) {
+	switch runtime {
+	case metadata.RuntimeNode16:
+		return 16, true
+	case metadata.RuntimeNode20:
+		return 20, true
+	case metadata.RuntimeNode24:
+		return 24, true
+	default:
+		return 0, false
+	}
+}
+
 func (r *postRegistry) register(post *registeredPost) {
 	if post == nil {
 		return
@@ -104,7 +121,7 @@ func VerifyWorkflow(job plan.Job, workspace string) error {
 func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (final JobResult, runJobErr error) {
 	callerWorkspace := workspace != ""
 	if r.nodeVerification == nil {
-		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 2)}
+		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 3)}
 	}
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
@@ -774,24 +791,20 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 			}
 			byTarget[target] = m
 		}
-		switch actionRuntime {
-		case metadata.RuntimeNode20:
-			requiredNode[20] = true
-		case metadata.RuntimeNode24:
-			requiredNode[24] = true
+		if major, ok := actionNodeMajor(actionRuntime); ok {
+			requiredNode[major] = true
 		}
 	}
 	if unknownWorkspaceRuntime {
-		requiredNode[20], requiredNode[24] = true, true
+		for _, major := range supportedNodeMajors() {
+			requiredNode[major] = true
+		}
 	}
-	for _, major := range []int{20, 24} {
+	for _, major := range supportedNodeMajors() {
 		if !requiredNode[major] {
 			continue
 		}
-		explicit := r.Node24
-		if major == 20 {
-			explicit = r.Node20
-		}
+		explicit := r.explicitNode(major)
 		if explicit != "" {
 			abs, err := filepath.Abs(explicit)
 			if err != nil {
@@ -820,11 +833,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 			if err != nil {
 				return nil, err
 			}
-			if major == 20 {
-				r.Node20 = explicit
-			} else {
-				r.Node24 = explicit
-			}
+			r.setExplicitNode(major, explicit)
 		}
 		byTarget[fmt.Sprintf("/__buildkite-gha/node%d", major)] = containerMount{host: explicit, target: fmt.Sprintf("/__buildkite-gha/node%d", major), readonly: true}
 	}
@@ -858,7 +867,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 
 	switch runtime {
-	case metadata.RuntimeNode20, metadata.RuntimeNode24:
+	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
 		// The checkout adapter replaces the verified action's JavaScript
 		// lifecycle as one indivisible operation. Do not register upstream
 		// checkout cleanup for a main phase that this runtime never executes.
@@ -875,10 +884,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if action.Runs.Pre == "" && action.Runs.Post == "" {
 			return result, nil
 		}
-		major, explicit := 24, r.Node24
-		if runtime == metadata.RuntimeNode20 {
-			major, explicit = 20, r.Node20
-		}
+		major, _ := actionNodeMajor(runtime)
+		explicit := r.explicitNode(major)
 		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
@@ -1070,7 +1077,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	actionEval := eval
 	actionEval.Inputs = inputs
 	switch actionRuntime {
-	case metadata.RuntimeNode20, metadata.RuntimeNode24:
+	case metadata.RuntimeNode16, metadata.RuntimeNode20, metadata.RuntimeNode24:
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
@@ -1080,10 +1087,8 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
 			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
 		}
-		major, explicit := 24, r.Node24
-		if actionRuntime == metadata.RuntimeNode20 {
-			major, explicit = 20, r.Node20
-		}
+		major, _ := actionNodeMajor(actionRuntime)
+		explicit := r.explicitNode(major)
 		node, err := r.discoverNode(ctx, major, explicit)
 		if err != nil {
 			return result, err

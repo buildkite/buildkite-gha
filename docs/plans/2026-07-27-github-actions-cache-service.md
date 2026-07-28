@@ -1139,7 +1139,10 @@ locally. Direct v4 completes Hosted miss/save; the unchanged transitive
 `lox/notion-cli` workflow completes Hosted miss/save plus its `mise run test`
 and `mise run lint`. Three sequential direct canary jobs each received an empty
 named volume, so cross-build Hosted restore remains open pending the production
-backend or a demonstrated later volume parent.
+backend or a demonstrated later volume parent. The runtime now admits and
+executes exact managed Node 16.20.2 for the final `actions/cache@v3` release;
+all v3 releases declare `runs.using: node16`, so v3 cannot be covered honestly
+by the existing Node 20/24 runtime set.
 
 Deliver:
 

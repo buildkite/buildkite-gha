@@ -70,7 +70,8 @@ a named imported job is planned, but is not part of this preview.
 The plugin path currently supports:
 
 - Linux Bash and `sh` steps;
-- JavaScript, composite, local, and anonymous public actions;
+- JavaScript actions using managed Node 16, 20, or 24, plus composite, local,
+  and anonymous public actions;
 - supported local and public Dockerfile actions;
 - `actions/cache` and actions using the GitHub Actions Cache v1 protocol when
   the experimental cache backend is enabled;

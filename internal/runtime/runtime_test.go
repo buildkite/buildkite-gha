@@ -1247,6 +1247,44 @@ esac
 	}
 }
 
+func TestJavaScriptNode16Lifecycle(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/node16/action.yml", `name: Node 16 lifecycle
+runs:
+  using: node16
+  pre: pre.js
+  main: main.js
+  post: post.js
+`)
+	for _, entry := range []string{"pre.js", "main.js", "post.js"} {
+		writeFixtureFile(t, workspace, ".github/actions/node16/"+entry, "")
+	}
+	fakeNode := filepath.Join(workspace, "node16")
+	writeFixtureFile(t, workspace, "node16", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+  echo v16.20.2
+  exit 0
+fi
+printf 'NODE16_%s=true\n' "$(basename "$1" .js | tr '[:lower:]' '[:upper:]')" >> "$GITHUB_ENV"
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/node16"}})
+	result, err := (Runner{Node16: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	for _, phase := range []string{"PRE", "MAIN", "POST"} {
+		if result.Env["NODE16_"+phase] != "true" {
+			t.Fatalf("RunJob() environment = %#v, want node16 %s lifecycle effect", result.Env, phase)
+		}
+	}
+}
+
 func TestBackgroundFailureSurfacesAtWait(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2322,6 +2360,38 @@ func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != "--no-config install core:node@20.20.2\n--no-config where core:node@20.20.2\n" {
+		t.Fatalf("mise arguments = %q", data)
+	}
+}
+
+func TestMiseNode16SelectionIsExactAndConfigFree(t *testing.T) {
+	root := t.TempDir()
+	log := filepath.Join(root, "args")
+	dataDir := filepath.Join(root, "data")
+	installation := filepath.Join(dataDir, "installs", "node", Node16Version)
+	node := filepath.Join(installation, "bin", "node")
+	nodeBytes := []byte("#!/bin/sh\nprintf 'v16.20.2\\n'\n")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mise := filepath.Join(root, "mise")
+	writeFixtureFile(t, root, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\ncase \"$2\" in install) :;; where) printf '%%s\\n' %q;; *) exit 9;; esac\n", log, installation))
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(nodeBytes)
+	got, err := (Runner{Mise: mise, MiseDataDir: dataDir, nodeDigests: map[int]string{16: hex.EncodeToString(digest[:])}}).discoverNode(context.Background(), 16, "")
+	if err != nil || got != node {
+		t.Fatalf("discoverNode() = %q, %v", got, err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "--no-config install core:node@16.20.2\n--no-config where core:node@16.20.2\n" {
 		t.Fatalf("mise arguments = %q", data)
 	}
 }

@@ -887,7 +887,7 @@ at barriers, and the cross-stream masking race.
 
 #### JavaScript actions
 
-- `node20` and `node24` action metadata;
+- `node16`, `node20`, and `node24` action metadata;
 - runner-compatible handling of deprecated Node versions;
 - action `pre`, `main`, and `post` entry points;
 - `INPUT_*`, `GITHUB_ACTION_PATH`, runtime files, and action state; and
@@ -900,10 +900,11 @@ cached executable tree by SHA-256, and follows the shared Buildkite hosted-cache
 and agent-cache conventions. For action workflows, upload deterministically
 archives that pinned importer mise executable, transports it as a
 content-addressed artifact, and re-verifies it in every generated action job.
-The runtime installs exactly `core:node@20.20.2` or `core:node@24.18.0` with
-mise configuration disabled, digest-verifies the resulting Node executable,
-and invokes that exact path directly. It never uses a fuzzy major, a data-dir
-plugin, repository mise configuration, or an unverified tool-bin `PATH`.
+The runtime installs exactly `core:node@16.20.2`, `core:node@20.20.2`, or
+`core:node@24.18.0` with mise configuration disabled, digest-verifies the
+resulting Node executable, and invokes that exact path directly. It never uses
+a fuzzy major, a data-dir plugin, repository mise configuration, or an
+unverified tool-bin `PATH`.
 `MISE_*` workflow environment overrides therefore cannot redirect compatibility
 Node; ordinary shell steps retain them.
 Generated action jobs declare a dedicated, pipeline-scoped Buildkite hosted
@@ -1156,10 +1157,11 @@ archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
 distribution, installs and digest-verifies the pinned mise executable, and
-invokes the fixed hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are
-installed by mise on demand into an automatically attached, integration-owned
-hosted cache volume. Cached Node executables are digest-verified before use, so
-cache sharing across builds is an optimization rather than a trust boundary.
+invokes the fixed hosted-tokenless upload path. Node 16.20.2, 20.20.2, and
+24.18.0 are installed by mise on demand into an automatically attached,
+integration-owned hosted cache volume. Cached Node executables are
+digest-verified before use, so cache sharing across builds is an optimization
+rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
@@ -1289,7 +1291,7 @@ The first externally useful beta should support:
   best-effort `fail-fast` that prevents undispatched siblings from starting;
 - shell `run` steps;
 - `background`, `wait`, `wait-all`, `cancel`, and `parallel` step controls;
-- JavaScript actions using managed Node 20/24;
+- JavaScript actions using managed Node 16/20/24;
 - composite actions;
 - Docker actions, job containers, and service containers;
 - environment files and workflow commands;
@@ -1350,12 +1352,12 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - Phase 4 is implemented within the tokenless public-action boundary.
   Action-resolved v3 plans carry immutable local and public action locks, verify
   complete source trees, execute nested composites and JavaScript pre/main/post
-  lifecycle through exact mise-managed Node 20.20.2 or 24.18.0, and fail closed
-  on private sources or provider-dependent authentication. Action resolution is
-  independent of event trust. Normal `upload` resolves local and anonymous
-  public JavaScript/composite actions without transporting Node executable
-  bytes; generated agents use the exact content-addressed importer mise
-  executable to resolve compatibility versions through `mise --no-config`.
+  lifecycle through exact mise-managed Node 16.20.2, 20.20.2, or 24.18.0, and
+  fail closed on private sources or provider-dependent authentication. Action
+  resolution is independent of event trust. Normal `upload` resolves local and
+  anonymous public JavaScript/composite actions without transporting Node
+  executable bytes; generated agents use the exact content-addressed importer
+  mise executable to resolve compatibility versions through `mise --no-config`.
   This path remains `EventUntrusted`, fixed to the
   ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
   or the Phase 5 compiler-proven Dockerfile-action provenance.

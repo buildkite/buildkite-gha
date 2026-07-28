@@ -16,6 +16,7 @@ func TestLoadAndClassify(t *testing.T) {
 		wantCapacity string
 		wantError    string
 	}{
+		{name: "Node 16", using: "node16", wantRuntime: RuntimeNode16},
 		{name: "Node 20", using: "node20", wantRuntime: RuntimeNode20},
 		{name: "Node 24", using: "node24", wantRuntime: RuntimeNode24},
 		{name: "composite", using: "composite", wantRuntime: RuntimeComposite},

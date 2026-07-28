@@ -38,6 +38,7 @@ const (
 type Runner struct {
 	Stdout            io.Writer
 	Stderr            io.Writer
+	Node16            string
 	Node20            string
 	Node24            string
 	ManagedNodeRoot   string
@@ -83,6 +84,30 @@ type CacheConfig struct {
 type managedNodeVerification struct {
 	mu    sync.Mutex
 	paths map[int]string
+}
+
+func (r Runner) explicitNode(major int) string {
+	switch major {
+	case 16:
+		return r.Node16
+	case 20:
+		return r.Node20
+	case 24:
+		return r.Node24
+	default:
+		return ""
+	}
+}
+
+func (r *Runner) setExplicitNode(major int, path string) {
+	switch major {
+	case 16:
+		r.Node16 = path
+	case 20:
+		r.Node20 = path
+	case 24:
+		r.Node24 = path
+	}
 }
 
 // JavaScriptAction is an already-resolved local JavaScript action.
@@ -698,15 +723,19 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 }
 
 const (
+	Node16Version = "16.20.2"
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
 	// Digests are for bin/node in the official Linux x86-64 release archives.
+	node16Digest = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
 	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
 	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
 )
 
 func nodeTool(major int) string {
 	switch major {
+	case 16:
+		return "core:node@" + Node16Version
 	case 20:
 		return "core:node@" + Node20Version
 	case 24:
@@ -806,6 +835,8 @@ func (r Runner) nodeDigest(major int) string {
 		return digest
 	}
 	switch major {
+	case 16:
+		return node16Digest
 	case 20:
 		return node20Digest
 	case 24:
@@ -921,6 +952,8 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	}
 	var wantVersion string
 	switch major {
+	case 16:
+		wantVersion = "v" + Node16Version
 	case 20:
 		wantVersion = "v" + Node20Version
 	case 24:

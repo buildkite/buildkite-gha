@@ -22,7 +22,7 @@ There are three different compatibility claims:
 
 Compilation alone is not admission, and admission does not execute arbitrary
 action code. In particular, an otherwise valid action may depend on a GitHub
-artifact, cache, token, or OIDC service that this project does not provide.
+artifact, token, or OIDC service that this project does not provide.
 
 ## Support matrix
 
@@ -35,7 +35,7 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Local reusable workflows | Supported when statically resolvable | Remote and runtime-dependent reusable workflows are deferred. |
 | Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
-| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |
+| JavaScript actions | Supported | Managed, digest-verified Node 16, 20, and 24 runtimes are used. Node 16 is retained for actions such as `actions/cache@v3` that still declare `node16`. |
 | Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
 | Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
 | `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |
@@ -43,7 +43,8 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Step summaries | Not surfaced | The runtime processes `GITHUB_STEP_SUMMARY`, but production generated jobs do not publish it to the Buildkite UI. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
-| Artifact and cache actions | Not supported | They compile but fail profile admission until Buildkite-backed adapters exist. |
+| Cache actions | Experimental | `actions/cache` and other GitHub Actions Cache v1 clients use the compatibility adapter when its backend is enabled. |
+| Artifact actions | Not supported | They compile but fail profile admission until a Buildkite-backed adapter exists. |
 | Private repositories or actions | Not supported | The preview has no private-source capability broker. |
 | Secrets and provider tokens | Not supported | Includes `GITHUB_TOKEN`, GitHub App tokens, and protected environment grants. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
@@ -143,8 +144,8 @@ archive checksum, and extract it to a stable location. The archive contains
 
 Action workflows also require mise 2026.5.12 on the importer `PATH` when
 invoking `upload` directly. The runtime uses it with repository configuration
-disabled to install exact Node 20.20.2 or 24.18.0 releases. Those Node binaries
-require glibc 2.28 or newer; the static Go CLI does not. `validate` and
+disabled to install exact Node 16.20.2, 20.20.2, or 24.18.0 releases. Those Node
+binaries require glibc 2.28 or newer; the static Go CLI does not. `validate` and
 `compile` do not install Node or require mise.
 
 ### Validate
