@@ -72,6 +72,11 @@ As of 2026-07-28:
   payload, and saved successfully, but every later job received an empty volume
   rather than a committed parent; this proves the per-job integration but not
   cross-build persistence on the current Namespace-backed queue;
+- exact-commit Hosted build 212 ran the current `lox/notion-cli` workflow
+  unchanged, fetched its pinned public commit, ran the default cache-enabled
+  `jdx/mise-action@v2` over the v1 adapter, missed and saved a 116,467,256-byte
+  archive, then the workflow's `mise run test` and `mise run lint` passed; this
+  proves the transitive miss/save path but not a later restore;
 - the independent Rails backend and seven job-authenticated Agent API endpoints
   are implemented in [`buildkite/buildkite` PR
   #31646](https://github.com/buildkite/buildkite/pull/31646), but are not
@@ -1130,9 +1135,10 @@ Exit criteria:
 ### C5 — Out-of-box compatibility and rollout
 
 Status: **In progress.** The pinned v4 restart-persistence canary passes
-locally. The real Hosted action now completes miss/save, but three sequential
-exact-commit jobs each received an empty named volume, so cross-build Hosted and
-transitive external-workflow evidence remain open pending the production
+locally. Direct v4 completes Hosted miss/save; the unchanged transitive
+`lox/notion-cli` workflow completes Hosted miss/save plus its `mise run test`
+and `mise run lint`. Three sequential direct canary jobs each received an empty
+named volume, so cross-build Hosted restore remains open pending the production
 backend or a demonstrated later volume parent.
 
 Deliver:
@@ -1246,8 +1252,9 @@ A successful static compile or admission result is not runtime cache evidence.
 2. Use the named Hosted cache volume as an integration bridge. Direct v4
    miss/save is proven; builds 205–207 did not receive a prior committed volume,
    so do not promote the smoke classification or block the production backend
-   on a best-effort volume hit. Prove the current transitive
-   `jdx/mise-action@v2` path separately.
+   on a best-effort volume hit. Build 212 proves the current transitive
+   `jdx/mise-action@v2` miss/save path and unchanged external workflow, but not
+   cross-build restore.
 3. Review and merge the independent Rails domain, migration, feature gate, and
    job-authenticated Agent API while the preview remains disabled.
 4. Confirm object-store IAM/lifecycle, ship GC worker and schedule, validate

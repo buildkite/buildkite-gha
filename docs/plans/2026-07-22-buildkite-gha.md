@@ -1395,8 +1395,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
   domain in `buildkite/buildkite`, not Cache v2; its job-authenticated API is
   implemented in PR #31646 but remains unmerged. The `buildkite-gha` client is
   implemented behind an explicit selector; object-store/GC operational work,
-  production selection, and live rollout evidence remain. This bounded slice
-  is separate from the remaining Phase 6
+  production selection, and live rollout evidence remain. Direct v4 Hosted
+  miss/save is proven, and Buildkite build 212 passed the unchanged
+  `lox/notion-cli` workflow through the transitive `jdx/mise-action@v2`
+  miss/save path; cross-build restore is not proven. This bounded slice is
+  separate from the remaining Phase 6
   artifact/results, provider-token, protected-secret, private-source, and
   capability-control-plane work.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
@@ -1890,9 +1893,10 @@ Delivery slices:
 1. Ship C0/C1/C4 of the focused cache plan: protocol fixtures, job-local
    adapter, host/container actions, post lifecycle, and deterministic backends.
 2. Prove direct and transitive cache clients on the experimental named-volume
-   backend, while preserving its explicit best-effort limitations. Direct
-   Hosted miss/save is proven; repeated empty successor volumes mean reliable
-   cross-build restore remains production-backend work.
+   backend, while preserving its explicit best-effort limitations. Direct v4
+   and unchanged `lox/notion-cli` transitive Hosted miss/save are proven;
+   repeated empty successor volumes mean reliable cross-build restore remains
+   production-backend work.
 3. Ship production cache by merging the independent Rails domain and
    job-authenticated Agent API, completing object-store/GC operations, then
    selecting the implemented `buildkite-gha` client. Run trusted branch/PR/fork,
