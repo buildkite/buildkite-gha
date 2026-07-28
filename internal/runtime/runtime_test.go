@@ -2429,13 +2429,17 @@ func TestManagedMiseCacheRefusesSymlinkedRemoval(t *testing.T) {
 func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testing.T) {
 	root := t.TempDir()
 	log := filepath.Join(root, "node-args")
+	workspace := filepath.Join(root, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	dataDir := filepath.Join(root, "mise-data")
 	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
 	node := filepath.Join(installation, "bin", "node")
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	nodeBytes := []byte(fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" >> %q; fi\n", log))
+	nodeBytes := []byte(fmt.Sprintf("#!/bin/sh\nif [ \"${1:-}\" = --version ]; then printf 'v24.18.0\\n'; else printf '%%s|MISE_DATA_DIR=%%s|PWD=%%s\\n' \"$*\" \"${MISE_DATA_DIR-unset}\" \"$PWD\" >> %q; fi\n", log))
 	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2454,6 +2458,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 		t.Fatal(err)
 	}
 	result := newResult()
+	result.Env["GITHUB_WORKSPACE"] = workspace
 	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
 	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
@@ -2462,7 +2467,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(root, "main.js") + "|MISE_DATA_DIR=/workflow-controlled\n"
+	want := filepath.Join(root, "main.js") + "|MISE_DATA_DIR=/workflow-controlled|PWD=" + workspace + "\n"
 	if string(data) != want {
 		t.Fatalf("Node invocations = %q, want %q", data, want)
 	}

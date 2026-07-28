@@ -515,7 +515,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, name, args...); err != nil {
+	if err := r.runProcess(ctx, processor, env["GITHUB_WORKSPACE"], env, result, stateOut, name, args...); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil

@@ -1327,6 +1327,9 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 		if !strings.Contains(joined, "/__buildkite-gha/node24") || !strings.Contains(joined, "GITHUB_ACTION_PATH="+jobContainerWorkspace+"/actions/javascript") {
 			t.Fatalf("container JavaScript paths were not translated: %#v", call.Args)
 		}
+		if workdir := argumentAfter(t, call.Args, "--workdir"); workdir != jobContainerWorkspace {
+			t.Fatalf("container JavaScript workdir = %q, want workspace %q", workdir, jobContainerWorkspace)
+		}
 	}
 	if !seenLifecycleExec {
 		t.Fatalf("container JavaScript exec absent: %#v", calls)
