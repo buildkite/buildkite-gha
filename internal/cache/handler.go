@@ -25,9 +25,6 @@ const mediaType = "application/json;api-version=6.0-preview.1"
 type Config struct {
 	Token, Session, BaseURL, ContainerBaseURL  string
 	TempDir                                    string
-	Namespace                                  Namespace
-	ReadScopes                                 []Scope
-	WriteScope                                 Scope
 	ReadOnly                                   bool
 	MaxKey, MaxVersion, MaxCandidates, MaxList int
 	MaxBody, MaxChunk, MaxArchive              int64
@@ -58,9 +55,6 @@ type localReservation struct {
 func NewHandler(backend Backend, cfg Config) (*Handler, error) {
 	if backend == nil || cfg.Token == "" || cfg.Session == "" {
 		return nil, fmt.Errorf("cache backend, token, and session are required")
-	}
-	if cfg.Namespace.Organization == "" || cfg.Namespace.Cluster == "" || cfg.Namespace.Pipeline == "" || len(cfg.ReadScopes) == 0 || !cfg.ReadOnly && cfg.WriteScope == "" {
-		return nil, fmt.Errorf("trusted cache namespace and scopes are required")
 	}
 	if cfg.MaxKey == 0 {
 		cfg.MaxKey = 512
@@ -162,7 +156,7 @@ func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid cache lookup")
 		return
 	}
-	e, ok, err := h.backend.Lookup(r.Context(), LookupRequest{Namespace: h.cfg.Namespace, Scopes: h.cfg.ReadScopes, Candidates: keys, Version: v})
+	e, ok, err := h.backend.Lookup(r.Context(), LookupRequest{Candidates: keys, Version: v})
 	if err != nil {
 		mapError(w, err)
 		return
@@ -189,7 +183,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid list key")
 		return
 	}
-	es, err := h.backend.List(r.Context(), ListRequest{Namespace: h.cfg.Namespace, Scopes: h.cfg.ReadScopes, Key: key, Limit: h.cfg.MaxList})
+	es, err := h.backend.List(r.Context(), ListRequest{Key: key, Limit: h.cfg.MaxList})
 	if err != nil {
 		mapError(w, err)
 		return
@@ -224,7 +218,7 @@ func (h *Handler) reserve(w http.ResponseWriter, r *http.Request) {
 		mapError(w, ErrTooLarge)
 		return
 	}
-	br, err := h.backend.Reserve(r.Context(), ReserveRequest{Namespace: h.cfg.Namespace, Scope: h.cfg.WriteScope, Key: q.Key, Version: q.Version, Owner: h.cfg.Session, DeclaredSize: q.CacheSize})
+	br, err := h.backend.Reserve(r.Context(), ReserveRequest{Key: q.Key, Version: q.Version, Owner: h.cfg.Session, DeclaredSize: q.CacheSize})
 	if err != nil {
 		mapError(w, err)
 		return

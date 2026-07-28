@@ -118,7 +118,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		_, _ = fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
-		usesMise := misePath != "" && job.UsesActions
+		usesActionsRuntime := misePath != "" && job.UsesActions
 		commands := []string{
 			"set -euo pipefail",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
@@ -131,7 +131,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
-		if usesMise {
+		if usesActionsRuntime {
 			commands = append(commands,
 				"buildkite-agent artifact download "+shellQuote(misePath)+` "$bootstrap_dir" --step `+shellQuote(pipeline.CompilerStep),
 				"mise_archive=\"$bootstrap_dir/"+misePath+`"`,
@@ -149,7 +149,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		out.WriteString("    agents:\n")
 		_, _ = fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
 		out.WriteString("    checkout:\n      skip: true\n")
-		if usesMise {
+		if usesActionsRuntime {
 			out.WriteString("    cache:\n")
 			out.WriteString("      paths:\n")
 			_, _ = fmt.Fprintf(&out, "        - %s\n", yamlScalar(hostedCacheVolumePath))
@@ -159,7 +159,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlScalar(job.PlanDigest))
 		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PATH: %s\n", yamlScalar(planPath))
 		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
-		if usesMise {
+		if usesActionsRuntime {
 			_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_MISE_DATA_DIR: %s\n", yamlScalar(miseDataDir))
 			_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_CACHE_DIR: %s\n", yamlScalar(experimentalGHACacheDirectory))
 		}

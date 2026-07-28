@@ -18,6 +18,9 @@ type memoryBackend struct {
 	mu           sync.Mutex
 	now          func() time.Time
 	lease        time.Duration
+	namespace    Namespace
+	readScopes   []Scope
+	writeScope   Scope
 	next         int
 	reservations map[ReservationID]*memoryReservation
 	entries      map[EntryID]Entry
@@ -31,12 +34,21 @@ type memoryReservation struct {
 	aborted   bool
 }
 
-func newMemoryBackend(now func() time.Time) *memoryBackend {
+func newMemoryBackend(now func() time.Time, namespace Namespace, readScopes []Scope, writeScope Scope) *memoryBackend {
 	if now == nil {
 		now = time.Now
 	}
-	return &memoryBackend{now: now, lease: time.Minute, reservations: map[ReservationID]*memoryReservation{}, entries: map[EntryID]Entry{}, data: map[string][]byte{}, faults: map[string]error{}}
+	return &memoryBackend{
+		now: now, lease: time.Minute,
+		namespace: namespace, readScopes: append([]Scope(nil), readScopes...), writeScope: writeScope,
+		reservations: map[ReservationID]*memoryReservation{}, entries: map[EntryID]Entry{}, data: map[string][]byte{}, faults: map[string]error{},
+	}
 }
+
+func newTestMemoryBackend(now func() time.Time) *memoryBackend {
+	return newMemoryBackend(now, Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"}, []Scope{"branch", "default"}, "branch")
+}
+
 func (m *memoryBackend) fail(op string) error {
 	if err := m.faults[op]; err != nil {
 		return err
@@ -46,17 +58,36 @@ func (m *memoryBackend) fail(op string) error {
 func identity(n Namespace, s Scope, k, v string) string {
 	return n.Organization + "\x00" + n.Cluster + "\x00" + n.Pipeline + "\x00" + string(s) + "\x00" + k + "\x00" + v
 }
+
+// seedMemoryEntry inserts a committed entry directly, bypassing writeScope.
+func seedMemoryEntry(m *memoryBackend, scope Scope, key, version string, contents []byte, createdAt time.Time) Entry {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sum := sha256.Sum256(contents)
+	digest := hex.EncodeToString(sum[:])
+	m.next++
+	locator := "blob:" + digest
+	m.data[locator] = bytes.Clone(contents)
+	entry := Entry{
+		ID: EntryID(fmt.Sprintf("e%020d", m.next)), Namespace: m.namespace, Scope: scope,
+		Key: key, Version: version, CreationTime: createdAt,
+		Blob: Blob{Locator: locator, SHA256: digest, Size: int64(len(contents)), Generation: fmt.Sprintf("seed%d", m.next)},
+	}
+	m.entries[entry.ID] = entry
+	return entry
+}
+
 func (m *memoryBackend) Lookup(_ context.Context, q LookupRequest) (Entry, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.fail("lookup"); err != nil {
 		return Entry{}, false, err
 	}
-	for _, scope := range q.Scopes {
+	for _, scope := range m.readScopes {
 		for _, candidate := range q.Candidates {
 			var exact, prefix []Entry
 			for _, e := range m.entries {
-				if e.Namespace == q.Namespace && e.Scope == scope && e.Version == q.Version {
+				if e.Namespace == m.namespace && e.Scope == scope && e.Version == q.Version {
 					if e.Key == candidate {
 						exact = append(exact, e)
 					} else if strings.HasPrefix(e.Key, candidate) {
@@ -90,12 +121,12 @@ func (m *memoryBackend) List(_ context.Context, q ListRequest) ([]Entry, error) 
 		return nil, err
 	}
 	allowed := map[Scope]bool{}
-	for _, s := range q.Scopes {
+	for _, s := range m.readScopes {
 		allowed[s] = true
 	}
 	var out []Entry
 	for _, e := range m.entries {
-		if e.Namespace == q.Namespace && allowed[e.Scope] && (q.Key == "" || strings.HasPrefix(e.Key, q.Key)) {
+		if e.Namespace == m.namespace && allowed[e.Scope] && (q.Key == "" || strings.HasPrefix(e.Key, q.Key)) {
 			out = append(out, e)
 		}
 	}
@@ -116,7 +147,7 @@ func (m *memoryBackend) Reserve(_ context.Context, q ReserveRequest) (Reservatio
 	if err := m.fail("reserve"); err != nil {
 		return Reservation{}, err
 	}
-	idn := identity(q.Namespace, q.Scope, q.Key, q.Version)
+	idn := identity(m.namespace, m.writeScope, q.Key, q.Version)
 	for _, e := range m.entries {
 		if identity(e.Namespace, e.Scope, e.Key, e.Version) == idn {
 			return Reservation{}, ErrContention
@@ -132,7 +163,7 @@ func (m *memoryBackend) Reserve(_ context.Context, q ReserveRequest) (Reservatio
 	}
 	m.next++
 	id := ReservationID(fmt.Sprintf("r%d", m.next))
-	r := Reservation{ID: id, Namespace: q.Namespace, Scope: q.Scope, Key: q.Key, Version: q.Version, Owner: q.Owner, Generation: fmt.Sprintf("g%d", m.next), DeclaredSize: cloneInt64(q.DeclaredSize), LeaseExpiresAt: m.now().Add(m.lease)}
+	r := Reservation{ID: id, Namespace: m.namespace, Scope: m.writeScope, Key: q.Key, Version: q.Version, Owner: q.Owner, Generation: fmt.Sprintf("g%d", m.next), DeclaredSize: cloneInt64(q.DeclaredSize), LeaseExpiresAt: m.now().Add(m.lease)}
 	m.reservations[id] = &memoryReservation{Reservation: r}
 	return r, nil
 }

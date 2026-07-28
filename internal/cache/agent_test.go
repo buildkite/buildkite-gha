@@ -28,7 +28,6 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 	)
 	createdAt := time.Date(2026, 7, 28, 1, 2, 3, 0, time.UTC)
 	expiresAt := createdAt.Add(7 * 24 * time.Hour)
-	namespace := Namespace{"organization", "cluster", "pipeline"}
 	scope := Scope("refs/heads/main")
 	payload := []byte("opaque cache archive")
 	digestBytes := sha256.Sum256(payload)
@@ -156,17 +155,17 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 	if err != nil || backend == nil || !capability.Enabled || capability.Mode != "read-write" {
 		t.Fatalf("NewAgentBackend() = %#v, %#v, %v", backend, capability, err)
 	}
-	listed, err := backend.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{scope}, Key: "cache-key", Limit: 100})
+	listed, err := backend.List(context.Background(), ListRequest{Key: "cache-key", Limit: 100})
 	if err != nil || len(listed) != 0 || apiCalls != 1 {
 		t.Fatalf("List() = %#v, %v, API calls = %d", listed, err, apiCalls)
 	}
-	lookup := LookupRequest{Namespace: namespace, Scopes: []Scope{scope}, Candidates: []string{"cache-key"}, Version: "v1"}
+	lookup := LookupRequest{Candidates: []string{"cache-key"}, Version: "v1"}
 	if entry, ok, err := backend.Lookup(context.Background(), lookup); err != nil || ok || entry.ID != "" {
 		t.Fatalf("initial Lookup() = %#v, %v, %v", entry, ok, err)
 	}
 	size := int64(len(payload))
 	reservation, err := backend.Reserve(context.Background(), ReserveRequest{
-		Namespace: namespace, Scope: scope, Key: "cache-key", Version: "v1", Owner: "session", DeclaredSize: &size,
+		Key: "cache-key", Version: "v1", Owner: "session", DeclaredSize: &size,
 	})
 	if err != nil || reservation.ID != reservationID || reservation.Generation == reservationToken {
 		t.Fatalf("Reserve() = %#v, %v", reservation, err)
@@ -182,7 +181,7 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 		t.Fatalf("Commit() = %#v, %v", entry, err)
 	}
 	hit, ok, err := backend.Lookup(context.Background(), lookup)
-	if err != nil || !ok || hit.ID != entry.ID || hit.Namespace != namespace {
+	if err != nil || !ok || hit.ID != entry.ID {
 		t.Fatalf("Lookup() = %#v, %v, %v", hit, ok, err)
 	}
 	reader, info, err := backend.Open(context.Background(), entry.ID, nil)

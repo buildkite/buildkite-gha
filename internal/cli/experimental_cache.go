@@ -22,14 +22,7 @@ func jobCacheConfig(ctx context.Context, job plan.Job, getenv func(string) strin
 	case "", "directory":
 		return experimentalDirectoryCacheConfig(job, getenv)
 	case "agent":
-		hasActions := false
-		for _, step := range job.Steps {
-			if step.Kind == "uses" {
-				hasActions = true
-				break
-			}
-		}
-		if !hasActions {
+		if !job.HasActions() {
 			return nil, nil
 		}
 		jobID := strings.TrimSpace(getenv("BUILDKITE_JOB_ID"))
@@ -50,12 +43,8 @@ func jobCacheConfig(ctx context.Context, job plan.Job, getenv func(string) strin
 		if !capability.Enabled {
 			return nil, nil
 		}
-		placeholder := "server-derived"
-		scope := ghacache.Scope(placeholder)
 		return &gharuntime.CacheConfig{
-			Backend: agentBackend, Namespace: ghacache.Namespace{Organization: placeholder, Cluster: placeholder, Pipeline: jobID},
-			ReadScopes: []ghacache.Scope{scope}, WriteScope: scope,
-			ReadOnly:   capability.Mode == "read-only",
+			Backend: agentBackend, ReadOnly: capability.ReadOnly(),
 			MaxArchive: capability.Limits.MaxArchiveSize, MaxCandidates: capability.Limits.MaxCandidates,
 			MaxKey: capability.Limits.MaxKeyBytes, MaxVersion: capability.Limits.MaxVersionBytes,
 		}, nil
@@ -71,6 +60,9 @@ func jobCacheConfig(ctx context.Context, job plan.Job, getenv func(string) strin
 func experimentalDirectoryCacheConfig(job plan.Job, getenv func(string) string) (*gharuntime.CacheConfig, error) {
 	root := strings.TrimSpace(getenv("BUILDKITE_GHA_CACHE_DIR"))
 	if root == "" {
+		return nil, nil
+	}
+	if !job.HasActions() {
 		return nil, nil
 	}
 	root, err := filepath.Abs(root)
@@ -92,15 +84,12 @@ func experimentalDirectoryCacheConfig(job plan.Job, getenv func(string) string) 
 	if namespace.Organization == "" || namespace.Cluster == "" || namespace.Pipeline == "" {
 		return nil, fmt.Errorf("experimental cache requires BUILDKITE_ORGANIZATION_ID, BUILDKITE_PIPELINE_ID, and BUILDKITE_AGENT_META_DATA_QUEUE")
 	}
-	backend, err := ghacache.NewExperimentalDirectoryBackend(root)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errCacheBackendUnavailable, err)
-	}
 	canonicalRepository := strings.ToLower(owner + "/" + name)
 	scopeDigest := sha256.Sum256([]byte(canonicalRepository + "\x00" + job.Event.Ref))
 	scope := ghacache.Scope("github-ref:sha256:" + hex.EncodeToString(scopeDigest[:]))
-	return &gharuntime.CacheConfig{
-		Backend: backend, Namespace: namespace,
-		ReadScopes: []ghacache.Scope{scope}, WriteScope: scope,
-	}, nil
+	backend, err := ghacache.NewExperimentalDirectoryBackend(root, namespace, []ghacache.Scope{scope}, scope)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCacheBackendUnavailable, err)
+	}
+	return &gharuntime.CacheConfig{Backend: backend}, nil
 }

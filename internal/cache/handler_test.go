@@ -20,8 +20,8 @@ import (
 
 func testHandler(t *testing.T) (*Handler, *memoryBackend, *httptest.Server) {
 	t.Helper()
-	b := newMemoryBackend(func() time.Time { return time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC) })
-	cfg := Config{Token: "token", Session: "job", Namespace: Namespace{"o", "c", "p"}, ReadScopes: []Scope{"branch", "default"}, WriteScope: "branch", TempDir: t.TempDir(), MaxArchive: 1024, MaxChunk: 1024, BaseURL: "http://example.test/"}
+	b := newTestMemoryBackend(func() time.Time { return time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC) })
+	cfg := Config{Token: "token", Session: "job", TempDir: t.TempDir(), MaxArchive: 1024, MaxChunk: 1024, BaseURL: "http://example.test/"}
 	h, err := NewHandler(b, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -155,13 +155,11 @@ func TestProtocolSaveRestoreAndRanges(t *testing.T) {
 }
 
 func TestLookupFailsClosedWhenDownloadURLRedactionFails(t *testing.T) {
-	backend := newMemoryBackend(nil)
-	namespace := Namespace{"o", "c", "p"}
-	putMemoryEntry(t, backend, namespace, "branch", "key", "version", "owner", []byte("archive"))
+	backend := newTestMemoryBackend(nil)
+	putMemoryEntry(t, backend, "key", "version", "owner", []byte("archive"))
 	var redacted string
 	handler, err := NewHandler(backend, Config{
 		Token: "token", Session: "job", BaseURL: "http://example.test/", TempDir: t.TempDir(),
-		Namespace: namespace, ReadScopes: []Scope{"branch"}, WriteScope: "branch",
 		RegisterRedaction: func(_ context.Context, value string) error {
 			redacted = value
 			return errors.New("redactor unavailable")
@@ -191,12 +189,10 @@ func TestLookupFailsClosedWhenDownloadURLRedactionFails(t *testing.T) {
 }
 
 func TestLookupUsesOnlyConfiguredRequestHostForDownloadURL(t *testing.T) {
-	backend := newMemoryBackend(nil)
-	namespace := Namespace{"o", "c", "p"}
-	putMemoryEntry(t, backend, namespace, "branch", "key", "version", "owner", []byte("archive"))
+	backend := newTestMemoryBackend(nil)
+	putMemoryEntry(t, backend, "key", "version", "owner", []byte("archive"))
 	handler, err := NewHandler(backend, Config{
 		Token: "token", Session: "job", BaseURL: "http://127.0.0.1:1234/", ContainerBaseURL: "http://buildkite-gha.internal:1234/", TempDir: t.TempDir(),
-		Namespace: namespace, ReadScopes: []Scope{"branch"}, WriteScope: "branch",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -305,10 +301,10 @@ func TestProtocolValidationAndCommitCoverage(t *testing.T) {
 }
 
 func TestReadOnlyAndZeroByteCache(t *testing.T) {
-	backend := newMemoryBackend(nil)
+	backend := newTestMemoryBackend(nil)
 	readOnly, err := NewHandler(backend, Config{
 		Token: "token", Session: "job", BaseURL: "http://example.test/", TempDir: t.TempDir(),
-		Namespace: Namespace{"o", "c", "p"}, ReadScopes: []Scope{"branch"}, ReadOnly: true,
+		ReadOnly: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -359,11 +355,10 @@ func (b *blockingReserveBackend) Abort(ctx context.Context, id ReservationID) er
 
 func TestCloseRacingReserveAbortsWithoutLeakingTempFile(t *testing.T) {
 	tempDir := t.TempDir()
-	memory := newMemoryBackend(nil)
+	memory := newTestMemoryBackend(nil)
 	backend := &blockingReserveBackend{Backend: memory, entered: make(chan struct{}), release: make(chan struct{})}
 	handler, err := NewHandler(backend, Config{
 		Token: "token", Session: "job", BaseURL: "http://example.test/", TempDir: tempDir,
-		Namespace: Namespace{"o", "c", "p"}, ReadScopes: []Scope{"branch"}, WriteScope: "branch",
 	})
 	if err != nil {
 		t.Fatal(err)

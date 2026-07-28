@@ -58,22 +58,17 @@ type Runner struct {
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
-	actionCacheEnv    map[string]string
-	containerCacheEnv map[string]string
+	cacheService      *jobCacheService
 	jobContainer      *jobContainerBackend
 	jobDocker         *jobContainerBackend
 	nodeVerification  *managedNodeVerification
 	nodeDigests       map[int]string
 }
 
-// CacheConfig supplies a cache backend session to RunJob. Namespace and scope
-// values are authoritative for local backends and compatibility metadata for a
-// server-authorized backend.
+// CacheConfig supplies a cache backend session to RunJob. Identity (namespace
+// and scopes) is bound inside the backend at construction.
 type CacheConfig struct {
 	Backend       ghacache.Backend
-	Namespace     ghacache.Namespace
-	ReadScopes    []ghacache.Scope
-	WriteScope    ghacache.Scope
 	ReadOnly      bool
 	MaxArchive    int64
 	MaxCandidates int
@@ -327,9 +322,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		}
 	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
-	if r.containerCacheEnv != nil {
-		args = append(args, "--add-host", cacheContainerHost)
-	}
+	args = append(args, r.cacheService.DockerArgs()...)
 	if r.jobDocker != nil {
 		args = append(args, "--network", r.jobDocker.network)
 	}
@@ -517,7 +510,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -540,7 +533,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	if err := r.runProcess(ctx, processor, env["GITHUB_WORKSPACE"], env, result, stateOut, name, args...); err != nil {
+	if err := r.runProcess(ctx, processor, workspace, env, result, stateOut, name, args...); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil
@@ -722,27 +715,33 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 	}
 }
 
-const (
-	Node16Version = "16.20.2"
-	Node20Version = "20.20.2"
-	Node24Version = "24.18.0"
-	// Digests are for bin/node in the official Linux x86-64 release archives.
-	node16Digest = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
-	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
-	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+type nodeRelease struct {
+	Version string
+	Digest  string
+}
+
+// Digests are for bin/node in the official Linux x86-64 release archives.
+var nodeReleases = map[int]nodeRelease{
+	16: {Version: "16.20.2", Digest: "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"},
+	20: {Version: "20.20.2", Digest: "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"},
+	24: {Version: "24.18.0", Digest: "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"},
+}
+
+// Keep exported aliases for tests.
+var (
+	Node16Version = nodeReleases[16].Version
+	Node20Version = nodeReleases[20].Version
+	Node24Version = nodeReleases[24].Version
 )
 
+func supportedNodeMajors() []int { return []int{16, 20, 24} }
+
 func nodeTool(major int) string {
-	switch major {
-	case 16:
-		return "core:node@" + Node16Version
-	case 20:
-		return "core:node@" + Node20Version
-	case 24:
-		return "core:node@" + Node24Version
-	default:
+	release, ok := nodeReleases[major]
+	if !ok {
 		return ""
 	}
+	return "core:node@" + release.Version
 }
 
 func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (string, error) {
@@ -834,16 +833,7 @@ func (r Runner) nodeDigest(major int) string {
 	if digest := r.nodeDigests[major]; digest != "" {
 		return digest
 	}
-	switch major {
-	case 16:
-		return node16Digest
-	case 20:
-		return node20Digest
-	case 24:
-		return node24Digest
-	default:
-		return ""
-	}
+	return nodeReleases[major].Digest
 }
 
 func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string) (string, string, error) {
@@ -950,16 +940,9 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	if err != nil {
 		return fmt.Errorf("verify exact Node %d executable: %w: %s", major, err, strings.TrimSpace(stderr.String()))
 	}
-	var wantVersion string
-	switch major {
-	case 16:
-		wantVersion = "v" + Node16Version
-	case 20:
-		wantVersion = "v" + Node20Version
-	case 24:
-		wantVersion = "v" + Node24Version
-	default:
-		wantVersion = fmt.Sprintf("v%d", major)
+	wantVersion := fmt.Sprintf("v%d", major)
+	if release, ok := nodeReleases[major]; ok {
+		wantVersion = "v" + release.Version
 	}
 	if strings.TrimSpace(string(out)) != wantVersion {
 		return fmt.Errorf("node %d executable reported %q, want %q", major, strings.TrimSpace(string(out)), wantVersion)

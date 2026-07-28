@@ -14,9 +14,15 @@ import (
 	"time"
 )
 
+func testDirectoryIdentity() (Namespace, []Scope, Scope) {
+	return Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"},
+		[]Scope{"branch", "default"}, "branch"
+}
+
 func newTestDirectoryBackend(t *testing.T, root string, now *time.Time) *experimentalDirectoryBackend {
 	t.Helper()
-	backend, err := NewExperimentalDirectoryBackend(root)
+	namespace, readScopes, writeScope := testDirectoryIdentity()
+	backend, err := NewExperimentalDirectoryBackend(root, namespace, readScopes, writeScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,11 +31,14 @@ func newTestDirectoryBackend(t *testing.T, root string, now *time.Time) *experim
 	return directory
 }
 
-func putDirectoryEntry(t *testing.T, backend Backend, namespace Namespace, scope Scope, key, version, owner string, contents []byte) Entry {
+func putDirectoryEntry(t *testing.T, backend *experimentalDirectoryBackend, scope Scope, key, version, owner string, contents []byte) Entry {
 	t.Helper()
+	prev := backend.writeScope
+	backend.writeScope = scope
+	defer func() { backend.writeScope = prev }()
 	size := int64(len(contents))
 	reservation, err := backend.Reserve(context.Background(), ReserveRequest{
-		Namespace: namespace, Scope: scope, Key: key, Version: version, Owner: owner, DeclaredSize: &size,
+		Key: key, Version: version, Owner: owner, DeclaredSize: &size,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -53,40 +62,39 @@ func TestExperimentalDirectoryBackendPersistsLookupListAndRanges(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now().UTC().Truncate(time.Second)
 	backend := newTestDirectoryBackend(t, root, &now)
-	namespace := Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"}
 
-	branchPrefix := putDirectoryEntry(t, backend, namespace, "branch", "npm-linux-branch", "v1", "branch-prefix", []byte("branch contents"))
+	branchPrefix := putDirectoryEntry(t, backend, "branch", "npm-linux-branch", "v1", "branch-prefix", []byte("branch contents"))
 	now = now.Add(time.Second)
-	_ = putDirectoryEntry(t, backend, namespace, "default", "npm-linux", "v1", "default-exact", []byte("default contents"))
+	_ = putDirectoryEntry(t, backend, "default", "npm-linux", "v1", "default-exact", []byte("default contents"))
 	now = now.Add(time.Second)
-	exact := putDirectoryEntry(t, backend, namespace, "branch", "restore-", "v1", "restore-exact", []byte("0123456789"))
+	exact := putDirectoryEntry(t, backend, "branch", "restore-", "v1", "restore-exact", []byte("0123456789"))
 	now = now.Add(time.Second)
-	_ = putDirectoryEntry(t, backend, namespace, "branch", "restore-newer", "v1", "restore-prefix", []byte("prefix contents"))
+	_ = putDirectoryEntry(t, backend, "branch", "restore-newer", "v1", "restore-prefix", []byte("prefix contents"))
 
 	reopened := newTestDirectoryBackend(t, root, &now)
 	entry, ok, err := reopened.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch", "default"}, Candidates: []string{"npm-linux"}, Version: "v1",
+		Candidates: []string{"npm-linux"}, Version: "v1",
 	})
 	if err != nil || !ok || entry.ID != branchPrefix.ID {
 		t.Fatalf("scope-ordered Lookup() = %#v, %v, %v, want %q", entry, ok, err, branchPrefix.ID)
 	}
 	entry, ok, err = reopened.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch"}, Candidates: []string{"missing", "restore-"}, Version: "v1",
+		Candidates: []string{"missing", "restore-"}, Version: "v1",
 	})
 	if err != nil || !ok || entry.ID != exact.ID {
 		t.Fatalf("exact-before-prefix Lookup() = %#v, %v, %v, want %q", entry, ok, err, exact.ID)
 	}
 	if _, ok, err := reopened.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch"}, Candidates: []string{"restore-"}, Version: "other",
+		Candidates: []string{"restore-"}, Version: "other",
 	}); err != nil || ok {
 		t.Fatalf("version-mismatched Lookup() = %v, %v, want miss", ok, err)
 	}
 
-	entries, err := reopened.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{"branch"}, Key: "restore", Limit: 10})
+	entries, err := reopened.List(context.Background(), ListRequest{Key: "restore", Limit: 10})
 	if err != nil || len(entries) != 2 || entries[0].Key != "restore-newer" || entries[1].ID != exact.ID {
 		t.Fatalf("List() = %#v, %v", entries, err)
 	}
-	entries, err = reopened.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{"branch"}, Key: "restore", Limit: -1})
+	entries, err = reopened.List(context.Background(), ListRequest{Key: "restore", Limit: -1})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("unlimited List() = %#v, %v", entries, err)
 	}
@@ -109,8 +117,7 @@ func TestExperimentalDirectoryBackendReservationIntegrityAndExpiry(t *testing.T)
 	now := time.Now().UTC().Truncate(time.Second)
 	backend := newTestDirectoryBackend(t, t.TempDir(), &now)
 	request := ReserveRequest{
-		Namespace: Namespace{Organization: "o", Cluster: "c", Pipeline: "p"},
-		Scope:     "branch", Key: "key\x00with-separator", Version: "version", Owner: "job-one",
+		Key: "key\x00with-separator", Version: "version", Owner: "job-one",
 		DeclaredSize: int64Pointer(3),
 	}
 	first, err := backend.Reserve(context.Background(), request)
@@ -173,10 +180,9 @@ func TestExperimentalDirectoryBackendReservationIntegrityAndExpiry(t *testing.T)
 func TestExperimentalDirectoryBackendUploadMismatchReplayAbortAndEmptyBlob(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	backend := newTestDirectoryBackend(t, t.TempDir(), &now)
-	namespace := Namespace{Organization: "o", Cluster: "c", Pipeline: "p"}
 	size := int64(3)
 	reservation, err := backend.Reserve(context.Background(), ReserveRequest{
-		Namespace: namespace, Scope: "branch", Key: "mismatch", Version: "v1", Owner: "job", DeclaredSize: &size,
+		Key: "mismatch", Version: "v1", Owner: "job", DeclaredSize: &size,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +226,7 @@ func TestExperimentalDirectoryBackendUploadMismatchReplayAbortAndEmptyBlob(t *te
 		t.Fatalf("aborted blob error = %v, want not exist", err)
 	}
 
-	empty := putDirectoryEntry(t, backend, namespace, "branch", "empty", "v1", "empty", nil)
+	empty := putDirectoryEntry(t, backend, "branch", "empty", "v1", "empty", nil)
 	reader, info, err := backend.Open(context.Background(), empty.ID, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -238,16 +244,15 @@ func TestExperimentalDirectoryBackendUploadMismatchReplayAbortAndEmptyBlob(t *te
 func TestExperimentalDirectoryBackendSkipsCorruptEntriesAndBlobs(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	backend := newTestDirectoryBackend(t, t.TempDir(), &now)
-	namespace := Namespace{Organization: "o", Cluster: "c", Pipeline: "p"}
-	older := putDirectoryEntry(t, backend, namespace, "branch", "prefix-old", "v1", "old", []byte("older"))
+	older := putDirectoryEntry(t, backend, "branch", "prefix-old", "v1", "old", []byte("older"))
 	now = now.Add(time.Second)
-	newer := putDirectoryEntry(t, backend, namespace, "branch", "prefix-new", "v1", "new", []byte("newer"))
+	newer := putDirectoryEntry(t, backend, "branch", "prefix-new", "v1", "new", []byte("newer"))
 
 	if err := os.WriteFile(backend.blobPath(newer.Blob.SHA256), []byte("tampered"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	entry, ok, err := backend.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch"}, Candidates: []string{"prefix-"}, Version: "v1",
+		Candidates: []string{"prefix-"}, Version: "v1",
 	})
 	if err != nil || !ok || entry.ID != older.ID {
 		t.Fatalf("Lookup() around corrupt newest = %#v, %v, %v, want %q", entry, ok, err, older.ID)
@@ -279,12 +284,11 @@ func TestExperimentalDirectoryBackendPrunesByTTLAndEntryLimit(t *testing.T) {
 	backend := newTestDirectoryBackend(t, t.TempDir(), &now)
 	backend.maxEntries = 2
 	backend.ttl = time.Hour
-	namespace := Namespace{Organization: "o", Cluster: "c", Pipeline: "p"}
-	oldest := putDirectoryEntry(t, backend, namespace, "branch", "key-one", "v1", "one", []byte("one"))
+	oldest := putDirectoryEntry(t, backend, "branch", "key-one", "v1", "one", []byte("one"))
 	now = now.Add(time.Second)
-	second := putDirectoryEntry(t, backend, namespace, "branch", "key-two", "v1", "two", []byte("two"))
+	second := putDirectoryEntry(t, backend, "branch", "key-two", "v1", "two", []byte("two"))
 	now = now.Add(time.Second)
-	third := putDirectoryEntry(t, backend, namespace, "branch", "key-three", "v1", "three", []byte("three"))
+	third := putDirectoryEntry(t, backend, "branch", "key-three", "v1", "three", []byte("three"))
 
 	if _, _, err := backend.Open(context.Background(), oldest.ID, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("entry-limit Open(oldest) error = %v, want not found", err)
@@ -300,7 +304,7 @@ func TestExperimentalDirectoryBackendPrunesByTTLAndEntryLimit(t *testing.T) {
 	if err := backend.Prune(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := backend.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{"branch"}, Limit: 10})
+	entries, err := backend.List(context.Background(), ListRequest{Limit: 10})
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("List() after TTL = %#v, %v, want empty", entries, err)
 	}
@@ -314,20 +318,19 @@ func TestExperimentalDirectoryBackendPrunesByUniqueBlobBytes(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	backend := newTestDirectoryBackend(t, t.TempDir(), &now)
 	backend.maxBytes = 4
-	namespace := Namespace{Organization: "o", Cluster: "c", Pipeline: "p"}
-	first := putDirectoryEntry(t, backend, namespace, "branch", "same-one", "v1", "one", []byte("same"))
+	first := putDirectoryEntry(t, backend, "branch", "same-one", "v1", "one", []byte("same"))
 	now = now.Add(time.Second)
-	second := putDirectoryEntry(t, backend, namespace, "branch", "same-two", "v1", "two", []byte("same"))
+	second := putDirectoryEntry(t, backend, "branch", "same-two", "v1", "two", []byte("same"))
 	if first.Blob.SHA256 != second.Blob.SHA256 {
 		t.Fatal("test entries did not share a blob")
 	}
-	entries, err := backend.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{"branch"}, Limit: 10})
+	entries, err := backend.List(context.Background(), ListRequest{Limit: 10})
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("deduplicated List() = %#v, %v", entries, err)
 	}
 	now = now.Add(time.Second)
-	newest := putDirectoryEntry(t, backend, namespace, "branch", "newest", "v1", "newest", []byte("x"))
-	entries, err = backend.List(context.Background(), ListRequest{Namespace: namespace, Scopes: []Scope{"branch"}, Limit: 10})
+	newest := putDirectoryEntry(t, backend, "branch", "newest", "v1", "newest", []byte("x"))
+	entries, err = backend.List(context.Background(), ListRequest{Limit: 10})
 	if err != nil || len(entries) != 1 || entries[0].ID != newest.ID {
 		t.Fatalf("byte-limited List() = %#v, %v, want only %q", entries, err, newest.ID)
 	}
@@ -346,8 +349,7 @@ func TestExperimentalDirectoryBackendConcurrentReservationHasOneWinner(t *testin
 			defer wait.Done()
 			<-start
 			_, err := backend.Reserve(context.Background(), ReserveRequest{
-				Namespace: Namespace{Organization: "o", Cluster: "c", Pipeline: "p"},
-				Scope:     "branch", Key: "key", Version: "version", Owner: string(rune('a' + worker)),
+				Key: "key", Version: "version", Owner: string(rune('a' + worker)),
 			})
 			errs <- err
 		}()

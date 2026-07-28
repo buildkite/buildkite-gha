@@ -207,9 +207,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 			"--mount", "type=bind,source=" + temp + ",target=" + jobContainerTemp,
 			"--mount", "type=bind,source=" + runtimeExecutable + ",target=" + jobContainerRuntime + ",readonly",
 			"--workdir", jobContainerWorkspace, "--entrypoint", "sh"}
-		if r.containerCacheEnv != nil {
-			args = append(args, "--add-host", cacheContainerHost)
-		}
+		args = append(args, r.cacheService.DockerArgs()...)
 		for _, m := range b.mounts[2:] {
 			mount := "type=bind,source=" + m.host + ",target=" + m.target
 			if m.readonly {

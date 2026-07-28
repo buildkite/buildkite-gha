@@ -99,7 +99,12 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 	var operations []string
 	runService := func(run func([]string)) {
 		t.Helper()
-		backend, err := NewExperimentalDirectoryBackend(cacheRoot)
+		backend, err := NewExperimentalDirectoryBackend(
+			cacheRoot,
+			Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"},
+			[]Scope{"branch", "default"},
+			"branch",
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,8 +112,7 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 		baseURL := "http://" + server.Listener.Addr().String() + "/"
 		handler, err := NewHandler(backend, Config{
 			Token: "live-client-token", Session: "live-client-" + name, BaseURL: baseURL,
-			TempDir: t.TempDir(), Namespace: Namespace{"organization", "cluster", "pipeline"},
-			ReadScopes: []Scope{"branch", "default"}, WriteScope: "branch",
+			TempDir: t.TempDir(),
 			MaxArchive: 16 << 20, MaxChunk: 2 << 20,
 		})
 		if err != nil {

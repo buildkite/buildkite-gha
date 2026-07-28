@@ -18,7 +18,10 @@ import (
 )
 
 func TestExperimentalDirectoryCacheConfigIsExplicitAndRefScoped(t *testing.T) {
-	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "Owner/Repository", Ref: "refs/heads/main"}}
+	job := plan.Job{
+		Event: plan.Event{Provider: "github", Repository: "Owner/Repository", Ref: "refs/heads/main"},
+		Steps: []plan.Step{{Kind: "uses"}},
+	}
 	if config, err := experimentalDirectoryCacheConfig(job, func(string) string { return "" }); err != nil || config != nil {
 		t.Fatalf("disabled config = %#v, %v, want nil", config, err)
 	}
@@ -35,11 +38,8 @@ func TestExperimentalDirectoryCacheConfigIsExplicitAndRefScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Backend == nil || config.Namespace.Organization != "organization-id" || config.Namespace.Cluster != "hosted" || config.Namespace.Pipeline != "pipeline-id" {
+	if config == nil || config.Backend == nil || config.ReadOnly {
 		t.Fatalf("config = %#v", config)
-	}
-	if len(config.ReadScopes) != 1 || !strings.HasPrefix(string(config.ReadScopes[0]), "github-ref:sha256:") || len(config.ReadScopes[0]) != len("github-ref:sha256:")+64 || config.WriteScope != config.ReadScopes[0] || config.ReadOnly {
-		t.Fatalf("cache scopes = %#v / %q, read-only %v", config.ReadScopes, config.WriteScope, config.ReadOnly)
 	}
 	if info, err := filepath.Glob(filepath.Join(root, "buildkite-gha-cache-v1", "*")); err != nil || len(info) != 3 {
 		t.Fatalf("cache directories = %#v, %v", info, err)
@@ -56,7 +56,10 @@ func TestExperimentalDirectoryCacheConfigResolvesHostedRelativePath(t *testing.T
 		"BUILDKITE_PIPELINE_ID":           "pipeline-id",
 		"BUILDKITE_AGENT_META_DATA_QUEUE": "hosted",
 	}
-	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"}}
+	job := plan.Job{
+		Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"},
+		Steps: []plan.Step{{Kind: "uses"}},
+	}
 	config, err := jobCacheConfig(context.Background(), job, func(name string) string { return values[name] }, nil)
 	if err != nil || config == nil || config.Backend == nil {
 		t.Fatalf("relative hosted cache config = %#v, %v", config, err)
@@ -78,17 +81,21 @@ func TestExperimentalDirectoryCacheConfigFailsClosed(t *testing.T) {
 	getenv := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
 	}
+	actionSteps := []plan.Step{{Kind: "uses"}}
 	for _, job := range []plan.Job{
-		{Event: plan.Event{Provider: "other", Repository: "owner/repository", Ref: "refs/heads/main"}},
-		{Event: plan.Event{Provider: "github", Ref: "refs/heads/main"}},
-		{Event: plan.Event{Provider: "github", Repository: "owner/repository"}},
-		{Event: plan.Event{Provider: "github", Repository: "owner/repository:other", Ref: "refs/heads/main"}},
+		{Event: plan.Event{Provider: "other", Repository: "owner/repository", Ref: "refs/heads/main"}, Steps: actionSteps},
+		{Event: plan.Event{Provider: "github", Ref: "refs/heads/main"}, Steps: actionSteps},
+		{Event: plan.Event{Provider: "github", Repository: "owner/repository"}, Steps: actionSteps},
+		{Event: plan.Event{Provider: "github", Repository: "owner/repository:other", Ref: "refs/heads/main"}, Steps: actionSteps},
 	} {
 		if config, err := experimentalDirectoryCacheConfig(job, getenv(valid)); err == nil || config != nil {
 			t.Fatalf("invalid event config = %#v, %v", config, err)
 		}
 	}
-	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"}}
+	job := plan.Job{
+		Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"},
+		Steps: actionSteps,
+	}
 	for _, missing := range []string{"BUILDKITE_ORGANIZATION_ID", "BUILDKITE_PIPELINE_ID", "BUILDKITE_AGENT_META_DATA_QUEUE"} {
 		values := make(map[string]string, len(valid))
 		for name, value := range valid {
@@ -110,6 +117,27 @@ func TestExperimentalDirectoryCacheConfigFailsClosed(t *testing.T) {
 	backendValues["BUILDKITE_GHA_CACHE_DIR"] = cacheFile
 	if config, err := experimentalDirectoryCacheConfig(job, getenv(backendValues)); !errors.Is(err, errCacheBackendUnavailable) || config != nil {
 		t.Fatalf("unavailable backend config = %#v, %v", config, err)
+	}
+}
+
+func TestJobCacheConfigSkipsDirectoryForShellOnlyJob(t *testing.T) {
+	root := t.TempDir()
+	values := map[string]string{
+		"BUILDKITE_GHA_CACHE_DIR":         root,
+		"BUILDKITE_ORGANIZATION_ID":       "organization-id",
+		"BUILDKITE_PIPELINE_ID":           "pipeline-id",
+		"BUILDKITE_AGENT_META_DATA_QUEUE": "hosted",
+	}
+	job := plan.Job{
+		Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"},
+		Steps: []plan.Step{{Kind: "run"}},
+	}
+	config, err := jobCacheConfig(context.Background(), job, func(name string) string { return values[name] }, nil)
+	if err != nil || config != nil {
+		t.Fatalf("shell-only directory config = %#v, %v", config, err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(root, "buildkite-gha-cache-v1", "*")); err != nil || len(matches) != 0 {
+		t.Fatalf("shell-only job created cache directories = %#v, %v", matches, err)
 	}
 }
 
@@ -140,9 +168,6 @@ func TestJobCacheConfigSelectsAgentCapabilityAndLimits(t *testing.T) {
 	}
 	if config == nil || config.Backend == nil || !config.ReadOnly || config.MaxArchive != 12345 || config.MaxCandidates != 7 || config.MaxKey != 321 || config.MaxVersion != 123 {
 		t.Fatalf("agent cache config = %#v", config)
-	}
-	if config.Namespace.Pipeline != jobID || len(config.ReadScopes) != 1 || config.WriteScope != config.ReadScopes[0] {
-		t.Fatalf("agent compatibility metadata = %#v / %#v / %q", config.Namespace, config.ReadScopes, config.WriteScope)
 	}
 	if _, err := os.Stat(filepath.Join(root, "buildkite-gha-cache-v1")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("agent selection initialized directory backend: %v", err)
@@ -258,18 +283,25 @@ func TestRunJobWiresAndDegradesExperimentalDirectoryCache(t *testing.T) {
 		mutate         func(*plan.Job)
 		wantCode       int
 		wantDiagnostic string
+		wantCacheDirs  bool
 	}{
-		{name: "configured", cachePath: func(t *testing.T) string { return t.TempDir() }},
+		{name: "configured", cachePath: func(t *testing.T) string { return t.TempDir() }, mutate: func(job *plan.Job) {
+			job.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/action@v1"}}
+		}, wantCode: 1, wantCacheDirs: true},
 		{name: "unavailable falls back", cachePath: func(t *testing.T) string {
 			path := filepath.Join(t.TempDir(), "file")
 			if err := os.WriteFile(path, []byte("not a directory"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return path
-		}, wantDiagnostic: "continuing without GitHub cache"},
+		}, mutate: func(job *plan.Job) {
+			job.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/action@v1"}}
+		}, wantCode: 1, wantDiagnostic: "continuing without GitHub cache"},
 		{name: "invalid plan identity fails", cachePath: func(t *testing.T) string { return t.TempDir() }, mutate: func(job *plan.Job) {
+			job.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/action@v1"}}
 			job.Event.Repository = ""
 		}, wantCode: 1, wantDiagnostic: "requires a GitHub repository and ref"},
+		{name: "shell-only skips", cachePath: func(t *testing.T) string { return t.TempDir() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := cliRunJobPlan()
@@ -291,10 +323,16 @@ func TestRunJobWiresAndDegradesExperimentalDirectoryCache(t *testing.T) {
 			if test.wantDiagnostic != "" && !strings.Contains(stderr.String(), test.wantDiagnostic) {
 				t.Fatalf("run() stderr = %q, want %q", stderr.String(), test.wantDiagnostic)
 			}
-			if test.wantCode == 0 && test.wantDiagnostic == "" {
-				if matches, err := filepath.Glob(filepath.Join(cachePath, "buildkite-gha-cache-v1", "*")); err != nil || len(matches) != 3 {
-					t.Fatalf("cache directories = %#v, %v", matches, err)
+			matches, err := filepath.Glob(filepath.Join(cachePath, "buildkite-gha-cache-v1", "*"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantCacheDirs {
+				if len(matches) != 3 {
+					t.Fatalf("cache directories = %#v, want 3", matches)
 				}
+			} else if len(matches) != 0 {
+				t.Fatalf("cache directories = %#v, want none", matches)
 			}
 		})
 	}

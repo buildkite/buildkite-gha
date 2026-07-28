@@ -30,9 +30,24 @@ const (
 // NewExperimentalDirectoryBackend stores opaque cache archives in a local
 // directory. It is intended for development and best-effort cache volumes: its
 // reservations coordinate one process, not concurrent snapshot forks or hosts.
-func NewExperimentalDirectoryBackend(root string) (Backend, error) {
+// Namespace and scopes are bound at construction and used for all operations.
+func NewExperimentalDirectoryBackend(root string, namespace Namespace, readScopes []Scope, writeScope Scope) (Backend, error) {
 	if root == "" || !filepath.IsAbs(root) {
 		return nil, fmt.Errorf("experimental cache directory must be absolute")
+	}
+	if namespace.Organization == "" || namespace.Cluster == "" || namespace.Pipeline == "" {
+		return nil, fmt.Errorf("cache namespace fields are required")
+	}
+	if len(readScopes) == 0 {
+		return nil, fmt.Errorf("cache read scopes are required")
+	}
+	for _, scope := range readScopes {
+		if scope == "" {
+			return nil, fmt.Errorf("cache read scopes must be non-empty")
+		}
+	}
+	if writeScope == "" {
+		return nil, fmt.Errorf("cache write scope is required")
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: create cache root: %v", ErrUnavailable, err)
@@ -47,6 +62,9 @@ func NewExperimentalDirectoryBackend(root string) (Backend, error) {
 		entriesDir:   filepath.Join(root, "entries"),
 		blobsDir:     filepath.Join(root, "blobs"),
 		stagingDir:   filepath.Join(root, "staging"),
+		namespace:    namespace,
+		readScopes:   append([]Scope(nil), readScopes...),
+		writeScope:   writeScope,
 		now:          time.Now,
 		random:       rand.Reader,
 		lease:        directoryDefaultLease,
@@ -75,6 +93,9 @@ type experimentalDirectoryBackend struct {
 	entriesDir   string
 	blobsDir     string
 	stagingDir   string
+	namespace    Namespace
+	readScopes   []Scope
+	writeScope   Scope
 	now          func() time.Time
 	random       io.Reader
 	lease        time.Duration
@@ -147,11 +168,11 @@ func (b *experimentalDirectoryBackend) Lookup(ctx context.Context, q LookupReque
 		return Entry{}, false, err
 	}
 	now := b.now()
-	for _, scope := range q.Scopes {
+	for _, scope := range b.readScopes {
 		for _, candidate := range q.Candidates {
 			var exact, prefix []Entry
 			for _, entry := range entries {
-				if entry.Namespace != q.Namespace || entry.Scope != scope || entry.Version != q.Version || !entry.ExpiresAt.After(now) {
+				if entry.Namespace != b.namespace || entry.Scope != scope || entry.Version != q.Version || !entry.ExpiresAt.After(now) {
 					continue
 				}
 				switch {
@@ -164,7 +185,7 @@ func (b *experimentalDirectoryBackend) Lookup(ctx context.Context, q LookupReque
 			for _, matches := range [][]Entry{exact, prefix} {
 				sortDirectoryEntries(matches)
 				for _, entry := range matches {
-					valid, err := b.validBlobLocked(ctx, entry)
+					valid, err := b.validBlobMetadataLocked(entry)
 					if err != nil {
 						return Entry{}, false, err
 					}
@@ -185,14 +206,14 @@ func (b *experimentalDirectoryBackend) List(ctx context.Context, q ListRequest) 
 	if err != nil {
 		return nil, err
 	}
-	allowed := make(map[Scope]bool, len(q.Scopes))
-	for _, scope := range q.Scopes {
+	allowed := make(map[Scope]bool, len(b.readScopes))
+	for _, scope := range b.readScopes {
 		allowed[scope] = true
 	}
 	now := b.now()
 	out := make([]Entry, 0, max(0, min(len(entries), q.Limit)))
 	for _, entry := range entries {
-		if entry.Namespace != q.Namespace || !allowed[entry.Scope] || !entry.ExpiresAt.After(now) || q.Key != "" && !strings.HasPrefix(entry.Key, q.Key) {
+		if entry.Namespace != b.namespace || !allowed[entry.Scope] || !entry.ExpiresAt.After(now) || q.Key != "" && !strings.HasPrefix(entry.Key, q.Key) {
 			continue
 		}
 		valid, err := b.validBlobMetadataLocked(entry)
@@ -216,7 +237,7 @@ func (b *experimentalDirectoryBackend) Reserve(ctx context.Context, q ReserveReq
 	if err := ctx.Err(); err != nil {
 		return Reservation{}, err
 	}
-	if q.Namespace.Organization == "" || q.Namespace.Cluster == "" || q.Namespace.Pipeline == "" || q.Scope == "" || q.Key == "" || !utf8.ValidString(q.Key) || q.Version == "" || !utf8.ValidString(q.Version) || q.Owner == "" || q.DeclaredSize != nil && *q.DeclaredSize < 0 {
+	if q.Key == "" || !utf8.ValidString(q.Key) || q.Version == "" || !utf8.ValidString(q.Version) || q.Owner == "" || q.DeclaredSize != nil && *q.DeclaredSize < 0 {
 		return Reservation{}, ErrConflict
 	}
 	now := b.now()
@@ -230,10 +251,10 @@ func (b *experimentalDirectoryBackend) Reserve(ctx context.Context, q ReserveReq
 		return Reservation{}, err
 	}
 	for _, entry := range entries {
-		if !sameDirectoryAddress(entry.Namespace, entry.Scope, entry.Key, entry.Version, q.Namespace, q.Scope, q.Key, q.Version) || !entry.ExpiresAt.After(now) {
+		if entry.Namespace != b.namespace || !sameDirectoryAddress(entry.Scope, entry.Key, entry.Version, b.writeScope, q.Key, q.Version) || !entry.ExpiresAt.After(now) {
 			continue
 		}
-		valid, err := b.validBlobLocked(ctx, entry)
+		valid, err := b.validBlobMetadataLocked(entry)
 		if err != nil {
 			return Reservation{}, err
 		}
@@ -242,7 +263,7 @@ func (b *experimentalDirectoryBackend) Reserve(ctx context.Context, q ReserveReq
 		}
 	}
 	for _, reservation := range b.reservations {
-		if !sameDirectoryAddress(reservation.Namespace, reservation.Scope, reservation.Key, reservation.Version, q.Namespace, q.Scope, q.Key, q.Version) {
+		if !sameDirectoryAddress(reservation.Scope, reservation.Key, reservation.Version, b.writeScope, q.Key, q.Version) {
 			continue
 		}
 		if reservation.Owner == q.Owner {
@@ -259,7 +280,7 @@ func (b *experimentalDirectoryBackend) Reserve(ctx context.Context, q ReserveReq
 		return Reservation{}, err
 	}
 	reservation := Reservation{
-		ID: ReservationID(id), Namespace: q.Namespace, Scope: q.Scope,
+		ID: ReservationID(id), Namespace: b.namespace, Scope: b.writeScope,
 		Key: q.Key, Version: q.Version, Owner: q.Owner, Generation: generation,
 		DeclaredSize: cloneInt64(q.DeclaredSize), LeaseExpiresAt: now.Add(b.lease),
 	}
@@ -283,7 +304,7 @@ func (b *experimentalDirectoryBackend) Upload(ctx context.Context, id Reservatio
 	if reservation.DeclaredSize != nil && source.Size != *reservation.DeclaredSize {
 		return Blob{}, ErrConflict
 	}
-	if source.SHA256 != "" && !validDirectoryDigest(source.SHA256) {
+	if source.SHA256 != "" && !validDigest(source.SHA256) {
 		return Blob{}, ErrConflict
 	}
 	stage, err := os.CreateTemp(b.stagingDir, ".upload-*")
@@ -359,10 +380,10 @@ func (b *experimentalDirectoryBackend) Commit(ctx context.Context, id Reservatio
 		return Entry{}, err
 	}
 	for _, entry := range entries {
-		if !sameDirectoryAddress(entry.Namespace, entry.Scope, entry.Key, entry.Version, reservation.Namespace, reservation.Scope, reservation.Key, reservation.Version) || !entry.ExpiresAt.After(b.now()) {
+		if entry.Namespace != reservation.Namespace || !sameDirectoryAddress(entry.Scope, entry.Key, entry.Version, reservation.Scope, reservation.Key, reservation.Version) || !entry.ExpiresAt.After(b.now()) {
 			continue
 		}
-		valid, err := b.validBlobLocked(ctx, entry)
+		valid, err := b.validBlobMetadataLocked(entry)
 		if err != nil {
 			return Entry{}, err
 		}
@@ -424,12 +445,8 @@ func (b *experimentalDirectoryBackend) Open(ctx context.Context, id EntryID, byt
 	if err != nil || !info.Mode().IsRegular() || info.Size() != entry.Blob.Size {
 		return nil, BlobInfo{}, ErrNotFound
 	}
-	digest, size, err := hashDirectoryFile(ctx, file)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, BlobInfo{}, err
-	}
-	if digest != entry.Blob.SHA256 || size != entry.Blob.Size {
-		return nil, BlobInfo{}, ErrNotFound
 	}
 	if byteRange != nil && (byteRange.Start < 0 || byteRange.End < byteRange.Start || byteRange.End >= entry.Blob.Size) {
 		return nil, BlobInfo{}, ErrConflict
@@ -439,7 +456,7 @@ func (b *experimentalDirectoryBackend) Open(ctx context.Context, id EntryID, byt
 		reader = io.NewSectionReader(file, byteRange.Start, byteRange.End-byteRange.Start+1)
 	}
 	closeFile = false
-	return directoryReadCloser{Reader: reader, Closer: file}, BlobInfo{SHA256: digest, Size: size}, nil
+	return directoryReadCloser{Reader: reader, Closer: file}, BlobInfo{SHA256: entry.Blob.SHA256, Size: entry.Blob.Size}, nil
 }
 
 // Prune removes expired or excess entries and all blobs they no longer
@@ -480,7 +497,7 @@ func (b *experimentalDirectoryBackend) pruneLocked(ctx context.Context) error {
 		retained[entry.Blob.SHA256] = true
 	}
 	for _, reservation := range b.reservations {
-		if !reservation.aborted && reservation.committed.ID == "" && reservation.LeaseExpiresAt.After(now) && validDirectoryDigest(reservation.blob.SHA256) {
+		if !reservation.aborted && reservation.committed.ID == "" && reservation.LeaseExpiresAt.After(now) && validDigest(reservation.blob.SHA256) {
 			retained[reservation.blob.SHA256] = true
 		}
 	}
@@ -492,7 +509,7 @@ func (b *experimentalDirectoryBackend) pruneLocked(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if blob.Type().IsRegular() && validDirectoryDigest(blob.Name()) && retained[blob.Name()] {
+		if blob.Type().IsRegular() && validDigest(blob.Name()) && retained[blob.Name()] {
 			continue
 		}
 		_ = os.RemoveAll(filepath.Join(b.blobsDir, blob.Name()))
@@ -566,7 +583,7 @@ func readDirectoryManifest(path, expectedID string) (Entry, error) {
 	if manifest.Format != directoryFormatVersion || manifest.ID != expectedID || !validDirectoryID(manifest.ID, "e") ||
 		manifest.Organization == "" || manifest.Cluster == "" || manifest.Pipeline == "" || manifest.Scope == "" ||
 		manifest.Key == "" || manifest.Version == "" || manifest.CreationTime.IsZero() || manifest.ExpiresAt.IsZero() ||
-		manifest.ExpiresAt.Before(manifest.CreationTime) || !validDirectoryDigest(manifest.SHA256) || manifest.Size < 0 || manifest.Generation == "" {
+		manifest.ExpiresAt.Before(manifest.CreationTime) || !validDigest(manifest.SHA256) || manifest.Size < 0 || manifest.Generation == "" {
 		return Entry{}, ErrConflict
 	}
 	return Entry{
@@ -618,10 +635,6 @@ func (b *experimentalDirectoryBackend) writeEntryLocked(entry Entry) error {
 		return fmt.Errorf("%w: publish cache entry: %v", ErrUnavailable, err)
 	}
 	return syncDirectory(b.entriesDir)
-}
-
-func (b *experimentalDirectoryBackend) validBlobLocked(ctx context.Context, entry Entry) (bool, error) {
-	return b.validBlobFileLocked(ctx, b.blobPath(entry.Blob.SHA256), entry.Blob.SHA256, entry.Blob.Size)
 }
 
 func (b *experimentalDirectoryBackend) validBlobMetadataLocked(entry Entry) (bool, error) {
@@ -755,8 +768,8 @@ func sortDirectoryEntries(entries []Entry) {
 	})
 }
 
-func sameDirectoryAddress(namespaceA Namespace, scopeA Scope, keyA, versionA string, namespaceB Namespace, scopeB Scope, keyB, versionB string) bool {
-	return namespaceA == namespaceB && scopeA == scopeB && keyA == keyB && versionA == versionB
+func sameDirectoryAddress(scopeA Scope, keyA, versionA string, scopeB Scope, keyB, versionB string) bool {
+	return scopeA == scopeB && keyA == keyB && versionA == versionB
 }
 
 func validDirectoryID(id, prefix string) bool {
@@ -765,14 +778,6 @@ func validDirectoryID(id, prefix string) bool {
 	}
 	_, err := hex.DecodeString(id[1:])
 	return err == nil && strings.ToLower(id) == id
-}
-
-func validDirectoryDigest(digest string) bool {
-	if len(digest) != sha256.Size*2 || strings.ToLower(digest) != digest {
-		return false
-	}
-	_, err := hex.DecodeString(digest)
-	return err == nil
 }
 
 func syncDirectory(path string) error {

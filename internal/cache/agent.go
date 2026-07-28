@@ -42,7 +42,7 @@ type AgentCapability struct {
 
 // AgentBackend implements Backend over Buildkite's job-authenticated GitHub
 // Actions cache API. Namespace and visibility are derived and enforced by the
-// server; the Backend request fields are compatibility metadata only.
+// server.
 type AgentBackend struct {
 	baseURL      string
 	token        string
@@ -165,6 +165,8 @@ func validateAgentCapability(capability AgentCapability) error {
 	return nil
 }
 
+func (c AgentCapability) ReadOnly() bool { return c.Mode == "read-only" }
+
 func (b *AgentBackend) Lookup(ctx context.Context, q LookupRequest) (Entry, bool, error) {
 	var response struct {
 		Entry *agentEntry `json:"entry"`
@@ -175,7 +177,7 @@ func (b *AgentBackend) Lookup(ctx context.Context, q LookupRequest) (Entry, bool
 	if response.Entry == nil {
 		return Entry{}, false, nil
 	}
-	entry, err := agentBackendEntry(*response.Entry, q.Namespace)
+	entry, err := agentBackendEntry(*response.Entry, Namespace{})
 	if err != nil {
 		return Entry{}, false, err
 	}
@@ -211,7 +213,7 @@ func (b *AgentBackend) Reserve(ctx context.Context, q ReserveRequest) (Reservati
 	}
 	generationBytes := sha256.Sum256([]byte(response.ReservationToken))
 	reservation := Reservation{
-		ID: ReservationID(response.ReservationID), Namespace: q.Namespace, Scope: q.Scope,
+		ID: ReservationID(response.ReservationID),
 		Key: q.Key, Version: q.Version, Owner: q.Owner,
 		Generation: hex.EncodeToString(generationBytes[:]), DeclaredSize: cloneInt64(q.DeclaredSize),
 		LeaseExpiresAt: response.ExpiresAt,
@@ -234,7 +236,7 @@ func (b *AgentBackend) Upload(ctx context.Context, id ReservationID, source Blob
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if source.Generation != state.reservation.Generation || source.Size < 0 || !validAgentDigest(source.SHA256) {
+	if source.Generation != state.reservation.Generation || source.Size < 0 || !validDigest(source.SHA256) {
 		return Blob{}, ErrConflict
 	}
 	if state.blob.Locator != "" {
@@ -354,12 +356,12 @@ func (b *AgentBackend) api(ctx context.Context, method, action string, body, res
 	if body != nil {
 		encoded, err = json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("%w: encode cache Agent request", ErrUnavailable)
+			return fmt.Errorf("%w: encode cache Agent request: %v", ErrUnavailable, err)
 		}
 	}
 	request, err := http.NewRequestWithContext(ctx, method, b.baseURL+action, bytes.NewReader(encoded))
 	if err != nil {
-		return fmt.Errorf("%w: create cache Agent request", ErrUnavailable)
+		return fmt.Errorf("%w: create cache Agent request: %v", ErrUnavailable, err)
 	}
 	request.Header.Set("Authorization", "Token "+b.token)
 	request.Header.Set("Accept", "application/json")
@@ -368,7 +370,7 @@ func (b *AgentBackend) api(ctx context.Context, method, action string, body, res
 	}
 	result, err := b.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: cache Agent request failed", ErrUnavailable)
+		return fmt.Errorf("%w: cache Agent request failed: %v", ErrUnavailable, err)
 	}
 	defer func() { _ = result.Body.Close() }()
 	if result.StatusCode < 200 || result.StatusCode >= 300 {
@@ -381,7 +383,7 @@ func (b *AgentBackend) api(ctx context.Context, method, action string, body, res
 	}
 	decoder := json.NewDecoder(io.LimitReader(result.Body, agentResponseLimit+1))
 	if err := decoder.Decode(response); err != nil {
-		return fmt.Errorf("%w: decode cache Agent response", ErrUnavailable)
+		return fmt.Errorf("%w: decode cache Agent response: %v", ErrUnavailable, err)
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return fmt.Errorf("%w: oversized or trailing cache Agent response", ErrUnavailable)
@@ -412,7 +414,7 @@ func agentResponseError(action string, status int) error {
 }
 
 func agentBackendEntry(value agentEntry, namespace Namespace) (Entry, error) {
-	if value.EntryID == "" || value.Scope == "" || value.Key == "" || value.Version == "" || value.Size < 0 || !validAgentDigest(value.SHA256) || value.CreatedAt.IsZero() || value.ExpiresAt.IsZero() || value.ExpiresAt.Before(value.CreatedAt) {
+	if value.EntryID == "" || value.Scope == "" || value.Key == "" || value.Version == "" || value.Size < 0 || !validDigest(value.SHA256) || value.CreatedAt.IsZero() || value.ExpiresAt.IsZero() || value.ExpiresAt.Before(value.CreatedAt) {
 		return Entry{}, fmt.Errorf("%w: invalid cache Agent entry", ErrUnavailable)
 	}
 	return Entry{
@@ -423,14 +425,6 @@ func agentBackendEntry(value agentEntry, namespace Namespace) (Entry, error) {
 	}, nil
 }
 
-func validAgentDigest(value string) bool {
-	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
-}
-
 func (b *AgentBackend) transfer(ctx context.Context, instruction agentInstruction, method string, body io.Reader, size int64, byteRange *ByteRange) error {
 	request, err := agentTransferRequest(ctx, instruction, method, body, size, byteRange)
 	if err != nil {
@@ -438,7 +432,7 @@ func (b *AgentBackend) transfer(ctx context.Context, instruction agentInstructio
 	}
 	response, err := b.directClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: cache transfer failed", ErrUnavailable)
+		return fmt.Errorf("%w: cache transfer failed: %v", ErrUnavailable, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, agentResponseLimit))
@@ -455,7 +449,7 @@ func (b *AgentBackend) download(ctx context.Context, instruction agentInstructio
 	}
 	response, err := b.directClient.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("%w: cache download failed", ErrUnavailable)
+		return nil, fmt.Errorf("%w: cache download failed: %v", ErrUnavailable, err)
 	}
 	wantStatus := http.StatusOK
 	wantLength := size

@@ -726,3 +726,12 @@ func (job Job) HasCapability(name string) bool {
 	}
 	return false
 }
+
+func (job Job) HasActions() bool {
+	for _, step := range job.Steps {
+		if step.Kind == "uses" {
+			return true
+		}
+	}
+	return false
+}

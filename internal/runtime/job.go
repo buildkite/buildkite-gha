@@ -2,13 +2,10 @@ package runtime
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,7 +16,6 @@ import (
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
-	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -59,16 +55,6 @@ type remotePreparations map[string]*preparedInvocation
 
 type remotePreparationStatus struct {
 	unsuccessful bool
-}
-
-type jobCacheService struct {
-	handler *ghacache.Handler
-	server  *http.Server
-	done    chan error
-}
-
-func supportedNodeMajors() [3]int {
-	return [3]int{16, 20, 24}
 }
 
 func actionNodeMajor(runtime metadata.Runtime) (int, bool) {
@@ -227,11 +213,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
 		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
 	}
-	if r.Cache != nil && jobHasActions(job) {
+	if r.Cache != nil && job.HasActions() {
 		service, cacheErr := r.startCacheService(runCtx, processor, runnerTemp, job.HasCapability("docker"))
 		if cacheErr != nil {
 			return jobResult, cacheErr
 		}
+		r.cacheService = service
 		defer func() { runJobErr = errors.Join(runJobErr, service.close(r.cleanupTimeout())) }()
 	}
 	if job.HasCapability("docker") {
@@ -424,25 +411,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = errors.Join(runErr, runCtx.Err())
 	}
 
-	postCtx, cancelPosts := context.WithTimeout(context.Background(), r.postActionTimeout())
-	postDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			timer := time.NewTimer(r.cleanupTimeout())
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				cancelPosts()
-			case <-postDone:
-			}
-		case <-postDone:
-		}
-	}()
-	defer func() {
-		close(postDone)
-		cancelPosts()
-	}()
+	postCtx, cancelPosts := postPhaseContext(ctx, r.postActionTimeout(), r.cleanupTimeout())
+	defer cancelPosts()
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
@@ -461,7 +431,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
-		postErr := r.runJavaScriptPhase(postCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
+		postErr := r.runJavaScriptPhase(postCtx, processor, workspace, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		jobResult.Summary += postResult.Summary
@@ -539,105 +509,6 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 		values[name] = value
 	}
 	return values, nil
-}
-
-func jobHasActions(job plan.Job) bool {
-	for _, step := range job.Steps {
-		if step.Kind == "uses" {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Runner) startCacheService(ctx context.Context, processor *commandProcessor, tempDir string, containerRouting bool) (*jobCacheService, error) {
-	if r.Cache == nil || r.Cache.Backend == nil {
-		return nil, errors.New("cache backend is not configured")
-	}
-	if r.Redactor == nil {
-		return nil, errors.New("cache service requires a redactor")
-	}
-	token, err := randomCacheValue(32)
-	if err != nil {
-		return nil, fmt.Errorf("generate cache token: %w", err)
-	}
-	if err := r.Redactor.AddRedaction(ctx, token); err != nil {
-		return nil, fmt.Errorf("register cache token redaction: %w", err)
-	}
-	processor.addMask(token)
-	session, err := randomCacheValue(16)
-	if err != nil {
-		return nil, fmt.Errorf("generate cache session: %w", err)
-	}
-	listenAddress := "127.0.0.1:0"
-	if containerRouting {
-		listenAddress = "0.0.0.0:0"
-	}
-	listener, err := net.Listen("tcp4", listenAddress)
-	if err != nil {
-		return nil, fmt.Errorf("listen for cache service: %w", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d/", port)
-	containerBaseURL := ""
-	if containerRouting {
-		containerBaseURL = fmt.Sprintf("http://%s:%d/", cacheContainerHostname, port)
-	}
-	registerRedaction := func(redactionCtx context.Context, value string) error {
-		if err := r.Redactor.AddRedaction(redactionCtx, value); err != nil {
-			return fmt.Errorf("register cache URL redaction: %w", err)
-		}
-		processor.addMask(value)
-		return nil
-	}
-	handler, err := ghacache.NewHandler(r.Cache.Backend, ghacache.Config{
-		Token: token, Session: session, BaseURL: baseURL, ContainerBaseURL: containerBaseURL, TempDir: tempDir,
-		Namespace: r.Cache.Namespace, ReadScopes: r.Cache.ReadScopes,
-		WriteScope: r.Cache.WriteScope, ReadOnly: r.Cache.ReadOnly,
-		MaxArchive: r.Cache.MaxArchive, MaxCandidates: r.Cache.MaxCandidates,
-		MaxKey: r.Cache.MaxKey, MaxVersion: r.Cache.MaxVersion,
-		RegisterRedaction: registerRedaction,
-	})
-	if err != nil {
-		_ = listener.Close()
-		return nil, fmt.Errorf("configure cache service: %w", err)
-	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(listener) }()
-	r.actionCacheEnv = map[string]string{
-		"ACTIONS_CACHE_URL":     baseURL,
-		"ACTIONS_RUNTIME_TOKEN": token,
-	}
-	if containerRouting {
-		r.containerCacheEnv = map[string]string{
-			"ACTIONS_CACHE_URL":     containerBaseURL,
-			"ACTIONS_RUNTIME_TOKEN": token,
-		}
-	}
-	return &jobCacheService{handler: handler, server: server, done: done}, nil
-}
-
-func (s *jobCacheService) close(timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	shutdownErr := s.server.Shutdown(ctx)
-	if shutdownErr != nil {
-		shutdownErr = errors.Join(shutdownErr, s.server.Close())
-	}
-	serveErr := <-s.done
-	if errors.Is(serveErr, http.ErrServerClosed) {
-		serveErr = nil
-	}
-	return errors.Join(shutdownErr, serveErr, s.handler.Close())
-}
-
-func randomCacheValue(size int) (string, error) {
-	value := make([]byte, size)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(value), nil
 }
 
 func durationMinutes(minutes float64) time.Duration {
@@ -915,7 +786,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
-			if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
+			if err := r.runJavaScriptPhase(ctx, processor, jobEnv["GITHUB_WORKSPACE"], node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
 				return result, err
 			}
 		}
@@ -1119,12 +990,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if javascript.Pre != "" && !wasPrepared {
 			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
 			if runPre {
-				if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Pre, nil, state, &result); err != nil {
+				if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javascript.Pre, nil, state, &result); err != nil {
 					return result, err
 				}
 			}
 		}
-		if err := r.runJavaScriptPhase(ctx, processor, node, javascript, javascript.Main, nil, state, &result); err != nil {
+		if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javascript.Main, nil, state, &result); err != nil {
 			return result, err
 		}
 		return result, nil
@@ -1419,26 +1290,6 @@ func (r Runner) cleanupTimeout() time.Duration {
 		return r.CleanupTimeout
 	}
 	return defaultCleanupTimeout
-}
-
-func (r Runner) postActionTimeout() time.Duration {
-	if r.PostActionTimeout > 0 {
-		return r.PostActionTimeout
-	}
-	return defaultPostActionTimeout
-}
-
-func (r Runner) applyActionCacheEnvironment(env map[string]string, container bool) {
-	cacheEnv := r.actionCacheEnv
-	if container {
-		cacheEnv = r.containerCacheEnv
-	}
-	if cacheEnv == nil {
-		return
-	}
-	delete(env, "ACTIONS_CACHE_SERVICE_V2")
-	delete(env, "ACTIONS_RESULTS_URL")
-	mergeInto(env, cacheEnv)
 }
 
 func cloneStrings(in map[string]string) map[string]string {

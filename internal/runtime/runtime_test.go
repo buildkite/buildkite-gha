@@ -2530,7 +2530,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	result := newResult()
 	result.Env["GITHUB_WORKSPACE"] = workspace
 	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
@@ -3618,6 +3618,9 @@ func remoteLifecycleLock(id, path, digest string, children map[string]plan.Actio
 
 type runtimeCacheBackend struct {
 	mu           sync.Mutex
+	namespace    ghacache.Namespace
+	readScopes   []ghacache.Scope
+	writeScope   ghacache.Scope
 	next         int
 	reservations map[ghacache.ReservationID]*runtimeCacheReservation
 	entries      map[ghacache.EntryID]ghacache.Entry
@@ -3634,6 +3637,9 @@ type runtimeCacheReservation struct {
 
 func newRuntimeCacheBackend() *runtimeCacheBackend {
 	return &runtimeCacheBackend{
+		namespace:    ghacache.Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"},
+		readScopes:   []ghacache.Scope{"branch", "default"},
+		writeScope:   "branch",
 		reservations: make(map[ghacache.ReservationID]*runtimeCacheReservation),
 		entries:      make(map[ghacache.EntryID]ghacache.Entry),
 		blobs:        make(map[string][]byte),
@@ -3643,15 +3649,15 @@ func newRuntimeCacheBackend() *runtimeCacheBackend {
 func (b *runtimeCacheBackend) Lookup(_ context.Context, request ghacache.LookupRequest) (ghacache.Entry, bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, scope := range request.Scopes {
+	for _, scope := range b.readScopes {
 		for _, candidate := range request.Candidates {
 			for _, entry := range b.entries {
-				if entry.Namespace == request.Namespace && entry.Scope == scope && entry.Version == request.Version && entry.Key == candidate {
+				if entry.Namespace == b.namespace && entry.Scope == scope && entry.Version == request.Version && entry.Key == candidate {
 					return entry, true, nil
 				}
 			}
 			for _, entry := range b.entries {
-				if entry.Namespace == request.Namespace && entry.Scope == scope && entry.Version == request.Version && strings.HasPrefix(entry.Key, candidate) {
+				if entry.Namespace == b.namespace && entry.Scope == scope && entry.Version == request.Version && strings.HasPrefix(entry.Key, candidate) {
 					return entry, true, nil
 				}
 			}
@@ -3663,13 +3669,13 @@ func (b *runtimeCacheBackend) Lookup(_ context.Context, request ghacache.LookupR
 func (b *runtimeCacheBackend) List(_ context.Context, request ghacache.ListRequest) ([]ghacache.Entry, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	allowed := make(map[ghacache.Scope]bool, len(request.Scopes))
-	for _, scope := range request.Scopes {
+	allowed := make(map[ghacache.Scope]bool, len(b.readScopes))
+	for _, scope := range b.readScopes {
 		allowed[scope] = true
 	}
 	entries := make([]ghacache.Entry, 0, len(b.entries))
 	for _, entry := range b.entries {
-		if entry.Namespace == request.Namespace && allowed[entry.Scope] && (request.Key == "" || strings.HasPrefix(entry.Key, request.Key)) {
+		if entry.Namespace == b.namespace && allowed[entry.Scope] && (request.Key == "" || strings.HasPrefix(entry.Key, request.Key)) {
 			entries = append(entries, entry)
 		}
 	}
@@ -3683,12 +3689,12 @@ func (b *runtimeCacheBackend) Reserve(_ context.Context, request ghacache.Reserv
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, entry := range b.entries {
-		if sameRuntimeCacheIdentity(entry.Namespace, entry.Scope, entry.Key, entry.Version, request.Namespace, request.Scope, request.Key, request.Version) {
+		if sameRuntimeCacheIdentity(entry.Namespace, entry.Scope, entry.Key, entry.Version, b.namespace, b.writeScope, request.Key, request.Version) {
 			return ghacache.Reservation{}, ghacache.ErrContention
 		}
 	}
 	for _, reservation := range b.reservations {
-		if !reservation.aborted && reservation.committed.ID == "" && sameRuntimeCacheIdentity(reservation.Namespace, reservation.Scope, reservation.Key, reservation.Version, request.Namespace, request.Scope, request.Key, request.Version) {
+		if !reservation.aborted && reservation.committed.ID == "" && sameRuntimeCacheIdentity(reservation.Namespace, reservation.Scope, reservation.Key, reservation.Version, b.namespace, b.writeScope, request.Key, request.Version) {
 			if reservation.Owner == request.Owner {
 				return reservation.Reservation, nil
 			}
@@ -3698,7 +3704,7 @@ func (b *runtimeCacheBackend) Reserve(_ context.Context, request ghacache.Reserv
 	b.next++
 	id := ghacache.ReservationID(fmt.Sprintf("reservation-%d", b.next))
 	reservation := ghacache.Reservation{
-		ID: id, Namespace: request.Namespace, Scope: request.Scope,
+		ID: id, Namespace: b.namespace, Scope: b.writeScope,
 		Key: request.Key, Version: request.Version, Owner: request.Owner,
 		Generation: fmt.Sprintf("generation-%d", b.next), DeclaredSize: request.DeclaredSize,
 		LeaseExpiresAt: time.Now().Add(time.Minute),
@@ -3779,18 +3785,14 @@ func sameRuntimeCacheIdentity(leftNamespace ghacache.Namespace, leftScope ghacac
 }
 
 func runtimeCacheConfig(backend ghacache.Backend) *CacheConfig {
-	return &CacheConfig{
-		Backend: backend, Namespace: ghacache.Namespace{Organization: "organization", Cluster: "cluster", Pipeline: "pipeline"},
-		ReadScopes: []ghacache.Scope{"branch", "default"}, WriteScope: "branch",
-	}
+	return &CacheConfig{Backend: backend}
 }
 
 func putRuntimeCacheEntry(t *testing.T, backend ghacache.Backend, key, version string, contents []byte) {
 	t.Helper()
-	config := runtimeCacheConfig(backend)
 	size := int64(len(contents))
 	reservation, err := backend.Reserve(context.Background(), ghacache.ReserveRequest{
-		Namespace: config.Namespace, Scope: config.WriteScope, Key: key, Version: version, Owner: "fixture", DeclaredSize: &size,
+		Key: key, Version: version, Owner: "fixture", DeclaredSize: &size,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3809,9 +3811,8 @@ func putRuntimeCacheEntry(t *testing.T, backend ghacache.Backend, key, version s
 
 func getRuntimeCacheEntry(t *testing.T, backend ghacache.Backend, key, version string) []byte {
 	t.Helper()
-	config := runtimeCacheConfig(backend)
 	entry, ok, err := backend.Lookup(context.Background(), ghacache.LookupRequest{
-		Namespace: config.Namespace, Scopes: config.ReadScopes, Candidates: []string{key}, Version: version,
+		Candidates: []string{key}, Version: version,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -13,10 +13,10 @@ import (
 
 func int64Pointer(value int64) *int64 { return &value }
 
-func putMemoryEntry(t *testing.T, backend *memoryBackend, namespace Namespace, scope Scope, key, version, owner string, contents []byte) Entry {
+func putMemoryEntry(t *testing.T, backend *memoryBackend, key, version, owner string, contents []byte) Entry {
 	t.Helper()
 	reservation, err := backend.Reserve(context.Background(), ReserveRequest{
-		Namespace: namespace, Scope: scope, Key: key, Version: version, Owner: owner,
+		Key: key, Version: version, Owner: owner,
 		DeclaredSize: int64Pointer(int64(len(contents))),
 	})
 	if err != nil {
@@ -39,17 +39,15 @@ func putMemoryEntry(t *testing.T, backend *memoryBackend, namespace Namespace, s
 
 func TestMemoryBackendLookupOrderAndVersion(t *testing.T) {
 	now := time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)
-	backend := newMemoryBackend(func() time.Time { return now })
-	namespace := Namespace{"organization", "cluster", "pipeline"}
+	backend := newTestMemoryBackend(func() time.Time { return now })
 
-	branchPrefix := putMemoryEntry(t, backend, namespace, "branch", "npm-linux-branch", "v1", "branch-prefix", []byte("branch"))
+	branchPrefix := putMemoryEntry(t, backend, "npm-linux-branch", "v1", "branch-prefix", []byte("branch"))
 	now = now.Add(time.Second)
-	_ = putMemoryEntry(t, backend, namespace, "default", "npm-linux", "v1", "default-exact", []byte("default"))
+	_ = seedMemoryEntry(backend, "default", "npm-linux", "v1", []byte("default"), now)
 	now = now.Add(time.Second)
-	_ = putMemoryEntry(t, backend, namespace, "branch", "restore-exact", "v1", "restore-exact", []byte("restore"))
+	_ = putMemoryEntry(t, backend, "restore-exact", "v1", "restore-exact", []byte("restore"))
 
 	entry, ok, err := backend.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch", "default"},
 		Candidates: []string{"npm-linux", "restore-exact"}, Version: "v1",
 	})
 	if err != nil || !ok {
@@ -60,29 +58,27 @@ func TestMemoryBackendLookupOrderAndVersion(t *testing.T) {
 	}
 
 	if _, ok, err := backend.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch", "default"},
 		Candidates: []string{"npm-linux"}, Version: "different",
 	}); err != nil || ok {
 		t.Fatalf("version-mismatched Lookup() = %v, %v, want miss", ok, err)
 	}
 
-	exactBackend := newMemoryBackend(func() time.Time { return now })
-	exact := putMemoryEntry(t, exactBackend, namespace, "branch", "restore-", "v1", "exact", []byte("exact"))
+	exactBackend := newTestMemoryBackend(func() time.Time { return now })
+	exact := putMemoryEntry(t, exactBackend, "restore-", "v1", "exact", []byte("exact"))
 	now = now.Add(time.Second)
-	_ = putMemoryEntry(t, exactBackend, namespace, "branch", "restore-newer", "v1", "prefix", []byte("prefix"))
+	_ = putMemoryEntry(t, exactBackend, "restore-newer", "v1", "prefix", []byte("prefix"))
 	entry, ok, err = exactBackend.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch"},
 		Candidates: []string{"primary-miss", "restore-"}, Version: "v1",
 	})
 	if err != nil || !ok || entry.ID != exact.ID {
 		t.Fatalf("restore exact-before-prefix Lookup() = %#v, %v, %v, want %q", entry, ok, err, exact.ID)
 	}
 
-	tieBackend := newMemoryBackend(func() time.Time { return now })
-	_ = putMemoryEntry(t, tieBackend, namespace, "branch", "tie-one", "v1", "one", []byte("one"))
-	tieWinner := putMemoryEntry(t, tieBackend, namespace, "branch", "tie-two", "v1", "two", []byte("two"))
+	tieBackend := newTestMemoryBackend(func() time.Time { return now })
+	_ = putMemoryEntry(t, tieBackend, "tie-one", "v1", "one", []byte("one"))
+	tieWinner := putMemoryEntry(t, tieBackend, "tie-two", "v1", "two", []byte("two"))
 	entry, ok, err = tieBackend.Lookup(context.Background(), LookupRequest{
-		Namespace: namespace, Scopes: []Scope{"branch"}, Candidates: []string{"tie-"}, Version: "v1",
+		Candidates: []string{"tie-"}, Version: "v1",
 	})
 	if err != nil || !ok || entry.ID != tieWinner.ID {
 		t.Fatalf("stable ID tie-break Lookup() = %#v, %v, %v, want %q", entry, ok, err, tieWinner.ID)
@@ -91,9 +87,9 @@ func TestMemoryBackendLookupOrderAndVersion(t *testing.T) {
 
 func TestMemoryBackendReservationReplayContentionAndExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC)
-	backend := newMemoryBackend(func() time.Time { return now })
+	backend := newTestMemoryBackend(func() time.Time { return now })
 	request := ReserveRequest{
-		Namespace: Namespace{"o", "c", "p"}, Scope: "branch", Key: "key", Version: "version",
+		Key: "key", Version: "version",
 		Owner: "job-one", DeclaredSize: int64Pointer(3),
 	}
 	first, err := backend.Reserve(context.Background(), request)
@@ -133,7 +129,7 @@ func TestMemoryBackendReservationReplayContentionAndExpiry(t *testing.T) {
 }
 
 func TestMemoryBackendConcurrentReservationHasOneWinner(t *testing.T) {
-	backend := newMemoryBackend(nil)
+	backend := newTestMemoryBackend(nil)
 	start := make(chan struct{})
 	const workers = 32
 	errs := make(chan error, workers)
@@ -144,7 +140,7 @@ func TestMemoryBackendConcurrentReservationHasOneWinner(t *testing.T) {
 			defer wait.Done()
 			<-start
 			_, err := backend.Reserve(context.Background(), ReserveRequest{
-				Namespace: Namespace{"o", "c", "p"}, Scope: "branch", Key: "key", Version: "version",
+				Key: "key", Version: "version",
 				Owner: string(rune('a' + worker)), DeclaredSize: int64Pointer(1),
 			})
 			errs <- err
