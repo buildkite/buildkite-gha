@@ -112,7 +112,7 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 		baseURL := "http://" + server.Listener.Addr().String() + "/"
 		handler, err := NewHandler(backend, Config{
 			Token: "live-client-token", Session: "live-client-" + name, BaseURL: baseURL,
-			TempDir: t.TempDir(),
+			TempDir:    t.TempDir(),
 			MaxArchive: 16 << 20, MaxChunk: 2 << 20,
 		})
 		if err != nil {

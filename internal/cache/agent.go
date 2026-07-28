@@ -213,7 +213,7 @@ func (b *AgentBackend) Reserve(ctx context.Context, q ReserveRequest) (Reservati
 	}
 	generationBytes := sha256.Sum256([]byte(response.ReservationToken))
 	reservation := Reservation{
-		ID: ReservationID(response.ReservationID),
+		ID:  ReservationID(response.ReservationID),
 		Key: q.Key, Version: q.Version, Owner: q.Owner,
 		Generation: hex.EncodeToString(generationBytes[:]), DeclaredSize: cloneInt64(q.DeclaredSize),
 		LeaseExpiresAt: response.ExpiresAt,
