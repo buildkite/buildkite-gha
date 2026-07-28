@@ -4,66 +4,50 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mise_bin="$HOME/.local/bin/mise"
 bk_version="3.54.1"
-gh_version="2.96.0"
+docker_packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
 
-if ! dpkg-query -W -f='${db:Status-Abbrev}' docker.io 2>/dev/null | grep -Fqx 'ii '; then
-  echo "Installing Docker packages..."
-  policy_rc_created=0
-  cleanup_policy_rc() {
-    if ((policy_rc_created)); then
-      sudo rm -f /usr/sbin/policy-rc.d
-    fi
-  }
-  trap cleanup_policy_rc EXIT
-  if [[ ! -e /usr/sbin/policy-rc.d ]]; then
-    printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
-    sudo chmod 0755 /usr/sbin/policy-rc.d
-    policy_rc_created=1
+missing_docker_packages=()
+for package in "${docker_packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -Fqx 'ii '; then
+    missing_docker_packages+=("$package")
   fi
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get update
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
-  cleanup_policy_rc
-  policy_rc_created=0
-  trap - EXIT
+done
+
+if ((${#missing_docker_packages[@]} > 0)); then
+  echo "Installing Docker from its official Debian repository..."
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+  docker_arch="$(dpkg --print-architecture)"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  docker_codename="$VERSION_CODENAME"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian %s stable\n' \
+    "$docker_arch" "$docker_codename" \
+    | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${docker_packages[@]}"
 fi
 
-# The package units are not used: the daemon is supervised by Amp.
-sudo systemctl disable --now docker.service docker.socket containerd.service >/dev/null
+sudo systemctl enable --now docker
+if ! id -nG "$USER" | tr ' ' '\n' | grep -Fqx docker; then
+  sudo usermod -aG docker "$USER"
+fi
 
-buildx_version="v0.35.0"
-case "$(uname -m)" in
-  x86_64)
-    buildx_arch="amd64"
-    buildx_sha256="d41ece72044243b4f58b343441ae37446d9c29a7d6b5e11c61847bbcf8f7dfda"
-    ;;
-  aarch64|arm64)
-    buildx_arch="arm64"
-    buildx_sha256="c4248d6cbc4a619a7e0b4609c11e509ad4ac0b475e1c64817c0ac20c5d90c766"
-    ;;
-  *)
-    echo "Unsupported architecture for Docker Buildx: $(uname -m)" >&2
-    exit 1
-    ;;
-esac
+if ! sudo docker info >/dev/null; then
+  echo "Docker did not become ready during setup" >&2
+  exit 1
+fi
+buildx_inspect="$(sudo docker buildx inspect default)"
+if ! grep -Eq '^Driver:[[:space:]]+docker$' <<<"$buildx_inspect"; then
+  echo "Docker Buildx default builder is not using the docker driver" >&2
+  printf '%s\n' "$buildx_inspect" >&2
+  exit 1
+fi
 
-buildx_dir="$HOME/.docker/cli-plugins"
-buildx_plugin="$buildx_dir/docker-buildx"
-install -d -m 0755 "$buildx_dir"
-if [[ ! -f "$buildx_plugin" ]] || [[ "$(sha256sum "$buildx_plugin" | awk '{print $1}')" != "$buildx_sha256" ]]; then
-  echo "Installing Docker Buildx $buildx_version..."
-  buildx_temp="$(mktemp)"
-  if ! curl -fsSL \
-    "https://github.com/docker/buildx/releases/download/$buildx_version/buildx-$buildx_version.linux-$buildx_arch" \
-    -o "$buildx_temp"; then
-    rm -f "$buildx_temp"
-    exit 1
-  fi
-  if ! printf '%s  %s\n' "$buildx_sha256" "$buildx_temp" | sha256sum -c - >/dev/null; then
-    rm -f "$buildx_temp"
-    exit 1
-  fi
-  install -m 0755 "$buildx_temp" "$buildx_plugin"
-  rm -f "$buildx_temp"
+if ! command -v gh >/dev/null; then
+  echo "Missing preinstalled GitHub CLI" >&2
+  exit 1
 fi
 
 echo "Installing mise if needed..."
@@ -107,12 +91,9 @@ echo "Installing pinned development tools..."
 "$mise_bin" trust "$repo_root/mise.toml"
 "$mise_bin" install
 
-echo "Installing pinned orb CLIs..."
-"$mise_bin" use --global --pin --yes \
-  "aqua:buildkite/cli@$bk_version" \
-  "gh@$gh_version"
+echo "Installing the pinned Buildkite CLI..."
+"$mise_bin" use --global --pin --yes "aqua:buildkite/cli@$bk_version"
 "$mise_bin" exec -- bk version >/dev/null
-"$mise_bin" exec -- gh --version >/dev/null
 
 echo "Downloading Go modules..."
 "$mise_bin" exec -- go mod download
