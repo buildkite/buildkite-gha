@@ -257,7 +257,11 @@ func TestCheckedInPipelinesTargetHostedQueue(t *testing.T) {
 			Agents struct {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
-			Steps []any `yaml:"steps"`
+			Steps []struct {
+				Agents struct {
+					Queue string `yaml:"queue"`
+				} `yaml:"agents"`
+			} `yaml:"steps"`
 		}
 		if err := yaml.Unmarshal(body, &document); err != nil {
 			t.Errorf("parse %s: %v", path, err)
@@ -268,6 +272,11 @@ func TestCheckedInPipelinesTargetHostedQueue(t *testing.T) {
 		}
 		if len(document.Steps) == 0 {
 			t.Errorf("%s has no steps", path)
+		}
+		for index, step := range document.Steps {
+			if step.Agents.Queue != "" && step.Agents.Queue != "hosted" {
+				t.Errorf("%s step %d overrides queue with %q, want hosted", path, index, step.Agents.Queue)
+			}
 		}
 		count++
 		return nil
