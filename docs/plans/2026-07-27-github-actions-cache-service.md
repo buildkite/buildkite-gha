@@ -78,15 +78,19 @@ As of 2026-07-28:
   archive, then the workflow's `mise run test` and `mise run lint` passed; this
   proves the transitive miss/save path but not a later restore;
 - the independent Rails backend and seven job-authenticated Agent API endpoints
-  are review-ready at commit `bf9475e3e1d7d22a1149f733d1467877d7352f43`
+  are review-ready at rebased commit
+  `e0c3941adae85be15dfe41798e4c51658b609206`
   in [`buildkite/buildkite` PR
-  #31646](https://github.com/buildkite/buildkite/pull/31646): all 226 executed
-  CI jobs and Buildsworth review build 9021 passed, but human review, merge,
-  deployment, migration, and feature activation remain open; and
+  #31646](https://github.com/buildkite/buildkite/pull/31646): Buildkite build
+  206077 passed all 226 executed jobs, Buildsworth build 9317 and the remaining
+  checks passed, and GitHub reports the PR mergeable; only required human
+  review blocks merge. The PR includes bounded per-shard garbage collection
+  with migration-safe row/blob handling, while its recurring Sidekiq schedule
+  intentionally remains a post-deploy follow-up; and
 - the `buildkite-gha` remote backend client is implemented behind the explicit
   `BUILDKITE_GHA_CACHE_BACKEND=agent` selector but generated jobs still select
-  the directory bridge. Production object-store/IAM confirmation, GC
-  deployment, policy-value approval, and production canaries remain open.
+  the directory bridge. Production object-store/IAM confirmation, the recurring
+  GC schedule, policy-value approval, and production canaries remain open.
 
 ## User outcome
 
@@ -808,8 +812,9 @@ undeployed, preview-gated, and disabled by default. Before a Hosted preview:
 
 1. confirm the production bucket/client, prefix-scoped IAM, encryption,
    monitoring, and object-lifecycle backstop;
-2. ship the bounded garbage-collector worker and its schedule in the required
-   separate deployment changes;
+2. deploy the included bounded garbage-collector worker, then add its recurring
+   Sidekiq schedule in the required immediate follow-up deployment before any
+   preview organization is enabled;
 3. confirm retention, byte/entry, archive-size, and reservation policy values;
 4. verify webhook-backed PR repository/base/fork fields for all admitted
    GitHub and GHES paths;
@@ -1046,10 +1051,11 @@ Exit criteria:
 
 ### C2 — Independent backend and authenticated client
 
-Status: **The platform side is review-ready and green at commit `bf9475e3e1d`
-in `buildkite/buildkite` PR #31646, and the exact-contract `buildkite-gha`
-client is implemented. Human review, merge, deployment, migration, feature
-activation, and production selection remain open.**
+Status: **The platform side is rebased, mergeable, and green at commit
+`e0c3941adae` in `buildkite/buildkite` PR #31646, and the exact-contract
+`buildkite-gha` client is implemented. Required human review, merge, deployment,
+migration, the post-deploy recurring GC schedule, feature activation, and
+production selection remain open.**
 
 Deliver the standalone Rails domain and its `buildkite-gha` adapter:
 
@@ -1085,7 +1091,7 @@ Exit criteria:
 
 ### C3 — Trusted scoping and abuse controls
 
-Status: **Implemented and review-green at commit `bf9475e3e1d` in
+Status: **Implemented and review-green at commit `e0c3941adae` in
 `buildkite/buildkite` PR #31646; human review, merge, operational approval, and
 production-field validation remain open.**
 
@@ -1275,8 +1281,9 @@ A successful static compile or admission result is not runtime cache evidence.
    cross-build restore.
 3. Review and merge the independent Rails domain, migration, feature gate, and
    job-authenticated Agent API while the preview remains disabled.
-4. Confirm object-store IAM/lifecycle, ship GC worker and schedule, validate
-   webhook provider fields, and approve quotas/retention.
+4. Confirm object-store IAM/lifecycle, deploy the included GC worker, add its
+   recurring schedule in the immediate follow-up deploy, validate webhook
+   provider fields, and approve quotas/retention.
 5. Switch generated production jobs to the implemented
    `BUILDKITE_GHA_CACHE_BACKEND=agent` backend and exercise the capability in
    absent, disabled, and read-only modes without exposing action cache variables
@@ -1331,8 +1338,9 @@ the Agent API shape are settled. These operational/product questions remain:
 1. Is the existing Hosted artifact S3 client and bucket the approved production
    boundary for the dedicated prefix, and what exact prefix-scoped IAM,
    encryption, capacity monitoring, and object-lifecycle policy will apply?
-2. What worker cadence and batch limits should garbage collection use, and what
-   storage lifecycle backstop covers abandoned objects if the worker is down?
+2. What recurring cadence should schedule the implemented bounded garbage
+   collection, and what storage lifecycle backstop covers abandoned objects if
+   the worker is down?
 3. Are seven-day retention, the 5 GiB inclusive archive limit, the 10 GiB
    retained-byte namespace quota, 1,000 retained records per namespace, and the
    current reservation limits the approved preview values?

@@ -1395,13 +1395,16 @@ Explicitly defer from beta unless implementation evidence changes the order:
   adapter, container routing, and experimental named-volume directory backend
   are implemented. The production backend is an independent GHA compatibility
   domain in `buildkite/buildkite`, not Cache v2; its job-authenticated API is
-  implemented in PR #31646 but remains unmerged. The `buildkite-gha` client is
-  implemented behind an explicit selector; object-store/GC operational work,
+  implemented, rebased, mergeable, and green at commit `e0c3941adae` in PR
+  #31646 but remains unmerged pending required human review. Its bounded
+  per-shard GC worker is implemented; the recurring schedule remains an
+  immediate post-deploy prerequisite to feature enablement. The `buildkite-gha`
+  client is implemented behind an explicit selector; object-store operations,
   production selection, and live rollout evidence remain. Direct v4 Hosted
-  miss/save is proven, and Buildkite build 212 passed the unchanged
-  `lox/notion-cli` workflow through the transitive `jdx/mise-action@v2`
-  miss/save path; cross-build restore is not proven. This bounded slice is
-  separate from the remaining Phase 6
+  miss/save is proven, and
+  Buildkite build 212 passed the unchanged `lox/notion-cli` workflow through the
+  transitive `jdx/mise-action@v2` miss/save path; cross-build restore is not
+  proven. This bounded slice is separate from the remaining Phase 6
   artifact/results, provider-token, protected-secret, private-source, and
   capability-control-plane work.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
@@ -1865,10 +1868,11 @@ names, and place a semantic backend interface between the protocol and
 the dedicated backend. The protocol/runtime, container routing, and
 experimental named-volume backend are implemented. Production enablement
 depends on the independent `buildkite/buildkite` GHA cache domain and its
-job-authenticated Agent API, plus object-store/GC operations, policy
-confirmation, production selection of the implemented `buildkite-gha` client,
-and live evidence. Do not build a second production durable index inside
-`buildkite-gha`; the named-volume backend is an explicit best-effort bridge.
+job-authenticated Agent API, plus human review and merge, deployment and
+migration, the post-deploy recurring GC schedule, object-store operations,
+policy confirmation, production selection of the implemented `buildkite-gha`
+client, and live evidence. Do not build a second production durable index
+inside `buildkite-gha`; the named-volume backend is an explicit best-effort bridge.
 This slice does not require the GitHub API proxy.
 Artifact v4/results compatibility is not part of this cache slice.
 
@@ -1900,9 +1904,11 @@ Delivery slices:
    repeated empty successor volumes mean reliable cross-build restore remains
    production-backend work.
 3. Ship production cache by merging the independent Rails domain and
-   job-authenticated Agent API, completing object-store/GC operations, then
-   selecting the implemented `buildkite-gha` client. Run trusted branch/PR/fork,
-   direct/transitive, and cross-build canaries before enablement.
+   job-authenticated Agent API, deploying its migration and included GC worker,
+   adding the recurring schedule in the immediate follow-up deploy, completing
+   object-store operations, then selecting the implemented `buildkite-gha`
+   client. Run trusted branch/PR/fork, direct/transitive, and cross-build
+   canaries before enablement.
 4. Ship artifact/results, summary, and public-checkout adapters as separate
    deliverables; do not couple their protocols or lifecycle to cache.
 5. Add the preferred GitHub REST/GraphQL/upload proxy with an opaque
@@ -2382,10 +2388,11 @@ them in the phase that first needs the capability:
    adapter, container routing, and experimental named-volume backend are
    implemented. An independent `buildkite/buildkite` GHA cache domain and
    job-authenticated Agent API are the selected durable authority; production
-   still needs that work reviewed and merged, object-store/GC operations,
-   selection of the implemented `buildkite-gha` client, and live evidence. Full
-   GitHub API proxy support does not block cache. Artifact v4/results protocol
-   selection remains a separate Phase 6 decision.
+   still needs required human review and merge, deployment and migration, the
+   post-deploy recurring GC schedule, object-store operations, selection of the
+   implemented `buildkite-gha` client, and live evidence. Full GitHub API proxy
+   support does not block cache. Artifact v4/results protocol selection remains
+   a separate Phase 6 decision.
 4. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
 5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
