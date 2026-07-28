@@ -407,11 +407,24 @@ func TestPhase2UploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`testdata/smoke/.github/workflows/shell.yml`,
 		`testdata/smoke/.github/workflows/cache.yml`,
 		`testdata/smoke/events/push.json`,
+		`testdata/cache-canaries/.github/workflows/cache-v3.yml`,
+		`testdata/cache-canaries/.github/workflows/setup-node.yml`,
+		`testdata/cache-canaries/.github/workflows/setup-go.yml`,
+		`testdata/phase4/events/public-checkout.json`,
 		`testdata/notion-cli/.github/workflows/ci.yml`,
 		`testdata/notion-cli/events/push.json`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Phase 2 upload proof lacks %q:\n%s", required, source)
+		}
+	}
+	for _, pairedSelector := range []string{
+		"cache-v3)\n          workflow=\"testdata/cache-canaries/.github/workflows/cache-v3.yml\"\n          event=\"testdata/smoke/events/push.json\"",
+		"setup-node-cache)\n          workflow=\"testdata/cache-canaries/.github/workflows/setup-node.yml\"\n          event=\"testdata/phase4/events/public-checkout.json\"",
+		"setup-go-cache)\n          workflow=\"testdata/cache-canaries/.github/workflows/setup-go.yml\"\n          event=\"testdata/notion-cli/events/push.json\"",
+	} {
+		if !strings.Contains(text, pairedSelector) {
+			t.Fatalf("Phase 2 upload proof lacks paired selector:\n%s\n\nsource:\n%s", pairedSelector, source)
 		}
 	}
 	var document struct {
@@ -524,6 +537,83 @@ func TestNotionCLICanaryPinsUpstreamSource(t *testing.T) {
 	}
 	if event.Provider != "github" || event.Event != "push" || event.Ref != "refs/heads/main" || event.SHA != "9e2dcfdacad890e63da77da2850452aeacb61e41" || event.Repository.Owner != "lox" || event.Repository.Name != "notion-cli" || event.Repository.CloneURL != "https://github.com/lox/notion-cli.git" {
 		t.Fatalf("notion-cli event identity drifted: %#v", event)
+	}
+}
+
+func TestCacheCanariesKeepRealClientsAndCachingEnabled(t *testing.T) {
+	root := filepath.Join("..", "..", "testdata", "cache-canaries", ".github", "workflows")
+	tests := []struct {
+		name      string
+		required  []string
+		forbidden []string
+	}{
+		{
+			name: "cache-v3.yml",
+			required: []string{
+				"actions/cache@6f8efc29b200d32929f49075959781ed54ec270c",
+				"experimental-cache-v3-fixture-${{ github.sha }}",
+				"deterministic-cache-v3-payload",
+			},
+		},
+		{
+			name: "setup-node.yml",
+			required: []string{
+				"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+				"actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+				"cache: npm",
+				"cache-dependency-path: package-lock.json",
+				"npm ci --ignore-scripts",
+			},
+			forbidden: []string{`package-manager-cache: "false"`},
+		},
+		{
+			name: "setup-go.yml",
+			required: []string{
+				"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+				"actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+				`cache: "true"`,
+				"cache-dependency-path: go.sum",
+				"go test ./...",
+			},
+			forbidden: []string{`cache: "false"`},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join(root, test.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(source)
+			for _, required := range test.required {
+				if !strings.Contains(text, required) {
+					t.Fatalf("cache canary lacks %q:\n%s", required, source)
+				}
+			}
+			for _, forbidden := range test.forbidden {
+				if strings.Contains(text, forbidden) {
+					t.Fatalf("cache canary contains disabled cache setting %q:\n%s", forbidden, source)
+				}
+			}
+		})
+	}
+
+	setupNodeSource, err := os.ReadFile(filepath.Join(root, "setup-node.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(eventSource, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.SHA == "" || !strings.Contains(string(setupNodeSource), "actions/checkout@"+event.SHA) {
+		t.Fatalf("setup-node checkout pin does not match event SHA %q", event.SHA)
 	}
 }
 

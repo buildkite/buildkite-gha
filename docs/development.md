@@ -87,6 +87,9 @@ phase selector only for targeted diagnosis:
 | --- | --- |
 | Sequential shell and upload | `PHASE2_PROBE=upload`, `PHASE2_COMMIT=<commit>` |
 | GitHub Cache v1 miss/save | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=cache`, `PHASE2_COMMIT=<commit>` |
+| `actions/cache@v3` miss/save | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=cache-v3`, `PHASE2_COMMIT=<commit>` |
+| `actions/setup-node` npm cache | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=setup-node-cache`, `PHASE2_COMMIT=<commit>` |
+| `actions/setup-go` module/build cache | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=setup-go-cache`, `PHASE2_COMMIT=<commit>` |
 | Unchanged `lox/notion-cli` workflow | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=notion-cli`, `PHASE2_COMMIT=<commit>` |
 | Concurrent step controls | `PHASE3_PROBE=concurrent`, `PHASE3_COMMIT=<commit>` |
 | Public JavaScript/composite actions | `PHASE4_PROBE=actions`, `PHASE4_COMMIT=<commit>` |
@@ -98,6 +101,11 @@ The cache selector runs pinned `actions/cache@v4`. A first run must miss,
 create `deterministic-cache-payload-v1`, and save it from the action's post
 phase. A later run against a durable production backend must hit and restore
 the payload before the smoke classification can become `runtime-pass`.
+
+The focused client selectors exercise pinned `actions/cache@v3`, setup-node
+with npm caching, and setup-go with module/build caching. Each must complete its
+lookup and workload on a miss; cache-v3 and setup-go must also log `Cache saved`
+because those clients reduce save failures to warnings.
 
 The `notion-cli` selector runs the upstream workflow unchanged at commit
 `9e2dcfdacad890e63da77da2850452aeacb61e41`. It covers public checkout,

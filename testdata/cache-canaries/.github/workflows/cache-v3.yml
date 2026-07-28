@@ -1,0 +1,31 @@
+name: Experimental cache v3 service
+
+on:
+  push:
+
+jobs:
+  cache-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache payload
+        id: cache
+        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c
+        with:
+          path: cache-data
+          key: experimental-cache-v3-fixture-${{ github.sha }}
+
+      - name: Verify restore or create payload
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          if [[ "$CACHE_HIT" == "true" ]]; then
+            test "$(cat cache-data/value)" = "deterministic-cache-v3-payload"
+            echo "Verified restored cache v3 payload"
+          else
+            test ! -e cache-data/value
+            mkdir -p cache-data
+            echo "deterministic-cache-v3-payload" > cache-data/value
+            echo "Created cache v3 payload for post-action save"
+          fi

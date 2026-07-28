@@ -1,0 +1,29 @@
+name: Experimental setup-go cache service
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact public event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Go with module and build caching
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: "true"
+          cache-dependency-path: go.sum
+          token: ""
+
+      - name: Populate and verify Go caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod download
+          go test ./...

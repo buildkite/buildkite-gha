@@ -20,8 +20,20 @@ steps:
           workflow="testdata/smoke/.github/workflows/cache.yml"
           event="testdata/smoke/events/push.json"
           ;;
+        cache-v3)
+          workflow="testdata/cache-canaries/.github/workflows/cache-v3.yml"
+          event="testdata/smoke/events/push.json"
+          ;;
         notion-cli)
           workflow="testdata/notion-cli/.github/workflows/ci.yml"
+          event="testdata/notion-cli/events/push.json"
+          ;;
+        setup-node-cache)
+          workflow="testdata/cache-canaries/.github/workflows/setup-node.yml"
+          event="testdata/phase4/events/public-checkout.json"
+          ;;
+        setup-go-cache)
+          workflow="testdata/cache-canaries/.github/workflows/setup-go.yml"
           event="testdata/notion-cli/events/push.json"
           ;;
         *) echo "unsupported PHASE2_WORKFLOW: $${PHASE2_WORKFLOW}" >&2; exit 1 ;;

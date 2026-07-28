@@ -1,0 +1,29 @@
+name: Experimental setup-node cache service
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  setup-node:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact public event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Node with npm caching
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+          token: ""
+
+      - name: Populate and verify npm cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm cache verify
