@@ -11,16 +11,22 @@ steps:
       set -euo pipefail
       commit="$${PHASE2_COMMIT:-$${SMOKE_COMMIT:-}}"
       scripts/phase-0-shell-oracle-checkout "$$commit"
+      case "$${PHASE2_WORKFLOW:-shell}" in
+        shell) workflow="testdata/smoke/.github/workflows/shell.yml" ;;
+        cache) workflow="testdata/smoke/.github/workflows/cache.yml" ;;
+        *) echo "unsupported PHASE2_WORKFLOW: $${PHASE2_WORKFLOW}" >&2; exit 1 ;;
+      esac
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase2.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
       CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
         --runtime-queue hosted \
-        testdata/smoke/.github/workflows/shell.yml
+        "$$workflow"
 
   - label: ":pipeline: Phase 2 continuation loader"
     key: "phase-2-continuation-loader"
+    if: build.env("PHASE2_WORKFLOW") != "cache"
     depends_on: "phase-2-upload-importer"
     allow_dependency_failure: true
     command: "buildkite-agent pipeline upload .buildkite/phase-2-upload-continuation.yml"

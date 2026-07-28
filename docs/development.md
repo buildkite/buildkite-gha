@@ -62,9 +62,11 @@ applies the same `hosted-tokenless` admission policy as production `upload`.
 It does not install Node or run action code. An `admitted` result is policy
 evidence, not runtime evidence.
 
-Known artifact and cache actions compile but fail admission. Job and service
-container fixtures have separate hosted runtime evidence but remain outside
-production admission.
+Known artifact actions compile but fail admission. The pinned cache action is
+admitted when the experimental cache backend is enabled, but remains
+`compile-pass` until a production-backed cross-build restore is demonstrated.
+Job and service container fixtures have separate hosted runtime evidence but
+remain outside production admission.
 
 ### Hosted runtime proofs
 
@@ -84,11 +86,17 @@ phase selector only for targeted diagnosis:
 | Coverage | Build environment |
 | --- | --- |
 | Sequential shell and upload | `PHASE2_PROBE=upload`, `PHASE2_COMMIT=<commit>` |
+| GitHub Cache v1 miss/save | `PHASE2_PROBE=upload`, `PHASE2_WORKFLOW=cache`, `PHASE2_COMMIT=<commit>` |
 | Concurrent step controls | `PHASE3_PROBE=concurrent`, `PHASE3_COMMIT=<commit>` |
 | Public JavaScript/composite actions | `PHASE4_PROBE=actions`, `PHASE4_COMMIT=<commit>` |
 | Hosted Docker prerequisites | `PHASE5_PROBE=capabilities`, `PHASE5_COMMIT=<commit>` |
 | Dockerfile action path | `PHASE5_PROBE=docker-action`, `PHASE5_COMMIT=<commit>` |
 | Complete container runtime | `PHASE5_PROBE=runtime`, `PHASE5_COMMIT=<commit>` |
+
+The cache selector runs pinned `actions/cache@v4`. A first run must miss,
+create `deterministic-cache-payload-v1`, and save it from the action's post
+phase. A later run against a durable production backend must hit and restore
+the payload before the smoke classification can become `runtime-pass`.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact

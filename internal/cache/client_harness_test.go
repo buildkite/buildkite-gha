@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 const (
@@ -21,7 +20,9 @@ const (
 
 // TestPinnedActionsCacheBundles is an opt-in network-free live-client harness.
 // Point either environment variable at an existing checkout of the exact
-// commit; the test never downloads or vendors action bundles.
+// commit; the test never downloads or vendors action bundles. Each client
+// saves through one directory-backend instance and restores through a fresh
+// instance rooted at the same persistent directory.
 func TestPinnedActionsCacheBundles(t *testing.T) {
 	clients := []struct {
 		name, environment, commit, nodeEnvironment string
@@ -68,28 +69,6 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 		}
 	}
 
-	backend := newMemoryBackend(func() time.Time { return time.Date(2026, 7, 27, 0, 0, 0, 0, time.UTC) })
-	server := httptest.NewUnstartedServer(nil)
-	baseURL := "http://" + server.Listener.Addr().String() + "/"
-	handler, err := NewHandler(backend, Config{
-		Token: "live-client-token", Session: "live-client-" + name, BaseURL: baseURL,
-		TempDir: t.TempDir(), Namespace: Namespace{"organization", "cluster", "pipeline"},
-		ReadScopes: []Scope{"branch", "default"}, WriteScope: "branch",
-		MaxArchive: 16 << 20, MaxChunk: 2 << 20,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	recorder := &protocolRecorder{next: handler}
-	server.Config.Handler = recorder
-	server.Start()
-	t.Cleanup(func() {
-		server.Close()
-		if err := handler.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-
 	workspace := t.TempDir()
 	source := filepath.Join(workspace, "source")
 	if err := os.MkdirAll(source, 0o755); err != nil {
@@ -103,8 +82,7 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 		t.Fatal(err)
 	}
 
-	environment := liveClientEnvironment(t, baseURL, workspace, source, "live-client-"+name)
-	runBundle := func(path string) {
+	runBundle := func(environment []string, path string) {
 		t.Helper()
 		command := exec.Command(node, filepath.Join(root, path))
 		command.Dir = workspace
@@ -117,18 +95,53 @@ func runPinnedClient(t *testing.T, root, wantCommit, name, nodeEnvironment strin
 		}
 	}
 
-	runBundle("dist/restore-only/index.js")
-	runBundle("dist/save-only/index.js")
+	cacheRoot := t.TempDir()
+	var operations []string
+	runService := func(run func([]string)) {
+		t.Helper()
+		backend, err := NewExperimentalDirectoryBackend(cacheRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewUnstartedServer(nil)
+		baseURL := "http://" + server.Listener.Addr().String() + "/"
+		handler, err := NewHandler(backend, Config{
+			Token: "live-client-token", Session: "live-client-" + name, BaseURL: baseURL,
+			TempDir: t.TempDir(), Namespace: Namespace{"organization", "cluster", "pipeline"},
+			ReadScopes: []Scope{"branch", "default"}, WriteScope: "branch",
+			MaxArchive: 16 << 20, MaxChunk: 2 << 20,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := &protocolRecorder{next: handler}
+		server.Config.Handler = recorder
+		server.Start()
+		defer func() {
+			server.Close()
+			if err := handler.Close(); err != nil {
+				t.Error(err)
+			}
+			operations = append(operations, recorder.operations()...)
+		}()
+		run(liveClientEnvironment(t, baseURL, workspace, source, "live-client-"+name))
+	}
+
+	runService(func(environment []string) {
+		runBundle(environment, "dist/restore-only/index.js")
+		runBundle(environment, "dist/save-only/index.js")
+	})
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	runBundle("dist/restore-only/index.js")
+	runService(func(environment []string) {
+		runBundle(environment, "dist/restore-only/index.js")
+	})
 	restored, err := os.ReadFile(filepath.Join(source, "payload.bin"))
 	if err != nil || !bytes.Equal(restored, payload) {
 		t.Fatalf("restored payload matches = %v, error = %v", bytes.Equal(restored, payload), err)
 	}
 
-	operations := recorder.operations()
 	wantInOrder := []string{
 		"GET /_apis/artifactcache/cache",
 		"GET /_apis/artifactcache/caches",
