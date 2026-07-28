@@ -147,10 +147,10 @@ func TestEmitMiseBootstrap(t *testing.T) {
 	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != ".buildkite-gha/cache-volume" {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != ".buildkite-gha/cache-volume/mise/2026.5.12" {
 		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
-	if step.Env["BUILDKITE_GHA_CACHE_DIR"] != "/cache/bkcache/buildkite-gha/gha-cache" {
+	if step.Env["BUILDKITE_GHA_CACHE_DIR"] != ".buildkite-gha/cache-volume/gha-cache" {
 		t.Fatalf("experimental GHA cache directory = %q", step.Env["BUILDKITE_GHA_CACHE_DIR"])
 	}
 }
@@ -165,7 +165,7 @@ func TestMisePathValidation(t *testing.T) {
 		t.Fatal("MisePath() accepted an invalid digest")
 	}
 	dataDir, err := MiseDataDir("2026.5.12")
-	if err != nil || dataDir != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+	if err != nil || dataDir != ".buildkite-gha/cache-volume/mise/2026.5.12" {
 		t.Fatalf("MiseDataDir() = %q, %v", dataDir, err)
 	}
 	if _, err := MiseDataDir("latest"); err == nil {

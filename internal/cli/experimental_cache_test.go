@@ -46,6 +46,27 @@ func TestExperimentalDirectoryCacheConfigIsExplicitAndRefScoped(t *testing.T) {
 	}
 }
 
+func TestExperimentalDirectoryCacheConfigResolvesHostedRelativePath(t *testing.T) {
+	workdir := t.TempDir()
+	t.Chdir(workdir)
+	const relativeRoot = ".buildkite-gha/cache-volume/gha-cache"
+	values := map[string]string{
+		"BUILDKITE_GHA_CACHE_DIR":         relativeRoot,
+		"BUILDKITE_ORGANIZATION_ID":       "organization-id",
+		"BUILDKITE_PIPELINE_ID":           "pipeline-id",
+		"BUILDKITE_AGENT_META_DATA_QUEUE": "hosted",
+	}
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/repository", Ref: "refs/heads/main"}}
+	config, err := jobCacheConfig(context.Background(), job, func(name string) string { return values[name] }, nil)
+	if err != nil || config == nil || config.Backend == nil {
+		t.Fatalf("relative hosted cache config = %#v, %v", config, err)
+	}
+	info, err := filepath.Glob(filepath.Join(workdir, relativeRoot, "buildkite-gha-cache-v1", "*"))
+	if err != nil || len(info) != 3 {
+		t.Fatalf("relative hosted cache directories = %#v, %v", info, err)
+	}
+}
+
 func TestExperimentalDirectoryCacheConfigFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	valid := map[string]string{

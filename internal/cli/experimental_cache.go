@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
@@ -71,6 +72,10 @@ func experimentalDirectoryCacheConfig(job plan.Job, getenv func(string) string) 
 	root := strings.TrimSpace(getenv("BUILDKITE_GHA_CACHE_DIR"))
 	if root == "" {
 		return nil, nil
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve cache directory: %v", errCacheBackendUnavailable, err)
 	}
 	if job.Event.Provider != "github" || job.Event.Repository == "" || job.Event.Ref == "" {
 		return nil, fmt.Errorf("experimental cache requires a GitHub repository and ref in the job plan")

@@ -14,7 +14,8 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 const toolDirectory = ".buildkite-gha/tools"
-const experimentalGHACacheDirectory = "/cache/bkcache/buildkite-gha/gha-cache"
+const hostedCacheVolumePath = ".buildkite-gha/cache-volume"
+const experimentalGHACacheDirectory = hostedCacheVolumePath + "/gha-cache"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -48,15 +49,14 @@ func MisePath(digest string) (string, error) {
 	return toolDirectory + "/mise/" + strings.TrimPrefix(digest, "sha256:") + "/mise.gz", nil
 }
 
-// MiseDataDir returns the runtime-owned hosted cache path for one exact mise
-// version. The generated cache path triggers Buildkite's documented
-// /cache/bkcache volume mount; cache contents are an accelerator, never an
-// authority.
+// MiseDataDir returns a runtime-owned subdirectory of the exact path requested
+// by the generated Hosted cache-volume configuration. Cache contents are an
+// accelerator, never an authority.
 func MiseDataDir(version string) (string, error) {
 	if !toolVersionPattern.MatchString(version) {
 		return "", fmt.Errorf("invalid mise version %q", version)
 	}
-	return "/cache/bkcache/buildkite-gha/mise/" + version, nil
+	return hostedCacheVolumePath + "/mise/" + version, nil
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -152,7 +152,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if usesMise {
 			out.WriteString("    cache:\n")
 			out.WriteString("      paths:\n")
-			out.WriteString("        - \".buildkite-gha/cache-volume\"\n")
+			_, _ = fmt.Fprintf(&out, "        - %s\n", yamlScalar(hostedCacheVolumePath))
 			out.WriteString("      name: \"buildkite-gha\"\n")
 		}
 		out.WriteString("    env:\n")
