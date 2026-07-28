@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 	payload := []byte("opaque cache archive")
 	digestBytes := sha256.Sum256(payload)
 	digest := hex.EncodeToString(digestBytes[:])
+	signedChecksum := base64.StdEncoding.EncodeToString(digestBytes[:])
 
 	var mu sync.Mutex
 	var uploaded []byte
@@ -40,12 +42,19 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/object" {
-			if request.Header.Get("Authorization") != "" || request.Header.Get("X-Signed-Upload") == "private-reservation-token" {
+			if request.Header.Get("Authorization") != "" {
 				t.Errorf("direct transfer leaked privileged headers: %#v", request.Header)
+			}
+			for name, values := range request.Header {
+				for _, value := range values {
+					if strings.Contains(value, reservationToken) || strings.Contains(value, "job-token") {
+						t.Errorf("direct transfer header %q leaked a privileged token", name)
+					}
+				}
 			}
 			switch request.Method {
 			case http.MethodPut:
-				if request.Header.Get("X-Signed-Upload") != "signed-value" || request.ContentLength != int64(len(payload)) {
+				if request.Header.Get("X-Amz-Checksum-Sha256") != signedChecksum || request.ContentLength != int64(len(payload)) {
 					t.Errorf("upload headers = %#v, length = %d", request.Header, request.ContentLength)
 				}
 				body, err := io.ReadAll(request.Body)
@@ -119,7 +128,7 @@ func TestAgentBackendLifecycleAndDirectTransfers(t *testing.T) {
 			}
 			writeAgentTestJSON(t, w, map[string]any{"upload": agentInstruction{
 				Method: http.MethodPut, URL: server.URL + "/object",
-				Headers:   map[string]string{"Content-Length": strconv.Itoa(len(payload)), "X-Signed-Upload": "signed-value"},
+				Headers:   map[string]string{"Content-Length": strconv.Itoa(len(payload)), "x-amz-checksum-sha256": signedChecksum},
 				ExpiresAt: createdAt.Add(5 * time.Minute),
 			}})
 		case "commit":
