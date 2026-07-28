@@ -65,14 +65,19 @@ type Runner struct {
 	nodeDigests       map[int]string
 }
 
-// CacheConfig supplies a cache backend session to RunJob. The caller owns the
-// trust and visibility policy represented by its namespace and scopes.
+// CacheConfig supplies a cache backend session to RunJob. Namespace and scope
+// values are authoritative for local backends and compatibility metadata for a
+// server-authorized backend.
 type CacheConfig struct {
-	Backend    ghacache.Backend
-	Namespace  ghacache.Namespace
-	ReadScopes []ghacache.Scope
-	WriteScope ghacache.Scope
-	ReadOnly   bool
+	Backend       ghacache.Backend
+	Namespace     ghacache.Namespace
+	ReadScopes    []ghacache.Scope
+	WriteScope    ghacache.Scope
+	ReadOnly      bool
+	MaxArchive    int64
+	MaxCandidates int
+	MaxKey        int
+	MaxVersion    int
 }
 
 type managedNodeVerification struct {

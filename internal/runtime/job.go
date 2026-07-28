@@ -577,6 +577,8 @@ func (r *Runner) startCacheService(ctx context.Context, processor *commandProces
 		Token: token, Session: session, BaseURL: baseURL, ContainerBaseURL: containerBaseURL, TempDir: tempDir,
 		Namespace: r.Cache.Namespace, ReadScopes: r.Cache.ReadScopes,
 		WriteScope: r.Cache.WriteScope, ReadOnly: r.Cache.ReadOnly,
+		MaxArchive: r.Cache.MaxArchive, MaxCandidates: r.Cache.MaxCandidates,
+		MaxKey: r.Cache.MaxKey, MaxVersion: r.Cache.MaxVersion,
 		RegisterRedaction: registerRedaction,
 	})
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -208,10 +209,12 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		actionMaterializer = store
 	}
-	cacheConfig, err := experimentalDirectoryCacheConfig(job, os.Getenv)
+	cacheConfig, err := jobCacheConfig(ctx, job, os.Getenv, &http.Client{Timeout: 30 * time.Second})
 	if err != nil {
-		if errors.Is(err, errExperimentalCacheBackend) {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %v; continuing without GitHub cache\n", err)
+		if errors.Is(err, errCacheBackendUnavailable) {
+			if ctx.Err() == nil {
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %v; continuing without GitHub cache\n", err)
+			}
 			cacheConfig = nil
 		} else {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)

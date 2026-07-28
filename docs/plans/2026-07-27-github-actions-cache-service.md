@@ -70,9 +70,10 @@ As of 2026-07-28:
 - the independent Rails backend and seven job-authenticated Agent API endpoints
   are implemented and locally verified on an unpushed
   `buildkite/buildkite` branch, but are not merged, deployed, or enabled; and
-- the `buildkite-gha` remote backend client, production object-store/IAM
-  confirmation, GC deployment, policy-value approval, and production canaries
-  remain open.
+- the `buildkite-gha` remote backend client is implemented behind the explicit
+  `BUILDKITE_GHA_CACHE_BACKEND=agent` selector but generated jobs still select
+  the directory bridge. Production object-store/IAM confirmation, GC
+  deployment, policy-value approval, and production canaries remain open.
 
 ## User outcome
 
@@ -1028,7 +1029,8 @@ Exit criteria:
 
 ### C2 — Independent backend and authenticated client
 
-Status: **Platform side implemented locally; `buildkite-gha` client open.**
+Status: **Platform side and `buildkite-gha` client implemented locally;
+deployment and production selection remain open.**
 
 Deliver the standalone Rails domain and its `buildkite-gha` adapter:
 

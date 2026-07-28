@@ -2,13 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	ghacache "github.com/buildkite/buildkite-gha/internal/cache"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 func TestExperimentalDirectoryCacheConfigIsExplicitAndRefScoped(t *testing.T) {
@@ -19,12 +25,13 @@ func TestExperimentalDirectoryCacheConfigIsExplicitAndRefScoped(t *testing.T) {
 
 	root := t.TempDir()
 	values := map[string]string{
+		"BUILDKITE_GHA_CACHE_BACKEND":     "directory",
 		"BUILDKITE_GHA_CACHE_DIR":         root,
 		"BUILDKITE_ORGANIZATION_ID":       "organization-id",
 		"BUILDKITE_PIPELINE_ID":           "pipeline-id",
 		"BUILDKITE_AGENT_META_DATA_QUEUE": "hosted",
 	}
-	config, err := experimentalDirectoryCacheConfig(job, func(name string) string { return values[name] })
+	config, err := jobCacheConfig(context.Background(), job, func(name string) string { return values[name] }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +87,146 @@ func TestExperimentalDirectoryCacheConfigFailsClosed(t *testing.T) {
 		backendValues[name] = value
 	}
 	backendValues["BUILDKITE_GHA_CACHE_DIR"] = cacheFile
-	if config, err := experimentalDirectoryCacheConfig(job, getenv(backendValues)); !errors.Is(err, errExperimentalCacheBackend) || config != nil {
+	if config, err := experimentalDirectoryCacheConfig(job, getenv(backendValues)); !errors.Is(err, errCacheBackendUnavailable) || config != nil {
 		t.Fatalf("unavailable backend config = %#v, %v", config, err)
+	}
+}
+
+func TestJobCacheConfigSelectsAgentCapabilityAndLimits(t *testing.T) {
+	const jobID = "55555555-5555-5555-5555-555555555555"
+	actionJob := plan.Job{Steps: []plan.Step{{Kind: "uses"}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v3/jobs/"+jobID+"/github-actions-cache/" || request.Header.Get("Authorization") != "Token agent-token" {
+			t.Errorf("capability request = %s %s, authorization %q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(ghacache.AgentCapability{
+			Enabled: true, Mode: "read-only",
+			Limits: ghacache.AgentLimits{MaxArchiveSize: 12345, MaxCandidates: 7, MaxKeyBytes: 321, MaxVersionBytes: 123},
+		})
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	values := map[string]string{
+		"BUILDKITE_GHA_CACHE_BACKEND":  "agent",
+		"BUILDKITE_GHA_CACHE_DIR":      root,
+		"BUILDKITE_AGENT_ENDPOINT":     server.URL + "/v3",
+		"BUILDKITE_AGENT_ACCESS_TOKEN": "agent-token",
+		"BUILDKITE_JOB_ID":             jobID,
+	}
+	config, err := jobCacheConfig(context.Background(), actionJob, func(name string) string { return values[name] }, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config == nil || config.Backend == nil || !config.ReadOnly || config.MaxArchive != 12345 || config.MaxCandidates != 7 || config.MaxKey != 321 || config.MaxVersion != 123 {
+		t.Fatalf("agent cache config = %#v", config)
+	}
+	if config.Namespace.Pipeline != jobID || len(config.ReadScopes) != 1 || config.WriteScope != config.ReadScopes[0] {
+		t.Fatalf("agent compatibility metadata = %#v / %#v / %q", config.Namespace, config.ReadScopes, config.WriteScope)
+	}
+	if _, err := os.Stat(filepath.Join(root, "buildkite-gha-cache-v1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("agent selection initialized directory backend: %v", err)
+	}
+}
+
+func TestJobCacheConfigAgentAdmissionAndFailures(t *testing.T) {
+	const jobID = "66666666-6666-6666-6666-666666666666"
+	actionJob := plan.Job{Steps: []plan.Step{{Kind: "uses"}}}
+	for _, test := range []struct {
+		name       string
+		status     int
+		capability ghacache.AgentCapability
+		mutate     func(map[string]string)
+		wantNil    bool
+		wantError  error
+		wantFatal  bool
+	}{
+		{name: "disabled", status: http.StatusOK, capability: ghacache.AgentCapability{Mode: "disabled", Reason: "feature_not_enabled"}, wantNil: true},
+		{name: "missing capability route is nonfatal", status: http.StatusNotFound, wantNil: true, wantError: errCacheBackendUnavailable},
+		{name: "rate limited is nonfatal", status: http.StatusTooManyRequests, wantNil: true, wantError: errCacheBackendUnavailable},
+		{name: "unavailable is nonfatal", status: http.StatusServiceUnavailable, wantNil: true, wantError: errCacheBackendUnavailable},
+		{name: "denied fails closed", status: http.StatusForbidden, wantNil: true, wantError: ghacache.ErrDenied},
+		{name: "missing token fails closed", status: http.StatusOK, mutate: func(values map[string]string) {
+			delete(values, "BUILDKITE_AGENT_ACCESS_TOKEN")
+		}, wantNil: true, wantFatal: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				if test.status == http.StatusOK {
+					_ = json.NewEncoder(w).Encode(test.capability)
+				}
+			}))
+			defer server.Close()
+			values := map[string]string{
+				"BUILDKITE_GHA_CACHE_BACKEND": "agent", "BUILDKITE_AGENT_ENDPOINT": server.URL + "/v3",
+				"BUILDKITE_AGENT_ACCESS_TOKEN": "agent-token", "BUILDKITE_JOB_ID": jobID,
+			}
+			if test.mutate != nil {
+				test.mutate(values)
+			}
+			config, err := jobCacheConfig(context.Background(), actionJob, func(name string) string { return values[name] }, server.Client())
+			wrongError := test.wantError == nil && err != nil
+			if test.wantFatal {
+				wrongError = err == nil || errors.Is(err, errCacheBackendUnavailable)
+			} else if test.wantError != nil {
+				wrongError = !errors.Is(err, test.wantError)
+			}
+			if test.wantNil && config != nil || wrongError {
+				t.Fatalf("jobCacheConfig() = %#v, %v, want error %v", config, err, test.wantError)
+			}
+		})
+	}
+	values := map[string]string{"BUILDKITE_GHA_CACHE_BACKEND": "bogus"}
+	if config, err := jobCacheConfig(context.Background(), plan.Job{}, func(name string) string { return values[name] }, nil); err == nil || config != nil {
+		t.Fatalf("unknown backend config = %#v, %v", config, err)
+	}
+}
+
+func TestJobCacheConfigSkipsAgentCapabilityForShellOnlyJob(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+	values := map[string]string{
+		"BUILDKITE_GHA_CACHE_BACKEND": "agent",
+		"BUILDKITE_AGENT_ENDPOINT":    server.URL + "/v3",
+		"BUILDKITE_JOB_ID":            "77777777-7777-7777-7777-777777777777",
+		// Intentionally omit the Agent token: unused cache configuration must
+		// not make a shell-only job fail closed.
+	}
+	job := plan.Job{Steps: []plan.Step{{Kind: "run"}}}
+	config, err := jobCacheConfig(context.Background(), job, func(name string) string { return values[name] }, server.Client())
+	if err != nil || config != nil || called {
+		t.Fatalf("jobCacheConfig() = %#v, %v, capability called %v", config, err, called)
+	}
+}
+
+func TestRunJobCancellationDoesNotReportCacheDegradation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("cancelled run queried cache capability")
+	}))
+	defer server.Close()
+	job := cliRunJobPlan()
+	job.Steps = []plan.Step{{ID: "action", Kind: "uses", Uses: "owner/action@v1"}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	t.Setenv("BUILDKITE_GHA_CACHE_BACKEND", "agent")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "agent-token")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
+		t.Fatalf("runJobContext() code = %d, stderr = %q, want 1", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "continuing without GitHub cache") {
+		t.Fatalf("runJobContext() stderr = %q, want no cache-degradation warning", stderr.String())
+	}
+	if result := publishedCLIManifest(t, runner, job, planDigest).Result; result != "cancelled" {
+		t.Fatalf("published result = %q, want cancelled", result)
 	}
 }
 
