@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "No persistent services require restart."
+for command in docker sudo systemctl timeout; do
+  if ! command -v "$command" >/dev/null; then
+    echo "Missing $command; run .agents/setup before .agents/resume" >&2
+    exit 1
+  fi
+done
+
+timeout 8s sudo systemctl start docker
+timeout 1s sudo docker info >/dev/null
+echo "Docker is ready."

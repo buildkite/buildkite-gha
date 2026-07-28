@@ -3,6 +3,52 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mise_bin="$HOME/.local/bin/mise"
+bk_version="3.54.1"
+docker_packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
+
+missing_docker_packages=()
+for package in "${docker_packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -Fqx 'ii '; then
+    missing_docker_packages+=("$package")
+  fi
+done
+
+if ((${#missing_docker_packages[@]} > 0)); then
+  echo "Installing Docker from its official Debian repository..."
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+  docker_arch="$(dpkg --print-architecture)"
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  docker_codename="$VERSION_CODENAME"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian %s stable\n' \
+    "$docker_arch" "$docker_codename" \
+    | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+  sudo apt-get update -qq
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${docker_packages[@]}"
+fi
+
+sudo systemctl enable --now docker
+if ! id -nG "$USER" | tr ' ' '\n' | grep -Fqx docker; then
+  sudo usermod -aG docker "$USER"
+fi
+
+if ! sudo docker info >/dev/null; then
+  echo "Docker did not become ready during setup" >&2
+  exit 1
+fi
+buildx_inspect="$(sudo docker buildx inspect default)"
+if ! grep -Eq '^Driver:[[:space:]]+docker$' <<<"$buildx_inspect"; then
+  echo "Docker Buildx default builder is not using the docker driver" >&2
+  printf '%s\n' "$buildx_inspect" >&2
+  exit 1
+fi
+
+if ! command -v gh >/dev/null; then
+  echo "Missing preinstalled GitHub CLI" >&2
+  exit 1
+fi
 
 echo "Installing mise if needed..."
 if [[ ! -x "$mise_bin" ]]; then
@@ -18,9 +64,26 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
 esac
+# buildkite-gha mise shims
+case ":$PATH:" in
+  *":$HOME/.local/share/mise/shims:"*) ;;
+  *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;;
+esac
 if [[ -x "$HOME/.local/bin/mise" ]]; then
   eval "$("$HOME/.local/bin/mise" activate bash)"
 fi
+EOF
+fi
+
+shims_marker="# buildkite-gha mise shims"
+if ! grep -Fqx "$shims_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# buildkite-gha mise shims
+case ":$PATH:" in
+  *":$HOME/.local/share/mise/shims:"*) ;;
+  *) export PATH="$HOME/.local/share/mise/shims:$PATH" ;;
+esac
 EOF
 fi
 
@@ -28,7 +91,13 @@ echo "Installing pinned development tools..."
 "$mise_bin" trust "$repo_root/mise.toml"
 "$mise_bin" install
 
+echo "Installing the pinned Buildkite CLI..."
+"$mise_bin" use --global --pin --yes "aqua:buildkite/cli@$bk_version"
+"$mise_bin" exec -- bk version >/dev/null
+
 echo "Downloading Go modules..."
 "$mise_bin" exec -- go mod download
+
+"$repo_root/.agents/resume"
 
 echo "Orb setup complete."
