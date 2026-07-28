@@ -66,10 +66,16 @@ As of 2026-07-28:
 - the real pinned `actions/cache@v4` bundle has passed a local miss/save,
   backend restart, and exact-byte restore test over that directory backend;
 - `actions/cache` is admitted by the Hosted tokenless profile while artifact
-  actions remain rejected; Hosted cross-build evidence is still pending;
+  actions remain rejected;
+- exact-commit Hosted builds 205, 206, and 207 each mounted the named volume,
+  ran the real v4 action over the v1 adapter, missed, created the deterministic
+  payload, and saved successfully, but every later job received an empty volume
+  rather than a committed parent; this proves the per-job integration but not
+  cross-build persistence on the current Namespace-backed queue;
 - the independent Rails backend and seven job-authenticated Agent API endpoints
-  are implemented and locally verified on an unpushed
-  `buildkite/buildkite` branch, but are not merged, deployed, or enabled; and
+  are implemented in [`buildkite/buildkite` PR
+  #31646](https://github.com/buildkite/buildkite/pull/31646), but are not
+  merged, deployed, or enabled; and
 - the `buildkite-gha` remote backend client is implemented behind the explicit
   `BUILDKITE_GHA_CACHE_BACKEND=agent` selector but generated jobs still select
   the directory bridge. Production object-store/IAM confirmation, GC
@@ -77,8 +83,9 @@ As of 2026-07-28:
 
 ## User outcome
 
-After this slice, users should not have to identify or disable transitive cache
-use. These should work without workflow edits:
+The production outcome is that users do not have to identify or disable
+transitive cache use. These should work without workflow edits once the durable
+backend is deployed and selected:
 
 - `actions/cache@v3` and `actions/cache@v4` restore and save;
 - setup actions such as `actions/setup-node` and `actions/setup-go` with their
@@ -788,8 +795,9 @@ instructions bind content length and SHA-256 headers; commit verifies both with
 HEAD before publication. Retrieve accepts only an opaque entry ID, rechecks
 policy, and never exposes a durable blob key.
 
-This platform work is locally committed and verified but remains unpushed,
-unmerged, preview-gated, and disabled by default. Before a Hosted preview:
+This platform work is open in [`buildkite/buildkite` PR
+#31646](https://github.com/buildkite/buildkite/pull/31646) but remains unmerged,
+undeployed, preview-gated, and disabled by default. Before a Hosted preview:
 
 1. confirm the production bucket/client, prefix-scoped IAM, encryption,
    monitoring, and object-lifecycle backstop;
@@ -1029,8 +1037,9 @@ Exit criteria:
 
 ### C2 — Independent backend and authenticated client
 
-Status: **Platform side and `buildkite-gha` client implemented locally;
-deployment and production selection remain open.**
+Status: **Platform side is open in `buildkite/buildkite` PR #31646 and the
+`buildkite-gha` client is implemented; merge, deployment, and production
+selection remain open.**
 
 Deliver the standalone Rails domain and its `buildkite-gha` adapter:
 
@@ -1066,8 +1075,8 @@ Exit criteria:
 
 ### C3 — Trusted scoping and abuse controls
 
-Status: **Implemented locally on the platform branch; operational approval and
-production-field validation remain open.**
+Status: **Implemented in `buildkite/buildkite` PR #31646; merge, operational
+approval, and production-field validation remain open.**
 
 Deliver:
 
@@ -1121,7 +1130,10 @@ Exit criteria:
 ### C5 — Out-of-box compatibility and rollout
 
 Status: **In progress.** The pinned v4 restart-persistence canary passes
-locally; cross-build Hosted and transitive external-workflow evidence is open.
+locally. The real Hosted action now completes miss/save, but three sequential
+exact-commit jobs each received an empty named volume, so cross-build Hosted and
+transitive external-workflow evidence remain open pending the production
+backend or a demonstrated later volume parent.
 
 Deliver:
 
@@ -1231,8 +1243,11 @@ A successful static compile or admission result is not runtime cache evidence.
 
 1. Land C0/C1/C4 and the experimental directory backend without calling it a
    production authorization or concurrency boundary.
-2. Use the named Hosted cache volume to prove direct v4 miss/save and later
-   restore, then prove the current transitive `jdx/mise-action@v2` path.
+2. Use the named Hosted cache volume as an integration bridge. Direct v4
+   miss/save is proven; builds 205–207 did not receive a prior committed volume,
+   so do not promote the smoke classification or block the production backend
+   on a best-effort volume hit. Prove the current transitive
+   `jdx/mise-action@v2` path separately.
 3. Review and merge the independent Rails domain, migration, feature gate, and
    job-authenticated Agent API while the preview remains disabled.
 4. Confirm object-store IAM/lifecycle, ship GC worker and schedule, validate
@@ -1311,7 +1326,9 @@ the Agent API shape are settled. These operational/product questions remain:
    and rollout/rollback across the Rails backend, object store, Hosted, and
    `buildkite-gha`?
 
-None blocks the local protocol/runtime work or the best-effort Hosted canary.
-All block production enablement unless explicitly resolved, and none should be
-papered over by embedding customer storage credentials, Agent authority, or a
-second production durable index in `buildkite-gha`.
+None blocks the local protocol/runtime work. The completed best-effort Hosted
+canary did not produce cross-build persistence, so production enablement now
+depends on the independent durable backend unless the Hosted volume behavior is
+separately resolved. The remaining questions must not be papered over by
+embedding customer storage credentials, Agent authority, or a second production
+durable index in `buildkite-gha`.

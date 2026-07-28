@@ -1393,7 +1393,7 @@ Explicitly defer from beta unless implementation evidence changes the order:
   adapter, container routing, and experimental named-volume directory backend
   are implemented. The production backend is an independent GHA compatibility
   domain in `buildkite/buildkite`, not Cache v2; its job-authenticated API is
-  implemented locally but remains unmerged. The `buildkite-gha` client is
+  implemented in PR #31646 but remains unmerged. The `buildkite-gha` client is
   implemented behind an explicit selector; object-store/GC operational work,
   production selection, and live rollout evidence remain. This bounded slice
   is separate from the remaining Phase 6
@@ -1449,8 +1449,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
   --format text|json <workflow>`. Expected-negative fixtures preserve current
   boundaries: official GitHub artifact actions compile but remain denied
   admission. The pinned cache action is admitted onto the explicit experimental
-  directory backend but remains `compile-pass` pending Hosted cross-build
-  evidence. Job and service containers compile to schema-v4 plans and have
+  directory backend but remains `compile-pass`: exact-commit Hosted builds
+  205–207 proved v1 miss/save but each received an empty named volume, so there
+  is no cross-build restore evidence. Job and service containers compile to
+  schema-v4 plans and have
   hosted runtime evidence, while production admission rejects their container
   provenance.
 - A consolidated exact-commit hosted dispatcher is available with
@@ -1888,7 +1890,9 @@ Delivery slices:
 1. Ship C0/C1/C4 of the focused cache plan: protocol fixtures, job-local
    adapter, host/container actions, post lifecycle, and deterministic backends.
 2. Prove direct and transitive cache clients on the experimental named-volume
-   backend, while preserving its explicit best-effort limitations.
+   backend, while preserving its explicit best-effort limitations. Direct
+   Hosted miss/save is proven; repeated empty successor volumes mean reliable
+   cross-build restore remains production-backend work.
 3. Ship production cache by merging the independent Rails domain and
    job-authenticated Agent API, completing object-store/GC operations, then
    selecting the implemented `buildkite-gha` client. Run trusted branch/PR/fork,
