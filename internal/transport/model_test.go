@@ -182,6 +182,44 @@ func TestAgentUsesExactProducerAndSafeUploadFlags(t *testing.T) {
 	}
 }
 
+func TestAgentPublishesBoundedJobAnnotationThroughStdin(t *testing.T) {
+	runner := &captureRunner{}
+	agent := Agent{Runner: runner}
+	body := "### Job summary\n\nPassed.\n"
+	if err := agent.AnnotateJob(context.Background(), testJobID, "buildkite-gha-job-summary", "info", body); err != nil {
+		t.Fatal(err)
+	}
+	want := capturedCommand{
+		name:  "buildkite-agent",
+		args:  []string{"annotate", "--scope", "job", "--job", testJobID, "--context", "buildkite-gha-job-summary", "--style", "info"},
+		stdin: body,
+	}
+	if !reflect.DeepEqual(runner.commands, []capturedCommand{want}) {
+		t.Fatalf("commands = %#v, want %#v", runner.commands, want)
+	}
+
+	for _, test := range []struct {
+		name, jobID, context, style, body string
+	}{
+		{name: "invalid job", jobID: "not-a-job", context: "summary", style: "info", body: "body"},
+		{name: "empty context", jobID: testJobID, style: "info", body: "body"},
+		{name: "oversized context", jobID: testJobID, context: strings.Repeat("x", maxAnnotationContextCharacters+1), style: "info", body: "body"},
+		{name: "invalid context UTF-8", jobID: testJobID, context: string([]byte{0xff}), style: "info", body: "body"},
+		{name: "invalid style", jobID: testJobID, context: "summary", style: "default", body: "body"},
+		{name: "empty body", jobID: testJobID, context: "summary", style: "info"},
+		{name: "oversized body", jobID: testJobID, context: "summary", style: "info", body: strings.Repeat("x", maxAnnotationBodyBytes+1)},
+		{name: "invalid UTF-8", jobID: testJobID, context: "summary", style: "info", body: string([]byte{0xff})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			validationRunner := &captureRunner{}
+			err := (Agent{Runner: validationRunner}).AnnotateJob(context.Background(), test.jobID, test.context, test.style, test.body)
+			if err == nil || len(validationRunner.commands) != 0 {
+				t.Fatalf("AnnotateJob() error = %v, commands = %#v", err, validationRunner.commands)
+			}
+		})
+	}
+}
+
 func TestUploadArtifactsMaterializesContentBeforePipeline(t *testing.T) {
 	root := t.TempDir()
 	plan := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan\n")}

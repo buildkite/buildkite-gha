@@ -40,7 +40,7 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
 | `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. |
-| Step summaries | Not surfaced | The runtime processes `GITHUB_STEP_SUMMARY`, but production generated jobs do not publish it to the Buildkite UI. |
+| Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Artifact and cache actions | Not supported | They compile but fail profile admission until Buildkite-backed adapters exist. |

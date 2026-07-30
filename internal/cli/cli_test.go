@@ -19,6 +19,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
@@ -761,13 +762,14 @@ type cliCommand struct {
 }
 
 type cliCaptureRunner struct {
-	commands      []cliCommand
-	failAt        int
-	failMetadata  bool
-	jobByStep     map[string]string
-	dataByPath    map[string][]byte
-	uploaded      map[string][]byte
-	contextErrors []error
+	commands       []cliCommand
+	failAt         int
+	failMetadata   bool
+	failAnnotation bool
+	jobByStep      map[string]string
+	dataByPath     map[string][]byte
+	uploaded       map[string][]byte
+	contextErrors  []error
 }
 
 func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {
@@ -802,6 +804,9 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	}
 	if r.failMetadata && len(args) >= 2 && args[0] == "meta-data" && args[1] == "set" {
 		return nil, errors.New("metadata unavailable")
+	}
+	if r.failAnnotation && len(args) > 0 && args[0] == "annotate" {
+		return nil, errors.New("annotation unavailable")
 	}
 	return nil, nil
 }
@@ -969,6 +974,65 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 	}
 }
 
+func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
+	tests := []struct {
+		name           string
+		command        string
+		failAnnotation bool
+		wantAnnotation bool
+		wantWarning    bool
+		wantResult     string
+		wantCode       int
+	}{
+		{name: "published", command: `printf '### Job summary\n\nPassed.\n' >> "$GITHUB_STEP_SUMMARY"`, wantAnnotation: true, wantResult: "success"},
+		{name: "published after job failure", command: `printf '### Job summary\n\nPassed.\n' >> "$GITHUB_STEP_SUMMARY"; exit 7`, wantAnnotation: true, wantResult: "failure", wantCode: 1},
+		{name: "failure is advisory", command: `printf '### Job summary\n\nPassed.\n' >> "$GITHUB_STEP_SUMMARY"`, failAnnotation: true, wantAnnotation: true, wantWarning: true, wantResult: "success"},
+		{name: "empty summary is a no-op", command: "true", wantResult: "success"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Steps[0].Command = test.command
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			runner := &cliCaptureRunner{failAnnotation: test.failAnnotation}
+			var stdout, stderr bytes.Buffer
+
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != test.wantCode {
+				t.Fatalf("run() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
+			}
+			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != test.wantResult {
+				t.Fatalf("published result = %q, want %q", result.Result, test.wantResult)
+			}
+			var annotations []cliCommand
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" {
+					annotations = append(annotations, command)
+				}
+			}
+			if !test.wantAnnotation {
+				if len(annotations) != 0 {
+					t.Fatalf("annotations = %#v, want none", annotations)
+				}
+				return
+			}
+			wantArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", "buildkite-gha-job-summary", "--style", "info"}
+			if len(annotations) != 1 || !slices.Equal(annotations[0].args, wantArgs) || string(annotations[0].stdin) != "### Job summary\n\nPassed.\n" {
+				t.Fatalf("annotations = %#v", annotations)
+			}
+			if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
+				t.Fatalf("last command = %#v, want annotation after authoritative publication", last)
+			}
+			if gotWarning := strings.Contains(stderr.String(), "warning: job summary annotation"); gotWarning != test.wantWarning {
+				t.Fatalf("stderr = %q, warning present = %v, want %v", stderr.String(), gotWarning, test.wantWarning)
+			}
+			if runner.contextErrors[len(runner.contextErrors)-1] != nil {
+				t.Fatalf("annotation inherited cancelled context: %v", runner.contextErrors[len(runner.contextErrors)-1])
+			}
+		})
+	}
+}
+
 func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1010,6 +1074,32 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPublishTerminalResultAnnotatesCancelledJobSummaryWithFreshContext(t *testing.T) {
+	job := cliRunJobPlan()
+	planDigest := transport.Digest([]byte("cancelled-plan"))
+	producer := transport.Producer{BuildID: cliTestBuildID, JobID: cliTestJobID, StepKey: job.Target.StepKey}
+	runner := &cliCaptureRunner{}
+
+	publication, err := publishTerminalResult(
+		transport.Agent{Runner: runner},
+		t.TempDir(),
+		job,
+		planDigest,
+		producer,
+		gharuntime.JobResult{Conclusion: "cancelled", Summary: "summary before cancellation\n"},
+	)
+	if err != nil || publication.SummaryAnnotationError != nil {
+		t.Fatalf("publishTerminalResult() publication = %#v, error = %v", publication, err)
+	}
+	last := runner.commands[len(runner.commands)-1]
+	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != "summary before cancellation\n" {
+		t.Fatalf("last command = %#v, want cancelled job summary annotation", last)
+	}
+	if runner.contextErrors[len(runner.contextErrors)-1] != nil {
+		t.Fatalf("annotation inherited cancelled context: %v", runner.contextErrors[len(runner.contextErrors)-1])
 	}
 }
 
@@ -1088,6 +1178,7 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 
 func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 	job := cliRunJobPlan()
+	job.Steps[0].Command = `printf 'summary from malformed result\n' >> "$GITHUB_STEP_SUMMARY"`
 	job.Outputs = make(map[string]string, transport.MaxResultOutputs+1)
 	for i := 0; i <= transport.MaxResultOutputs; i++ {
 		job.Outputs[fmt.Sprintf("output_%02d", i)] = "value"
@@ -1102,6 +1193,10 @@ func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 	manifest := publishedCLIManifest(t, runner, job, planDigest)
 	if manifest.Result != "failure" || len(manifest.Outputs) != 0 {
 		t.Fatalf("published result = %#v, want bounded failure without outputs", manifest)
+	}
+	last := runner.commands[len(runner.commands)-1]
+	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != "summary from malformed result\n" {
+		t.Fatalf("last command = %#v, want summary annotation after bounded failure", last)
 	}
 }
 

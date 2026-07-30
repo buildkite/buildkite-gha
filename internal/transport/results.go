@@ -24,12 +24,13 @@ type NeedResult struct {
 	Producers []Producer
 }
 
-// Publication records the authoritative artifact and any non-fatal metadata
-// mirror failure. Consumers never use the mirror to make runtime decisions.
+// Publication records the authoritative artifact and non-fatal visibility
+// failures. Consumers never use metadata or annotations as runtime authority.
 type Publication struct {
-	Path                string
-	ManifestDigest      string
-	MetadataMirrorError error
+	Path                   string
+	ManifestDigest         string
+	MetadataMirrorError    error
+	SummaryAnnotationError error
 }
 
 // SearchArtifactProducer resolves exactly one artifact owner under the
