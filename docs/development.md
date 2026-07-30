@@ -93,6 +93,21 @@ phase selector only for targeted diagnosis:
 | Hosted Docker prerequisites | `PHASE5_PROBE=capabilities`, `PHASE5_COMMIT=<commit>` |
 | Dockerfile action path | `PHASE5_PROBE=docker-action`, `PHASE5_COMMIT=<commit>` |
 | Complete container runtime | `PHASE5_PROBE=runtime`, `PHASE5_COMMIT=<commit>` |
+| Job summary annotation | `PHASE6_PROBE=summary`, `PHASE6_COMMIT=<commit>` |
+
+Summary annotation publication is advisory, so the generated job's successful
+outcome does not by itself prove that Buildkite persisted the annotation. After
+the targeted or aggregate build settles, use an authenticated `bk` CLI with
+`read_builds` access to verify the job-scoped annotation independently:
+
+```sh
+scripts/phase-6-summary-annotation-verify <build-number> <commit>
+```
+
+The verifier reads only the generated job and its annotations. It requires
+the build to match the expected exact commit and exactly one `info` annotation
+with context `buildkite-gha-job-summary`, job scope, and both checked-in summary
+fragments.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact

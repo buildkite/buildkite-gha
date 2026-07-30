@@ -1288,6 +1288,13 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `docker://`, Docker lifecycle overrides, private registries, arbitrary
   options, credentials, protected capabilities, and privileged queues continue
   to fail closed.
+- Phase 6 has begun with bounded job summaries and advisory job-scoped
+  Buildkite annotation publication. The checked-in exact-commit hosted proof
+  compiles `testdata/phase6/.github/workflows/summary-annotation.yml`, settles
+  the generated job through the existing importer/continuation topology, and
+  requires an independent read-only API observation of its context, scope,
+  style, and body. Build 242 and its API observation now establish that runtime
+  evidence, so the smoke inventory records the fixture as `runtime-pass`.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1344,11 +1351,12 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
-  container-runtime proofs. The dispatcher deliberately uploads each existing
-  importer and continuation independently, then settles their generated and
-  native terminal steps; it does not flatten the importer/continuation topology.
-  Existing `PHASE2_PROBE`, `PHASE3_PROBE`, `PHASE4_PROBE`, and all three
-  `PHASE5_PROBE` selectors remain available for targeted runs.
+  container-runtime proofs, plus the Phase 6 job-summary annotation proof. The
+  dispatcher deliberately uploads each existing importer and continuation
+  independently, then settles their generated and native terminal steps; it
+  does not flatten the importer/continuation topology. Existing `PHASE2_PROBE`,
+  `PHASE3_PROBE`, `PHASE4_PROBE`, all three `PHASE5_PROBE`, and `PHASE6_PROBE`
+  selectors remain available for targeted runs.
 
 Phase 4 live evidence:
 
@@ -1406,6 +1414,18 @@ Phase 5 evidence:
   deterministic conformance tests. Build 53 documented the reason for the
   split by failing the credential-scrubbed anonymous fetch of this private
   repository; no private credential was added or forwarded.
+
+Phase 6 evidence:
+
+- [Buildkite build 242](https://buildkite.com/buildkite/buildkite-gha/builds/242)
+  ran exact implementation commit
+  `fad3b797fc682e7c0a56c5c8c35392e526ef26ca`. The exact-commit importer
+  compiled and uploaded the checked-in Phase 6 summary fixture, and generated
+  job `019fb552-eb6b-43db-b084-7ed041c10db5` passed.
+- The independent read-only API verifier found exactly one annotation on that
+  job with context `buildkite-gha-job-summary`, job scope, `info` style, and
+  both checked-in body fragments. This API observation is required evidence
+  because annotation failure remains advisory and cannot change job outcome.
 
 Phase 2 live evidence:
 

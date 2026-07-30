@@ -19,8 +19,9 @@ workflow is executable:
    payload in both consumer matrix instances.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
-these workflows and the related Phase 4 and Phase 5 fixtures. Every entry names
-its deterministic compile event and records the separate runtime evidence.
+these workflows and the related Phase 4, Phase 5, and Phase 6 fixtures. Every
+entry names its deterministic compile event and records the separate runtime
+evidence.
 
 Expectations have these precise meanings:
 

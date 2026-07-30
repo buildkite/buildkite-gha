@@ -65,6 +65,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "phase6-summary-annotation",
+      "workflow": "testdata/phase6/.github/workflows/summary-annotation.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-commit Buildkite build 242 and a read-only API observation proved the persisted job-scoped summary annotation contract.",
+      "note": "The verifier bound build 242, implementation commit fad3b797fc682e7c0a56c5c8c35392e526ef26ca, and generated job 019fb552-eb6b-43db-b084-7ed041c10db5.",
+      "action_preflight": "none"
+    },
+    {
       "id": "unsupported-cache-service",
       "workflow": "testdata/unsupported/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",
