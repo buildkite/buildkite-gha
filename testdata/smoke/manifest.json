@@ -68,9 +68,9 @@
       "id": "phase6-summary-annotation",
       "workflow": "testdata/phase6/.github/workflows/summary-annotation.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "Summary aggregation and annotation invocation have local coverage; the exact-commit hosted API observation is pending.",
-      "note": "The hosted proof requires an independent read of the generated job annotation because publication is advisory.",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-commit Buildkite build 242 and a read-only API observation proved the persisted job-scoped summary annotation contract.",
+      "note": "The verifier bound build 242, implementation commit fad3b797fc682e7c0a56c5c8c35392e526ef26ca, and generated job 019fb552-eb6b-43db-b084-7ed041c10db5.",
       "action_preflight": "none"
     },
     {
