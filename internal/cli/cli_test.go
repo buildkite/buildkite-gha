@@ -677,21 +677,50 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
-	for repository, service := range map[string]string{
-		"actions/upload-artifact":   "artifact",
-		"actions/download-artifact": "artifact",
-		"actions/cache":             "cache",
-	} {
-		t.Run(repository, func(t *testing.T) {
+	tests := []struct {
+		action  plan.ActionLock
+		service string
+	}{
+		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}, "artifact"},
+		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, "artifact"},
+		{plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}, "artifact"},
+		{plan.ActionLock{Source: "github", Repository: "actions/cache"}, "cache"},
+		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore"}, "cache"},
+		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "save"}, "cache"},
+	}
+	for _, test := range tests {
+		name := test.action.Repository
+		if test.action.Path != "" {
+			name += "/" + test.action.Path
+		}
+		t.Run(name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 				Workflow: plan.Workflow{LogicalJobID: "service-action"},
-				Actions:  []plan.ActionLock{{Source: "github", Repository: repository}},
+				Actions:  []plan.ActionLock{test.action},
 			}}}}
 			err := validateUnprivilegedBundle(bundle)
-			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+service+" service") || !strings.Contains(err.Error(), "Phase 6") {
-				t.Fatalf("validateUnprivilegedBundle(%q) error = %v", repository, err)
+			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+test.service+" service") || !strings.Contains(err.Error(), "Phase 6") {
+				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadDoesNotBroadenKnownServiceActionIdentity(t *testing.T) {
+	for _, action := range []plan.ActionLock{
+		{Source: "workspace", Repository: "actions/cache"},
+		{Source: "github", Repository: "actions/cache", Path: "nested"},
+		{Source: "github", Repository: "actions/upload-artifact", Path: "nested"},
+		{Source: "github", Repository: "actions/download-artifact", Path: "nested"},
+		{Source: "github", Repository: "owner/action"},
+	} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "ordinary-action"},
+			Actions:  []plan.ActionLock{action},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err != nil {
+			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+		}
 	}
 }
 

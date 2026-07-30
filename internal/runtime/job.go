@@ -725,7 +725,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		// The checkout adapter replaces the verified action's JavaScript
 		// lifecycle as one indivisible operation. Do not register upstream
 		// checkout cleanup for a main phase that this runtime never executes.
-		if lock.Source == "github" && lock.Repository == "actions/checkout" && lock.Path == "" {
+		if usesCheckoutAdapter(lock) {
 			return result, nil
 		}
 		runPre, err := evaluateLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
@@ -881,7 +881,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		action, actionLock = resolvedAction, &lock
-		if lock.Source == "github" && lock.Repository == "actions/checkout" && lock.Path == "" {
+		if usesCheckoutAdapter(lock) {
 			inputs, err := evaluateMap(step.With, eval)
 			if err != nil {
 				return result, err

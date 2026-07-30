@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -52,6 +53,11 @@ func newActionLockResolver(job plan.Job, workspace string, materializer ActionMa
 		r.locks[lock.ID] = &actionLockEntry{lock: lock}
 	}
 	return r
+}
+
+func usesCheckoutAdapter(lock plan.ActionLock) bool {
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
 func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {

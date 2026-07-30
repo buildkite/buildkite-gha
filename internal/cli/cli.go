@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
@@ -718,18 +719,9 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, action := range artifact.Job.Actions {
-			if action.Source != "github" {
-				continue
-			}
-			var service string
-			switch strings.ToLower(action.Repository) {
-			case "actions/upload-artifact", "actions/download-artifact":
-				service = "artifact"
-			case "actions/cache":
-				service = "cache"
-			}
-			if service != "" {
-				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, service)
+			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
+			if descriptor.Service != "" {
+				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service)
 			}
 		}
 	}
