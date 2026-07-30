@@ -65,6 +65,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "phase6-summary-annotation",
+      "workflow": "testdata/phase6/.github/workflows/summary-annotation.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Summary aggregation and annotation invocation have local coverage; the exact-commit hosted API observation is pending.",
+      "note": "The hosted proof requires an independent read of the generated job annotation because publication is advisory.",
+      "action_preflight": "none"
+    },
+    {
       "id": "unsupported-cache-service",
       "workflow": "testdata/unsupported/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",

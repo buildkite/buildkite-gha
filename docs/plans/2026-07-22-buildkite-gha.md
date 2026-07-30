@@ -1288,6 +1288,13 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `docker://`, Docker lifecycle overrides, private registries, arbitrary
   options, credentials, protected capabilities, and privileged queues continue
   to fail closed.
+- Phase 6 has begun with bounded job summaries and advisory job-scoped
+  Buildkite annotation publication. The checked-in exact-commit hosted proof
+  compiles `testdata/phase6/.github/workflows/summary-annotation.yml`, settles
+  the generated job through the existing importer/continuation topology, and
+  requires an independent read-only API observation of its context, scope,
+  style, and body. Until that observation is recorded, the smoke inventory
+  retains the fixture as `compile-pass` rather than runtime evidence.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
