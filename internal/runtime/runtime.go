@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 )
@@ -28,6 +29,10 @@ const (
 	defaultInterruptGrace = 7500 * time.Millisecond
 	defaultTerminateGrace = 2500 * time.Millisecond
 	maxStreamLineBytes    = 1024 * 1024
+	// Match Buildkite's maximum annotation body size.
+	maxJobSummaryBytes = 1024 * 1024
+
+	jobSummaryTruncationNotice = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -96,8 +101,53 @@ type Result struct {
 	Summary string
 	Paths   []string
 
-	pathBase    string
-	pathBaseSet bool
+	pathBase         string
+	pathBaseSet      bool
+	summaryTruncated bool
+}
+
+// appendJobSummary is the only summary aggregation path. It preserves a
+// deterministic UTF-8 prefix and reserves room for a final truncation notice.
+func appendJobSummary(summary *string, truncated *bool, next string, nextTruncated bool) {
+	if *truncated || (next == "" && !nextTruncated) {
+		return
+	}
+	if !nextTruncated && len(*summary) <= maxJobSummaryBytes && len(next) <= maxJobSummaryBytes-len(*summary) {
+		*summary += next
+		return
+	}
+
+	prefixLimit := maxJobSummaryBytes - len(jobSummaryTruncationNotice)
+	if len(*summary) > prefixLimit {
+		*summary = utf8Prefix(*summary, prefixLimit)
+	} else {
+		*summary += utf8Prefix(next, prefixLimit-len(*summary))
+	}
+	*truncated = true
+}
+
+func utf8Prefix(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
+	return value[:limit]
+}
+
+func finalizeJobSummary(summary string, truncated bool) string {
+	if truncated {
+		return summary + jobSummaryTruncationNotice
+	}
+	return summary
+}
+
+func boundJobSummary(summary string, truncated bool) (string, bool) {
+	var bounded string
+	var boundedTruncated bool
+	appendJobSummary(&bounded, &boundedTruncated, summary, truncated)
+	return bounded, boundedTruncated
 }
 
 // RunDocker builds and executes an explicitly resolved local Docker action.
@@ -323,7 +373,8 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	if runErr != nil {
 		runErr = fmt.Errorf("run Docker action %q: %w", action.Name, runErr)
 	}
-	_, fileErr := files.apply(&result, nil)
+	effects, fileErr := files.apply(&result, nil)
+	effects.reportSummaryUploadFailure(processor)
 	if fileErr != nil {
 		fileErr = fmt.Errorf("process Docker action %q file commands: %w", action.Name, fileErr)
 	}
@@ -523,6 +574,7 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		runErr = r.runStreaming(ctx, processor, dir, env, name, args...)
 	}
 	effects, fileErr := files.apply(result, state)
+	effects.reportSummaryUploadFailure(processor)
 	if fileErr == nil && (effects.pathSet || len(effects.paths) > 0) {
 		pathEnv := map[string]string{"PATH": env["PATH"]}
 		if effects.pathSet {
@@ -532,6 +584,13 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		result.Env["PATH"] = pathEnv["PATH"]
 	}
 	return errors.Join(runErr, fileErr)
+}
+
+func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandProcessor) {
+	if effects.summaryBytes <= maxCommandFileBytes {
+		return
+	}
+	processor.process(processor.stderr, fmt.Sprintf("GITHUB_STEP_SUMMARY upload skipped: content is %d bytes; maximum is %d bytes", effects.summaryBytes, maxCommandFileBytes))
 }
 
 func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {

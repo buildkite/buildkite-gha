@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -1098,6 +1099,62 @@ test "${{ steps.two.outputs.value }}" = output-two`},
 	}
 }
 
+func TestBackgroundSummariesAreBoundedInCommitOrder(t *testing.T) {
+	supervisor := newBackgroundSupervisor(2)
+	releaseFirst := make(chan struct{})
+	completionOrder := make(chan string, 2)
+	first := plan.Step{ID: "first"}
+	second := plan.Step{ID: "second"}
+	summaryBytes := maxJobSummaryBytes * 3 / 4
+
+	supervisor.start(context.Background(), first.ID,
+		func(context.Context) stepExecution {
+			<-releaseFirst
+			completionOrder <- first.ID
+			result := newResult()
+			result.Summary = strings.Repeat("a", summaryBytes)
+			return classifyStepExecution(context.Background(), context.Background(), first, result, nil)
+		},
+		func(ctx context.Context) stepExecution {
+			return cancelledStepExecution(context.Background(), ctx, first)
+		},
+	)
+	supervisor.start(context.Background(), second.ID,
+		func(context.Context) stepExecution {
+			completionOrder <- second.ID
+			close(releaseFirst)
+			result := newResult()
+			result.Summary = strings.Repeat("b", summaryBytes)
+			return classifyStepExecution(context.Background(), context.Background(), second, result, nil)
+		},
+		func(ctx context.Context) stepExecution {
+			return cancelledStepExecution(context.Background(), ctx, second)
+		},
+	)
+
+	jobResult := JobResult{Env: map[string]string{}, State: map[string]string{}}
+	eval := expression.Context{Steps: map[string]map[string]string{}}
+	statuses := map[string]expression.StepStatus{}
+	for _, execution := range supervisor.waitAll() {
+		if err := commitStepExecution(execution, &jobResult, &eval, statuses); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobResult.Summary = finalizeJobSummary(jobResult.Summary, jobResult.summaryTruncated)
+
+	if got := []string{<-completionOrder, <-completionOrder}; !slices.Equal(got, []string{second.ID, first.ID}) {
+		t.Fatalf("completion order = %v, want second then first", got)
+	}
+	if len(jobResult.Summary) > maxJobSummaryBytes || !strings.HasSuffix(jobResult.Summary, jobSummaryTruncationNotice) {
+		t.Fatalf("summary bytes = %d, suffix present = %v", len(jobResult.Summary), strings.HasSuffix(jobResult.Summary, jobSummaryTruncationNotice))
+	}
+	prefix := strings.TrimSuffix(jobResult.Summary, jobSummaryTruncationNotice)
+	wantPrefix := strings.Repeat("a", summaryBytes) + strings.Repeat("b", len(prefix)-summaryBytes)
+	if prefix != wantPrefix {
+		t.Fatalf("summary did not preserve commit order")
+	}
+}
+
 func TestConcurrentPathEffectsComposeWithLiveBarrierState(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -1730,6 +1787,69 @@ func TestJavaScriptPreMainPostFilesAndMasking(t *testing.T) {
 	}
 }
 
+func TestPostActionSummaryOverflowIsTruncatedWithoutFailingJob(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/summary/action.yml", `name: Summary writer
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+`)
+	writeFixtureFile(t, workspace, ".github/actions/summary/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/summary/post.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+  echo v24.0.0
+  exit 0
+fi
+case "${1##*/}" in
+  main.js) head -c "$MAIN_SUMMARY_BYTES" /dev/zero | tr '\000' m >> "$GITHUB_STEP_SUMMARY" ;;
+  post.js) printf 'post-summary-must-be-truncated\n' >> "$GITHUB_STEP_SUMMARY" ;;
+esac
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "summary", Kind: "uses", Uses: "./.github/actions/summary"}})
+	job.Env = map[string]string{"MAIN_SUMMARY_BYTES": strconv.Itoa(maxJobSummaryBytes)}
+
+	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if len(result.Summary) > maxJobSummaryBytes || strings.Contains(result.Summary, "post-summary-must-be-truncated") || !strings.HasSuffix(result.Summary, jobSummaryTruncationNotice) {
+		t.Fatalf("RunJob() summary bytes = %d, suffix present = %v", len(result.Summary), strings.HasSuffix(result.Summary, jobSummaryTruncationNotice))
+	}
+}
+
+func TestOversizedStepSummaryIsNonFatalAndDiscarded(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "oversized", Kind: "run", Shell: "sh", Command: `
+printf 'SUMMARY_EFFECT=preserved\n' >> "$GITHUB_ENV"
+head -c "$SUMMARY_BYTES" /dev/zero | tr '\000' x >> "$GITHUB_STEP_SUMMARY"`},
+		{ID: "after", Kind: "run", Shell: "sh", Command: `
+test "$SUMMARY_EFFECT" = preserved
+printf 'retained summary\n' >> "$GITHUB_STEP_SUMMARY"`},
+	})
+	job.Env = map[string]string{"SUMMARY_BYTES": strconv.Itoa(maxCommandFileBytes + 1)}
+	var logs bytes.Buffer
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Env["SUMMARY_EFFECT"] != "preserved" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if result.Summary != "retained summary\n" || !strings.Contains(logs.String(), "GITHUB_STEP_SUMMARY upload skipped") {
+		t.Fatalf("RunJob() summary = %q, logs = %q", result.Summary, logs.String())
+	}
+}
+
 func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	node := requireNode24(t)
 	var logs bytes.Buffer
@@ -2022,8 +2142,24 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	result = newResult()
-	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "summary exceeds") {
-		t.Fatalf("apply() error = %v, want summary size limit", err)
+	effects, err := files.apply(&result, nil)
+	if err != nil || result.Summary != "" || effects.summaryBytes != maxCommandFileBytes+1 {
+		t.Fatalf("oversized summary result = %#v, effects = %#v, error = %v", result, effects, err)
+	}
+
+	if err := os.WriteFile(files.summary, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files.output, bytes.Repeat([]byte("x"), maxCommandFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = newResult()
+	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "output exceeds") {
+		t.Fatalf("apply() error = %v, want output size limit", err)
+	}
+
+	if err := os.WriteFile(files.output, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	for _, path := range []string{files.output, files.env, files.state} {
@@ -2037,6 +2173,57 @@ func TestFileCommandAggregateLimits(t *testing.T) {
 	result = newResult()
 	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "aggregate limit") {
 		t.Fatalf("apply() error = %v, want aggregate size limit", err)
+	}
+}
+
+func TestJobSummaryTruncationPreservesUTF8(t *testing.T) {
+	var summary string
+	var truncated bool
+	prefixBytes := maxJobSummaryBytes - 1
+	appendJobSummary(&summary, &truncated, strings.Repeat("a", prefixBytes), false)
+	appendJobSummary(&summary, &truncated, "€ and omitted text", false)
+	summary = finalizeJobSummary(summary, truncated)
+
+	if !truncated || len(summary) > maxJobSummaryBytes || !utf8.ValidString(summary) {
+		t.Fatalf("summary truncated = %v, bytes = %d, valid UTF-8 = %v", truncated, len(summary), utf8.ValidString(summary))
+	}
+	if strings.Contains(summary, "€") || !strings.HasSuffix(summary, jobSummaryTruncationNotice) {
+		t.Fatalf("summary split a UTF-8 rune or omitted its truncation notice")
+	}
+}
+
+func TestJobSummaryRemainsBoundedAfterSecretScrubbing(t *testing.T) {
+	secret := "xx"
+	result := JobResult{Summary: strings.Repeat(secret, maxJobSummaryBytes/len(secret))}
+	result = scrubJobResult(result, []string{secret})
+
+	if len(result.Summary) > maxJobSummaryBytes || !utf8.ValidString(result.Summary) {
+		t.Fatalf("scrubbed summary bytes = %d, valid UTF-8 = %v", len(result.Summary), utf8.ValidString(result.Summary))
+	}
+	if strings.Contains(result.Summary, secret) || !strings.HasSuffix(result.Summary, jobSummaryTruncationNotice) {
+		t.Fatalf("scrubbed summary leaked the secret or omitted its truncation notice")
+	}
+}
+
+func TestTruncatedJobSummaryDoesNotExposePartialSecret(t *testing.T) {
+	secret := "partial-secret-token"
+	prefixBytes := maxJobSummaryBytes - len(jobSummaryTruncationNotice)
+	visibleSecretBytes := len(secret) / 2
+	contents := strings.Repeat("a", prefixBytes-visibleSecretBytes) + secret + strings.Repeat("z", len(jobSummaryTruncationNotice))
+	result := JobResult{}
+	appendJobSummary(&result.Summary, &result.summaryTruncated, contents, false)
+
+	result = scrubJobResult(result, []string{secret})
+	if strings.Contains(result.Summary, secret[:visibleSecretBytes]) || !strings.HasSuffix(result.Summary, jobSummaryTruncationNotice) {
+		t.Fatalf("truncated summary retained a partial secret suffix")
+	}
+}
+
+func TestJobSummarySecretScrubbingIsOrderIndependent(t *testing.T) {
+	first := scrubJobResult(JobResult{Summary: "overlapping-secret"}, []string{"overlapping", "overlapping-secret"})
+	second := scrubJobResult(JobResult{Summary: "overlapping-secret"}, []string{"overlapping-secret", "overlapping"})
+	if first.Summary != "***" || second.Summary != first.Summary {
+		t.Fatalf("scrubbed summaries = %q and %q, want deterministic longest match", first.Summary, second.Summary)
 	}
 }
 

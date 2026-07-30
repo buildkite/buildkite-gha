@@ -27,9 +27,10 @@ type commandFiles struct {
 }
 
 type fileCommandEffects struct {
-	paths    []string
-	pathBase string
-	pathSet  bool
+	paths        []string
+	pathBase     string
+	pathSet      bool
+	summaryBytes int64
 }
 
 func newCommandFiles() (commandFiles, error) {
@@ -97,27 +98,33 @@ func (files commandFiles) cleanup() error {
 }
 
 func (files commandFiles) apply(result *Result, state map[string]string) (fileCommandEffects, error) {
-	if err := files.checkSizeBudget(); err != nil {
+	summaryBytes, err := files.checkSizeBudget()
+	if err != nil {
 		return fileCommandEffects{}, err
 	}
+	effects := fileCommandEffects{summaryBytes: summaryBytes}
 	outputs, outputErr := files.parseCommandFile(files.output)
 	env, envErr := files.parseCommandFile(files.env)
 	states, stateErr := files.parseCommandFile(files.state)
-	summary, summaryErr := files.readBoundedFile(files.summary, maxCommandFileBytes)
+	var summary []byte
+	var summaryErr error
+	if summaryBytes <= maxCommandFileBytes {
+		summary, summaryErr = files.readBoundedFile(files.summary, maxCommandFileBytes)
+	}
 	paths, pathErr := files.parsePathFile(files.path)
 	if outputErr != nil || envErr != nil || stateErr != nil || summaryErr != nil || pathErr != nil {
-		return fileCommandEffects{}, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
+		return effects, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
 	for name := range env {
 		if strings.EqualFold(name, "NODE_OPTIONS") {
-			return fileCommandEffects{}, errors.New("GITHUB_ENV may not set NODE_OPTIONS")
+			return effects, errors.New("GITHUB_ENV may not set NODE_OPTIONS")
 		}
 		upper := strings.ToUpper(name)
 		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
-			return fileCommandEffects{}, fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
+			return effects, fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
 		}
 	}
-	effects := fileCommandEffects{paths: paths}
+	effects.paths = paths
 	if pathBase, ok := env["PATH"]; ok {
 		effects.pathBase = pathBase
 		effects.pathSet = true
@@ -137,31 +144,38 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 			state[name] = value
 		}
 	}
-	result.Summary += string(summary)
+	appendJobSummary(&result.Summary, &result.summaryTruncated, string(summary), false)
 	result.Paths = append(result.Paths, paths...)
 	return effects, nil
 }
 
-func (files commandFiles) checkSizeBudget() error {
+func (files commandFiles) checkSizeBudget() (int64, error) {
 	var total int64
+	var summaryBytes int64
 	for _, path := range []string{files.output, files.env, files.state, files.summary, files.path} {
 		file, err := files.retained(path)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		info, err := file.Stat()
 		if err != nil {
-			return fmt.Errorf("stat file command %s: %w", filepath.Base(path), err)
+			return 0, fmt.Errorf("stat file command %s: %w", filepath.Base(path), err)
+		}
+		if path == files.summary {
+			summaryBytes = info.Size()
+			if summaryBytes > maxCommandFileBytes {
+				continue
+			}
 		}
 		if info.Size() > maxCommandFileBytes {
-			return fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), maxCommandFileBytes)
+			return 0, fmt.Errorf("file command %s exceeds the %d-byte limit", filepath.Base(path), maxCommandFileBytes)
 		}
 		total += info.Size()
 	}
 	if total > maxCommandFilesBytes {
-		return fmt.Errorf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
+		return 0, fmt.Errorf("file commands exceed the %d-byte aggregate limit", maxCommandFilesBytes)
 	}
-	return nil
+	return summaryBytes, nil
 }
 
 func (files commandFiles) parseCommandFile(path string) (map[string]string, error) {
