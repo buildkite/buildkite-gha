@@ -196,7 +196,7 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	commitResultEnvironment(jobResult.Env, execution.result)
 	eval.Env = jobResult.Env
 	mergeInto(jobResult.State, execution.result.State)
-	jobResult.Summary += execution.result.Summary
+	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	statuses[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)

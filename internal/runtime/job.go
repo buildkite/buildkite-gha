@@ -27,6 +27,8 @@ type JobResult struct {
 	Env        map[string]string `json:"env,omitempty"`
 	State      map[string]string `json:"state,omitempty"`
 	Summary    string            `json:"summary,omitempty"`
+
+	summaryTruncated bool
 }
 
 const maxJobOutputBytes = 1024
@@ -309,7 +311,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
-			jobResult.Summary += preResult.Summary
+			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
 			if preErr != nil {
 				preStatus.unsuccessful = true
@@ -413,7 +415,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
-		jobResult.Summary += postResult.Summary
+		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
 		if postErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q: %w", post.action.Name, postErr))
 		}
@@ -445,6 +447,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 }
 
 func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
+	sort.Slice(sensitiveValues, func(i, j int) bool {
+		if len(sensitiveValues[i]) != len(sensitiveValues[j]) {
+			return len(sensitiveValues[i]) > len(sensitiveValues[j])
+		}
+		return sensitiveValues[i] < sensitiveValues[j]
+	})
 	scrub := func(value string) string {
 		for _, sensitive := range sensitiveValues {
 			if sensitive != "" {
@@ -462,8 +470,40 @@ func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
 	for name, value := range result.State {
 		result.State[name] = scrub(value)
 	}
-	result.Summary = scrub(result.Summary)
+	summary, summaryTruncated := result.Summary, result.summaryTruncated
+	for _, sensitive := range sensitiveValues {
+		if sensitive != "" {
+			summary = strings.ReplaceAll(summary, sensitive, "***")
+			summary, summaryTruncated = boundJobSummary(summary, summaryTruncated)
+		}
+	}
+	result.Summary, result.summaryTruncated = boundJobSummary(summary, summaryTruncated)
+	if result.summaryTruncated {
+		result.Summary = trimSensitiveSummarySuffix(result.Summary, sensitiveValues)
+	}
+	result.Summary = finalizeJobSummary(result.Summary, result.summaryTruncated)
 	return result
+}
+
+func trimSensitiveSummarySuffix(summary string, sensitiveValues []string) string {
+	for {
+		trimmed := false
+		for _, sensitive := range sensitiveValues {
+			for prefixBytes := min(len(sensitive)-1, len(summary)); prefixBytes > 0; prefixBytes-- {
+				if strings.HasSuffix(summary, sensitive[:prefixBytes]) {
+					summary = summary[:len(summary)-prefixBytes]
+					trimmed = true
+					break
+				}
+			}
+			if trimmed {
+				break
+			}
+		}
+		if !trimmed {
+			return summary
+		}
+	}
 }
 
 func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor, names []string) (map[string]string, error) {
@@ -811,7 +851,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			}
 			result.Paths = append(result.Paths, childResult.Paths...)
 			mergeInto(result.State, childResult.State)
-			result.Summary += childResult.Summary
+			appendJobSummary(&result.Summary, &result.summaryTruncated, childResult.Summary, childResult.summaryTruncated)
 			if childErr != nil {
 				status.unsuccessful = true
 				err = errors.Join(err, fmt.Errorf("composite action step %d: %w", i+1, childErr))
@@ -1100,7 +1140,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		}
 		result.Paths = append(result.Paths, stepResult.Paths...)
 		mergeInto(result.State, stepResult.State)
-		result.Summary += stepResult.Summary
+		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
 		if id != "" {
 			eval.Steps[id] = stepResult.Outputs
 			outcome := "success"
