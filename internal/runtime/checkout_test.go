@@ -144,36 +144,15 @@ esac
 
 func TestTokenlessCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
-	for name, inputs := range map[string]map[string]string{
-		"token":                {"token": ""},
-		"foreign repository":   {"repository": "other/repository"},
-		"foreign ref":          {"ref": strings.Repeat("b", 40)},
-		"submodules":           {"submodules": "true"},
-		"path":                 {"path": "nested"},
-		"persist credentials":  {"persist-credentials": "true"},
-		"case-colliding names": {"Repository": repository, "repository": repository},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := validateCheckoutRuntimeInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "Phase 6") {
-				t.Fatalf("validateCheckoutRuntimeInputs() error = %v", err)
-			}
-		})
-	}
-	for _, inputs := range []map[string]string{
-		nil,
-		{"repository": "BUILDKITE/BUILDKITE-GHA", "ref": sha, "fetch-depth": "1", "persist-credentials": "false", "clean": "true", "set-safe-directory": "true"},
-	} {
-		if err := validateCheckoutRuntimeInputs(inputs, repository, sha); err != nil {
-			t.Fatalf("validateCheckoutRuntimeInputs(%#v) = %v", inputs, err)
-		}
-	}
-
 	processor := newCommandProcessor(io.Discard, io.Discard)
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "Phase 6") {
+		t.Fatalf("runCheckout() unsupported input error = %v", err)
+	}
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
 	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
 		t.Fatalf("nonempty workspace error = %v", err)
 	}

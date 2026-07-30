@@ -695,6 +695,22 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 	}
 }
 
+func TestUnprivilegedUploadDoesNotBroadenKnownServiceActionIdentity(t *testing.T) {
+	for _, action := range []plan.ActionLock{
+		{Source: "workspace", Repository: "actions/cache"},
+		{Source: "github", Repository: "actions/cache", Path: "nested"},
+		{Source: "github", Repository: "owner/action"},
+	} {
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "ordinary-action"},
+			Actions:  []plan.ActionLock{action},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err != nil {
+			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+		}
+	}
+}
+
 func TestBundleUsesActionsDetectsStepsAndLocks(t *testing.T) {
 	for _, job := range []plan.Job{
 		{Steps: []plan.Step{{Kind: "uses"}}},

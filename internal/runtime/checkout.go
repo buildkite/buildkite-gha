@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -20,8 +21,8 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if job.Event.Provider != "github" || !checkoutRepositoryPattern.MatchString(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
 		return result, fmt.Errorf("tokenless checkout adapter requires a valid github.com event repository and exact SHA; Phase 6 is required for other events")
 	}
-	if err := validateCheckoutRuntimeInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
-		return result, err
+	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
+		return result, fmt.Errorf("tokenless checkout adapter: %w", err)
 	}
 	entries, err := os.ReadDir(workspace)
 	if err != nil {
@@ -73,40 +74,4 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	result.Outputs["ref"] = job.Event.Ref
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
-}
-
-func validateCheckoutRuntimeInputs(inputs map[string]string, repository, sha string) error {
-	seen := make(map[string]bool, len(inputs))
-	for _, name := range sortedKeys(inputs) {
-		value := inputs[name]
-		normalized := strings.ToLower(name)
-		if seen[normalized] {
-			return fmt.Errorf("tokenless checkout adapter does not support duplicate case-insensitive input %q; Phase 6 is required", name)
-		}
-		seen[normalized] = true
-		switch normalized {
-		case "repository":
-			if strings.EqualFold(value, repository) {
-				continue
-			}
-		case "ref":
-			if value == sha {
-				continue
-			}
-		case "persist-credentials":
-			if value == "false" {
-				continue
-			}
-		case "fetch-depth":
-			if value == "1" {
-				continue
-			}
-		case "clean", "set-safe-directory":
-			if value == "true" {
-				continue
-			}
-		}
-		return fmt.Errorf("tokenless checkout adapter does not support explicit input %q (including empty token); Phase 6 is required", name)
-	}
-	return nil
 }
