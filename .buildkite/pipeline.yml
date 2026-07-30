@@ -76,6 +76,8 @@ steps:
 
   - label: ":go: Repository checks"
     key: "checks"
+    env:
+      BUILDKITE_GHA_LIVE_REQUIRED: "1"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
