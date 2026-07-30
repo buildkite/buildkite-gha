@@ -300,9 +300,10 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			Queue string `yaml:"queue"`
 		} `yaml:"agents"`
 		Steps []struct {
-			Key     string `yaml:"key"`
-			Command string `yaml:"command"`
-			If      string `yaml:"if"`
+			Key     string            `yaml:"key"`
+			Command string            `yaml:"command"`
+			If      string            `yaml:"if"`
+			Env     map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
@@ -318,17 +319,22 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		t.Fatalf("default pipeline = %#v, want nine gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
-		command   string
-		condition string
+		command     string
+		condition   string
+		environment map[string]string
 	}, len(document.Steps))
 	for _, step := range document.Steps {
 		steps[step.Key] = struct {
-			command   string
-			condition string
-		}{step.Command, step.If}
+			command     string
+			condition   string
+			environment map[string]string
+		}{command: step.Command, condition: step.If, environment: step.Env}
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
+	}
+	if got := steps["checks"].environment["BUILDKITE_GHA_LIVE_REQUIRED"]; got != "1" {
+		t.Fatalf("repository checks BUILDKITE_GHA_LIVE_REQUIRED = %q, want required live prerequisites", got)
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)

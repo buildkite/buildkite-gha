@@ -19,6 +19,10 @@ mise run check
 race-enabled tests, runs `go vet`, golangci-lint, and shellcheck, validates the
 signed plan-envelope fixtures, checks deterministic smoke compilation, and
 validates the release configuration. `make check` is a convenience alias.
+The standard and race-enabled suites run serially because their live container
+tests inspect daemon-wide Docker resources. Local runs may skip those tests when
+Docker or managed Node is unavailable; the hosted repository check requires the
+live prerequisites and fails rather than silently losing Phase 5 coverage.
 
 Focused tasks are also available:
 
