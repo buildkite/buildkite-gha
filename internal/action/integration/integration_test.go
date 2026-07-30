@@ -5,18 +5,25 @@ import (
 	"testing"
 )
 
-func TestLookupMatchesCanonicalRootActions(t *testing.T) {
+func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 	tests := []struct {
 		identity Identity
 		want     Descriptor
 	}{
 		{Identity{Source: "github", Repository: "actions/checkout"}, Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
 		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Service: ServiceArtifact}},
+		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Service: ServiceArtifact}},
 	}
 	for _, test := range tests {
-		t.Run(test.identity.Repository, func(t *testing.T) {
+		name := test.identity.Repository
+		if test.identity.Path != "" {
+			name += "/" + test.identity.Path
+		}
+		t.Run(name, func(t *testing.T) {
 			got, ok := Lookup(test.identity)
 			if !ok || got != test.want {
 				t.Fatalf("Lookup(%#v) = %#v, %t, want %#v, true", test.identity, got, ok, test.want)
@@ -31,6 +38,8 @@ func TestLookupDoesNotBroadenCanonicalIdentity(t *testing.T) {
 		{Source: "github", Repository: "Actions/Checkout"},
 		{Source: "github", Repository: "actions/checkout", Path: "nested"},
 		{Source: "github", Repository: "actions/cache", Path: "nested"},
+		{Source: "github", Repository: "actions/upload-artifact", Path: "nested"},
+		{Source: "github", Repository: "actions/download-artifact", Path: "nested"},
 		{Source: "github", Repository: "owner/action"},
 	} {
 		if descriptor, ok := Lookup(identity); ok {

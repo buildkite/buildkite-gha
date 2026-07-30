@@ -43,10 +43,13 @@ type Descriptor struct {
 }
 
 var catalog = map[Identity]Descriptor{
-	{Source: "github", Repository: "actions/checkout"}:          {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:             {Service: ServiceCache},
-	{Source: "github", Repository: "actions/upload-artifact"}:   {Service: ServiceArtifact},
-	{Source: "github", Repository: "actions/download-artifact"}: {Service: ServiceArtifact},
+	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache},
+	{Source: "github", Repository: "actions/upload-artifact"}:                {Service: ServiceArtifact},
+	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
+	{Source: "github", Repository: "actions/download-artifact"}:              {Service: ServiceArtifact},
 }
 
 // Lookup returns the integration for an exact canonical action identity.
