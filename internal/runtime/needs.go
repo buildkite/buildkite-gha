@@ -9,6 +9,8 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
+const jobSummaryAnnotationContext = "buildkite-gha-job-summary"
+
 // ResolveNeeds converts compiler-owned producer identities into the verified
 // logical results and outputs consumed by runtime expression contexts.
 func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID string, sources map[string][]plan.NeedSource) (map[string]plan.Need, error) {
@@ -56,7 +58,22 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 		if publishErr != nil {
 			return publication, errors.Join(fmt.Errorf("validate terminal result: %w", err), fmt.Errorf("publish bounded terminal result: %w", publishErr))
 		}
+		publishJobSummary(ctx, agent, producer.JobID, result.Summary, &publication)
 		return publication, fmt.Errorf("validate terminal result: %w", err)
 	}
-	return transport.PublishResult(ctx, agent, root, workflow, instance, manifest)
+	publication, err := transport.PublishResult(ctx, agent, root, workflow, instance, manifest)
+	if err != nil {
+		return publication, err
+	}
+	publishJobSummary(ctx, agent, producer.JobID, result.Summary, &publication)
+	return publication, nil
+}
+
+func publishJobSummary(ctx context.Context, agent transport.Agent, jobID, summary string, publication *transport.Publication) {
+	if summary == "" {
+		return
+	}
+	if err := agent.AnnotateJob(ctx, jobID, jobSummaryAnnotationContext, "info", summary); err != nil {
+		publication.SummaryAnnotationError = fmt.Errorf("publish job summary: %w", err)
+	}
 }

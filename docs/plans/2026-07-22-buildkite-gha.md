@@ -918,8 +918,10 @@ mask values to `buildkite-agent redactor add` before subsequent output is
 written. A secret printed before it is registered cannot be retroactively
 protected.
 
-Step summaries should become job-scoped Buildkite annotations when supported,
-with a stable context and artifact fallback for oversized content.
+Step summaries become job-scoped Buildkite annotations when supported, with a
+stable context. Oversized per-step summaries are rejected without failing the
+job, matching GitHub Actions, while the aggregate annotation is truncated to
+Buildkite's 1 MiB body limit.
 
 Parallel step logs need explicit step identity. Prefer live prefixed output and
 per-step completion summaries over buffering all output until completion.

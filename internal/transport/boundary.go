@@ -10,6 +10,12 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"unicode/utf8"
+)
+
+const (
+	maxAnnotationBodyBytes         = 1024 * 1024
+	maxAnnotationContextCharacters = 100
 )
 
 // Runner is the only process boundary used by the Buildkite adapter.
@@ -69,6 +75,27 @@ func (a Agent) GetMetadata(ctx context.Context, key string) ([]byte, error) {
 
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {
 	_, err := a.run(ctx, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}, pipeline)
+	return err
+}
+
+// AnnotateJob publishes Markdown through stdin under a job-scoped context.
+// Reusing the context updates the annotation instead of duplicating it.
+func (a Agent) AnnotateJob(ctx context.Context, jobID, annotationContext, style, body string) error {
+	if !uuidPattern.MatchString(jobID) {
+		return fmt.Errorf("invalid annotation job ID %q", jobID)
+	}
+	if !utf8.ValidString(annotationContext) || utf8.RuneCountInString(annotationContext) < 1 || utf8.RuneCountInString(annotationContext) > maxAnnotationContextCharacters {
+		return fmt.Errorf("annotation context must be valid UTF-8 between 1 and %d characters", maxAnnotationContextCharacters)
+	}
+	switch style {
+	case "success", "info", "warning", "error":
+	default:
+		return fmt.Errorf("invalid annotation style %q", style)
+	}
+	if body == "" || len(body) > maxAnnotationBodyBytes || !utf8.ValidString(body) {
+		return fmt.Errorf("annotation body must be valid UTF-8 between 1 and %d bytes", maxAnnotationBodyBytes)
+	}
+	_, err := a.run(ctx, []string{"annotate", "--scope", "job", "--job", jobID, "--context", annotationContext, "--style", style}, []byte(body))
 	return err
 }
 

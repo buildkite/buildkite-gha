@@ -249,6 +249,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
 		}
+		if publication.SummaryAnnotationError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: job summary annotation: %v\n", publication.SummaryAnnotationError)
+		}
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("publish terminal result: %w", err))
 		}
