@@ -2550,6 +2550,19 @@ func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestWorkflowCommandAnnotationScrubbingPreservesUTF8(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	_ = processor.process(io.Discard, "::warning::café")
+	_ = processor.process(io.Discard, "::warning::masked "+string([]byte{0xC3}))
+	_ = processor.process(io.Discard, "::add-mask::"+string([]byte{0xC3}))
+
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, processor.maskValues())
+	if !utf8.ValidString(result.WarningAnnotations) || !strings.Contains(result.WarningAnnotations, "café") || !strings.Contains(result.WarningAnnotations, "masked ***") || strings.Contains(result.WarningAnnotations, "\uFFFD") {
+		t.Fatalf("scrubbed warning annotation = %q, valid UTF-8 = %v", result.WarningAnnotations, utf8.ValidString(result.WarningAnnotations))
+	}
+}
+
 func TestWorkflowCommandAnnotationsRemainBoundedAfterSecretScrubbing(t *testing.T) {
 	secret := "x"
 	result := JobResult{WarningAnnotations: strings.Repeat(secret, maxJobAnnotationBytes)}

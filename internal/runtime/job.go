@@ -493,15 +493,15 @@ func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
 }
 
 func scrubWorkflowCommandAnnotations(value string, truncated bool, sensitiveValues []string) (string, bool) {
-	annotationSensitiveValues := make([]string, 0, len(sensitiveValues)*2)
+	annotationSensitiveValues := make([]string, 0, len(sensitiveValues))
 	for _, sensitive := range sensitiveValues {
 		if sensitive == "" {
 			continue
 		}
-		annotationSensitiveValues = append(annotationSensitiveValues, sensitive)
-		if encoded := commandHTML(sensitive); encoded != sensitive {
-			annotationSensitiveValues = append(annotationSensitiveValues, encoded)
-		}
+		// User-controlled annotation content is rendered through commandHTML.
+		// Scrubbing that same valid UTF-8 representation prevents invalid raw
+		// mask bytes from splitting a rendered multibyte rune.
+		annotationSensitiveValues = append(annotationSensitiveValues, commandHTML(sensitive))
 	}
 	sort.Slice(annotationSensitiveValues, func(i, j int) bool {
 		if len(annotationSensitiveValues[i]) != len(annotationSensitiveValues[j]) {
