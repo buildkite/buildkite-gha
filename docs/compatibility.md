@@ -41,6 +41,7 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. |
 | Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
+| Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Artifact and cache actions | Not supported | They compile but fail profile admission until Buildkite-backed adapters exist. |
@@ -62,6 +63,12 @@ workspace, environment-file updates, action state, and cleanup lifecycle.
 Docker is another execution backend within that job—not a security boundary
 between mutually untrusted steps. Use a disposable job VM when workflow code
 must be isolated from other jobs or the agent host.
+
+Step summaries and workflow-command warnings/errors are visibility-only
+Buildkite annotations. Their publication is attempted after the authoritative
+logical result; an annotation API failure is reported as a warning but does not
+rewrite an otherwise successful job. Successfully parsed warning/error command
+lines are consumed and their decoded messages remain visible in the job log.
 
 ### Concurrent steps stay inside the job
 

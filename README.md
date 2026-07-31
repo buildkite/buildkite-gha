@@ -75,7 +75,8 @@ The plugin path currently supports:
 - static matrices, `needs`, outputs, and local reusable workflows;
 - the currently implemented job and step condition subset;
 - background, wait, cancellation, and parallel step controls;
-- timeouts, `continue-on-error`, masking, and pre/main/post actions; and
+- timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
+  and pre/main/post actions; and
 - public, credential-free checkout of the event repository at its exact commit.
 
 It does **not** currently support:
@@ -85,7 +86,6 @@ It does **not** currently support:
 - `actions/cache`, `actions/upload-artifact`, or `actions/download-artifact`;
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
-- publishing `GITHUB_STEP_SUMMARY` content to the Buildkite UI;
 - job containers or service containers through the production plugin path;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
 - Windows or macOS jobs.

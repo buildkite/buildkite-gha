@@ -908,10 +908,13 @@ Implement the observable Actions contracts for:
 - `::stop-commands`; and
 - supported legacy command behavior and security restrictions.
 
-The Phase 2 shell runtime implements `::add-mask` only. It applies dynamically
-registered masks to subsequent log lines and rejects or scrubs them from the
-bounded job result before transport; annotations, groups, stop-commands, and
-legacy workflow commands remain later compatibility work.
+The runtime implements `::add-mask`, `::stop-commands`, `::warning`, and
+`::error`. It applies dynamically registered masks to subsequent log lines and
+scrubs all registered values from bounded job results before transport.
+Warnings and errors retain supported source metadata and publish as separate
+job-scoped Buildkite annotations without changing conclusions. Notices,
+groups, command echo control, and legacy workflow commands remain later
+compatibility work.
 
 Map warnings and errors to Buildkite log output and annotations. Map dynamic
 mask values to `buildkite-agent redactor add` before subsequent output is
@@ -1295,6 +1298,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
   requires an independent read-only API observation of its context, scope,
   style, and body. Build 242 and its API observation now establish that runtime
   evidence, so the smoke inventory records the fixture as `runtime-pass`.
+  Workflow `::warning` and `::error` commands now use the same bounded,
+  secret-scrubbed advisory publication boundary with separate stable warning
+  and error contexts; they do not change step or job conclusions. Its distinct
+  checked-in hosted fixture remains `compile-pass` until the read-only verifier
+  observes both persisted annotations at an exact commit.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1351,8 +1359,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
-  container-runtime proofs, plus the Phase 6 job-summary annotation proof. The
-  dispatcher deliberately uploads each existing importer and continuation
+  container-runtime proofs, plus the Phase 6 job-summary and workflow-command
+  annotation proofs. The dispatcher deliberately uploads each existing
+  importer and continuation
   independently, then settles their generated and native terminal steps; it
   does not flatten the importer/continuation topology. Existing `PHASE2_PROBE`,
   `PHASE3_PROBE`, `PHASE4_PROBE`, all three `PHASE5_PROBE`, and `PHASE6_PROBE`

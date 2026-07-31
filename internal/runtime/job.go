@@ -22,13 +22,17 @@ import (
 
 // JobResult is the bounded logical result returned to the transport layer.
 type JobResult struct {
-	Conclusion string            `json:"conclusion"`
-	Outputs    map[string]string `json:"outputs,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
-	State      map[string]string `json:"state,omitempty"`
-	Summary    string            `json:"summary,omitempty"`
+	Conclusion         string            `json:"conclusion"`
+	Outputs            map[string]string `json:"outputs,omitempty"`
+	Env                map[string]string `json:"env,omitempty"`
+	State              map[string]string `json:"state,omitempty"`
+	Summary            string            `json:"summary,omitempty"`
+	WarningAnnotations string            `json:"warning_annotations,omitempty"`
+	ErrorAnnotations   string            `json:"error_annotations,omitempty"`
 
-	summaryTruncated bool
+	summaryTruncated  bool
+	warningsTruncated bool
+	errorsTruncated   bool
 }
 
 const maxJobOutputBytes = 1024
@@ -421,6 +425,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 
+	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
 	for _, name := range sortedKeys(job.Outputs) {
 		template := job.Outputs[name]
@@ -479,19 +484,54 @@ func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
 	}
 	result.Summary, result.summaryTruncated = boundJobSummary(summary, summaryTruncated)
 	if result.summaryTruncated {
-		result.Summary = trimSensitiveSummarySuffix(result.Summary, sensitiveValues)
+		result.Summary = trimSensitiveSuffix(result.Summary, sensitiveValues)
 	}
 	result.Summary = finalizeJobSummary(result.Summary, result.summaryTruncated)
+	result.WarningAnnotations, result.warningsTruncated = scrubWorkflowCommandAnnotations(result.WarningAnnotations, result.warningsTruncated, sensitiveValues)
+	result.ErrorAnnotations, result.errorsTruncated = scrubWorkflowCommandAnnotations(result.ErrorAnnotations, result.errorsTruncated, sensitiveValues)
 	return result
 }
 
-func trimSensitiveSummarySuffix(summary string, sensitiveValues []string) string {
+func scrubWorkflowCommandAnnotations(value string, truncated bool, sensitiveValues []string) (string, bool) {
+	annotationSensitiveValues := make([]string, 0, len(sensitiveValues))
+	for _, sensitive := range sensitiveValues {
+		if sensitive == "" {
+			continue
+		}
+		// User-controlled annotation content is rendered through commandHTML.
+		// Scrubbing that same valid UTF-8 representation prevents invalid raw
+		// mask bytes from splitting a rendered multibyte rune.
+		annotationSensitiveValues = append(annotationSensitiveValues, commandHTML(sensitive))
+	}
+	sort.Slice(annotationSensitiveValues, func(i, j int) bool {
+		if len(annotationSensitiveValues[i]) != len(annotationSensitiveValues[j]) {
+			return len(annotationSensitiveValues[i]) > len(annotationSensitiveValues[j])
+		}
+		return annotationSensitiveValues[i] < annotationSensitiveValues[j]
+	})
+	for _, sensitive := range annotationSensitiveValues {
+		value = strings.ReplaceAll(value, sensitive, "***")
+		var bounded string
+		var boundedTruncated bool
+		appendBoundedText(&bounded, &boundedTruncated, value, truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+		value, truncated = bounded, boundedTruncated
+	}
+	var bounded string
+	var boundedTruncated bool
+	appendBoundedText(&bounded, &boundedTruncated, value, truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	if boundedTruncated {
+		bounded = trimSensitiveSuffix(bounded, annotationSensitiveValues) + workflowCommandTruncationNotice
+	}
+	return bounded, boundedTruncated
+}
+
+func trimSensitiveSuffix(value string, sensitiveValues []string) string {
 	for {
 		trimmed := false
 		for _, sensitive := range sensitiveValues {
-			for prefixBytes := min(len(sensitive)-1, len(summary)); prefixBytes > 0; prefixBytes-- {
-				if strings.HasSuffix(summary, sensitive[:prefixBytes]) {
-					summary = summary[:len(summary)-prefixBytes]
+			for prefixBytes := min(len(sensitive)-1, len(value)); prefixBytes > 0; prefixBytes-- {
+				if strings.HasSuffix(value, sensitive[:prefixBytes]) {
+					value = value[:len(value)-prefixBytes]
 					trimmed = true
 					break
 				}
@@ -501,7 +541,7 @@ func trimSensitiveSummarySuffix(summary string, sensitiveValues []string) string
 			}
 		}
 		if !trimmed {
-			return summary
+			return value
 		}
 	}
 }

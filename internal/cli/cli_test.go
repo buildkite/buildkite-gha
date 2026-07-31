@@ -1033,6 +1033,82 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 	}
 }
 
+func TestRunJobPublishesWorkflowCommandsAsAdvisoryJobAnnotations(t *testing.T) {
+	diagnostics := "printf '%s\\n' '::warning title=Lint::warning body'; printf '%s\\n' '::error file=main.go,line=7::error body' >&2"
+	tests := []struct {
+		name           string
+		command        string
+		failAnnotation bool
+		wantAnnotation bool
+		wantWarning    bool
+		wantResult     string
+		wantCode       int
+	}{
+		{name: "published without changing success", command: diagnostics, wantAnnotation: true, wantResult: "success"},
+		{name: "published after job failure", command: diagnostics + "; exit 7", wantAnnotation: true, wantResult: "failure", wantCode: 1},
+		{name: "publication failure is advisory", command: diagnostics, failAnnotation: true, wantAnnotation: true, wantWarning: true, wantResult: "success"},
+		{name: "empty diagnostics are a no-op", command: "true", wantResult: "success"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			job := cliRunJobPlan()
+			job.Steps[0].Command = test.command
+			planPath, planDigest := writeCLIJobPlan(t, job)
+			setCLIJobIdentity(t, job, planDigest)
+			runner := &cliCaptureRunner{failAnnotation: test.failAnnotation}
+			var stdout, stderr bytes.Buffer
+
+			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != test.wantCode {
+				t.Fatalf("run() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
+			}
+			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != test.wantResult {
+				t.Fatalf("published result = %q, want %q", result.Result, test.wantResult)
+			}
+			var annotations []cliCommand
+			for _, command := range runner.commands {
+				if len(command.args) > 0 && command.args[0] == "annotate" {
+					annotations = append(annotations, command)
+				}
+			}
+			if !test.wantAnnotation {
+				if len(annotations) != 0 {
+					t.Fatalf("annotations = %#v, want none", annotations)
+				}
+				return
+			}
+			want := []struct {
+				context, style, body string
+			}{
+				{context: "buildkite-gha-workflow-warnings", style: "warning", body: "warning body"},
+				{context: "buildkite-gha-workflow-errors", style: "error", body: "error body"},
+			}
+			if len(annotations) != len(want) {
+				t.Fatalf("annotations = %#v, want warning and error", annotations)
+			}
+			for i, expected := range want {
+				wantArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", expected.context, "--style", expected.style}
+				if !slices.Equal(annotations[i].args, wantArgs) || !strings.Contains(string(annotations[i].stdin), expected.body) {
+					t.Errorf("annotation %d = %#v, want args %#v and body containing %q", i, annotations[i], wantArgs, expected.body)
+				}
+			}
+			for _, command := range runner.commands[len(runner.commands)-len(want):] {
+				if len(command.args) == 0 || command.args[0] != "annotate" {
+					t.Fatalf("trailing command = %#v, want annotations after authoritative publication", command)
+				}
+			}
+			gotWarning := strings.Contains(stderr.String(), "warning: workflow warning annotation") && strings.Contains(stderr.String(), "warning: workflow error annotation")
+			if gotWarning != test.wantWarning {
+				t.Fatalf("stderr = %q, advisory warnings present = %v, want %v", stderr.String(), gotWarning, test.wantWarning)
+			}
+			for _, contextErr := range runner.contextErrors[len(runner.contextErrors)-len(want):] {
+				if contextErr != nil {
+					t.Fatalf("annotation inherited cancelled context: %v", contextErr)
+				}
+			}
+		})
+	}
+}
+
 func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1077,7 +1153,7 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 	}
 }
 
-func TestPublishTerminalResultAnnotatesCancelledJobSummaryWithFreshContext(t *testing.T) {
+func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T) {
 	job := cliRunJobPlan()
 	planDigest := transport.Digest([]byte("cancelled-plan"))
 	producer := transport.Producer{BuildID: cliTestBuildID, JobID: cliTestJobID, StepKey: job.Target.StepKey}
@@ -1089,17 +1165,27 @@ func TestPublishTerminalResultAnnotatesCancelledJobSummaryWithFreshContext(t *te
 		job,
 		planDigest,
 		producer,
-		gharuntime.JobResult{Conclusion: "cancelled", Summary: "summary before cancellation\n"},
+		gharuntime.JobResult{
+			Conclusion:         "cancelled",
+			Summary:            "summary before cancellation\n",
+			WarningAnnotations: "warning before cancellation\n",
+			ErrorAnnotations:   "error before cancellation\n",
+		},
 	)
-	if err != nil || publication.SummaryAnnotationError != nil {
+	if err != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
 		t.Fatalf("publishTerminalResult() publication = %#v, error = %v", publication, err)
 	}
-	last := runner.commands[len(runner.commands)-1]
-	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != "summary before cancellation\n" {
-		t.Fatalf("last command = %#v, want cancelled job summary annotation", last)
+	wantBodies := []string{"summary before cancellation\n", "warning before cancellation\n", "error before cancellation\n"}
+	commands := runner.commands[len(runner.commands)-len(wantBodies):]
+	for i, command := range commands {
+		if len(command.args) == 0 || command.args[0] != "annotate" || string(command.stdin) != wantBodies[i] {
+			t.Errorf("annotation %d = %#v, want cancelled job annotation body %q", i, command, wantBodies[i])
+		}
 	}
-	if runner.contextErrors[len(runner.contextErrors)-1] != nil {
-		t.Fatalf("annotation inherited cancelled context: %v", runner.contextErrors[len(runner.contextErrors)-1])
+	for _, contextErr := range runner.contextErrors[len(runner.contextErrors)-len(wantBodies):] {
+		if contextErr != nil {
+			t.Fatalf("annotation inherited cancelled context: %v", contextErr)
+		}
 	}
 }
 

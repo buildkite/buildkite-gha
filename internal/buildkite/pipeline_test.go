@@ -315,8 +315,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Agents.Queue != "hosted" {
 		t.Fatalf("default pipeline queue = %q, want hosted", document.Agents.Queue)
 	}
-	if len(document.Steps) != 13 {
-		t.Fatalf("default pipeline = %#v, want ten gated loaders, repository checks, wait, and release", document.Steps)
+	if len(document.Steps) != 14 {
+		t.Fatalf("default pipeline = %#v, want eleven gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command     string
@@ -366,6 +366,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["phase-6-summary-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-6-summary.yml" || got.condition != `build.env("PHASE6_PROBE") == "summary" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 6 summary annotation loader = %#v", got)
 	}
+	if got := steps["phase-6-annotations-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-6-annotations.yml" || got.condition != `build.env("PHASE6_PROBE") == "annotations" && build.env("SMOKE_PROBE") != "hosted"` {
+		t.Fatalf("Phase 6 workflow command annotation loader = %#v", got)
+	}
 	hosted := steps["hosted-smoke-loader"]
 	if hosted.condition != `build.env("SMOKE_PROBE") == "hosted"` {
 		t.Fatalf("hosted smoke loader = %#v", hosted)
@@ -388,7 +391,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			t.Fatalf("hosted smoke loader lacks %q:\n%s", required, hosted.command)
 		}
 	}
-	for _, fragment := range []string{"phase-2-upload.yml", "phase-3-upload.yml", "phase-4-upload.yml", "phase-5-capabilities.yml", "phase-5-docker-action.yml", "phase-5-runtime.yml", "phase-6-summary.yml", "hosted-smoke-control.yml"} {
+	for _, fragment := range []string{"phase-2-upload.yml", "phase-3-upload.yml", "phase-4-upload.yml", "phase-5-capabilities.yml", "phase-5-docker-action.yml", "phase-5-runtime.yml", "phase-6-summary.yml", "phase-6-annotations.yml", "hosted-smoke-control.yml"} {
 		if count := strings.Count(hosted.command, "buildkite-agent pipeline upload .buildkite/"+fragment); count != 1 {
 			t.Fatalf("hosted smoke loader uploads %s %d times:\n%s", fragment, count, hosted.command)
 		}
@@ -961,6 +964,104 @@ func TestPhase6SummaryAnnotationProofContract(t *testing.T) {
 	}
 }
 
+func TestPhase6WorkflowCommandAnnotationProofContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	importerBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-6-annotations.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(importerBody)
+	for _, fragment := range []string{
+		`commit="$${PHASE6_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
+		`test -z "$$(git status --porcelain --untracked-files=all)"`,
+		`automatic: false`,
+		`runtime_version="0.0.0-phase6.$$commit"`,
+		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
+		`"$$distribution_root/buildkite-gha" upload`,
+		`--event-path testdata/smoke/events/push.json`,
+		`--runtime-queue hosted`,
+		`testdata/phase6/.github/workflows/workflow-command-annotations.yml`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("Phase 6 workflow annotation importer lacks %q:\n%s", fragment, importerBody)
+		}
+	}
+	var upload struct {
+		Steps []struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(importerBody, &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-6-annotations-importer" {
+		t.Fatalf("Phase 6 workflow annotation importer = %#v", upload.Steps)
+	}
+	loader := upload.Steps[1]
+	if loader.Key != "phase-6-annotations-continuation-loader" || loader.DependsOn != "phase-6-annotations-importer" || !loader.AllowDependencyFailure || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-6-annotations-continuation.yml" {
+		t.Fatalf("Phase 6 workflow annotation continuation loader = %#v", loader)
+	}
+
+	continuationBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-6-annotations-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(continuationBody), `key: "phase-6-native-after-annotations"`) || !strings.Contains(string(continuationBody), `step: "gha-workflow-command-annotations"`) || !strings.Contains(string(continuationBody), `allow_failure: true`) {
+		t.Fatalf("Phase 6 workflow annotation continuation is not failure-tolerant: %s", continuationBody)
+	}
+
+	fixture, err := os.ReadFile(filepath.Join(root, "testdata", "phase6", ".github", "workflows", "workflow-command-annotations.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureText := string(fixture)
+	for _, fragment := range []string{"::warning title=Phase 6 warning", "::error title=Phase 6 error", "PHASE6_WARNING_OBSERVATION=stdout-with-location", "PHASE6_ERROR_OBSERVATION=stderr-outcome-neutral", "::add-mask::$canary", "phase6-workflow-command-secret"} {
+		if !strings.Contains(fixtureText, fragment) {
+			t.Fatalf("Phase 6 workflow annotation fixture lacks %q: %s", fragment, fixture)
+		}
+	}
+
+	verifierPath := filepath.Join(root, "scripts", "phase-6-workflow-annotations-verify")
+	verifier, err := os.ReadFile(verifierPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(verifierPath)
+	if err != nil || info.Mode()&0o111 == 0 {
+		t.Fatalf("Phase 6 workflow annotation verifier is not executable: %v", err)
+	}
+	verifierText := string(verifier)
+	for _, fragment := range []string{
+		"set -euo pipefail",
+		`expected_commit=$2`,
+		`bk --no-pager api "/pipelines/$pipeline/builds/$build_number"`,
+		`$commit != "$expected_commit"`,
+		`step_key=gha-workflow-command-annotations`,
+		`warning_context=buildkite-gha-workflow-warnings`,
+		`error_context=buildkite-gha-workflow-errors`,
+		`bk --no-pager api "/jobs/$job_id/annotations"`,
+		`($warnings | length) == 1`,
+		`($errors | length) == 1`,
+		`$warnings[0].style == "warning"`,
+		`$errors[0].style == "error"`,
+		`contains($masked_canary) | not`,
+		`PHASE6_WORKFLOW_ANNOTATION_OBSERVATION=`,
+	} {
+		if !strings.Contains(verifierText, fragment) {
+			t.Fatalf("Phase 6 workflow annotation verifier lacks %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"BUILDKITE_API_TOKEN", "Authorization:", "bk auth token"} {
+		if strings.Contains(verifierText, forbidden) {
+			t.Fatalf("Phase 6 workflow annotation verifier handles credentials directly through %q", forbidden)
+		}
+	}
+}
+
 func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	type dependency struct {
 		Step         string `yaml:"step"`
@@ -1001,9 +1102,9 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	if control.Key != "hosted-smoke-aggregator-loader" || control.Command != "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml" {
 		t.Fatalf("control step = %#v", control)
 	}
-	assertSet("control", control.DependsOn, map[string]bool{"phase-2-continuation-loader": true, "phase-3-continuation-loader": true, "phase-4-continuation-loader": true, "phase-5-continuation-loader": true, "phase-5-docker-action-continuation-loader": true, "phase-5-runtime-continuation-loader": true, "phase-6-summary-continuation-loader": true})
+	assertSet("control", control.DependsOn, map[string]bool{"phase-2-continuation-loader": true, "phase-3-continuation-loader": true, "phase-4-continuation-loader": true, "phase-5-continuation-loader": true, "phase-5-docker-action-continuation-loader": true, "phase-5-runtime-continuation-loader": true, "phase-6-summary-continuation-loader": true, "phase-6-annotations-continuation-loader": true})
 	generated := map[string]bool{}
-	for _, name := range []string{"phase-2-upload-continuation.yml", "phase-3-upload-continuation.yml", "phase-4-upload-continuation.yml", "phase-5-capabilities-continuation.yml", "phase-5-docker-action-continuation.yml", "phase-5-runtime-continuation.yml", "phase-6-summary-continuation.yml"} {
+	for _, name := range []string{"phase-2-upload-continuation.yml", "phase-3-upload-continuation.yml", "phase-4-upload-continuation.yml", "phase-5-capabilities-continuation.yml", "phase-5-docker-action-continuation.yml", "phase-5-runtime-continuation.yml", "phase-6-summary-continuation.yml", "phase-6-annotations-continuation.yml"} {
 		continuation := read(name)
 		for _, dependency := range continuation.DependsOn {
 			generated[dependency.Step] = true
@@ -1013,7 +1114,7 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 	for key := range generated {
 		want[key] = true
 	}
-	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime", "phase-6-native-after-summary"} {
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime", "phase-6-native-after-summary", "phase-6-native-after-annotations"} {
 		want[key] = true
 	}
 	aggregator := read("hosted-smoke-aggregator.yml")
@@ -1026,7 +1127,7 @@ func TestHostedSmokeControlAndAggregatorDependencies(t *testing.T) {
 			t.Fatalf("aggregator command does not inspect generated step %q: %s", key, aggregator.Command)
 		}
 	}
-	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime", "phase-6-native-after-summary"} {
+	for _, key := range []string{"gha-producer", "gha-concurrent", "phase-2-native-after-shell", "phase-3-native-after-concurrent", "phase-4-native-after-actions", "phase-5-native-after-hosted-docker", "phase-5-native-after-docker-action", "phase-5-native-after-runtime", "phase-6-native-after-summary", "phase-6-native-after-annotations"} {
 		if !strings.Contains(aggregator.Command, key) {
 			t.Fatalf("aggregator command does not inspect required step %q: %s", key, aggregator.Command)
 		}
