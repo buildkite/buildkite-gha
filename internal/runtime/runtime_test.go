@@ -2458,24 +2458,28 @@ printf '%s\n' '::stop-commands::warning'
 }
 
 func TestInvalidWorkflowCommandStopTokenFailsTheStep(t *testing.T) {
-	workspace := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: invalid workflow command stop token\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID: "invalid-stop", Kind: "run", Shell: "sh",
-		Command: "printf '%s\\n' '::stop-commands::warning'\nprintf '%s\\n' '::warning::commands remain active'",
-	}})
-	var logs bytes.Buffer
+	for _, token := range []string{"warning", "add-matcher", "remove-matcher"} {
+		t.Run(token, func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/test.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: invalid workflow command stop token\n")
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+				ID: "invalid-stop", Kind: "run", Shell: "sh",
+				Command: fmt.Sprintf("printf '%%s\\n' '::stop-commands::%s'\nprintf '%%s\\n' '::warning::commands remain active'", token),
+			}})
+			var logs bytes.Buffer
 
-	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "invalid ::stop-commands workflow command") || result.Conclusion != "failure" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-	if !strings.Contains(result.ErrorAnnotations, "invalid ::stop-commands token") || !strings.Contains(result.WarningAnnotations, "commands remain active") {
-		t.Fatalf("RunJob() warnings = %q, errors = %q", result.WarningAnnotations, result.ErrorAnnotations)
-	}
-	if !strings.Contains(logs.String(), "error: invalid ::stop-commands token") {
-		t.Fatalf("RunJob() logs = %q, want invalid-token diagnostic", logs.String())
+			result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+			if err == nil || !strings.Contains(err.Error(), "invalid ::stop-commands workflow command") || result.Conclusion != "failure" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			if !strings.Contains(result.ErrorAnnotations, "invalid ::stop-commands token") || !strings.Contains(result.WarningAnnotations, "commands remain active") {
+				t.Fatalf("RunJob() warnings = %q, errors = %q", result.WarningAnnotations, result.ErrorAnnotations)
+			}
+			if !strings.Contains(logs.String(), "error: invalid ::stop-commands token") {
+				t.Fatalf("RunJob() logs = %q, want invalid-token diagnostic", logs.String())
+			}
+		})
 	}
 }
 

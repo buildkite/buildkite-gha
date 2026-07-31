@@ -1193,9 +1193,9 @@ func validWorkflowCommandStopToken(token string) bool {
 		return false
 	}
 	for _, command := range []string{
-		"add-mask", "add-path", "debug", "echo", "endgroup", "error", "group",
-		"internal-set-repo-path", "notice", "save-state", "set-env", "set-output",
-		"set-repo-path", "stop-commands", "warning",
+		"add-mask", "add-matcher", "add-path", "debug", "echo", "endgroup", "error", "group",
+		"internal-set-repo-path", "notice", "remove-matcher", "save-state", "set-env",
+		"set-output", "set-repo-path", "stop-commands", "warning",
 	} {
 		if strings.EqualFold(token, command) {
 			return false
