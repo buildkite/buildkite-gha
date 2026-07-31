@@ -989,7 +989,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			if err != nil {
 				return result, err
 			}
-			return r.runUploadArtifact(ctx, workspace, inputs, processor.maskValues())
+			return r.runUploadArtifact(ctx, processor, workspace, inputs)
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {

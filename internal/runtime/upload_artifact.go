@@ -54,10 +54,10 @@ func (r *artifactRegistry) release(name string) {
 }
 
 type uploadOptions struct {
-	name, noFiles string
-	paths         []string
-	hidden        bool
-	level         int
+	name, noFiles, searchPath string
+	paths                     []string
+	hidden                    bool
+	level                     int
 }
 
 func parseUploadOptions(inputs map[string]string) (uploadOptions, error) {
@@ -106,7 +106,8 @@ func parseUploadOptions(inputs map[string]string) (uploadOptions, error) {
 			return o, fmt.Errorf("archive may only be omitted or true; Phase 6 is required")
 		}
 	}
-	o.paths, err = actionintegration.UploadArtifactPaths(values["path"])
+	o.searchPath = strings.TrimSpace(values["path"])
+	o.paths, err = actionintegration.UploadArtifactPaths(o.searchPath)
 	if err != nil {
 		return o, err
 	}
@@ -118,13 +119,16 @@ type archiveFile struct {
 	size       int64
 }
 
-func (r Runner) runUploadArtifact(ctx context.Context, workspace string, inputs map[string]string, masks []string) (Result, error) {
+func (r Runner) runUploadArtifact(ctx context.Context, processor *commandProcessor, workspace string, inputs map[string]string) (Result, error) {
 	result := newResult()
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	o, err := parseUploadOptions(inputs)
 	if err != nil {
 		return result, fmt.Errorf("bounded upload-artifact adapter: %w", err)
 	}
-	for _, mask := range masks {
+	for _, mask := range processor.maskValues() {
 		if mask != "" && strings.Contains(o.name, mask) {
 			return result, fmt.Errorf("artifact name contains a registered mask and cannot be uploaded")
 		}
@@ -138,16 +142,20 @@ func (r Runner) runUploadArtifact(ctx context.Context, workspace string, inputs 
 			r.artifactRegistry.release(o.name)
 		}
 	}()
-	files, err := collectUploadFiles(workspace, o.paths, o.hidden)
+	files, err := collectUploadFiles(ctx, workspace, o.paths, o.hidden)
 	if err != nil {
 		return result, err
 	}
 	if len(files) == 0 {
+		message := fmt.Sprintf("No files were found with the provided path: %s. No artifacts will be uploaded.", o.searchPath)
 		switch o.noFiles {
 		case "error":
-			return result, fmt.Errorf("no files were found for artifact")
+			_ = processor.process(processor.stdout, "::error::"+escapeWorkflowCommandData(message))
+			return result, errors.New(message)
 		case "warn":
-			_, _ = fmt.Fprintln(r.stderr(), "warning: no files were found for artifact")
+			_ = processor.process(processor.stdout, "::warning::"+escapeWorkflowCommandData(message))
+		case "ignore":
+			_ = processor.process(processor.stdout, message)
 		}
 		return result, nil
 	}
@@ -168,7 +176,7 @@ func (r Runner) runUploadArtifact(ctx context.Context, workspace string, inputs 
 		return result, err
 	}
 	defer func() { _ = os.Remove(tmp) }()
-	digest, size, err := writeUploadZIP(tmp, workspace, files, o.level)
+	digest, size, err := writeUploadZIP(ctx, tmp, workspace, files, o.level)
 	if err != nil {
 		return result, err
 	}
@@ -186,11 +194,14 @@ func (r Runner) runUploadArtifact(ctx context.Context, workspace string, inputs 
 	if err := os.Rename(tmp, abs); err != nil {
 		return result, err
 	}
-	if err := verifyUploadZIP(abs, digest, size); err != nil {
+	if err := verifyUploadZIP(ctx, abs, digest, size); err != nil {
 		return result, err
 	}
 	if err := r.Artifacts.UploadArtifactFrom(ctx, root, rel); err != nil {
 		return result, fmt.Errorf("upload native artifact: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	idNumber := binary.BigEndian.Uint64(storageSum[:8])
 	if idNumber == 0 {
@@ -205,16 +216,19 @@ func (r Runner) runUploadArtifact(ctx context.Context, workspace string, inputs 
 	return result, nil
 }
 
-func verifyUploadZIP(path, digest string, size int64) error {
+func verifyUploadZIP(ctx context.Context, path, digest string, size int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(hash, io.LimitReader(file, transport.MaxResultArtifactSizeBytes+1))
+	written, copyErr := io.Copy(hash, io.LimitReader(contextReader{ctx: ctx, reader: file}, transport.MaxResultArtifactSizeBytes+1))
 	closeErr := file.Close()
 	if copyErr != nil {
-		return copyErr
+		return errors.Join(copyErr, closeErr)
 	}
 	if closeErr != nil {
 		return closeErr
@@ -225,7 +239,10 @@ func verifyUploadZIP(path, digest string, size int64) error {
 	return nil
 }
 
-func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiveFile, error) {
+func collectUploadFiles(ctx context.Context, workspace string, roots []string, hidden bool) ([]archiveFile, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	workspace, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return nil, fmt.Errorf("resolve upload workspace: %w", err)
@@ -234,6 +251,9 @@ func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiv
 	var matchedRoots []string
 	var bytes int64
 	add := func(disk string, info os.FileInfo) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		bytes += info.Size()
 		if bytes > transport.MaxResultArtifactSizeBytes {
 			return fmt.Errorf("artifact source bytes exceed 1 GiB")
@@ -245,11 +265,14 @@ func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiv
 		return nil
 	}
 	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if hiddenPath(root) && !hidden {
 			continue
 		}
 		before := len(files)
-		if err := rejectUploadSymlinkComponents(workspace, root); err != nil {
+		if err := rejectUploadSymlinkComponents(ctx, workspace, root); err != nil {
 			return nil, err
 		}
 		disk := filepath.Join(workspace, root)
@@ -274,6 +297,9 @@ func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiv
 			return nil, fmt.Errorf("non-regular path %q is unsupported", root)
 		}
 		err = filepath.Walk(disk, func(p string, i os.FileInfo, e error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if e != nil {
 				return e
 			}
@@ -308,6 +334,9 @@ func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiv
 	base := commonArchiveRoot(workspace, matchedRoots)
 	seen := make(map[string]string, len(files))
 	for i := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		relative, err := filepath.Rel(filepath.Join(workspace, base), files[i].disk)
 		if err != nil {
 			return nil, err
@@ -330,9 +359,12 @@ func collectUploadFiles(workspace string, roots []string, hidden bool) ([]archiv
 	return files, nil
 }
 
-func rejectUploadSymlinkComponents(workspace, relative string) error {
+func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative string) error {
 	current := workspace
 	for _, component := range strings.Split(filepath.FromSlash(relative), string(filepath.Separator)) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if os.IsNotExist(err) {
@@ -379,7 +411,10 @@ func commonArchiveRoot(workspace string, roots []string) string {
 	return filepath.FromSlash(strings.Join(parts, "/"))
 }
 
-func writeUploadZIP(path, workspace string, files []archiveFile, level int) (_ string, _ int64, err error) {
+func writeUploadZIP(ctx context.Context, path, workspace string, files []archiveFile, level int) (_ string, _ int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	f, e := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
 	if e != nil {
 		return "", 0, e
@@ -401,6 +436,9 @@ func writeUploadZIP(path, workspace string, files []archiveFile, level int) (_ s
 		z.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) { return flate.NewWriter(out, level) })
 	}
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
 		method := uint16(zip.Deflate)
 		if level == 0 {
 			method = zip.Store
@@ -419,8 +457,11 @@ func writeUploadZIP(path, workspace string, files []archiveFile, level int) (_ s
 		if e != nil {
 			return "", 0, e
 		}
-		copied, copyErr := io.CopyN(zw, in, file.size+1)
+		copied, copyErr := io.CopyN(zw, contextReader{ctx: ctx, reader: in}, file.size+1)
 		closeErr := in.Close()
+		if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+			return "", 0, errors.Join(copyErr, closeErr)
+		}
 		if copyErr != io.EOF || copied != file.size {
 			return "", 0, fmt.Errorf("artifact source %q changed while archiving", file.name)
 		}
@@ -431,6 +472,9 @@ func writeUploadZIP(path, workspace string, files []archiveFile, level int) (_ s
 	if e = z.Close(); e != nil {
 		return "", 0, e
 	}
+	if e = ctx.Err(); e != nil {
+		return "", 0, e
+	}
 	info, e := f.Stat()
 	if e != nil {
 		return "", 0, e
@@ -439,4 +483,24 @@ func writeUploadZIP(path, workspace string, files []archiveFile, level int) (_ s
 		return "", 0, fmt.Errorf("final ZIP exceeds 1 GiB")
 	}
 	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if contextErr := r.ctx.Err(); contextErr != nil {
+		err = contextErr
+	}
+	return n, err
+}
+
+func escapeWorkflowCommandData(value string) string {
+	return strings.NewReplacer("%", "%25", "\r", "%0D", "\n", "%0A").Replace(value)
 }
