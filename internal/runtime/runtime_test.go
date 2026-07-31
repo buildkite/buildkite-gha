@@ -2532,6 +2532,24 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 	}
 }
 
+func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	command := `printf '::warning title=bad\377,file=bad\376.go::bad\375\n'`
+	if err := (Runner{}).runStreaming(context.Background(), processor, "", nil, "sh", "-c", command); err != nil {
+		t.Fatalf("runStreaming() error = %v", err)
+	}
+
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if truncated || !utf8.ValidString(warnings) || strings.Count(warnings, "\uFFFD") != 3 {
+		t.Fatalf("warning annotation = %q, truncated = %v, valid UTF-8 = %v", warnings, truncated, utf8.ValidString(warnings))
+	}
+	for _, fragment := range []string{"<strong>Title:</strong> <code>bad\uFFFD</code>", "<strong>File:</strong> <code>bad\uFFFD.go</code>", "<p>bad\uFFFD</p>"} {
+		if !strings.Contains(warnings, fragment) {
+			t.Fatalf("warning annotation lacks %q: %q", fragment, warnings)
+		}
+	}
+}
+
 func TestWorkflowCommandAnnotationsRemainBoundedAfterSecretScrubbing(t *testing.T) {
 	secret := "x"
 	result := JobResult{WarningAnnotations: strings.Repeat(secret, maxJobAnnotationBytes)}

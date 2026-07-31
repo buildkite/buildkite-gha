@@ -1343,6 +1343,7 @@ func renderWorkflowCommand(severity string, command parsedWorkflowCommand) strin
 }
 
 func commandHTML(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
 	return strings.ReplaceAll(html.EscapeString(value), "\n", "<br>\n")
