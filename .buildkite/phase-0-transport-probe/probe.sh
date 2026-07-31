@@ -307,7 +307,7 @@ producer() {
   local result="success"
   [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && result="failure"
   jq -Scn --arg build_id "${BUILDKITE_BUILD_ID}" --arg job_id "${BUILDKITE_JOB_ID}" --arg step_key "${producer_key}" --arg plan_digest "${PHASE0_PLAN_DIGEST}" --arg result "${result}" \
-    '{schema:"buildkite-gha/result-manifest/v1",plan_digest:$plan_digest,producer:{build_id:$build_id,job_id:$job_id,step_key:$step_key},result:$result,outputs:[{name:"message",value:"phase0-producer"}]}' \
+    '{schema:"buildkite-gha/result-manifest/v2",plan_digest:$plan_digest,producer:{build_id:$build_id,job_id:$job_id,step_key:$step_key},result:$result,outputs:[{name:"message",value:"phase0-producer"}],artifacts:[]}' \
     > "${work}/buildkite-gha/v1/results/${producer_key}/manifest.json"
   truncate -s -1 "${work}/buildkite-gha/v1/results/${producer_key}/manifest.json"
   (
@@ -334,7 +334,7 @@ consumer() {
   cmp -s "${canonical}" "${manifest}"
   [[ "${PHASE0_PRODUCER_FAIL:-}" == "1" ]] && expected_result="failure"
   jq -e --arg build_id "${BUILDKITE_BUILD_ID}" --arg job_id "${producer_job_id}" --arg step_key "${producer_key}" --arg plan_digest "${PHASE0_PRODUCER_PLAN_DIGEST}" --arg result "${expected_result}" \
-    '.schema == "buildkite-gha/result-manifest/v1" and .plan_digest == $plan_digest and .producer.build_id == $build_id and .producer.job_id == $job_id and .producer.step_key == $step_key and .result == $result and .outputs == [{"name":"message","value":"phase0-producer"}]' "${manifest}" >/dev/null
+    '.schema == "buildkite-gha/result-manifest/v2" and .plan_digest == $plan_digest and .producer.build_id == $build_id and .producer.job_id == $job_id and .producer.step_key == $step_key and .result == $result and .outputs == [{"name":"message","value":"phase0-producer"}] and .artifacts == []' "${manifest}" >/dev/null
   buildkite-agent meta-data set "buildkite-gha/v1/results/${consumer_key}" "consumed:${expected_result}"
 }
 

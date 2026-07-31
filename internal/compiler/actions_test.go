@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -368,6 +369,62 @@ func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 				t.Fatalf("CompilePlansWithOptions() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: upload artifact\nruns:\n  using: node24\n  main: dist/index.js\n")
+	if err := os.MkdirAll(filepath.Join(remote, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remote, "dist", "index.js"), []byte("throw new Error('adapter only')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compile := func(commit, with string) ([]plan.Job, error) {
+		workflow := []byte("on: push\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/upload-artifact@" + commit + "\n" + with)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+
+	plans, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          name: payload\n          path: payload/result.txt\n          if-no-files-found: error\n          compression-level: '0'\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
+		t.Fatalf("upload-artifact plans = %#v", plans)
+	}
+
+	for name, input := range map[string]string{
+		"missing path": "          name: payload\n",
+		"glob":         "          path: payload/**\n",
+		"retention":    "          path: payload\n          retention-days: '1'\n",
+		"overwrite":    "          path: payload\n          overwrite: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := compile(actionintegration.UploadArtifactCommit, "        with:\n"+input)
+			if err == nil || !strings.Contains(err.Error(), "artifact.yml:") || !strings.Contains(err.Error(), "bounded upload-artifact adapter") {
+				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+			}
+		})
+	}
+
+	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) {
+		t.Fatalf("unsupported upload-artifact commit error = %v", err)
 	}
 }
 

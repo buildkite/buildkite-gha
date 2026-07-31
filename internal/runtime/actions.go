@@ -60,6 +60,11 @@ func usesCheckoutAdapter(lock plan.ActionLock) bool {
 	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
+func usesUploadArtifactAdapter(lock plan.ActionLock) bool {
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	return descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite
+}
+
 func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {
 	if r == nil || selector.Lock == "" {
 		return "", fmt.Errorf("resolve action lock: selector is missing")
@@ -84,6 +89,11 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	}
 	if entry.duplicate || entry.lock.ID != selector.Lock {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
+	}
+	if usesUploadArtifactAdapter(entry.lock) {
+		if err := actionintegration.ValidateUploadArtifactCommit(entry.lock.Commit); err != nil {
+			return metadata.Metadata{}, plan.ActionLock{}, err
+		}
 	}
 
 	var m metadata.Metadata

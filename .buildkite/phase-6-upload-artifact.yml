@@ -1,0 +1,31 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":package: Phase 6 upload-artifact importer"
+    key: "phase-6-upload-artifact-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${PHASE6_COMMIT:-$${SMOKE_COMMIT:-}}"
+      scripts/phase-0-shell-oracle-checkout "$$commit"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase6-upload-artifact.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      runtime_version="0.0.0-phase6.$$commit"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runtime-queue hosted \
+        testdata/phase6/.github/workflows/upload-artifact.yml
+
+  - label: ":pipeline: Phase 6 upload-artifact continuation loader"
+    key: "phase-6-upload-artifact-continuation-loader"
+    depends_on: "phase-6-upload-artifact-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/phase-6-upload-artifact-continuation.yml"

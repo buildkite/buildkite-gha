@@ -76,14 +76,16 @@ The plugin path currently supports:
 - the currently implemented job and step condition subset;
 - background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
-  and pre/main/post actions; and
-- public, credential-free checkout of the event repository at its exact commit.
+  and pre/main/post actions;
+- public, credential-free checkout of the event repository at its exact commit;
+  and
+- bounded native uploads for the audited `actions/upload-artifact` v4 commit.
 
 It does **not** currently support:
 
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
-- `actions/cache`, `actions/upload-artifact`, or `actions/download-artifact`;
+- `actions/cache` or `actions/download-artifact`;
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
 - job containers or service containers through the production plugin path;

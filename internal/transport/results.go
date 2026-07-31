@@ -72,7 +72,7 @@ func PublishResult(ctx context.Context, agent Agent, root, workflow, instance st
 	if err != nil {
 		return Publication{}, fmt.Errorf("resolve result artifact root: %w", err)
 	}
-	if err := agent.uploadArtifactFrom(ctx, resolvedRoot, path); err != nil {
+	if err := agent.UploadArtifactFrom(ctx, resolvedRoot, path); err != nil {
 		return Publication{}, fmt.Errorf("upload result manifest: %w", err)
 	}
 	publication := Publication{Path: path, ManifestDigest: Digest(encoded)}

@@ -27,6 +27,8 @@ steps:
         allow_failure: true
       - step: "gha-workflow-command-annotations"
         allow_failure: true
+      - step: "gha-upload-artifact"
+        allow_failure: true
       - step: "phase-2-native-after-shell"
         allow_failure: true
       - step: "phase-3-native-after-concurrent"
@@ -43,6 +45,8 @@ steps:
         allow_failure: true
       - step: "phase-6-native-after-annotations"
         allow_failure: true
+      - step: "phase-6-native-after-upload-artifact"
+        allow_failure: true
     command: |
       set -euo pipefail
       failed=0
@@ -58,6 +62,7 @@ steps:
         phase-5-hosted-runtime-probe \
         gha-summary-annotation \
         gha-workflow-command-annotations \
+        gha-upload-artifact \
         phase-2-native-after-shell \
         phase-3-native-after-concurrent \
         phase-4-native-after-actions \
@@ -65,7 +70,8 @@ steps:
         phase-5-native-after-docker-action \
         phase-5-native-after-runtime \
         phase-6-native-after-summary \
-        phase-6-native-after-annotations
+        phase-6-native-after-annotations \
+        phase-6-native-after-upload-artifact
       do
         outcome="$$(buildkite-agent step get "outcome" --step "$$step")"
         printf '%s: %s\n' "$$step" "$$outcome"

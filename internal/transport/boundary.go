@@ -51,8 +51,17 @@ func (a Agent) UploadArtifact(ctx context.Context, path string) error {
 	return err
 }
 
-func (a Agent) uploadArtifactFrom(ctx context.Context, root, path string) error {
-	_, err := a.runInDir(ctx, root, []string{"artifact", "upload", path}, nil)
+// UploadArtifactFrom uploads a workspace-relative path rooted at root.
+func (a Agent) UploadArtifactFrom(ctx context.Context, root, path string) error {
+	nativePath := filepath.FromSlash(path)
+	if root == "" || path == "" || !filepath.IsLocal(nativePath) || filepath.ToSlash(filepath.Clean(nativePath)) != path {
+		return fmt.Errorf("artifact upload requires a root and clean relative path")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve artifact upload root: %w", err)
+	}
+	_, err = a.runInDir(ctx, resolvedRoot, []string{"artifact", "upload", path}, nil)
 	return err
 }
 
@@ -152,7 +161,7 @@ func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []
 		if err := verifyMaterialized(materialized[artifact.Path], artifact.Contents, artifact.Digest); err != nil {
 			return fmt.Errorf("verify artifact %q at upload: %w", artifact.Path, err)
 		}
-		if err := agent.uploadArtifactFrom(ctx, absoluteRoot, artifact.Path); err != nil {
+		if err := agent.UploadArtifactFrom(ctx, absoluteRoot, artifact.Path); err != nil {
 			return fmt.Errorf("upload artifact %q: %w", artifact.Path, err)
 		}
 	}
@@ -226,13 +235,13 @@ func Upload(ctx context.Context, agent Agent, root string, plans []PlanArtifact,
 		if err := verifyMaterialized(files.plan, plan.Contents, plan.Digest); err != nil {
 			return fmt.Errorf("verify plan %q before upload: %w", plan.StepKey, err)
 		}
-		if err := agent.uploadArtifactFrom(ctx, files.root, plan.Path()); err != nil {
+		if err := agent.UploadArtifactFrom(ctx, files.root, plan.Path()); err != nil {
 			return fmt.Errorf("upload plan %q: %w", plan.StepKey, err)
 		}
 		if err := verifyMaterialized(files.binding, plan.Binding, ""); err != nil {
 			return fmt.Errorf("verify plan binding %q before upload: %w", plan.StepKey, err)
 		}
-		if err := agent.uploadArtifactFrom(ctx, files.root, plan.BindingPath()); err != nil {
+		if err := agent.UploadArtifactFrom(ctx, files.root, plan.BindingPath()); err != nil {
 			return fmt.Errorf("upload plan binding %q: %w", plan.StepKey, err)
 		}
 	}

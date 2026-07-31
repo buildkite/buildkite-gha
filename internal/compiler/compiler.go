@@ -293,6 +293,12 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 						return nil, nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
 				}
+				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+					if err := actionintegration.ValidateUploadArtifactInputs(instance.Steps[stepIndex].With); err != nil {
+						span := instance.Steps[stepIndex].Span.Start
+						return nil, nil, fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+					}
+				}
 			}
 			jobSchema = plan.SchemaV3
 			actions = locks

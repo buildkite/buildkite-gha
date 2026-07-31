@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Phase 6 upload-artifact settled"
+    key: "phase-6-native-after-upload-artifact"
+    depends_on:
+      - step: "gha-upload-artifact"
+        allow_failure: true
+    command: "echo 'Phase 6 upload-artifact job settled before API verification'"

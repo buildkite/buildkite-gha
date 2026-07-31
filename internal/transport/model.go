@@ -13,21 +13,30 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
-	ResultManifestSchema   = "buildkite-gha/result-manifest/v1"
+	ResultManifestSchema   = "buildkite-gha/result-manifest/v2"
 	MaxResultOutputs       = 64
 	MaxResultOutputBytes   = 1024
 	MaxResultManifestBytes = 96 * 1024
 	MaxResultProducers     = 256
+
+	MaxResultArtifacts         = 64
+	MaxResultArtifactNameBytes = 255
+	MaxResultArtifactIDBytes   = 20
+	MaxResultArtifactFileCount = 10_000
+	MaxResultArtifactSizeBytes = int64(1 << 30)
 )
 
 var (
-	digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	keyPattern    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
-	uuidPattern   = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	digestPattern             = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	keyPattern                = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+	uuidPattern               = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	commitPattern             = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	resultArtifactIDPattern   = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+	resultArtifactPathPattern = regexp.MustCompile(`^buildkite-gha/v1/artifacts/[0-9a-f]{64}\.zip$`)
 )
 
 // Digest returns the content address used by transport artifacts.
@@ -169,21 +178,59 @@ func (p Producer) Validate() error {
 	return nil
 }
 
-// ResultManifest is authoritative; metadata only mirrors its bounded values.
-type ResultManifest struct {
-	Schema     string   `json:"schema"`
-	PlanDigest string   `json:"plan_digest"`
-	Producer   Producer `json:"producer"`
-	Result     string   `json:"result"`
-	Outputs    []Output `json:"outputs"`
+// ResultArtifact binds one compatibility artifact to its immutable native
+// Buildkite artifact archive.
+type ResultArtifact struct {
+	Name      string `json:"name"`
+	ID        string `json:"id"`
+	Path      string `json:"path"`
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+	FileCount int    `json:"file_count"`
 }
 
-// MarshalResultManifest sorts outputs and returns stable canonical bytes.
+func (a ResultArtifact) validate() error {
+	if !utf8.ValidString(a.Name) || len(a.Name) == 0 || len(a.Name) > MaxResultArtifactNameBytes || strings.ContainsAny(a.Name, `":<>|*?`+"\r\n/\\") {
+		return fmt.Errorf("invalid result artifact name %q", a.Name)
+	}
+	if len(a.ID) > MaxResultArtifactIDBytes || !resultArtifactIDPattern.MatchString(a.ID) {
+		return fmt.Errorf("invalid result artifact ID %q", a.ID)
+	}
+	if !resultArtifactPathPattern.MatchString(a.Path) {
+		return fmt.Errorf("invalid result artifact path %q", a.Path)
+	}
+	if !digestPattern.MatchString(a.Digest) {
+		return fmt.Errorf("invalid result artifact digest %q", a.Digest)
+	}
+	if a.Size <= 0 || a.Size > MaxResultArtifactSizeBytes {
+		return fmt.Errorf("invalid result artifact size %d", a.Size)
+	}
+	if a.FileCount <= 0 || a.FileCount > MaxResultArtifactFileCount {
+		return fmt.Errorf("invalid result artifact file count %d", a.FileCount)
+	}
+	return nil
+}
+
+// ResultManifest is authoritative; metadata only mirrors its bounded values.
+type ResultManifest struct {
+	Schema     string           `json:"schema"`
+	PlanDigest string           `json:"plan_digest"`
+	Producer   Producer         `json:"producer"`
+	Result     string           `json:"result"`
+	Outputs    []Output         `json:"outputs"`
+	Artifacts  []ResultArtifact `json:"artifacts"`
+}
+
+// MarshalResultManifest sorts outputs and artifacts and returns stable canonical bytes.
 func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 	manifest.Schema = ResultManifestSchema
 	manifest.Outputs = append([]Output(nil), manifest.Outputs...)
 	if manifest.Outputs == nil {
 		manifest.Outputs = []Output{}
+	}
+	manifest.Artifacts = append([]ResultArtifact(nil), manifest.Artifacts...)
+	if manifest.Artifacts == nil {
+		manifest.Artifacts = []ResultArtifact{}
 	}
 	if !digestPattern.MatchString(manifest.PlanDigest) || manifest.Producer.Validate() != nil {
 		return nil, errors.New("invalid result manifest identity")
@@ -207,6 +254,36 @@ func MarshalResultManifest(manifest ResultManifest) ([]byte, error) {
 			return nil, fmt.Errorf("duplicate output %q", output.Name)
 		}
 		outputNames[name] = struct{}{}
+	}
+	if len(manifest.Artifacts) > MaxResultArtifacts {
+		return nil, fmt.Errorf("result manifest has %d artifacts, maximum is %d", len(manifest.Artifacts), MaxResultArtifacts)
+	}
+	sort.Slice(manifest.Artifacts, func(i, j int) bool {
+		if manifest.Artifacts[i].Name == manifest.Artifacts[j].Name {
+			return manifest.Artifacts[i].ID < manifest.Artifacts[j].ID
+		}
+		return manifest.Artifacts[i].Name < manifest.Artifacts[j].Name
+	})
+	artifactNames := make(map[string]struct{}, len(manifest.Artifacts))
+	artifactIDs := make(map[string]struct{}, len(manifest.Artifacts))
+	artifactPaths := make(map[string]struct{}, len(manifest.Artifacts))
+	for _, artifact := range manifest.Artifacts {
+		if err := artifact.validate(); err != nil {
+			return nil, err
+		}
+		name := strings.ToLower(artifact.Name)
+		if _, exists := artifactNames[name]; exists {
+			return nil, fmt.Errorf("duplicate result artifact name %q", artifact.Name)
+		}
+		if _, exists := artifactIDs[artifact.ID]; exists {
+			return nil, fmt.Errorf("duplicate result artifact ID %q", artifact.ID)
+		}
+		if _, exists := artifactPaths[artifact.Path]; exists {
+			return nil, fmt.Errorf("duplicate result artifact path %q", artifact.Path)
+		}
+		artifactNames[name] = struct{}{}
+		artifactIDs[artifact.ID] = struct{}{}
+		artifactPaths[artifact.Path] = struct{}{}
 	}
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)

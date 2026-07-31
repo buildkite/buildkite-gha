@@ -12,10 +12,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -682,7 +684,6 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 		action  plan.ActionLock
 		service string
 	}{
-		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}, "artifact"},
 		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, "artifact"},
 		{plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}, "artifact"},
 		{plan.ActionLock{Source: "github", Repository: "actions/cache"}, "cache"},
@@ -704,6 +705,19 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadAllowsNativeUploadArtifactAdapter(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow: plan.Workflow{LogicalJobID: "artifact-producer"},
+		Actions: []plan.ActionLock{{
+			Source: "github", Repository: "actions/upload-artifact",
+			Commit: actionintegration.UploadArtifactCommit,
+		}},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 	}
 }
 
@@ -1158,6 +1172,11 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 	planDigest := transport.Digest([]byte("cancelled-plan"))
 	producer := transport.Producer{BuildID: cliTestBuildID, JobID: cliTestJobID, StepKey: job.Target.StepKey}
 	runner := &cliCaptureRunner{}
+	artifactDigest := strings.Repeat("a", 64)
+	artifact := transport.ResultArtifact{
+		Name: "payload", ID: "123", Path: "buildkite-gha/v1/artifacts/" + artifactDigest + ".zip",
+		Digest: "sha256:" + artifactDigest, Size: 42, FileCount: 1,
+	}
 
 	publication, err := publishTerminalResult(
 		transport.Agent{Runner: runner},
@@ -1170,6 +1189,7 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 			Summary:            "summary before cancellation\n",
 			WarningAnnotations: "warning before cancellation\n",
 			ErrorAnnotations:   "error before cancellation\n",
+			Artifacts:          []transport.ResultArtifact{artifact},
 		},
 	)
 	if err != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
@@ -1186,6 +1206,10 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 		if contextErr != nil {
 			t.Fatalf("annotation inherited cancelled context: %v", contextErr)
 		}
+	}
+	manifest := publishedCLIManifest(t, runner, job, planDigest)
+	if !reflect.DeepEqual(manifest.Artifacts, []transport.ResultArtifact{artifact}) {
+		t.Fatalf("published artifacts = %#v, want %#v", manifest.Artifacts, artifact)
 	}
 }
 

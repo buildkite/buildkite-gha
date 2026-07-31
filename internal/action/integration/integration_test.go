@@ -14,7 +14,7 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
-		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Service: ServiceArtifact}},
+		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Service: ServiceArtifact}},
 	}
@@ -27,6 +27,54 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 			got, ok := Lookup(test.identity)
 			if !ok || got != test.want {
 				t.Fatalf("Lookup(%#v) = %#v, %t, want %#v, true", test.identity, got, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestUploadArtifactCommitIsExact(t *testing.T) {
+	if err := ValidateUploadArtifactCommit(UploadArtifactCommit); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateUploadArtifactCommit(strings.Repeat("0", 40)); err == nil {
+		t.Fatal("unrecognized commit accepted")
+	}
+}
+
+func TestValidateUploadArtifactInputs(t *testing.T) {
+	for _, inputs := range []map[string]string{
+		{"path": "payload/result.txt"},
+		{
+			"name": "payload-${{ matrix.variant }}", "path": "payload\nreports/result.txt\n",
+			"if-no-files-found": "error", "include-hidden-files": "TRUE",
+			"compression-level": "0", "overwrite": "False", "archive": "true",
+		},
+	} {
+		if err := ValidateUploadArtifactInputs(inputs); err != nil {
+			t.Fatalf("ValidateUploadArtifactInputs(%#v) = %v", inputs, err)
+		}
+	}
+
+	rejected := map[string]map[string]string{
+		"missing path":        nil,
+		"glob":                {"path": "payload/**"},
+		"path expression":     {"path": "${{ matrix.path }}"},
+		"unclean path":        {"path": "./payload"},
+		"too many roots":      {"path": strings.Repeat("payload\n", MaxUploadArtifactRoots+1)},
+		"retention":           {"path": "payload", "retention-days": "1"},
+		"overwrite":           {"path": "payload", "overwrite": "true"},
+		"raw upload":          {"path": "payload", "archive": "false"},
+		"bad no-files":        {"path": "payload", "if-no-files-found": "WARN"},
+		"bad boolean":         {"path": "payload", "include-hidden-files": "1"},
+		"bad compression":     {"path": "payload", "compression-level": "10"},
+		"bad name":            {"path": "payload", "name": "bad/name"},
+		"unknown":             {"path": "payload", "future-input": "value"},
+		"case-colliding keys": {"path": "payload", "Name": "one", "name": "two"},
+	}
+	for name, inputs := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if err := ValidateUploadArtifactInputs(inputs); err == nil {
+				t.Fatalf("ValidateUploadArtifactInputs(%#v) succeeded", inputs)
 			}
 		})
 	}
