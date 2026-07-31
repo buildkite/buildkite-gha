@@ -26,7 +26,7 @@ type downloadMember struct {
 	size int64
 }
 
-func (r Runner) runDownloadArtifact(ctx context.Context, workspace string, needs map[string]plan.Need, inputs map[string]string) (Result, error) {
+func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, inputs map[string]string) (Result, error) {
 	result := newResult()
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -39,6 +39,11 @@ func (r Runner) runDownloadArtifact(ctx context.Context, workspace string, needs
 		values[strings.ToLower(k)] = v
 	}
 	name, destinationRelative := values["name"], "."
+	for _, mask := range processor.maskValues() {
+		if mask != "" && strings.Contains(name, mask) {
+			return result, errors.New("artifact name contains a registered mask and cannot be downloaded")
+		}
+	}
 	if p := values["path"]; p != "" {
 		destinationRelative = filepath.FromSlash(p)
 	}
@@ -60,7 +65,7 @@ func (r Runner) runDownloadArtifact(ctx context.Context, workspace string, needs
 		}
 	}
 	if len(matches) != 1 {
-		return result, fmt.Errorf("artifact %q has %d verified matches across direct needs, want exactly one", name, len(matches))
+		return result, fmt.Errorf("artifact lookup found %d verified matches across direct needs, want exactly one", len(matches))
 	}
 	if r.Artifacts == nil {
 		return result, fmt.Errorf("native artifact store is not configured")

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,8 +82,9 @@ func TestDownloadArtifactExactNeedAndDirectExtraction(t *testing.T) {
 	archive, size, digest := testDownloadZIP(t, "nested/result.txt")
 	store := &downloadStore{archive: archive}
 	workspace := t.TempDir()
+	processor := newCommandProcessor(io.Discard, io.Discard)
 	need := plan.NeedArtifact{Name: "payload", ID: "42", Path: "buildkite-gha/v1/artifacts/" + strings.Repeat("a", 64) + ".zip", Digest: digest, Size: size, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
-	result, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "payload", "path": "out"})
+	result, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "payload", "path": "out"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,14 +98,24 @@ func TestDownloadArtifactExactNeedAndDirectExtraction(t *testing.T) {
 	if result.Outputs["download-path"] != want {
 		t.Fatalf("download-path = %q", result.Outputs["download-path"])
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), workspace, map[string]plan.Need{}, map[string]string{"name": "payload"}); err == nil {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{}, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
 		t.Fatal("missing artifact accepted")
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), workspace, map[string]plan.Need{"a": {Artifacts: []plan.NeedArtifact{need}}, "b": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "payload"}); err == nil {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"a": {Artifacts: []plan.NeedArtifact{need}}, "b": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "payload"}); err == nil || strings.Contains(err.Error(), "payload") {
 		t.Fatal("ambiguous artifact accepted")
 	}
-	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "Payload"}); err == nil {
+	if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{need}}}, map[string]string{"name": "Payload"}); err == nil || strings.Contains(err.Error(), "Payload") {
 		t.Fatal("non-exact artifact name accepted")
+	}
+}
+
+func TestDownloadArtifactRejectsMaskedNameWithoutDisclosure(t *testing.T) {
+	const maskedName = "runtime-secret-artifact"
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(maskedName)
+	_, err := (Runner{}).runDownloadArtifact(context.Background(), processor, t.TempDir(), nil, map[string]string{"name": maskedName})
+	if err == nil || strings.Contains(err.Error(), maskedName) || !strings.Contains(err.Error(), "registered mask") {
+		t.Fatalf("masked artifact lookup error = %v", err)
 	}
 }
 
@@ -149,7 +161,7 @@ func TestDownloadArtifactRejectsManifestAndDownloadMismatch(t *testing.T) {
 			artifact := base
 			store := &downloadStore{archive: archive}
 			test.alter(&artifact, store)
-			_, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), t.TempDir(), map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, map[string]string{"name": "payload"})
+			_, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, map[string]string{"name": "payload"})
 			if err == nil {
 				t.Fatal("mismatched download accepted")
 			}
