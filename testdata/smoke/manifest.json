@@ -86,9 +86,9 @@
       "id": "phase6-upload-artifact",
       "workflow": "testdata/phase6/.github/workflows/upload-artifact.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "The exact-commit upload-only fixture compiles and is admitted by the hosted-tokenless profile; live native artifact publication is not yet claimed.",
-      "note": "Runtime-pass requires an exact-commit Buildkite build and the independent archive, manifest, attribution, digest, content, and output verifier.",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-commit Buildkite build 259 and an independent read-only artifact observation proved native archive publication and its bounded producer contract.",
+      "note": "The verifier bound build 259, merged implementation commit 12e72d3298e919f33caba70d39265ef2da387f83, and generated job 019fb686-0167-4da1-9bfc-550166d6a1a4.",
       "action_preflight": "hosted-tokenless"
     },
     {
