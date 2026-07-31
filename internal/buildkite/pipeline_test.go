@@ -1188,6 +1188,8 @@ func TestPhase6ArtifactRoundtripProofContract(t *testing.T) {
 		`automatic: false`,
 		`runtime_version="0.0.0-phase6.$$commit"`,
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
+		`[[ -z "$$proof_workflow" ]] || rm -f -- "$$proof_workflow"`,
+		`proof_workflow="$$(mktemp testdata/smoke/.github/workflows/.phase-6-artifact-roundtrip.XXXXXXXX.yml)"`,
 		`nonce="$${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}"`,
 		`sed "s/__PHASE6_ARTIFACT_NONCE__/$$nonce/g" testdata/smoke/.github/workflows/artifact.yml`,
 		`! grep -q '__PHASE6_ARTIFACT_NONCE__' "$$proof_workflow"`,

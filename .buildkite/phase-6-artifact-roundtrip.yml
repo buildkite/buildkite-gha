@@ -16,10 +16,11 @@ steps:
       scripts/phase-0-shell-oracle-checkout "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-phase6-artifact-roundtrip.XXXXXXXX")"
-      trap 'rm -rf -- "$$distribution_root"' EXIT
+      proof_workflow=
+      trap 'rm -rf -- "$$distribution_root"; [[ -z "$$proof_workflow" ]] || rm -f -- "$$proof_workflow"' EXIT
       runtime_version="0.0.0-phase6.$$commit"
       CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
-      proof_workflow="$$distribution_root/artifact.yml"
+      proof_workflow="$$(mktemp testdata/smoke/.github/workflows/.phase-6-artifact-roundtrip.XXXXXXXX.yml)"
       nonce="$${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}"
       sed "s/__PHASE6_ARTIFACT_NONCE__/$$nonce/g" testdata/smoke/.github/workflows/artifact.yml > "$$proof_workflow"
       ! grep -q '__PHASE6_ARTIFACT_NONCE__' "$$proof_workflow"
