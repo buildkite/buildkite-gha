@@ -1309,9 +1309,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
   immutable, digest-addressed ZIP; compatible artifact ID and digest outputs
   and the native path, size, and file count are bound into the authoritative
   terminal result manifest. Globs, symlinks, overwrite, retention, raw upload,
-  and unrecognized upstream commits fail explicitly. The separate upload-only
-  Phase 6 fixture remains `compile-pass` until an exact-commit hosted build and
-  independent read-only artifact observation establish runtime evidence.
+  and unrecognized upstream commits fail explicitly. Build 259 and its
+  exact-commit artifact observation prove publication, attribution, manifest
+  binding, archive integrity and contents, hidden-file exclusion, and compatible
+  action outputs, so the separate upload-only fixture is now `runtime-pass`.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1456,6 +1457,19 @@ Phase 6 evidence:
   both checked-in body contracts and the absence of the registered masking
   canary; successful job outcome alone would not establish this advisory
   publication evidence.
+- [Buildkite build 259](https://buildkite.com/buildkite/buildkite-gha/builds/259)
+  ran exact merged implementation commit
+  `12e72d3298e919f33caba70d39265ef2da387f83`. The exact-commit importer
+  compiled and uploaded the checked-in upload-only fixture, and generated job
+  `019fb686-0167-4da1-9bfc-550166d6a1a4` passed.
+- The independent read-only artifact verifier found exactly one native archive
+  and one authoritative terminal manifest under that producer. It verified the
+  manifest's v2 schema, exact build/job/step and plan attribution, artifact ID,
+  digest, path, 363-byte size, and two-file count; independently rehashed and
+  inspected the ZIP; confirmed both checked-in payloads and hidden-file
+  exclusion; and bound the compatible action outputs in the job log to the
+  manifest. The observed native archive digest was
+  `sha256:efd85cd46277c320fdc52362d01ee151cd672c9b83f592d338c6baf45ac377dc`.
 
 Phase 2 live evidence:
 
