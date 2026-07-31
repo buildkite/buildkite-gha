@@ -150,7 +150,8 @@ exact-name match, downloads by the bound producer job UUID,
 and verifies size and SHA-256 before preflighting and extracting the bounded
 ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
 mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
-fabricated. Hosted roundtrip proof remains pending.
+fabricated. Exact-commit Buildkite build 270 and its independent artifact
+observation prove the producer-to-two-consumer roundtrip contract.
 
 ### Failures stay explicit
 
