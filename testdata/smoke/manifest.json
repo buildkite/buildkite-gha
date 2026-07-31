@@ -32,9 +32,9 @@
       "id": "smoke-artifact",
       "workflow": "testdata/smoke/.github/workflows/artifact.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "runtime-unsupported",
-      "evidence": "Compilation is covered, but GitHub artifact service emulation is deferred.",
-      "note": "Upload-artifact and download-artifact require hosted service compatibility.",
+      "expectation": "compile-pass",
+      "evidence": "The bounded native upload and exact-name download adapters have focused local coverage; hosted roundtrip observation is pending.",
+      "note": "Only pinned exact-commit, direct-needs, exact-name native artifact transfer is supported.",
       "action_preflight": "hosted-tokenless"
     },
     {

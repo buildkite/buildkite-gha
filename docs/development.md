@@ -66,9 +66,10 @@ applies the same `hosted-tokenless` admission policy as production `upload`.
 It does not install Node or run action code. An `admitted` result is policy
 evidence, not runtime evidence.
 
-The exact audited `actions/upload-artifact` commit passes admission through its
-bounded native adapter. Cache actions, artifact download/merge, and unsupported
-upload commits still fail admission. Job and service container fixtures have
+The exact audited `actions/upload-artifact` and exact-name
+`actions/download-artifact` commits pass admission through bounded native
+adapters. Cache actions, artifact merge/broad download modes, and unsupported
+commits still fail admission. Job and service container fixtures have
 separate hosted runtime evidence but remain outside production admission.
 
 ### Hosted runtime proofs
@@ -96,6 +97,8 @@ phase selector only for targeted diagnosis:
 | Complete container runtime | `PHASE5_PROBE=runtime`, `PHASE5_COMMIT=<commit>` |
 | Job summary annotation | `PHASE6_PROBE=summary`, `PHASE6_COMMIT=<commit>` |
 | Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
+| Upload-artifact publication | `PHASE6_PROBE=upload-artifact`, `PHASE6_COMMIT=<commit>` |
+| Artifact producer/consumer roundtrip | `PHASE6_PROBE=artifact-roundtrip`, `PHASE6_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After
@@ -122,6 +125,20 @@ This verifier requires the generated job to pass even though it emitted an
 `::error` command, then checks exactly one job-scoped `warning` annotation and
 one job-scoped `error` annotation, their checked-in body fragments, and the
 absence of the registered masking canary.
+
+Artifact publication and consumption require independent native-storage
+observations after their targeted or aggregate builds settle:
+
+```sh
+scripts/phase-6-upload-artifact-verify <build-number> <commit>
+scripts/phase-6-artifact-roundtrip-verify <build-number> <commit>
+```
+
+The upload verifier binds the archive, terminal manifest, producer, digest,
+contents, and action outputs. The roundtrip verifier additionally requires the
+producer and both consumer matrix jobs to pass, checks all three terminal
+manifests, and confirms both consumers observed the exact payload and compatible
+absolute `download-path` output.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact

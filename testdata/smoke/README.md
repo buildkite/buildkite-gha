@@ -31,7 +31,7 @@ Expectations have these precise meanings:
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently artifact download and cache services).
+  intentionally unsupported (currently the cache service).
 - `future`: the fixture is inventoried but not yet required to compile.
 
 Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
@@ -44,13 +44,15 @@ Run `mise run smoke:profile` for the opt-in networked preflight of entries marke
 the same admission policy as production upload without installing or executing
 Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
-The exact audited `actions/upload-artifact` commit is admitted through its
-bounded native adapter. Cache actions, artifact download/merge, and unsupported
-upload commits remain rejected; the profile leaves unknown generic service
-dependencies as an explicit warning rather than guessing from arbitrary action
-source. Runtime-pass job and service container fixtures are deliberately not
-marked for this profile: their execution is proven separately, while production
-hosted-tokenless admission continues to reject their container provenance.
+The exact audited `actions/upload-artifact` and exact-name
+`actions/download-artifact` commits are admitted through bounded native
+adapters. Cache actions, artifact merge and broad download modes, and
+unsupported commits remain rejected; the profile leaves unknown generic
+service dependencies as an explicit warning rather than guessing from
+arbitrary action source. Runtime-pass job and service container fixtures are
+deliberately not marked for this profile: their execution is proven separately,
+while production hosted-tokenless admission continues to reject their container
+provenance.
 
 `events/push.json` is deterministic and its repository SHA is intentionally
 synthetic. End-to-end runs involving checkout must bind the event to the real

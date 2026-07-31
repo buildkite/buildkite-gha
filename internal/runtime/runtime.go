@@ -61,7 +61,7 @@ type Runner struct {
 	Secrets           SecretResolver
 	Redactor          Redactor
 	Actions           ActionMaterializer
-	Artifacts         ArtifactUploader
+	Artifacts         ArtifactStore
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
@@ -1246,6 +1246,47 @@ func (p *commandProcessor) maskValues() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.masks...)
+}
+
+type scrubbedCommandError struct {
+	cause   error
+	message string
+}
+
+func (e scrubbedCommandError) Error() string { return e.message }
+func (e scrubbedCommandError) Unwrap() error { return e.cause }
+
+func (p *commandProcessor) scrubError(err error) error {
+	if err == nil {
+		return nil
+	}
+	registered := p.maskValues()
+	masks := make([]string, 0, len(registered)*2)
+	for _, mask := range registered {
+		if mask == "" {
+			continue
+		}
+		masks = append(masks, mask)
+		quoted := strconv.Quote(mask)
+		escaped := quoted[1 : len(quoted)-1]
+		if escaped != mask {
+			masks = append(masks, escaped)
+		}
+	}
+	sort.Slice(masks, func(i, j int) bool {
+		if len(masks[i]) != len(masks[j]) {
+			return len(masks[i]) > len(masks[j])
+		}
+		return masks[i] < masks[j]
+	})
+	message := err.Error()
+	for _, mask := range masks {
+		message = strings.ReplaceAll(message, mask, "***")
+	}
+	if message == err.Error() {
+		return err
+	}
+	return scrubbedCommandError{cause: err, message: message}
 }
 
 func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {

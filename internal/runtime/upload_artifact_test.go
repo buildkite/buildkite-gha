@@ -32,6 +32,10 @@ type captureArtifactUploader struct {
 	err     error
 }
 
+func (u *captureArtifactUploader) DownloadArtifact(context.Context, string, string, string) error {
+	return errors.New("unexpected artifact download")
+}
+
 func (u *captureArtifactUploader) UploadArtifactFrom(_ context.Context, root, path string) error {
 	if u.err != nil {
 		return u.err
@@ -86,6 +90,25 @@ func TestUploadArtifactCanIncludeHiddenFiles(t *testing.T) {
 	}
 	if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, map[string]string{".hidden": "included"}) {
 		t.Fatalf("archive entries = %#v", got)
+	}
+}
+
+func TestUploadArtifactRejectsPathsTheConsumerCannotExtract(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "control\tcharacter", "unsafe")
+	if _, err := collectUploadFiles(context.Background(), workspace, []string{"control\tcharacter"}, false); err == nil || !strings.Contains(err.Error(), "forbidden characters") {
+		t.Fatalf("control character error = %v", err)
+	}
+
+	components := make([]string, 258)
+	components[0] = "deep"
+	for i := 1; i < len(components)-1; i++ {
+		components[i] = "d"
+	}
+	components[len(components)-1] = "file"
+	writeFixtureFile(t, workspace, filepath.Join(components...), "too deep")
+	if _, err := collectUploadFiles(context.Background(), workspace, []string{"deep"}, false); err == nil || !strings.Contains(err.Error(), "forbidden characters") {
+		t.Fatalf("deep path error = %v", err)
 	}
 }
 

@@ -60,6 +60,11 @@ steps:
     if: build.env("PHASE6_PROBE") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-6-upload-artifact.yml"
 
+  - label: ":package: Load Phase 6 artifact roundtrip proof"
+    key: "phase-6-artifact-roundtrip-loader"
+    if: build.env("PHASE6_PROBE") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml"
+
   - label: ":pipeline: Load consolidated hosted smoke proof"
     key: "hosted-smoke-loader"
     if: build.env("SMOKE_PROBE") == "hosted"
@@ -91,6 +96,7 @@ steps:
       buildkite-agent pipeline upload .buildkite/phase-6-summary.yml
       buildkite-agent pipeline upload .buildkite/phase-6-annotations.yml
       buildkite-agent pipeline upload .buildkite/phase-6-upload-artifact.yml
+      buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml
       buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
 
   - label: ":go: Repository checks"

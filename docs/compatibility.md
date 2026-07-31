@@ -43,9 +43,10 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
+| `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
-| Artifact download and cache actions | Not supported | They compile but fail profile admission until their Buildkite-backed adapters exist. |
+| Artifact cache and broad download modes | Not supported | Cache, merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
 | Private repositories or actions | Not supported | The preview has no private-source capability broker. |
 | Secrets and provider tokens | Not supported | Includes `GITHUB_TOKEN`, GitHub App tokens, and protected environment grants. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
@@ -142,8 +143,14 @@ and `artifact-digest` as the bare SHA-256 of the stored ZIP, matching the useful
 shape of the upstream outputs. `artifact-url` is not fabricated because a
 GitHub run-scoped URL does not exist. The authoritative terminal result binds
 the ID and digest to the native Buildkite path, archive size, file count, and
-producer. `actions/download-artifact` remains unsupported until its consumer
-adapter can resolve that exact manifest contract across jobs.
+producer. The consumer recognizes only
+`actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093`.
+It scans only verified manifests from direct `needs`, requires one
+exact-name match, downloads by the bound producer job UUID,
+and verifies size and SHA-256 before preflighting and extracting the bounded
+ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
+mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
+fabricated. Hosted roundtrip proof remains pending.
 
 ### Failures stay explicit
 

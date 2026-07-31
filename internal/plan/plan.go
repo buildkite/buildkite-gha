@@ -78,9 +78,20 @@ type Target struct {
 }
 
 type Need struct {
-	Result  string            `json:"result"`
-	Outputs map[string]string `json:"outputs,omitempty"`
+	Result    string            `json:"result"`
+	Outputs   map[string]string `json:"outputs,omitempty"`
+	Artifacts []NeedArtifact    `json:"-"`
 }
+
+// NeedArtifact is verified runtime-only native storage authority.
+type NeedArtifact struct {
+	Name, ID, Path, Digest string
+	Size                   int64
+	FileCount              int
+	Producer               NeedProducer
+}
+
+type NeedProducer struct{ BuildID, JobID, StepKey string }
 
 // NeedSource binds one logical prerequisite to an exact generated producer
 // and immutable plan. Buildkite scheduling still uses Dependencies; runtimes

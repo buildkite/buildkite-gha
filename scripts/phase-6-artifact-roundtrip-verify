@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 2 )) || [[ ! $1 =~ ^[1-9][0-9]*$ ]] || [[ ! $2 =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'usage: scripts/phase-6-artifact-roundtrip-verify <build-number> <commit>' >&2
+  exit 2
+fi
+
+readonly build_number=$1
+readonly expected_commit=$2
+readonly pipeline=${PHASE6_PIPELINE_SLUG:-buildkite-gha}
+readonly producer_key=gha-artifact-producer
+readonly consumer_one_key=gha-artifact-consumer-5ebbc197d87b
+readonly consumer_two_key=gha-artifact-consumer-91934b28b00f
+readonly expected_payload="smoke-artifact:$build_number"
+
+command -v bk >/dev/null
+command -v jq >/dev/null
+command -v sha256sum >/dev/null
+command -v unzip >/dev/null
+
+build="$(bk --no-pager api "/pipelines/$pipeline/builds/$build_number")"
+commit="$(jq -r '.commit // ""' <<<"$build")"
+if [[ $commit != "$expected_commit" ]]; then
+  echo "build $build_number ran commit $commit, expected $expected_commit" >&2
+  exit 1
+fi
+readonly commit
+build_id="$(jq -r '.id // ""' <<<"$build")"
+readonly build_id
+
+job_id() {
+  local step_key=$1
+  local -a matches
+  mapfile -t matches < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
+  if (( ${#matches[@]} != 1 )) || [[ ! ${matches[0]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
+    echo "build $build_number has ${#matches[@]} jobs with step key $step_key; expected exactly one" >&2
+    return 1
+  fi
+  if ! jq -e --arg job_id "${matches[0]}" '.jobs[] | select(.id == $job_id) | .state == "passed"' <<<"$build" >/dev/null; then
+    echo "artifact roundtrip job ${matches[0]} ($step_key) did not pass" >&2
+    return 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
+producer_job="$(job_id "$producer_key")"
+consumer_one_job="$(job_id "$consumer_one_key")"
+consumer_two_job="$(job_id "$consumer_two_key")"
+readonly producer_job consumer_one_job consumer_two_job
+
+producer_artifacts="$(bk --no-pager api "/jobs/$producer_job/artifacts?per_page=100")"
+if ! jq -e --arg job_id "$producer_job" --arg step_key "$producer_key" '
+  length == 2 and
+  all(.[]; .job_id == $job_id and .state == "finished") and
+  ([.[] | select(.path | test("^buildkite-gha/v1/artifacts/[0-9a-f]{64}\\.zip$"))] | length) == 1 and
+  ([.[] | select(.path | test("^buildkite-gha/v1/results/" + $step_key + "/[0-9a-f]{64}\\.json$"))] | length) == 1
+' <<<"$producer_artifacts" >/dev/null; then
+  echo "producer $producer_job does not have exactly one native archive and one terminal manifest" >&2
+  exit 1
+fi
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-phase6-roundtrip-verify.XXXXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+
+download_job_artifacts() {
+  local job=$1
+  local artifacts=$2
+  local id
+  while IFS= read -r id; do
+    (
+      cd "$work"
+      bk --no-pager artifacts download "$id" --build "$build_number" --job-uuid "$job" --pipeline "$pipeline"
+    )
+  done < <(jq -r '.[].id' <<<"$artifacts")
+}
+
+download_job_artifacts "$producer_job" "$producer_artifacts"
+archive_path="$(jq -r '.[] | select(.path | test("^buildkite-gha/v1/artifacts/")) | .path' <<<"$producer_artifacts")"
+producer_manifest_path="$(jq -r '.[] | select(.path | test("^buildkite-gha/v1/results/")) | .path' <<<"$producer_artifacts")"
+readonly archive_path producer_manifest_path
+readonly archive_file="$work/$archive_path"
+readonly producer_manifest="$work/$producer_manifest_path"
+
+archive_size="$(wc -c < "$archive_file" | tr -d ' ')"
+archive_digest="sha256:$(sha256sum "$archive_file" | cut -d ' ' -f 1)"
+readonly archive_size archive_digest
+producer_plan_digest="sha256:${producer_manifest_path##*/}"
+producer_plan_digest=${producer_plan_digest%.json}
+readonly producer_plan_digest
+if ! jq -e \
+  --arg build_id "$build_id" \
+  --arg job_id "$producer_job" \
+  --arg step_key "$producer_key" \
+  --arg plan_digest "$producer_plan_digest" \
+  --arg archive_path "$archive_path" \
+  --arg archive_digest "$archive_digest" \
+  --argjson archive_size "$archive_size" '
+    .schema == "buildkite-gha/result-manifest/v2" and
+    .plan_digest == $plan_digest and
+    .producer == {build_id: $build_id, job_id: $job_id, step_key: $step_key} and
+    .result == "success" and .outputs == [] and
+    (.artifacts | length) == 1 and
+    .artifacts[0].name == "smoke-payload" and
+    (.artifacts[0].id | test("^[1-9][0-9]{0,19}$")) and
+    .artifacts[0].path == $archive_path and
+    .artifacts[0].digest == $archive_digest and
+    .artifacts[0].size == $archive_size and
+    .artifacts[0].file_count == 1
+  ' "$producer_manifest" >/dev/null
+then
+  echo "producer manifest does not bind the exact native artifact" >&2
+  exit 1
+fi
+mapfile -t entries < <(unzip -Z1 "$archive_file")
+archive_payload="$(unzip -p "$archive_file" result.txt)"
+archive_payload_digest="sha256:$(unzip -p "$archive_file" result.txt | sha256sum | cut -d ' ' -f 1)"
+readonly archive_payload archive_payload_digest
+if (( ${#entries[@]} != 1 )) || [[ ${entries[0]} != result.txt ]] || [[ $archive_payload != "$expected_payload" ]]; then
+  printf 'unexpected producer archive: entries=%s\n' "${entries[*]}" >&2
+  exit 1
+fi
+
+verify_consumer() {
+  local job=$1
+  local step_key=$2
+  local variant=$3
+  local artifacts manifest_path plan_digest log
+  artifacts="$(bk --no-pager api "/jobs/$job/artifacts?per_page=100")"
+  if ! jq -e --arg job_id "$job" --arg step_key "$step_key" '
+    length == 1 and .[0].job_id == $job_id and .[0].state == "finished" and
+    (.[0].path | test("^buildkite-gha/v1/results/" + $step_key + "/[0-9a-f]{64}\\.json$"))
+  ' <<<"$artifacts" >/dev/null; then
+    echo "consumer $job does not have exactly one terminal manifest" >&2
+    return 1
+  fi
+  download_job_artifacts "$job" "$artifacts"
+  manifest_path="$(jq -r '.[0].path' <<<"$artifacts")"
+  plan_digest="sha256:${manifest_path##*/}"
+  plan_digest=${plan_digest%.json}
+  if ! jq -e \
+    --arg build_id "$build_id" \
+    --arg job_id "$job" \
+    --arg step_key "$step_key" \
+    --arg plan_digest "$plan_digest" '
+      .schema == "buildkite-gha/result-manifest/v2" and
+      .plan_digest == $plan_digest and
+      .producer == {build_id: $build_id, job_id: $job_id, step_key: $step_key} and
+      .result == "success" and .outputs == [] and .artifacts == []
+    ' "$work/$manifest_path" >/dev/null
+  then
+    echo "consumer $job terminal manifest is not exact" >&2
+    return 1
+  fi
+  log="$(bk --no-pager api "/jobs/$job/log" | jq -r '.content // ""')"
+  if ! grep -E -- "PHASE6_ARTIFACT_ROUNDTRIP=\\{\"artifact\":\"smoke-artifact:$build_number\",\"variant\":\"$variant\",\"file_digest\":\"$archive_payload_digest\",\"download_path\":\"/[^\"]*/payload\"\\}" <<<"$log" >/dev/null; then
+    echo "consumer $job log lacks the $variant content and download-path observation" >&2
+    return 1
+  fi
+}
+
+verify_consumer "$consumer_one_job" "$consumer_one_key" one
+verify_consumer "$consumer_two_job" "$consumer_two_key" two
+
+printf 'PHASE6_ARTIFACT_ROUNDTRIP_OBSERVATION={"build":%s,"commit":"%s","producer_job":"%s","consumer_jobs":["%s","%s"],"name":"smoke-payload","path":"%s","digest":"%s","size":%s,"file_count":1,"payload_digest":"%s"}\n' \
+  "$build_number" "$commit" "$producer_job" "$consumer_one_job" "$consumer_two_job" "$archive_path" "$archive_digest" "$archive_size" "$archive_payload_digest"
