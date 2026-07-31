@@ -1248,6 +1248,37 @@ func (p *commandProcessor) maskValues() []string {
 	return append([]string(nil), p.masks...)
 }
 
+type scrubbedCommandError struct {
+	cause   error
+	message string
+}
+
+func (e scrubbedCommandError) Error() string { return e.message }
+func (e scrubbedCommandError) Unwrap() error { return e.cause }
+
+func (p *commandProcessor) scrubError(err error) error {
+	if err == nil {
+		return nil
+	}
+	masks := p.maskValues()
+	sort.Slice(masks, func(i, j int) bool {
+		if len(masks[i]) != len(masks[j]) {
+			return len(masks[i]) > len(masks[j])
+		}
+		return masks[i] < masks[j]
+	})
+	message := err.Error()
+	for _, mask := range masks {
+		if mask != "" {
+			message = strings.ReplaceAll(message, mask, "***")
+		}
+	}
+	if message == err.Error() {
+		return err
+	}
+	return scrubbedCommandError{cause: err, message: message}
+}
+
 func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -26,8 +26,9 @@ type downloadMember struct {
 	size int64
 }
 
-func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, inputs map[string]string) (Result, error) {
-	result := newResult()
+func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, inputs map[string]string) (result Result, returnErr error) {
+	result = newResult()
+	defer func() { returnErr = processor.scrubError(returnErr) }()
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
