@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -453,9 +454,22 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		if e != nil {
 			return "", 0, e
 		}
-		in, e := root.Open(relative)
+		in, e := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 		if e != nil {
 			return "", 0, e
+		}
+		if e = ctx.Err(); e != nil {
+			return "", 0, errors.Join(e, in.Close())
+		}
+		info, statErr := in.Stat()
+		if statErr != nil {
+			return "", 0, errors.Join(statErr, in.Close())
+		}
+		if !info.Mode().IsRegular() {
+			return "", 0, errors.Join(fmt.Errorf("artifact source %q changed to a non-regular file", file.name), in.Close())
+		}
+		if info.Size() != file.size {
+			return "", 0, errors.Join(fmt.Errorf("artifact source %q changed while archiving", file.name), in.Close())
 		}
 		copied, copyErr := io.CopyN(zw, contextReader{ctx: ctx, reader: in}, file.size+1)
 		closeErr := in.Close()

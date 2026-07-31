@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -228,6 +230,39 @@ func TestUploadArtifactCancellationStopsEveryArchiveStage(t *testing.T) {
 	var copied bytes.Buffer
 	if n, err := io.Copy(&copied, reader); n != int64(len("chunk")) || !errors.Is(err, context.Canceled) || copied.String() != "chunk" {
 		t.Fatalf("copy-loop cancellation = %d, %v, %q", n, err, copied.String())
+	}
+}
+
+func TestUploadArtifactRejectsFIFOReplacementWithoutBlockingPastCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload", "regular before collection")
+	files, err := collectUploadFiles(context.Background(), workspace, []string{"payload"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(workspace, "payload")
+	if err := os.Remove(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	archive := filepath.Join(t.TempDir(), "fifo.zip")
+	go func() {
+		_, _, err := writeUploadZIP(ctx, archive, workspace, files, 0)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "non-regular file") {
+			t.Fatalf("FIFO replacement error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("FIFO replacement blocked past cancellation")
 	}
 }
 
