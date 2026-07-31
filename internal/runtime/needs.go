@@ -50,6 +50,7 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 		Producer:   producer,
 		Result:     result.Conclusion,
 		Outputs:    outputs,
+		Artifacts:  append([]transport.ResultArtifact(nil), result.Artifacts...),
 	}
 	if _, err := transport.MarshalResultManifest(manifest); err != nil {
 		fallback := manifest
@@ -58,6 +59,7 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 			fallback.Result = "cancelled"
 		}
 		fallback.Outputs = nil
+		fallback.Artifacts = nil
 		publication, publishErr := transport.PublishResult(ctx, agent, root, workflow, instance, fallback)
 		if publishErr != nil {
 			return publication, errors.Join(fmt.Errorf("validate terminal result: %w", err), fmt.Errorf("publish bounded terminal result: %w", publishErr))

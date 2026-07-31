@@ -218,6 +218,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Secrets:     gharuntime.EnvironmentSecrets{},
 		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:     actionMaterializer,
+		Artifacts:   agent,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {

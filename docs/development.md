@@ -66,9 +66,10 @@ applies the same `hosted-tokenless` admission policy as production `upload`.
 It does not install Node or run action code. An `admitted` result is policy
 evidence, not runtime evidence.
 
-Known artifact and cache actions compile but fail admission. Job and service
-container fixtures have separate hosted runtime evidence but remain outside
-production admission.
+The exact audited `actions/upload-artifact` commit passes admission through its
+bounded native adapter. Cache actions, artifact download/merge, and unsupported
+upload commits still fail admission. Job and service container fixtures have
+separate hosted runtime evidence but remain outside production admission.
 
 ### Hosted runtime proofs
 

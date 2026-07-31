@@ -18,17 +18,19 @@ import (
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 // JobResult is the bounded logical result returned to the transport layer.
 type JobResult struct {
-	Conclusion         string            `json:"conclusion"`
-	Outputs            map[string]string `json:"outputs,omitempty"`
-	Env                map[string]string `json:"env,omitempty"`
-	State              map[string]string `json:"state,omitempty"`
-	Summary            string            `json:"summary,omitempty"`
-	WarningAnnotations string            `json:"warning_annotations,omitempty"`
-	ErrorAnnotations   string            `json:"error_annotations,omitempty"`
+	Conclusion         string                     `json:"conclusion"`
+	Outputs            map[string]string          `json:"outputs,omitempty"`
+	Env                map[string]string          `json:"env,omitempty"`
+	State              map[string]string          `json:"state,omitempty"`
+	Summary            string                     `json:"summary,omitempty"`
+	WarningAnnotations string                     `json:"warning_annotations,omitempty"`
+	ErrorAnnotations   string                     `json:"error_annotations,omitempty"`
+	Artifacts          []transport.ResultArtifact `json:"artifacts,omitempty"`
 
 	summaryTruncated  bool
 	warningsTruncated bool
@@ -102,6 +104,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if r.nodeVerification == nil {
 		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 2)}
 	}
+	if r.artifactRegistry == nil {
+		r.artifactRegistry = &artifactRegistry{names: make(map[string]bool)}
+	}
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
@@ -122,7 +127,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		Vars:        job.Vars,
 		GitHub:      githubContext(job),
 	}
-	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}}
+	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
 		need := job.Needs[name]
 		if need.Result == "" {
@@ -312,6 +317,9 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
 				break
 			}
+			if entry := actions.locks[step.Action.Lock]; entry != nil && usesUploadArtifactAdapter(entry.lock) {
+				continue
+			}
 			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
@@ -427,6 +435,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 
 	jobResult.WarningAnnotations, jobResult.warningsTruncated, jobResult.ErrorAnnotations, jobResult.errorsTruncated = processor.workflowCommandAnnotations()
 	sensitiveValues := processor.maskValues()
+	for _, artifact := range jobResult.Artifacts {
+		for _, sensitive := range sensitiveValues {
+			if sensitive != "" && strings.Contains(artifact.Name, sensitive) {
+				jobResult.Artifacts = nil
+				return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("artifact name contains a registered secret"))
+			}
+		}
+	}
 	for _, name := range sortedKeys(job.Outputs) {
 		template := job.Outputs[name]
 		value, err := expression.Evaluate(template, eval)
@@ -805,7 +821,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		// The checkout adapter replaces the verified action's JavaScript
 		// lifecycle as one indivisible operation. Do not register upstream
 		// checkout cleanup for a main phase that this runtime never executes.
-		if usesCheckoutAdapter(lock) {
+		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) {
 			return result, nil
 		}
 		runPre, err := evaluateLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
@@ -967,6 +983,13 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 				return result, err
 			}
 			return r.runCheckout(ctx, processor, workspace, job, inputs)
+		}
+		if usesUploadArtifactAdapter(lock) {
+			inputs, err := evaluateMap(step.With, eval)
+			if err != nil {
+				return result, err
+			}
+			return r.runUploadArtifact(ctx, workspace, inputs, processor.maskValues())
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {
@@ -1179,6 +1202,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			result.Paths = result.Paths[:0]
 		}
 		result.Paths = append(result.Paths, stepResult.Paths...)
+		result.Artifacts = append(result.Artifacts, stepResult.Artifacts...)
 		mergeInto(result.State, stepResult.State)
 		appendJobSummary(&result.Summary, &result.summaryTruncated, stepResult.Summary, stepResult.summaryTruncated)
 		if id != "" {

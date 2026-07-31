@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -174,6 +175,12 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
+	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+		if err := actionintegration.ValidateUploadArtifactCommit(lock.Commit); err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	b.caps["network"] = true
 	return key, lock, materialized.RepositoryRoot, ref.Path, nil
 }

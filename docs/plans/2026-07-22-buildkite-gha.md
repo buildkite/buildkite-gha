@@ -1303,6 +1303,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
   and error contexts; they do not change step or job conclusions. Build 252
   and its exact-commit API observation prove both persisted annotations and
   masking, so the distinct checked-in hosted fixture is now `runtime-pass`.
+  The producer-side artifact slice now recognizes only the audited
+  `actions/upload-artifact` v4 commit and replaces its lifecycle with a bounded
+  Buildkite Agent upload. Literal workspace files and directories become an
+  immutable, digest-addressed ZIP; compatible artifact ID and digest outputs
+  and the native path, size, and file count are bound into the authoritative
+  terminal result manifest. Globs, symlinks, overwrite, retention, raw upload,
+  and unrecognized upstream commits fail explicitly. The separate upload-only
+  Phase 6 fixture remains `compile-pass` until an exact-commit hosted build and
+  independent read-only artifact observation establish runtime evidence.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1894,10 +1903,11 @@ buildkite-gha validate --profile hosted-tokenless \
   --event-path <event.json> --format text|json <workflow.yml>
 ```
 
-Admission is policy evidence, not execution evidence. In particular, known
-official artifact and cache actions compile but must be rejected until Phase 6
-provides their service adapters. Unknown generic action dependencies are not
-declared executable merely because the profile admits them.
+Admission is policy evidence, not execution evidence. The exact audited
+`actions/upload-artifact` commit is admitted through its bounded native adapter;
+cache actions, artifact download/merge, and unsupported upload commits remain
+rejected. Unknown generic action dependencies are not declared executable
+merely because the profile admits them.
 
 The manual hosted aggregate is dispatched against one exact full commit:
 

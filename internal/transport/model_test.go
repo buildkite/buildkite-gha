@@ -140,6 +140,106 @@ func TestResultManifestEnforcesOutputLimits(t *testing.T) {
 	}
 }
 
+func TestResultManifestArtifactsAreCanonicalAndRoundTrip(t *testing.T) {
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+	manifest.Artifacts = []ResultArtifact{
+		resultArtifact("zeta", "20", strings.Repeat("b", 64)),
+		resultArtifact("alpha", "10", strings.Repeat("a", 64)),
+	}
+	encoded, err := MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"schema":"buildkite-gha/result-manifest/v2"`) ||
+		!strings.Contains(string(encoded), `"artifacts":[{"name":"alpha","id":"10"`) {
+		t.Fatalf("manifest schema or artifact order is not canonical: %s", encoded)
+	}
+	verified, err := VerifyResultManifest(encoded, manifest.PlanDigest, manifest.Producer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(verified.Artifacts, []ResultArtifact{manifest.Artifacts[1], manifest.Artifacts[0]}) {
+		t.Fatalf("artifacts = %#v", verified.Artifacts)
+	}
+
+	manifest.Artifacts = nil
+	encoded, err = MarshalResultManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"artifacts":[]`) {
+		t.Fatalf("nil artifacts were not normalized: %s", encoded)
+	}
+}
+
+func TestResultManifestRejectsMalformedArtifacts(t *testing.T) {
+	base := resultArtifact("artifact", "1", strings.Repeat("a", 64))
+	tests := []struct {
+		name   string
+		mutate func(*ResultArtifact)
+	}{
+		{name: "empty name", mutate: func(a *ResultArtifact) { a.Name = "" }},
+		{name: "invalid UTF-8 name", mutate: func(a *ResultArtifact) { a.Name = string([]byte{0xff}) }},
+		{name: "oversized name", mutate: func(a *ResultArtifact) { a.Name = strings.Repeat("x", MaxResultArtifactNameBytes+1) }},
+		{name: "forbidden name character", mutate: func(a *ResultArtifact) { a.Name = "directory/file" }},
+		{name: "zero ID", mutate: func(a *ResultArtifact) { a.ID = "0" }},
+		{name: "signed ID", mutate: func(a *ResultArtifact) { a.ID = "+1" }},
+		{name: "oversized ID", mutate: func(a *ResultArtifact) { a.ID = strings.Repeat("1", MaxResultArtifactIDBytes+1) }},
+		{name: "wrong path prefix", mutate: func(a *ResultArtifact) { a.Path = "other/" + strings.Repeat("a", 64) + ".zip" }},
+		{name: "uppercase path digest", mutate: func(a *ResultArtifact) { a.Path = "buildkite-gha/v1/artifacts/" + strings.Repeat("A", 64) + ".zip" }},
+		{name: "invalid digest", mutate: func(a *ResultArtifact) { a.Digest = strings.Repeat("a", 64) }},
+		{name: "zero size", mutate: func(a *ResultArtifact) { a.Size = 0 }},
+		{name: "oversized archive", mutate: func(a *ResultArtifact) { a.Size = MaxResultArtifactSizeBytes + 1 }},
+		{name: "zero files", mutate: func(a *ResultArtifact) { a.FileCount = 0 }},
+		{name: "too many files", mutate: func(a *ResultArtifact) { a.FileCount = MaxResultArtifactFileCount + 1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			artifact := base
+			test.mutate(&artifact)
+			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+			manifest.Artifacts = []ResultArtifact{artifact}
+			if _, err := MarshalResultManifest(manifest); err == nil {
+				t.Fatal("MarshalResultManifest() accepted malformed artifact")
+			}
+		})
+	}
+
+	manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+	manifest.Artifacts = make([]ResultArtifact, MaxResultArtifacts+1)
+	if _, err := MarshalResultManifest(manifest); err == nil {
+		t.Fatal("MarshalResultManifest() accepted too many artifacts")
+	}
+}
+
+func TestResultManifestRejectsDuplicateArtifacts(t *testing.T) {
+	first := resultArtifact("Artifact", "1", strings.Repeat("a", 64))
+	for _, test := range []struct {
+		name   string
+		second ResultArtifact
+	}{
+		{name: "case-insensitive name", second: resultArtifact("artifact", "2", strings.Repeat("b", 64))},
+		{name: "ID", second: resultArtifact("other", "1", strings.Repeat("b", 64))},
+		{name: "path", second: resultArtifact("other", "2", strings.Repeat("a", 64))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := resultManifest(testJobID, "gha-producer", Digest([]byte("plan")), "success")
+			manifest.Artifacts = []ResultArtifact{first, test.second}
+			if _, err := MarshalResultManifest(manifest); err == nil || !strings.Contains(err.Error(), "duplicate result artifact") {
+				t.Fatalf("MarshalResultManifest() error = %v", err)
+			}
+		})
+	}
+}
+
+func resultArtifact(name, id, hexDigest string) ResultArtifact {
+	return ResultArtifact{
+		Name: name, ID: id,
+		Path: "buildkite-gha/v1/artifacts/" + hexDigest + ".zip", Digest: "sha256:" + hexDigest,
+		Size: 1, FileCount: 1,
+	}
+}
+
 type capturedCommand struct {
 	dir   string
 	name  string

@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 const (
@@ -60,6 +61,7 @@ type Runner struct {
 	Secrets           SecretResolver
 	Redactor          Redactor
 	Actions           ActionMaterializer
+	Artifacts         ArtifactUploader
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
@@ -67,6 +69,7 @@ type Runner struct {
 	jobDocker         *jobContainerBackend
 	nodeVerification  *managedNodeVerification
 	nodeDigests       map[int]string
+	artifactRegistry  *artifactRegistry
 }
 
 type managedNodeVerification struct {
@@ -102,11 +105,12 @@ type DockerAction struct {
 
 // Result contains file-command effects produced by an action or lifecycle.
 type Result struct {
-	Outputs map[string]string
-	Env     map[string]string
-	State   map[string]string
-	Summary string
-	Paths   []string
+	Outputs   map[string]string
+	Env       map[string]string
+	State     map[string]string
+	Summary   string
+	Paths     []string
+	Artifacts []transport.ResultArtifact
 
 	pathBase         string
 	pathBaseSet      bool
