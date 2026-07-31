@@ -1321,9 +1321,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
   workspace-relative destination and exposes the compatible absolute
   `download-path` output. Run-wide listing, IDs, patterns, merge, cross-run,
   cross-repository, symlink, traversal, and special-file behavior fail closed.
-  The full producer-to-two-consumer fixture remains `compile-pass` until an
-  exact-commit hosted roundtrip and independent read-only observation establish
-  runtime evidence.
+  Build 270 and its exact-commit independent artifact observation prove the
+  full producer-to-two-consumer matrix roundtrip, verified terminal manifests,
+  exact native archive binding, build-unique payload, and compatible output,
+  so the smoke inventory records the fixture as `runtime-pass`.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1481,6 +1482,21 @@ Phase 6 evidence:
   exclusion; and bound the compatible action outputs in the job log to the
   manifest. The observed native archive digest was
   `sha256:efd85cd46277c320fdc52362d01ee151cd672c9b83f592d338c6baf45ac377dc`.
+- [Buildkite build 270](https://buildkite.com/buildkite/buildkite-gha/builds/270)
+  ran exact merged proof-fix commit
+  `1b69b2fa1a9d488d0f349b3267b484db9aeea57d`. Producer job
+  `019fb6d9-4dc5-4271-94d9-68570606bb9e` and consumer jobs
+  `019fb6d9-4de0-4724-825b-e31238f60c42` and
+  `019fb6d9-4de5-44dc-9dd0-cd397e5d07f5` all passed.
+- The independent read-only roundtrip verifier checked the producer's exact v2
+  terminal manifest and native archive, both consumers' exact terminal
+  manifests, and both consumer log observations. It bound the consumers to the
+  build-unique `smoke-artifact:270` payload from the producer's one-file,
+  177-byte archive, verified compatible absolute `download-path` outputs, and
+  independently rehashed the archive and payload. The observed archive digest
+  was `sha256:e4a73e073cfea509c8fe18aa5ddedbfbcd9342de0b4c5372e6105c6f28f1f151`;
+  the payload digest was
+  `sha256:33dc6db44d6acaabdf47645944927ab2ce139bb7caabe9e23a82c71621ae239c`.
 
 Phase 2 live evidence:
 
