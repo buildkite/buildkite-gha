@@ -345,7 +345,7 @@ func (b *jobContainerBackend) serviceDiagnostics(processor *commandProcessor, na
 	output, _ := boundedDockerCombinedOutput(ctx, b.env, b.docker, "logs", "--tail", serviceLogTail, name)
 	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
 		if line != "" {
-			processor.process(processor.stderr, line)
+			_ = processor.process(processor.stderr, line)
 		}
 	}
 }

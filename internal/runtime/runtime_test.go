@@ -2266,18 +2266,22 @@ func TestRunStreamingDrainsOversizedLineAndPreservesMasking(t *testing.T) {
 
 func TestStreamLineLimitIncludesContentNotNewline(t *testing.T) {
 	want := strings.Repeat("x", maxStreamLineBytes)
-	var lines []string
-	suppressed := false
-	err := streamLines(strings.NewReader(want+"\nnext\n"), func(line string) {
-		lines = append(lines, line)
-	}, func() {
-		suppressed = true
-	})
-	if err != nil || suppressed {
-		t.Fatalf("streamLines() = %v, suppressed = %v", err, suppressed)
-	}
-	if len(lines) != 2 || lines[0] != want || lines[1] != "next" {
-		t.Fatalf("streamLines() returned %d lines with unexpected content", len(lines))
+	for _, ending := range []string{"\n", "\r\n"} {
+		t.Run(fmt.Sprintf("ending-%q", ending), func(t *testing.T) {
+			var lines []string
+			suppressed := false
+			err := streamLines(strings.NewReader(want+ending+"next"+ending), func(line string) {
+				lines = append(lines, line)
+			}, func() {
+				suppressed = true
+			})
+			if err != nil || suppressed {
+				t.Fatalf("streamLines() = %v, suppressed = %v", err, suppressed)
+			}
+			if len(lines) != 2 || lines[0] != want || lines[1] != "next" {
+				t.Fatalf("streamLines() returned %#v", lines)
+			}
+		})
 	}
 }
 
@@ -2337,12 +2341,12 @@ func TestWorkflowCommandParsingIsCaseInsensitiveAndExact(t *testing.T) {
 func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	processor := newCommandProcessor(&stdout, &stderr)
-	processor.process(&stdout, "::warning title=Unsafe <title>,file=cmd%2Cmain.go,line=12,endLine=12,col=3,endColumn=5::late-secret <late-secret-tag> <warning>")
-	processor.process(&stdout, "::add-mask::late-secret")
-	processor.process(&stdout, "::add-mask::<late-secret-tag>")
-	processor.process(&stderr, "::add-mask::early-secret")
-	processor.process(&stderr, "::error file=main.go,line=invalid,endLine=9,col=2,endColumn=4::early-secret <error>")
-	processor.process(&stdout, "::warning without a delimiter")
+	_ = processor.process(&stdout, "::warning title=Unsafe <title>,file=cmd%2Cmain.go,line=12,endLine=12,col=3,endColumn=5::late-secret <late-secret-tag> <warning>")
+	_ = processor.process(&stdout, "::add-mask::late-secret")
+	_ = processor.process(&stdout, "::add-mask::<late-secret-tag>")
+	_ = processor.process(&stderr, "::add-mask::early-secret")
+	_ = processor.process(&stderr, "::error file=main.go,line=invalid,endLine=9,col=2,endColumn=4::early-secret <error>")
+	_ = processor.process(&stdout, "::warning without a delimiter")
 
 	warnings, warningsTruncated, commandErrors, errorsTruncated := processor.workflowCommandAnnotations()
 	result := scrubJobResult(JobResult{
@@ -2382,10 +2386,10 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
-	processor.process(&logs, "::stop-commands::phase6-stop-token")
-	processor.process(&logs, "::warning::untrusted warning-shaped output")
-	processor.process(&logs, "::phase6-stop-token::")
-	processor.process(&logs, "::warning::collected warning")
+	_ = processor.process(&logs, "::stop-commands::phase6-stop-token")
+	_ = processor.process(&logs, "::warning::untrusted warning-shaped output")
+	_ = processor.process(&logs, "::phase6-stop-token::")
+	_ = processor.process(&logs, "::warning::collected warning")
 
 	warnings, truncated, commandErrors, _ := processor.workflowCommandAnnotations()
 	if truncated || commandErrors != "" || strings.Contains(warnings, "untrusted warning-shaped output") || !strings.Contains(warnings, "collected warning") {
@@ -2393,6 +2397,63 @@ func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "::warning::untrusted warning-shaped output") || strings.Contains(logs.String(), "::warning::collected warning") || strings.Contains(logs.String(), "phase6-stop-token") {
 		t.Fatalf("logs = %q, want stopped command as masked ordinary output", logs.String())
+	}
+}
+
+func TestWorkflowCommandStopTokenHandlesCRLFStreams(t *testing.T) {
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	command := `printf '::stop-commands::crlf-stop-token\r\n'
+printf '::warning::untrusted warning-shaped output\r\n'
+printf '::crlf-stop-token::\r\n'
+printf '::add-mask::crlf-secret\r\n'
+printf 'masked after resume: crlf-secret\r\n'`
+	if err := (Runner{}).runStreaming(context.Background(), processor, "", nil, "sh", "-c", command); err != nil {
+		t.Fatalf("runStreaming() error = %v", err)
+	}
+	warnings, _, commandErrors, _ := processor.workflowCommandAnnotations()
+	if warnings != "" || commandErrors != "" {
+		t.Fatalf("workflow command annotations = %q, errors = %q", warnings, commandErrors)
+	}
+	if !strings.Contains(logs.String(), "::warning::untrusted warning-shaped output") || !strings.Contains(logs.String(), "masked after resume: ***") || strings.Contains(logs.String(), "crlf-secret") || strings.Contains(logs.String(), "\r") {
+		t.Fatalf("logs = %q, want resumed masking with normalized CRLF records", logs.String())
+	}
+	commandWithEscapedCR, ok := parseWorkflowCommand("::warning::preserved%0D")
+	if !ok || commandWithEscapedCR.message != "preserved\r" {
+		t.Fatalf("parseWorkflowCommand() = %#v, %v, want escaped carriage return", commandWithEscapedCR, ok)
+	}
+}
+
+func TestRunStreamingScopesWorkflowCommandFailuresToInvocation(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	ready := filepath.Join(t.TempDir(), "clean-ready")
+	release := filepath.Join(t.TempDir(), "release-clean")
+	cleanDone := make(chan error, 1)
+	go func() {
+		cleanDone <- (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"READY": ready, "RELEASE": release}, "sh", "-c", `
+: > "$READY"
+while [ ! -e "$RELEASE" ]; do sleep .01; done
+printf '%s\n' 'clean invocation completed'`)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("clean invocation did not become ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	invalidErr := (Runner{}).runStreaming(context.Background(), processor, "", map[string]string{"RELEASE": release}, "sh", "-c", `
+printf '%s\n' '::stop-commands::warning'
+: > "$RELEASE"`)
+	cleanErr := <-cleanDone
+	if !errors.Is(invalidErr, errInvalidWorkflowCommandStopToken) {
+		t.Fatalf("invalid runStreaming() error = %v", invalidErr)
+	}
+	if cleanErr != nil {
+		t.Fatalf("overlapping clean runStreaming() inherited command failure: %v", cleanErr)
 	}
 }
 
@@ -2448,7 +2509,7 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 		go func(worker int) {
 			defer group.Done()
 			for message := 0; message < 50; message++ {
-				processor.process(io.Discard, fmt.Sprintf("::warning::worker-%d-message-%d", worker, message))
+				_ = processor.process(io.Discard, fmt.Sprintf("::warning::worker-%d-message-%d", worker, message))
 			}
 		}(worker)
 	}
@@ -2459,7 +2520,7 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 	}
 
 	processor = newCommandProcessor(io.Discard, io.Discard)
-	processor.process(io.Discard, "::warning::"+strings.Repeat("€", maxJobAnnotationBytes))
+	_ = processor.process(io.Discard, "::warning::"+strings.Repeat("€", maxJobAnnotationBytes))
 	warnings, truncated, _, _ = processor.workflowCommandAnnotations()
 	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, nil)
 	if !truncated || len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {

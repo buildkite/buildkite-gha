@@ -557,7 +557,6 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
-	commandFailures := processor.commandFailureCount()
 	var files commandFiles
 	var err error
 	if r.jobContainer != nil {
@@ -595,18 +594,14 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		applyPaths(pathEnv, effects.paths)
 		result.Env["PATH"] = pathEnv["PATH"]
 	}
-	var commandErr error
-	if processor.commandFailureCount() != commandFailures {
-		commandErr = errors.New("invalid ::stop-commands workflow command")
-	}
-	return errors.Join(runErr, fileErr, commandErr)
+	return errors.Join(runErr, fileErr)
 }
 
 func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandProcessor) {
 	if effects.summaryBytes <= maxCommandFileBytes {
 		return
 	}
-	processor.process(processor.stderr, fmt.Sprintf("GITHUB_STEP_SUMMARY upload skipped: content is %d bytes; maximum is %d bytes", effects.summaryBytes, maxCommandFileBytes))
+	_ = processor.process(processor.stderr, fmt.Sprintf("GITHUB_STEP_SUMMARY upload skipped: content is %d bytes; maximum is %d bytes", effects.summaryBytes, maxCommandFileBytes))
 }
 
 func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, name string, args ...string) error {
@@ -657,12 +652,17 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	streamErrs := make([]error, 2)
 	stream := func(index int, label string, reader io.Reader, target io.Writer) {
 		defer wg.Done()
-		streamErrs[index] = streamLines(reader, func(line string) {
-			processor.process(target, line)
+		var commandErr error
+		streamErr := streamLines(reader, func(line string) {
+			commandErr = errors.Join(commandErr, processor.process(target, line))
 		}, processor.suppress)
-		if streamErrs[index] != nil {
-			streamErrs[index] = fmt.Errorf("%s stream: %w", label, streamErrs[index])
+		if streamErr != nil {
+			streamErr = fmt.Errorf("%s stream: %w", label, streamErr)
 		}
+		if commandErr != nil {
+			commandErr = fmt.Errorf("%s stream: %w", label, commandErr)
+		}
+		streamErrs[index] = errors.Join(streamErr, commandErr)
 	}
 	wg.Add(2)
 	go stream(0, "stdout", stdout, processor.stdout)
@@ -705,6 +705,9 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 			contentBytes := len(line) + len(fragment)
 			if err == nil {
 				contentBytes--
+				if len(fragment) > 1 && fragment[len(fragment)-2] == '\r' {
+					contentBytes--
+				}
 			}
 			if contentBytes > maxStreamLineBytes {
 				line = line[:0]
@@ -719,7 +722,7 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 		if err == nil {
 			if oversized {
 			} else {
-				process(strings.TrimSuffix(string(line), "\n"))
+				process(trimStreamLineEnding(string(line)))
 			}
 			line = line[:0]
 			oversized = false
@@ -731,7 +734,7 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 		if errors.Is(err, io.EOF) {
 			if oversized {
 			} else if len(line) != 0 {
-				process(string(line))
+				process(trimStreamLineEnding(string(line)))
 			}
 			if sawOversized {
 				return fmt.Errorf("line exceeds %d-byte limit and was discarded", maxStreamLineBytes)
@@ -743,6 +746,11 @@ func streamLines(reader io.Reader, process func(string), suppress func()) error 
 		}
 		return err
 	}
+}
+
+func trimStreamLineEnding(line string) string {
+	line = strings.TrimSuffix(line, "\n")
+	return strings.TrimSuffix(line, "\r")
 }
 
 const (
@@ -1102,15 +1110,14 @@ func sortedKeys[V any](values map[string]V) []string {
 }
 
 type commandProcessor struct {
-	mu              sync.Mutex
-	stdout          io.Writer
-	stderr          io.Writer
-	masks           []string
-	warnings        workflowCommandAnnotationBuffer
-	errors          workflowCommandAnnotationBuffer
-	stopToken       string
-	commandFailures uint64
-	discard         bool
+	mu        sync.Mutex
+	stdout    io.Writer
+	stderr    io.Writer
+	masks     []string
+	warnings  workflowCommandAnnotationBuffer
+	errors    workflowCommandAnnotationBuffer
+	stopToken string
+	discard   bool
 }
 
 type workflowCommandAnnotationBuffer struct {
@@ -1133,11 +1140,13 @@ func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
 	return &commandProcessor{stdout: stdout, stderr: stderr}
 }
 
-func (p *commandProcessor) process(target io.Writer, line string) {
+var errInvalidWorkflowCommandStopToken = errors.New("invalid ::stop-commands workflow command")
+
+func (p *commandProcessor) process(target io.Writer, line string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.discard {
-		return
+		return nil
 	}
 	command, isCommand := parseWorkflowCommand(line)
 	if p.stopToken != "" {
@@ -1145,38 +1154,38 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 			p.stopToken = ""
 		}
 		p.writeMaskedLineLocked(target, line)
-		return
+		return nil
 	}
 	if isCommand {
 		switch {
 		case strings.EqualFold(command.name, "add-mask"):
 			p.addMaskLocked(command.message)
-			return
+			return nil
 		case strings.EqualFold(command.name, "stop-commands"):
 			if !validWorkflowCommandStopToken(command.message) {
 				const message = "invalid ::stop-commands token: token is empty or collides with a workflow command"
-				p.commandFailures++
 				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", parsedWorkflowCommand{message: message})
 				p.writeWorkflowCommandMessageLocked(target, "error", message)
-				return
+				return errInvalidWorkflowCommandStopToken
 			}
 			p.stopToken = command.message
 			if len(command.message) > 6 {
 				p.addMaskLocked(command.message)
 			}
 			p.writeMaskedLineLocked(target, line)
-			return
+			return nil
 		case strings.EqualFold(command.name, "warning"):
 			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, "Warning", command)
 			p.writeWorkflowCommandMessageLocked(target, "warning", command.message)
-			return
+			return nil
 		case strings.EqualFold(command.name, "error"):
 			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", command)
 			p.writeWorkflowCommandMessageLocked(target, "error", command.message)
-			return
+			return nil
 		}
 	}
 	p.writeMaskedLineLocked(target, line)
+	return nil
 }
 
 func validWorkflowCommandStopToken(token string) bool {
@@ -1239,12 +1248,6 @@ func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warnin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.warnings.body, p.warnings.truncated, p.errors.body, p.errors.truncated
-}
-
-func (p *commandProcessor) commandFailureCount() uint64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.commandFailures
 }
 
 func (p *commandProcessor) addMaskLocked(value string) {
