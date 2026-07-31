@@ -9,7 +9,11 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-const jobSummaryAnnotationContext = "buildkite-gha-job-summary"
+const (
+	jobSummaryAnnotationContext = "buildkite-gha-job-summary"
+	jobWarningAnnotationContext = "buildkite-gha-workflow-warnings"
+	jobErrorAnnotationContext   = "buildkite-gha-workflow-errors"
+)
 
 // ResolveNeeds converts compiler-owned producer identities into the verified
 // logical results and outputs consumed by runtime expression contexts.
@@ -58,15 +62,29 @@ func PublishJobResult(ctx context.Context, agent transport.Agent, root, workflow
 		if publishErr != nil {
 			return publication, errors.Join(fmt.Errorf("validate terminal result: %w", err), fmt.Errorf("publish bounded terminal result: %w", publishErr))
 		}
-		publishJobSummary(ctx, agent, producer.JobID, result.Summary, &publication)
+		publishJobAnnotations(ctx, agent, producer.JobID, result, &publication)
 		return publication, fmt.Errorf("validate terminal result: %w", err)
 	}
 	publication, err := transport.PublishResult(ctx, agent, root, workflow, instance, manifest)
 	if err != nil {
 		return publication, err
 	}
-	publishJobSummary(ctx, agent, producer.JobID, result.Summary, &publication)
+	publishJobAnnotations(ctx, agent, producer.JobID, result, &publication)
 	return publication, nil
+}
+
+func publishJobAnnotations(ctx context.Context, agent transport.Agent, jobID string, result JobResult, publication *transport.Publication) {
+	publishJobSummary(ctx, agent, jobID, result.Summary, publication)
+	if result.WarningAnnotations != "" {
+		if err := agent.AnnotateJob(ctx, jobID, jobWarningAnnotationContext, "warning", result.WarningAnnotations); err != nil {
+			publication.WarningAnnotationError = fmt.Errorf("publish workflow warnings: %w", err)
+		}
+	}
+	if result.ErrorAnnotations != "" {
+		if err := agent.AnnotateJob(ctx, jobID, jobErrorAnnotationContext, "error", result.ErrorAnnotations); err != nil {
+			publication.ErrorAnnotationError = fmt.Errorf("publish workflow errors: %w", err)
+		}
+	}
 }
 
 func publishJobSummary(ctx context.Context, agent transport.Agent, jobID, summary string, publication *transport.Publication) {

@@ -2309,11 +2309,170 @@ func TestProcessEnvironmentIsExplicitAndUsable(t *testing.T) {
 }
 
 func TestWorkflowCommandParsingIsCaseInsensitiveAndExact(t *testing.T) {
-	if got, ok := workflowCommand("::ADD-MASK::secret%250Avalue", "add-mask"); !ok || got != "secret%0Avalue" {
-		t.Fatalf("workflowCommand() = %q, %v", got, ok)
+	mask, ok := parseWorkflowCommand(" \t::ADD-MASK::secret%250Avalue")
+	if !ok || !strings.EqualFold(mask.name, "add-mask") || mask.message != "secret%0Avalue" {
+		t.Fatalf("parseWorkflowCommand() = %#v, %v", mask, ok)
 	}
-	if _, ok := workflowCommand("::add-mask-extra::secret", "add-mask"); ok {
-		t.Fatal("workflowCommand() accepted a different command name")
+	extra, ok := parseWorkflowCommand("::add-mask-extra::secret")
+	if !ok || strings.EqualFold(extra.name, "add-mask") {
+		t.Fatalf("parseWorkflowCommand() accepted %q as add-mask", extra.name)
+	}
+	command, ok := parseWorkflowCommand("::WaRnInG title=Deploy%3A prod,file=src%2Cmain.go,line=12,endLine=12,col=3,endColumn=5,broken,unknown=value::first%0Asecond%250A")
+	if !ok || !strings.EqualFold(command.name, "warning") || command.message != "first\nsecond%0A" {
+		t.Fatalf("parseWorkflowCommand() = %#v, %v", command, ok)
+	}
+	wantProperties := map[string]string{
+		"title": "Deploy: prod", "file": "src,main.go", "line": "12", "endline": "12", "col": "3", "endcolumn": "5", "unknown": "value",
+	}
+	if !maps.Equal(command.properties, wantProperties) {
+		t.Fatalf("properties = %#v, want %#v", command.properties, wantProperties)
+	}
+	for _, malformed := range []string{"", "prefix::warning::message", "::warning without a delimiter", "::::message"} {
+		if _, ok := parseWorkflowCommand(malformed); ok {
+			t.Fatalf("parseWorkflowCommand(%q) succeeded", malformed)
+		}
+	}
+}
+
+func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	processor := newCommandProcessor(&stdout, &stderr)
+	processor.process(&stdout, "::warning title=Unsafe <title>,file=cmd%2Cmain.go,line=12,endLine=12,col=3,endColumn=5::late-secret <late-secret-tag> <warning>")
+	processor.process(&stdout, "::add-mask::late-secret")
+	processor.process(&stdout, "::add-mask::<late-secret-tag>")
+	processor.process(&stderr, "::add-mask::early-secret")
+	processor.process(&stderr, "::error file=main.go,line=invalid,endLine=9,col=2,endColumn=4::early-secret <error>")
+	processor.process(&stdout, "::warning without a delimiter")
+
+	warnings, warningsTruncated, commandErrors, errorsTruncated := processor.workflowCommandAnnotations()
+	result := scrubJobResult(JobResult{
+		WarningAnnotations: warnings, warningsTruncated: warningsTruncated,
+		ErrorAnnotations: commandErrors, errorsTruncated: errorsTruncated,
+	}, processor.maskValues())
+	if warningsTruncated || errorsTruncated {
+		t.Fatal("small workflow command annotations were truncated")
+	}
+	for _, secret := range []string{"late-secret", "late-secret-tag", "early-secret"} {
+		if strings.Contains(result.WarningAnnotations, secret) || strings.Contains(result.ErrorAnnotations, secret) {
+			t.Fatalf("annotations leaked %q: warnings = %q, errors = %q", secret, result.WarningAnnotations, result.ErrorAnnotations)
+		}
+	}
+	for _, fragment := range []string{
+		"## GitHub Actions warnings", "### Warning", "Unsafe &lt;title&gt;", "cmd,main.go", "<strong>Line:</strong> <code>12</code>", "*** &lt;warning&gt;",
+	} {
+		if !strings.Contains(result.WarningAnnotations, fragment) {
+			t.Errorf("warning annotation lacks %q: %q", fragment, result.WarningAnnotations)
+		}
+	}
+	for _, fragment := range []string{
+		"## GitHub Actions errors", "### Error", "<strong>Line:</strong> <code>9</code>", "<strong>Column:</strong> <code>2</code>", "*** &lt;error&gt;",
+	} {
+		if !strings.Contains(result.ErrorAnnotations, fragment) {
+			t.Errorf("error annotation lacks %q: %q", fragment, result.ErrorAnnotations)
+		}
+	}
+	if strings.Contains(stdout.String(), "::warning title=") || !strings.Contains(stdout.String(), "warning: late-secret <late-secret-tag> <warning>") || !strings.Contains(stdout.String(), "::warning without a delimiter") {
+		t.Fatalf("stdout = %q, want rendered command message and ordinary malformed command", stdout.String())
+	}
+	if strings.Contains(stderr.String(), "::error") || !strings.Contains(stderr.String(), "error: *** <error>") {
+		t.Fatalf("stderr = %q, want masked rendered error", stderr.String())
+	}
+}
+
+func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	processor.process(&logs, "::stop-commands::phase6-stop-token")
+	processor.process(&logs, "::warning::untrusted warning-shaped output")
+	processor.process(&logs, "::phase6-stop-token::")
+	processor.process(&logs, "::warning::collected warning")
+
+	warnings, truncated, commandErrors, _ := processor.workflowCommandAnnotations()
+	if truncated || commandErrors != "" || strings.Contains(warnings, "untrusted warning-shaped output") || !strings.Contains(warnings, "collected warning") {
+		t.Fatalf("workflow command annotations = %q, errors = %q, truncated = %v", warnings, commandErrors, truncated)
+	}
+	if !strings.Contains(logs.String(), "::warning::untrusted warning-shaped output") || strings.Contains(logs.String(), "::warning::collected warning") || strings.Contains(logs.String(), "phase6-stop-token") {
+		t.Fatalf("logs = %q, want stopped command as masked ordinary output", logs.String())
+	}
+}
+
+func TestInvalidWorkflowCommandStopTokenFailsTheStep(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: invalid workflow command stop token\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "invalid-stop", Kind: "run", Shell: "sh",
+		Command: "printf '%s\\n' '::stop-commands::warning'\nprintf '%s\\n' '::warning::commands remain active'",
+	}})
+	var logs bytes.Buffer
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "invalid ::stop-commands workflow command") || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(result.ErrorAnnotations, "invalid ::stop-commands token") || !strings.Contains(result.WarningAnnotations, "commands remain active") {
+		t.Fatalf("RunJob() warnings = %q, errors = %q", result.WarningAnnotations, result.ErrorAnnotations)
+	}
+	if !strings.Contains(logs.String(), "error: invalid ::stop-commands token") {
+		t.Fatalf("RunJob() logs = %q, want invalid-token diagnostic", logs.String())
+	}
+}
+
+func TestRunJobCollectsWarningAndErrorCommandsWithoutChangingConclusion(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: workflow command annotations\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "diagnostics", Kind: "run", Shell: "sh",
+		Command: "printf '%s\\n' '::warning title=Compiler::warning from stdout'\nprintf '%s\\n' '::error file=main.go,line=7::error from stderr' >&2",
+	}})
+	var stdout, stderr bytes.Buffer
+
+	result, err := (Runner{Stdout: &stdout, Stderr: &stderr}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(result.WarningAnnotations, "warning from stdout") || !strings.Contains(result.ErrorAnnotations, "error from stderr") {
+		t.Fatalf("RunJob() warnings = %q, errors = %q", result.WarningAnnotations, result.ErrorAnnotations)
+	}
+	if strings.Contains(stdout.String(), "::warning") || strings.Contains(stderr.String(), "::error") {
+		t.Fatalf("RunJob() echoed raw workflow command: stdout = %q, stderr = %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	var group sync.WaitGroup
+	for worker := 0; worker < 2; worker++ {
+		group.Add(1)
+		go func(worker int) {
+			defer group.Done()
+			for message := 0; message < 50; message++ {
+				processor.process(io.Discard, fmt.Sprintf("::warning::worker-%d-message-%d", worker, message))
+			}
+		}(worker)
+	}
+	group.Wait()
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if truncated || strings.Count(warnings, "### Warning") != 100 {
+		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, "### Warning"), truncated)
+	}
+
+	processor = newCommandProcessor(io.Discard, io.Discard)
+	processor.process(io.Discard, "::warning::"+strings.Repeat("€", maxJobAnnotationBytes))
+	warnings, truncated, _, _ = processor.workflowCommandAnnotations()
+	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, nil)
+	if !truncated || len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
+		t.Fatalf("bounded warnings bytes = %d, truncated = %v, valid UTF-8 = %v", len(result.WarningAnnotations), truncated, utf8.ValidString(result.WarningAnnotations))
+	}
+}
+
+func TestWorkflowCommandAnnotationsRemainBoundedAfterSecretScrubbing(t *testing.T) {
+	secret := "x"
+	result := JobResult{WarningAnnotations: strings.Repeat(secret, maxJobAnnotationBytes)}
+	result = scrubJobResult(result, []string{secret})
+	if len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || strings.Contains(result.WarningAnnotations, secret) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
+		t.Fatalf("scrubbed warnings bytes = %d, valid UTF-8 = %v", len(result.WarningAnnotations), utf8.ValidString(result.WarningAnnotations))
 	}
 }
 

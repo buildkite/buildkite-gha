@@ -74,6 +74,15 @@
       "action_preflight": "none"
     },
     {
+      "id": "phase6-workflow-command-annotations",
+      "workflow": "testdata/phase6/.github/workflows/workflow-command-annotations.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Local runtime and publication tests cover warning and error annotations; the checked-in exact-commit hosted proof still requires an API observation.",
+      "note": "Do not classify this fixture as runtime-pass until the read-only verifier confirms both persisted job-scoped annotations.",
+      "action_preflight": "none"
+    },
+    {
       "id": "unsupported-cache-service",
       "workflow": "testdata/unsupported/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",

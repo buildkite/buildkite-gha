@@ -252,6 +252,12 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		if publication.SummaryAnnotationError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: job summary annotation: %v\n", publication.SummaryAnnotationError)
 		}
+		if publication.WarningAnnotationError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow warning annotation: %v\n", publication.WarningAnnotationError)
+		}
+		if publication.ErrorAnnotationError != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow error annotation: %v\n", publication.ErrorAnnotationError)
+		}
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("publish terminal result: %w", err))
 		}

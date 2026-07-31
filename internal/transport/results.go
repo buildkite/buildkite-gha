@@ -31,6 +31,8 @@ type Publication struct {
 	ManifestDigest         string
 	MetadataMirrorError    error
 	SummaryAnnotationError error
+	WarningAnnotationError error
+	ErrorAnnotationError   error
 }
 
 // SearchArtifactProducer resolves exactly one artifact owner under the

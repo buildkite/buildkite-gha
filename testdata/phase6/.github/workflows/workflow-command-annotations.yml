@@ -1,0 +1,25 @@
+name: Phase 6 workflow command annotations
+
+on:
+  push:
+
+jobs:
+  workflow-command-annotations:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit a warning from stdout
+        shell: bash
+        run: |
+          printf '%s\n' '::warning title=Phase 6 warning,file=.github/workflows/workflow-command-annotations.yml,line=13,endLine=13,col=3,endColumn=8::PHASE6_WARNING_OBSERVATION=stdout-with-location'
+
+      - name: Emit an error from stderr without failing the job
+        shell: bash
+        run: |
+          printf '%s\n' '::error title=Phase 6 error,file=.github/workflows/workflow-command-annotations.yml,line=18::PHASE6_ERROR_OBSERVATION=stderr-outcome-neutral' >&2
+
+      - name: Prove late annotation masking
+        shell: bash
+        run: |
+          canary='phase6-workflow-command-secret'
+          printf '%s\n' "::warning title=Masked warning::masked diagnostic $canary"
+          printf '%s\n' "::add-mask::$canary"

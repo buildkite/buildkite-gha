@@ -19,4 +19,6 @@ steps:
         allow_failure: true
       - step: "phase-6-summary-continuation-loader"
         allow_failure: true
+      - step: "phase-6-annotations-continuation-loader"
+        allow_failure: true
     command: "buildkite-agent pipeline upload .buildkite/hosted-smoke-aggregator.yml"

@@ -94,6 +94,7 @@ phase selector only for targeted diagnosis:
 | Dockerfile action path | `PHASE5_PROBE=docker-action`, `PHASE5_COMMIT=<commit>` |
 | Complete container runtime | `PHASE5_PROBE=runtime`, `PHASE5_COMMIT=<commit>` |
 | Job summary annotation | `PHASE6_PROBE=summary`, `PHASE6_COMMIT=<commit>` |
+| Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After
@@ -108,6 +109,18 @@ The verifier reads only the generated job and its annotations. It requires
 the build to match the expected exact commit and exactly one `info` annotation
 with context `buildkite-gha-job-summary`, job scope, and both checked-in summary
 fragments.
+
+Workflow-command annotation publication is also advisory. Verify its distinct
+warning and error contexts independently after the annotations proof settles:
+
+```sh
+scripts/phase-6-workflow-annotations-verify <build-number> <commit>
+```
+
+This verifier requires the generated job to pass even though it emitted an
+`::error` command, then checks exactly one job-scoped `warning` annotation and
+one job-scoped `error` annotation, their checked-in body fragments, and the
+absence of the registered masking canary.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact

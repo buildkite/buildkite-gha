@@ -9,15 +9,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -30,9 +33,13 @@ const (
 	defaultTerminateGrace = 2500 * time.Millisecond
 	maxStreamLineBytes    = 1024 * 1024
 	// Match Buildkite's maximum annotation body size.
-	maxJobSummaryBytes = 1024 * 1024
+	maxJobAnnotationBytes = 1024 * 1024
+	maxJobSummaryBytes    = maxJobAnnotationBytes
 
-	jobSummaryTruncationNotice = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
+	jobSummaryTruncationNotice       = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
+	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
+	workflowWarningAnnotationHeading = "## GitHub Actions warnings\n\n"
+	workflowErrorAnnotationHeading   = "## GitHub Actions errors\n\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -109,19 +116,23 @@ type Result struct {
 // appendJobSummary is the only summary aggregation path. It preserves a
 // deterministic UTF-8 prefix and reserves room for a final truncation notice.
 func appendJobSummary(summary *string, truncated *bool, next string, nextTruncated bool) {
+	appendBoundedText(summary, truncated, next, nextTruncated, maxJobSummaryBytes, jobSummaryTruncationNotice)
+}
+
+func appendBoundedText(value *string, truncated *bool, next string, nextTruncated bool, limit int, notice string) {
 	if *truncated || (next == "" && !nextTruncated) {
 		return
 	}
-	if !nextTruncated && len(*summary) <= maxJobSummaryBytes && len(next) <= maxJobSummaryBytes-len(*summary) {
-		*summary += next
+	if !nextTruncated && len(*value) <= limit && len(next) <= limit-len(*value) {
+		*value += next
 		return
 	}
 
-	prefixLimit := maxJobSummaryBytes - len(jobSummaryTruncationNotice)
-	if len(*summary) > prefixLimit {
-		*summary = utf8Prefix(*summary, prefixLimit)
+	prefixLimit := limit - len(notice)
+	if len(*value) > prefixLimit {
+		*value = utf8Prefix(*value, prefixLimit)
 	} else {
-		*summary += utf8Prefix(next, prefixLimit-len(*summary))
+		*value += utf8Prefix(next, prefixLimit-len(*value))
 	}
 	*truncated = true
 }
@@ -546,6 +557,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {
+	commandFailures := processor.commandFailureCount()
 	var files commandFiles
 	var err error
 	if r.jobContainer != nil {
@@ -583,7 +595,11 @@ func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir
 		applyPaths(pathEnv, effects.paths)
 		result.Env["PATH"] = pathEnv["PATH"]
 	}
-	return errors.Join(runErr, fileErr)
+	var commandErr error
+	if processor.commandFailureCount() != commandFailures {
+		commandErr = errors.New("invalid ::stop-commands workflow command")
+	}
+	return errors.Join(runErr, fileErr, commandErr)
 }
 
 func (effects fileCommandEffects) reportSummaryUploadFailure(processor *commandProcessor) {
@@ -1086,11 +1102,31 @@ func sortedKeys[V any](values map[string]V) []string {
 }
 
 type commandProcessor struct {
-	mu      sync.Mutex
-	stdout  io.Writer
-	stderr  io.Writer
-	masks   []string
-	discard bool
+	mu              sync.Mutex
+	stdout          io.Writer
+	stderr          io.Writer
+	masks           []string
+	warnings        workflowCommandAnnotationBuffer
+	errors          workflowCommandAnnotationBuffer
+	stopToken       string
+	commandFailures uint64
+	discard         bool
+}
+
+type workflowCommandAnnotationBuffer struct {
+	body      string
+	truncated bool
+}
+
+type parsedWorkflowCommand struct {
+	name       string
+	properties map[string]string
+	message    string
+}
+
+type workflowCommandMetadata struct {
+	label string
+	value string
 }
 
 func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
@@ -1103,14 +1139,82 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 	if p.discard {
 		return
 	}
-	if value, ok := workflowCommand(line, "add-mask"); ok {
-		p.addMaskLocked(value)
+	command, isCommand := parseWorkflowCommand(line)
+	if p.stopToken != "" {
+		if isCommand && strings.EqualFold(command.name, p.stopToken) {
+			p.stopToken = ""
+		}
+		p.writeMaskedLineLocked(target, line)
 		return
 	}
+	if isCommand {
+		switch {
+		case strings.EqualFold(command.name, "add-mask"):
+			p.addMaskLocked(command.message)
+			return
+		case strings.EqualFold(command.name, "stop-commands"):
+			if !validWorkflowCommandStopToken(command.message) {
+				const message = "invalid ::stop-commands token: token is empty or collides with a workflow command"
+				p.commandFailures++
+				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", parsedWorkflowCommand{message: message})
+				p.writeWorkflowCommandMessageLocked(target, "error", message)
+				return
+			}
+			p.stopToken = command.message
+			if len(command.message) > 6 {
+				p.addMaskLocked(command.message)
+			}
+			p.writeMaskedLineLocked(target, line)
+			return
+		case strings.EqualFold(command.name, "warning"):
+			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, "Warning", command)
+			p.writeWorkflowCommandMessageLocked(target, "warning", command.message)
+			return
+		case strings.EqualFold(command.name, "error"):
+			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", command)
+			p.writeWorkflowCommandMessageLocked(target, "error", command.message)
+			return
+		}
+	}
+	p.writeMaskedLineLocked(target, line)
+}
+
+func validWorkflowCommandStopToken(token string) bool {
+	if token == "" || strings.EqualFold(token, "pause-logging") {
+		return false
+	}
+	for _, command := range []string{
+		"add-mask", "add-path", "debug", "echo", "endgroup", "error", "group",
+		"internal-set-repo-path", "notice", "save-state", "set-env", "set-output",
+		"set-repo-path", "stop-commands", "warning",
+	} {
+		if strings.EqualFold(token, command) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, severity, message string) {
+	if message == "" {
+		return
+	}
+	p.writeMaskedLineLocked(target, severity+": "+message)
+}
+
+func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) {
 	for _, mask := range p.masks {
 		line = strings.ReplaceAll(line, mask, "***")
 	}
 	_, _ = fmt.Fprintln(target, line)
+}
+
+func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading, severity string, command parsedWorkflowCommand) {
+	fragment := renderWorkflowCommand(severity, command)
+	if buffer.body == "" {
+		fragment = heading + fragment
+	}
+	appendBoundedText(&buffer.body, &buffer.truncated, fragment, false, maxJobAnnotationBytes, workflowCommandTruncationNotice)
 }
 
 func (p *commandProcessor) suppress() {
@@ -1131,6 +1235,18 @@ func (p *commandProcessor) maskValues() []string {
 	return append([]string(nil), p.masks...)
 }
 
+func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.warnings.body, p.warnings.truncated, p.errors.body, p.errors.truncated
+}
+
+func (p *commandProcessor) commandFailureCount() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.commandFailures
+}
+
 func (p *commandProcessor) addMaskLocked(value string) {
 	if value == "" {
 		return
@@ -1143,24 +1259,136 @@ func (p *commandProcessor) addMaskLocked(value string) {
 	}
 }
 
-func workflowCommand(line, command string) (string, bool) {
+func parseWorkflowCommand(line string) (parsedWorkflowCommand, bool) {
+	line = strings.TrimLeftFunc(line, unicode.IsSpace)
 	if !strings.HasPrefix(line, "::") {
-		return "", false
+		return parsedWorkflowCommand{}, false
 	}
 	separator := strings.Index(line[2:], "::")
 	if separator < 0 {
-		return "", false
+		return parsedWorkflowCommand{}, false
 	}
 	separator += 2
 	header := line[2:separator]
-	name, _, _ := strings.Cut(header, " ")
-	if !strings.EqualFold(name, command) {
-		return "", false
+	name, propertyList, hasProperties := strings.Cut(header, " ")
+	if name == "" {
+		return parsedWorkflowCommand{}, false
 	}
-	return decodeCommandValue(line[separator+2:]), true
+	properties := map[string]string{}
+	if hasProperties {
+		for _, property := range strings.Split(strings.TrimSpace(propertyList), ",") {
+			name, value, ok := strings.Cut(property, "=")
+			if !ok || name == "" || value == "" {
+				continue
+			}
+			properties[strings.ToLower(name)] = decodeCommandProperty(value)
+		}
+	}
+	return parsedWorkflowCommand{name: name, properties: properties, message: decodeCommandValue(line[separator+2:])}, true
 }
 
 func decodeCommandValue(value string) string {
 	replacer := strings.NewReplacer("%0D", "\r", "%0A", "\n", "%25", "%")
 	return replacer.Replace(value)
+}
+
+func decodeCommandProperty(value string) string {
+	replacer := strings.NewReplacer("%0D", "\r", "%0A", "\n", "%3A", ":", "%2C", ",", "%25", "%")
+	return replacer.Replace(value)
+}
+
+func renderWorkflowCommand(severity string, command parsedWorkflowCommand) string {
+	var body strings.Builder
+	body.WriteString("### ")
+	body.WriteString(severity)
+	body.WriteString("\n\n")
+	metadata := []workflowCommandMetadata{
+		{label: "Title", value: command.properties["title"]},
+		{label: "File", value: command.properties["file"]},
+	}
+	line, endLine, column, endColumn := workflowCommandLocation(command.properties)
+	metadata = append(metadata,
+		workflowCommandMetadata{label: "Line", value: line},
+		workflowCommandMetadata{label: "End line", value: endLine},
+		workflowCommandMetadata{label: "Column", value: column},
+		workflowCommandMetadata{label: "End column", value: endColumn},
+	)
+	hasMetadata := false
+	for _, item := range metadata {
+		if item.value == "" {
+			continue
+		}
+		if !hasMetadata {
+			body.WriteString("<p>")
+			hasMetadata = true
+		} else {
+			body.WriteString("<br>\n")
+		}
+		body.WriteString("<strong>")
+		body.WriteString(item.label)
+		body.WriteString(":</strong> <code>")
+		body.WriteString(commandHTML(item.value))
+		body.WriteString("</code>")
+	}
+	if hasMetadata {
+		body.WriteString("</p>\n\n")
+	}
+	body.WriteString("<p>")
+	body.WriteString(commandHTML(command.message))
+	body.WriteString("</p>\n\n")
+	return body.String()
+}
+
+func commandHTML(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.ReplaceAll(html.EscapeString(value), "\n", "<br>\n")
+}
+
+func workflowCommandLocation(properties map[string]string) (line, endLine, column, endColumn string) {
+	line, lineNumberOK := workflowCommandCoordinate(properties["line"])
+	endLine, endLineNumberOK := workflowCommandCoordinate(properties["endline"])
+	column, columnNumberOK := workflowCommandCoordinate(properties["col"])
+	endColumn, endColumnNumberOK := workflowCommandCoordinate(properties["endcolumn"])
+	lineProperty, endLineProperty := properties["line"], properties["endline"]
+
+	if !lineNumberOK && endLineNumberOK {
+		line, lineNumberOK = endLine, true
+		lineProperty = endLineProperty
+	}
+	if !columnNumberOK && endColumnNumberOK {
+		column, columnNumberOK = endColumn, true
+	}
+	if !lineNumberOK && (columnNumberOK || endColumnNumberOK) {
+		column, endColumn = "", ""
+		columnNumberOK, endColumnNumberOK = false, false
+	}
+	// Match actions/runner's original-property comparison: textual forms such
+	// as line=01,endLine=1 describe different lines for column-range purposes.
+	if lineNumberOK && endLineNumberOK && lineProperty != endLineProperty {
+		column, endColumn = "", ""
+		columnNumberOK, endColumnNumberOK = false, false
+	}
+	if lineNumberOK && endLineNumberOK && coordinateNumber(endLine) < coordinateNumber(line) {
+		line, endLine = "", ""
+	}
+	if columnNumberOK && endColumnNumberOK && coordinateNumber(endColumn) < coordinateNumber(column) {
+		column, endColumn = "", ""
+	}
+	return line, endLine, column, endColumn
+}
+
+func workflowCommandCoordinate(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	if _, err := strconv.ParseInt(strings.TrimSpace(value), 10, 32); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func coordinateNumber(value string) int64 {
+	number, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 32)
+	return number
 }
