@@ -181,6 +181,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 			return "", plan.ActionLock{}, "", "", err
 		}
 	}
+	if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
+		if err := actionintegration.ValidateDownloadArtifactCommit(lock.Commit); err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	b.caps["network"] = true
 	return key, lock, materialized.RepositoryRoot, ref.Path, nil
 }

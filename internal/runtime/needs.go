@@ -32,7 +32,12 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 	}
 	needs := make(map[string]plan.Need, len(verified))
 	for name, result := range verified {
-		needs[name] = plan.Need{Result: result.Result, Outputs: result.Outputs}
+		need := plan.Need{Result: result.Result, Outputs: result.Outputs}
+		for _, retained := range result.Artifacts {
+			a, p := retained.Artifact, retained.Producer
+			need.Artifacts = append(need.Artifacts, plan.NeedArtifact{Name: a.Name, ID: a.ID, Path: a.Path, Digest: a.Digest, Size: a.Size, FileCount: a.FileCount, Producer: plan.NeedProducer{BuildID: p.BuildID, JobID: p.JobID, StepKey: p.StepKey}})
+		}
+		needs[name] = need
 	}
 	return needs, nil
 }

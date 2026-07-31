@@ -31,9 +31,13 @@ const (
 	// AdapterUploadArtifactBuildkite stores the pinned upload-artifact action as
 	// a Buildkite-native ZIP without executing its JavaScript lifecycle.
 	AdapterUploadArtifactBuildkite Adapter = "upload-artifact-buildkite-v1"
+	// AdapterDownloadArtifactBuildkite extracts one producer-attributed native
+	// archive without using the GitHub Actions artifact service.
+	AdapterDownloadArtifactBuildkite Adapter = "download-artifact-buildkite-v1"
 	// UploadArtifactCommit is the only upstream implementation whose input and
 	// archive semantics this adapter implements.
-	UploadArtifactCommit = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	DownloadArtifactCommit = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
 
 	MaxUploadArtifactNameBytes = 255
 	MaxUploadArtifactRoots     = 32
@@ -63,13 +67,49 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
-	{Source: "github", Repository: "actions/download-artifact"}:              {Service: ServiceArtifact},
+	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
 }
 
 // ValidateUploadArtifactCommit rejects semantic drift from the audited action.
 func ValidateUploadArtifactCommit(commit string) error {
 	if commit != UploadArtifactCommit {
 		return fmt.Errorf("actions/upload-artifact native adapter supports only commit %s, resolved %q; Phase 6 is required", UploadArtifactCommit, commit)
+	}
+	return nil
+}
+
+func ValidateDownloadArtifactCommit(commit string) error {
+	if commit != DownloadArtifactCommit {
+		return fmt.Errorf("actions/download-artifact native adapter supports only commit %s, resolved %q; Phase 6 is required", DownloadArtifactCommit, commit)
+	}
+	return nil
+}
+
+// ValidateDownloadArtifactInputs implements only v4.3.0 exact-name mode.
+func ValidateDownloadArtifactInputs(inputs map[string]string) error {
+	allowed := map[string]bool{"name": true, "path": true, "merge-multiple": true}
+	seen := map[string]bool{}
+	for _, name := range sortedNames(inputs) {
+		lower := strings.ToLower(name)
+		if seen[lower] {
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+		}
+		seen[lower] = true
+		if !allowed[lower] {
+			return fmt.Errorf("input %q is unsupported by the bounded download-artifact adapter; Phase 6 is required", name)
+		}
+	}
+	name, ok := inputFold(inputs, "name")
+	if !ok || strings.Contains(name, "${{") || ValidateUploadArtifactName(name) != nil {
+		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
+	}
+	if value, ok := inputFold(inputs, "path"); ok {
+		if value == "" || strings.Contains(value, "${{") || len(value) > MaxUploadArtifactPathBytes || strings.Contains(value, "\\") || !filepath.IsLocal(value) || path.Clean(value) != value {
+			return fmt.Errorf("input %q must be a clean workspace-relative literal", "path")
+		}
+	}
+	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(value) {
+		return fmt.Errorf("input %q may only be omitted or false; Phase 6 is required", "merge-multiple")
 	}
 	return nil
 }

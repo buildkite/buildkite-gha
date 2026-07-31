@@ -16,7 +16,7 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
-		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Service: ServiceArtifact}},
+		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
 	}
 	for _, test := range tests {
 		name := test.identity.Repository
@@ -27,6 +27,31 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 			got, ok := Lookup(test.identity)
 			if !ok || got != test.want {
 				t.Fatalf("Lookup(%#v) = %#v, %t, want %#v, true", test.identity, got, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactExactContract(t *testing.T) {
+	if err := ValidateDownloadArtifactCommit(DownloadArtifactCommit); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDownloadArtifactCommit(strings.Repeat("0", 40)); err == nil {
+		t.Fatal("unrecognized commit accepted")
+	}
+	for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": "payload", "path": "out", "merge-multiple": "False"}} {
+		if err := ValidateDownloadArtifactInputs(inputs); err != nil {
+			t.Fatalf("valid inputs rejected: %v", err)
+		}
+	}
+	for name, inputs := range map[string]map[string]string{
+		"all": nil, "expression": {"name": "${{ x }}"}, "absolute": {"name": "x", "path": "/tmp"},
+		"merge": {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
+		"duplicate": {"name": "x", "Name": "y"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ValidateDownloadArtifactInputs(inputs) == nil {
+				t.Fatal("unsupported inputs accepted")
 			}
 		})
 	}

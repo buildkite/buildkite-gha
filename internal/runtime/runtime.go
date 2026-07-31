@@ -61,7 +61,7 @@ type Runner struct {
 	Secrets           SecretResolver
 	Redactor          Redactor
 	Actions           ActionMaterializer
-	Artifacts         ArtifactUploader
+	Artifacts         ArtifactStore
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool

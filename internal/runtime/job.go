@@ -317,7 +317,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
 				break
 			}
-			if entry := actions.locks[step.Action.Lock]; entry != nil && usesUploadArtifactAdapter(entry.lock) {
+			if entry := actions.locks[step.Action.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
 			preResult, preErr := r.prepareRemoteAction(runCtx, processor, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
@@ -821,7 +821,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		// The checkout adapter replaces the verified action's JavaScript
 		// lifecycle as one indivisible operation. Do not register upstream
 		// checkout cleanup for a main phase that this runtime never executes.
-		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) {
+		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
 			return result, nil
 		}
 		runPre, err := evaluateLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
@@ -990,6 +990,13 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 				return result, err
 			}
 			return r.runUploadArtifact(ctx, processor, workspace, inputs)
+		}
+		if usesDownloadArtifactAdapter(lock) {
+			inputs, err := evaluateMap(step.With, eval)
+			if err != nil {
+				return result, err
+			}
+			return r.runDownloadArtifact(ctx, workspace, job.Needs, inputs)
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {

@@ -79,13 +79,13 @@ The plugin path currently supports:
   and pre/main/post actions;
 - public, credential-free checkout of the event repository at its exact commit;
   and
-- bounded native uploads for the audited `actions/upload-artifact` v4 commit.
+- bounded native upload and exact-name download for the audited artifact v4 commits.
 
 It does **not** currently support:
 
 - private repositories or private actions;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
-- `actions/cache` or `actions/download-artifact`;
+- `actions/cache`, artifact merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
 - job containers or service containers through the production plugin path;

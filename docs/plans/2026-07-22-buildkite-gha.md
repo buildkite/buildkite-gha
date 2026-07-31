@@ -1313,6 +1313,17 @@ Explicitly defer from beta unless implementation evidence changes the order:
   exact-commit artifact observation prove publication, attribution, manifest
   binding, archive integrity and contents, hidden-file exclusion, and compatible
   action outputs, so the separate upload-only fixture is now `runtime-pass`.
+  The consumer-side slice recognizes only the audited `actions/download-artifact`
+  v4.3.0 commit and one exact literal artifact name from verified direct
+  `needs`. It preserves the manifest's exact producer job UUID through runtime
+  hydration, revalidates native path, compressed size, digest, file count, ZIP
+  member paths and expanded bytes, then extracts directly to a confined
+  workspace-relative destination and exposes the compatible absolute
+  `download-path` output. Run-wide listing, IDs, patterns, merge, cross-run,
+  cross-repository, symlink, traversal, and special-file behavior fail closed.
+  The full producer-to-two-consumer fixture remains `compile-pass` until an
+  exact-commit hosted roundtrip and independent read-only observation establish
+  runtime evidence.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1361,17 +1372,17 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - The profile is also exposed as the text/JSON workflow preflight
   `buildkite-gha validate --profile hosted-tokenless --event-path <path>
   --format text|json <workflow>`. Expected-negative fixtures preserve current
-  boundaries: official GitHub artifact/cache actions compile but are denied
-  admission pending Phase 6. Job and service containers compile to schema-v4
-  plans and have hosted runtime evidence, while production admission rejects
-  their container provenance.
+  boundaries: cache actions, artifact merge and broad download modes, and
+  unsupported commits are denied admission or input validation. Job and service
+  containers compile to schema-v4 plans and have hosted runtime evidence, while
+  production admission rejects their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
-  container-runtime proofs, plus the Phase 6 job-summary and workflow-command
-  annotation proofs. The dispatcher deliberately uploads each existing
-  importer and continuation
+  container-runtime proofs, plus the Phase 6 job-summary, workflow-command,
+  upload-artifact, and artifact-roundtrip proofs. The dispatcher deliberately
+  uploads each existing importer and continuation
   independently, then settles their generated and native terminal steps; it
   does not flatten the importer/continuation topology. Existing `PHASE2_PROBE`,
   `PHASE3_PROBE`, `PHASE4_PROBE`, all three `PHASE5_PROBE`, and `PHASE6_PROBE`
@@ -1918,10 +1929,11 @@ buildkite-gha validate --profile hosted-tokenless \
 ```
 
 Admission is policy evidence, not execution evidence. The exact audited
-`actions/upload-artifact` commit is admitted through its bounded native adapter;
-cache actions, artifact download/merge, and unsupported upload commits remain
-rejected. Unknown generic action dependencies are not declared executable
-merely because the profile admits them.
+`actions/upload-artifact` commit and exact-name `actions/download-artifact`
+commit are admitted through bounded native adapters; cache actions, artifact
+merge and broad download modes, and unsupported commits remain rejected.
+Unknown generic action dependencies are not declared executable merely because
+the profile admits them.
 
 The manual hosted aggregate is dispatched against one exact full commit:
 
@@ -1934,12 +1946,13 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 It gathers Phase 2 shell/upload, Phase 3 concurrency, Phase 4 public actions,
-and the three Phase 5 Docker capability, Dockerfile-action, and complete
-container-runtime proofs in one build. Each phase still owns an independent
-importer and continuation loader; a final aggregate waits for all generated and
-native terminal evidence, including failures, without changing those security
-or dependency boundaries. Keep the phase-specific selectors for focused reruns
-and fault isolation.
+the three Phase 5 Docker capability, Dockerfile-action, and complete
+container-runtime proofs, and the implemented Phase 6 visibility and artifact
+proofs in one build. Each phase still owns an independent importer and
+continuation loader; a final aggregate waits for all generated and native
+terminal evidence, including failures, without changing those security or
+dependency boundaries. Keep the phase-specific selectors for focused reruns and
+fault isolation.
 
 ### Initial checked-in corpus
 

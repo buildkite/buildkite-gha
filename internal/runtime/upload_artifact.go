@@ -18,15 +18,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
-// ArtifactUploader is the narrow native storage boundary used by the adapter.
-type ArtifactUploader interface {
+// ArtifactStore is the narrow native storage boundary shared by both adapters.
+type ArtifactStore interface {
 	UploadArtifactFrom(context.Context, string, string) error
+	DownloadArtifact(context.Context, string, string, string) error
 }
 
 type artifactRegistry struct {
@@ -350,7 +350,7 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 		if old, ok := seen[lower]; ok {
 			return nil, fmt.Errorf("duplicate or case-colliding archive paths %q and %q", old, name)
 		}
-		if len(name) > actionintegration.MaxUploadArtifactPathBytes || !utf8.ValidString(name) || strings.ContainsAny(name, `":<>|*?`+"\r\n\\") {
+		if !validArtifactMember(name) || strings.ContainsAny(name, `":<>|*?`) {
 			return nil, fmt.Errorf("archive path %q contains forbidden characters", name)
 		}
 		seen[lower] = name

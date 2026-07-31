@@ -428,6 +428,58 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node20\n  main: index.js\n")
+	compile := func(commit, needs, with string) ([]plan.Job, error) {
+		workflow := []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactCommit + "\n        with:\n          path: payload\n  consumer:\n" + needs + "    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/download-artifact@" + commit + "\n" + with)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+		})
+	}
+
+	plans, err := compile(actionintegration.DownloadArtifactCommit, "    needs: producer\n", "        with:\n          name: payload\n          path: out\n          merge-multiple: false\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || len(plans[1].NeedSources["producer"]) != 1 || plans[1].Actions[0].Commit != actionintegration.DownloadArtifactCommit {
+		t.Fatalf("download-artifact plans = %#v", plans)
+	}
+
+	for name, with := range map[string]string{
+		"missing name":  "        with:\n          path: out\n",
+		"pattern":       "        with:\n          name: payload\n          pattern: 'payload-*'\n",
+		"merge":         "        with:\n          name: payload\n          merge-multiple: true\n",
+		"absolute path": "        with:\n          name: payload\n          path: /tmp/out\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := compile(actionintegration.DownloadArtifactCommit, "    needs: producer\n", with)
+			if err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
+				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+			}
+		})
+	}
+	if _, err := compile(actionintegration.DownloadArtifactCommit, "", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), "direct needs producer") {
+		t.Fatalf("needs-free download-artifact error = %v", err)
+	}
+	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
+		t.Fatalf("unsupported download-artifact commit error = %v", err)
+	}
+}
+
 func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: remote\nruns:\n  using: node24\n  main: index.js\n")

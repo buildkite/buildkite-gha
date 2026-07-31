@@ -22,6 +22,12 @@ type NeedResult struct {
 	Result    string
 	Outputs   map[string]string
 	Producers []Producer
+	Artifacts []NeedArtifact
+}
+
+type NeedArtifact struct {
+	Artifact ResultArtifact
+	Producer Producer
 }
 
 // Publication records the authoritative artifact and non-fatal visibility
@@ -192,6 +198,9 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 				return nil, fmt.Errorf("load logical need %q: %w", name, err)
 			}
 			need.Producers = append(need.Producers, manifest.Producer)
+			for _, artifact := range manifest.Artifacts {
+				need.Artifacts = append(need.Artifacts, NeedArtifact{Artifact: artifact, Producer: manifest.Producer})
+			}
 			need.Result = aggregateResult(need.Result, manifest.Result)
 			for _, output := range manifest.Outputs {
 				lower := strings.ToLower(output.Name)

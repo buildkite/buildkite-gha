@@ -685,7 +685,6 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 		service string
 	}{
 		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, "artifact"},
-		{plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}, "artifact"},
 		{plan.ActionLock{Source: "github", Repository: "actions/cache"}, "cache"},
 		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore"}, "cache"},
 		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "save"}, "cache"},
@@ -705,6 +704,13 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadAllowsNativeDownloadArtifactAdapter(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "consumer"}, Actions: []plan.ActionLock{{Source: "github", Repository: "actions/download-artifact", Commit: actionintegration.DownloadArtifactCommit}}}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatal(err)
 	}
 }
 

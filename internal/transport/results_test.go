@@ -123,10 +123,12 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	second := ResultSource{StepKey: "gha-build-two", PlanDigest: Digest([]byte("two-plan"))}
 	firstPath := ResultPath(first.StepKey, first.PlanDigest)
 	secondPath := ResultPath(second.StepKey, second.PlanDigest)
+	firstManifest := resultManifest(testJobID, first.StepKey, first.PlanDigest, "success", Output{Name: "first", Value: "one"})
+	firstManifest.Artifacts = []ResultArtifact{resultArtifact("payload", "1", strings.Repeat("a", 64))}
 	runner := &resultRunner{
 		jobByStep: map[string]string{first.StepKey: testJobID, second.StepKey: testJobID2},
 		dataByPath: map[string][]byte{
-			firstPath:  mustManifest(t, resultManifest(testJobID, first.StepKey, first.PlanDigest, "success", Output{Name: "first", Value: "one"})),
+			firstPath:  mustManifest(t, firstManifest),
 			secondPath: mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "failure", Output{Name: "second", Value: "two"})),
 		},
 	}
@@ -134,8 +136,11 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needs["build"].Result != "failure" || !reflect.DeepEqual(needs["build"].Outputs, map[string]string{"first": "one", "second": "two"}) || len(needs["build"].Producers) != 2 {
+	if needs["build"].Result != "failure" || !reflect.DeepEqual(needs["build"].Outputs, map[string]string{"first": "one", "second": "two"}) || len(needs["build"].Producers) != 2 || len(needs["build"].Artifacts) != 1 {
 		t.Fatalf("needs = %#v", needs)
+	}
+	if got := needs["build"].Artifacts[0]; got.Artifact != firstManifest.Artifacts[0] || got.Producer != firstManifest.Producer {
+		t.Fatalf("retained artifact authority = %#v", got)
 	}
 
 	runner.dataByPath[secondPath] = mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success", Output{Name: "first", Value: "different"}))

@@ -1,0 +1,14 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Phase 6 artifact roundtrip settled"
+    key: "phase-6-native-after-artifact-roundtrip"
+    depends_on:
+      - step: "gha-artifact-producer"
+        allow_failure: true
+      - step: "gha-artifact-consumer-5ebbc197d87b"
+        allow_failure: true
+      - step: "gha-artifact-consumer-91934b28b00f"
+        allow_failure: true
+    command: "echo 'Phase 6 artifact producer and both consumers settled before API verification'"
