@@ -77,9 +77,9 @@
       "id": "phase6-workflow-command-annotations",
       "workflow": "testdata/phase6/.github/workflows/workflow-command-annotations.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "Local runtime and publication tests cover warning and error annotations; the checked-in exact-commit hosted proof still requires an API observation.",
-      "note": "Do not classify this fixture as runtime-pass until the read-only verifier confirms both persisted job-scoped annotations.",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-commit Buildkite build 252 and a read-only API observation proved both persisted job-scoped workflow-command annotation contracts.",
+      "note": "The verifier bound build 252, merged implementation commit 4050f0c884eef0f54a77c27958abe3ca21ede9e0, and generated job 019fb5d6-f314-4294-b991-7ceb540604b7.",
       "action_preflight": "none"
     },
     {

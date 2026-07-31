@@ -1300,9 +1300,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
   evidence, so the smoke inventory records the fixture as `runtime-pass`.
   Workflow `::warning` and `::error` commands now use the same bounded,
   secret-scrubbed advisory publication boundary with separate stable warning
-  and error contexts; they do not change step or job conclusions. Its distinct
-  checked-in hosted fixture remains `compile-pass` until the read-only verifier
-  observes both persisted annotations at an exact commit.
+  and error contexts; they do not change step or job conclusions. Build 252
+  and its exact-commit API observation prove both persisted annotations and
+  masking, so the distinct checked-in hosted fixture is now `runtime-pass`.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1435,6 +1435,18 @@ Phase 6 evidence:
   job with context `buildkite-gha-job-summary`, job scope, `info` style, and
   both checked-in body fragments. This API observation is required evidence
   because annotation failure remains advisory and cannot change job outcome.
+- [Buildkite build 252](https://buildkite.com/buildkite/buildkite-gha/builds/252)
+  ran exact merged implementation commit
+  `4050f0c884eef0f54a77c27958abe3ca21ede9e0`. The exact-commit importer
+  compiled and uploaded the checked-in workflow-command fixture, and generated
+  job `019fb5d6-f314-4294-b991-7ceb540604b7` passed even though it emitted an
+  `::error` command.
+- The independent read-only API verifier found exactly one job-scoped `warning`
+  annotation with context `buildkite-gha-workflow-warnings` and one job-scoped
+  `error` annotation with context `buildkite-gha-workflow-errors`. It verified
+  both checked-in body contracts and the absence of the registered masking
+  canary; successful job outcome alone would not establish this advisory
+  publication evidence.
 
 Phase 2 live evidence:
 
