@@ -139,6 +139,26 @@ func TestDownloadArtifactScrubsMaskedMemberFromDestinationErrors(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactScrubsQuotedMaskedDestinationFromErrors(t *testing.T) {
+	const maskedDestination = `runtime"secret`
+	archive, size, digest := testDownloadZIP(t, "result.txt")
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, maskedDestination), []byte("collision"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(maskedDestination)
+	artifact := plan.NeedArtifact{
+		Name: "payload", Path: "buildkite-gha/v1/artifacts/" + strings.Repeat("e", 64) + ".zip",
+		Digest: digest, Size: size, FileCount: 1,
+		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
+	}
+	_, err := (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), processor, workspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, map[string]string{"name": "payload", "path": maskedDestination})
+	if err == nil || strings.Contains(err.Error(), maskedDestination) || strings.Contains(err.Error(), `runtime\"secret`) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("quoted masked destination error = %v", err)
+	}
+}
+
 func TestDownloadArtifactRejectsUnsafeZIPAndDigest(t *testing.T) {
 	for _, name := range []string{"../escape", "/absolute", "dir/../escape", "a\\b"} {
 		t.Run(name, func(t *testing.T) {

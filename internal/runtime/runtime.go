@@ -1260,7 +1260,19 @@ func (p *commandProcessor) scrubError(err error) error {
 	if err == nil {
 		return nil
 	}
-	masks := p.maskValues()
+	registered := p.maskValues()
+	masks := make([]string, 0, len(registered)*2)
+	for _, mask := range registered {
+		if mask == "" {
+			continue
+		}
+		masks = append(masks, mask)
+		quoted := strconv.Quote(mask)
+		escaped := quoted[1 : len(quoted)-1]
+		if escaped != mask {
+			masks = append(masks, escaped)
+		}
+	}
 	sort.Slice(masks, func(i, j int) bool {
 		if len(masks[i]) != len(masks[j]) {
 			return len(masks[i]) > len(masks[j])
@@ -1269,9 +1281,7 @@ func (p *commandProcessor) scrubError(err error) error {
 	})
 	message := err.Error()
 	for _, mask := range masks {
-		if mask != "" {
-			message = strings.ReplaceAll(message, mask, "***")
-		}
+		message = strings.ReplaceAll(message, mask, "***")
 	}
 	if message == err.Error() {
 		return err
