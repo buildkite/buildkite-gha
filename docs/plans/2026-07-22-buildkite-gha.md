@@ -1175,7 +1175,7 @@ Result: executable on Buildkite, partially provider-dependent
 
 ✓ 6 jobs and 14 static matrix instances compile
 ✓ JavaScript, composite, and Docker action capabilities are available
-✓ actions/cache@v4 uses the Buildkite cache adapter
+✓ actions/cache@v6.1.0 uses the Buildkite cache-v2 service
 ! release job calls api.github.com and will not be portable to Cursor Origin
 ✗ windows-latest is not supported by queue mapping "hosted-linux"
 ```
@@ -1325,6 +1325,17 @@ Explicitly defer from beta unless implementation evidence changes the order:
   full producer-to-two-consumer matrix roundtrip, verified terminal manifests,
   exact native archive binding, build-unique payload, and compatible output,
   so the smoke inventory records the fixture as `runtime-pass`.
+  Cache support now admits only
+  `actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (v6.1.0) and runs
+  that stock Node 24 ESM implementation against the standard cache-v2 protocol.
+  The runtime mints a fresh, job-bound GHAC token for each action lifecycle
+  phase, registers it with both redaction layers before execution, and exposes
+  the three cache-v2 variables only to the verified cache action. The ambient
+  Agent job token never enters action code or plan/result state. Older majors,
+  other commits, unsafe mint responses, redirects, missing service
+  configuration, and redaction failure all fail closed. The checked-in fixture
+  is `compile-pass`; a separate exact-commit hosted miss/save/restore proof is
+  still required before claiming `runtime-pass`.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1373,8 +1384,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - The profile is also exposed as the text/JSON workflow preflight
   `buildkite-gha validate --profile hosted-tokenless --event-path <path>
   --format text|json <workflow>`. Expected-negative fixtures preserve current
-  boundaries: cache actions, artifact merge and broad download modes, and
-  unsupported commits are denied admission or input validation. Job and service
+  boundaries: unsupported cache commits, artifact merge and broad download
+  modes, and unsupported artifact commits are denied admission or input
+  validation. The exact cache v6.1.0 fixture is admitted but intentionally
+  remains `compile-pass` until hosted service evidence exists. Job and service
   containers compile to schema-v4 plans and have hosted runtime evidence, while
   production admission rejects their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
@@ -1808,17 +1821,20 @@ Definition of done:
 
 ### Phase 6 — Core services and protected capability control plane
 
-Deliver two explicit tracks. Tokenless Buildkite-backed adapters remain local to
-the job:
+Deliver two explicit tracks. Buildkite-backed compatibility integrations use
+the narrowest available boundary:
 
-- cache restore/save;
-- artifact upload/download;
+- cache restore/save through the stock audited cache-v2 client, a compatible
+  Results service, and short-lived job-bound GHAC credentials;
+- artifact upload/download through bounded native adapters;
 - public checkout under GitHub and Cursor Origin provider adapters; and
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
-requires an HTTP protocol, run a job-local compatibility endpoint or provide a
-well-defined adapter rather than proxying GitHub's private service.
+requires an HTTP protocol, use an explicitly configured compatible service or
+provide a well-defined adapter rather than proxying GitHub's private service.
+Cache credentials authorize storage access only; they are distinct from the
+provider-feature grants below.
 
 Protected provider features use the supporting control-plane service:
 
@@ -1836,14 +1852,17 @@ Protected provider features use the supporting control-plane service:
 
 Delivery slices:
 
-1. Ship tokenless cache, artifact, summary, and public-checkout adapters without
-   a service dependency.
-2. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
+1. Ship artifact, summary, and public-checkout adapters without a service
+   dependency.
+2. Run only the audited `actions/cache` v6.1.0 client against cache-v2, minting
+   short-lived credentials through the exact current Buildkite job and keeping
+   all Agent authority outside action code.
+3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
    policy evaluation, and signed no-op grants before returning credentials.
-3. Add private checkout, private actions, and private reusable-workflow source
+4. Add private checkout, private actions, and private reusable-workflow source
    access through the narrowest practical credential or download interface.
-4. Add scoped GitHub tokens, selected secrets, and environment grants.
-5. Prefer direct Buildkite OIDC migration, then add only explicitly supported
+5. Add scoped GitHub tokens, selected secrets, and environment grants.
+6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
 Definition of done:
@@ -1852,8 +1871,8 @@ Definition of done:
   producer and verifies the same contents in both consumer matrix instances on
   GitHub Actions and `buildkite-gha`.
 - Common official cache and artifact actions work without a GitHub Actions run.
-- Artifact and cache keys cannot cross organization/build boundaries
-  unexpectedly.
+- Artifact identities remain build-bound; cache keys remain confined to their
+  organization, pipeline, and authorized ref scopes.
 - Cursor Origin checkout does not require a GitHub repository mirror.
 - Private checkout and actions use repository-scoped, least-privilege access
   without exposing a reusable service credential to the compiler.
@@ -1946,10 +1965,12 @@ buildkite-gha validate --profile hosted-tokenless \
 
 Admission is policy evidence, not execution evidence. The exact audited
 `actions/upload-artifact` commit and exact-name `actions/download-artifact`
-commit are admitted through bounded native adapters; cache actions, artifact
-merge and broad download modes, and unsupported commits remain rejected.
-Unknown generic action dependencies are not declared executable merely because
-the profile admits them.
+commit are admitted through bounded native adapters. The exact audited
+`actions/cache` v6.1.0 commit is admitted through the cache-v2 credential
+boundary; all other cache commits, artifact merge and broad download modes, and
+unsupported artifact commits remain rejected. Unknown generic action
+dependencies are not declared executable merely because the profile admits
+them.
 
 The manual hosted aggregate is dispatched against one exact full commit:
 
@@ -1980,7 +2001,10 @@ Start with `testdata/smoke` rather than an external workflow catalog:
   composite actions, including masking, state, summaries, post-actions, and
   environment propagation; and
 - `artifact.yml` is dormant until Phase 6, when it proves upload/download
-  compatibility and content preservation across jobs.
+  compatibility and content preservation across jobs; and
+- `testdata/phase6/.github/workflows/cache-v6.yml` preserves the exact audited
+  cache-v2 admission contract until the separate hosted roundtrip proof can
+  promote it from `compile-pass` to `runtime-pass`.
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression
@@ -2116,7 +2140,7 @@ compatibility may justify Buildkite additions:
   skipped;
 - richer logical sub-step/timeline presentation inside one command job;
 - targeted matrix-sibling cancellation;
-- Buildkite-backed cache APIs suitable for Actions toolkit adapters;
+- a productionized cache-v2 Results service and discoverable endpoint contract;
 - Buildkite Job OIDC claims and APIs sufficient for short-lived provider token
   brokering;
 - Origin event/context integration;
@@ -2292,17 +2316,15 @@ them in the phase that first needs the capability:
    the local `default` Docker driver and queue prerequisites; build 136 proved
    the complete container runtime. A compatibility image remains deferred until
    tool-cache differences demonstrate a concrete need.
-3. Phase 6 will choose job-local protocol adapters versus recognized built-ins
-   for cache and artifact actions.
-4. Phase 4 will set the customer-beta event and expression subset from the
+3. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
-5. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
+4. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
-6. The fixed Buildkite `hosted` queue's documented per-job disposable isolation
+5. The fixed Buildkite `hosted` queue's documented per-job disposable isolation
    and the Phase 5 probe are sufficient for tokenless, non-privileged Dockerfile
    actions built on the local driver. Phases 6 and 9 still own authorization and
    queue policy for protected Docker capabilities and privileged workloads.
-7. Phase 6 will define the GitHub App installation-token compatibility contract
+6. Phase 6 will define the GitHub App installation-token compatibility contract
    for `github.token` and `GITHUB_TOKEN`, including repository/permission
    narrowing and documented differences from native Actions tokens. Tokenless
    workflows remain the default until then.

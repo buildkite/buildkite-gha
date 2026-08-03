@@ -404,8 +404,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = errors.Join(runErr, runCtx.Err())
 	}
 
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), r.cleanupTimeout())
-	defer cancel()
+	postCtx, cancelPosts := postPhaseContext(runCtx, r.postActionTimeout(), r.cleanupTimeout())
+	defer cancelPosts()
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
 		post := registeredPosts[i]
@@ -424,7 +424,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
-		postErr := r.runJavaScriptPhase(cleanupCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
+		postErr := r.runJavaScriptPhase(postCtx, processor, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
 		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
@@ -619,6 +619,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 		"GITHUB_JOB":        job.Workflow.LogicalJobID,
 		"GITHUB_REF":        job.Event.Ref,
 		"GITHUB_REPOSITORY": job.Event.Repository,
+		"GITHUB_SERVER_URL": "https://github.com",
 		"GITHUB_SHA":        job.Event.SHA,
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         "Linux",
@@ -838,7 +839,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if runtime == metadata.RuntimeNode20 {
 			major, explicit = 20, r.Node20
 		}
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), nodeMajor: major}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1062,7 +1063,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, nodeMajor: major}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1387,6 +1388,44 @@ func (r Runner) cleanupTimeout() time.Duration {
 		return r.CleanupTimeout
 	}
 	return defaultCleanupTimeout
+}
+
+func (r Runner) postActionTimeout() time.Duration {
+	if r.PostActionTimeout > 0 {
+		return r.PostActionTimeout
+	}
+	// Preserve the existing test/operator override while separating the normal
+	// post-action budget from short resource cleanup.
+	if r.CleanupTimeout > 0 {
+		return r.CleanupTimeout
+	}
+	return defaultPostActionTimeout
+}
+
+// postPhaseContext gives JavaScript post actions one bounded shared budget.
+// Cancellation still permits the existing short cleanup grace before stopping
+// an in-flight post action.
+func postPhaseContext(parent context.Context, timeout, cancelGrace time.Duration) (context.Context, context.CancelFunc) {
+	postCtx, cancelPosts := context.WithTimeout(context.Background(), timeout)
+	postDone := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-parent.Done():
+			timer := time.NewTimer(cancelGrace)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancelPosts()
+			case <-postDone:
+			}
+		case <-postDone:
+		}
+	}()
+	return postCtx, func() {
+		once.Do(func() { close(postDone) })
+		cancelPosts()
+	}
 }
 
 func cloneStrings(in map[string]string) map[string]string {

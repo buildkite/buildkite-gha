@@ -22,7 +22,8 @@ There are three different compatibility claims:
 
 Compilation alone is not admission, and admission does not execute arbitrary
 action code. In particular, an otherwise valid action may depend on a GitHub
-artifact, cache, token, or OIDC service that this project does not provide.
+artifact, token, OIDC, or unrecognized cache service that this project does not
+provide.
 
 ## Support matrix
 
@@ -44,9 +45,10 @@ artifact, cache, token, or OIDC service that this project does not provide.
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
 | `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
+| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and requires an operator-configured compatible Results service. Hosted runtime proof is still pending. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
-| Artifact cache and broad download modes | Not supported | Cache, merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
+| Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
 | Private repositories or actions | Not supported | The preview has no private-source capability broker. |
 | Secrets and provider tokens | Not supported | Includes `GITHUB_TOKEN`, GitHub App tokens, and protected environment grants. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
@@ -152,6 +154,43 @@ ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
 mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
 fabricated. Exact-commit Buildkite build 270 and its independent artifact
 observation prove the producer-to-two-consumer roundtrip contract.
+
+### Cache v6 uses the standard cache-v2 protocol
+
+The cache integration recognizes only
+`actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (v6.1.0), including
+the `restore` and `save` entry points from that same immutable source tree.
+Older majors and every other commit fail closed. Unlike the artifact actions,
+the runtime does not replace the upstream implementation: it executes the
+audited action's stock Node 24 ESM lifecycle and supplies the standard
+cache-v2 environment only to that verified action invocation.
+
+Before each pre, main, or post phase that runs, the runtime posts an empty body
+to the current job's
+`/v3/jobs/<BUILDKITE_JOB_ID>/ghac_tokens` Agent API endpoint using the ambient
+`BUILDKITE_AGENT_ACCESS_TOKEN`. The returned short-lived token is registered
+with both the local log scrubber and `buildkite-agent redactor add` before the
+action starts. A fresh token is minted for post-save rather than retaining a
+main-phase credential. The runtime exposes only `ACTIONS_CACHE_SERVICE_V2`,
+`ACTIONS_RESULTS_URL`, and `ACTIONS_RUNTIME_TOKEN` to the cache action; it does
+not forward the Agent job token, persist cache credentials into job state, or
+expose them to ordinary actions.
+
+Operators must set `BUILDKITE_GHA_CACHE_URL` to the origin-only URL of the
+compatible Results service; a non-root path is rejected because the stock
+cache-v2 client uses root-relative Twirp endpoints. The Buildkite organization
+must also have GHAC token minting enabled, and jobs must be able to reach both
+that service and the Agent API.
+The service-issued token scopes cache access to the current organization and
+pipeline, grants writes only for an authorized ref, and limits cross-repository
+pull requests to the read-only default-branch scope. Missing configuration,
+disabled minting, malformed responses, redirects, or failed redaction stop the
+cache action before its JavaScript executes.
+
+This is an implemented and admitted contract, not yet a runtime-proof claim.
+The follow-up hosted fixture must independently demonstrate a miss, post-action
+save, and later restore hit at an exact implementation commit before the smoke
+inventory can mark cache v6 `runtime-pass`.
 
 ### Failures stay explicit
 

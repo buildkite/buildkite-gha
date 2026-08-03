@@ -1996,6 +1996,43 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 	}
 }
 
+func TestJobTimeoutLimitsPostActionsToCleanupGrace(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Job timeout post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/slow/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/slow/post.js", "")
+	postStarted := filepath.Join(workspace, "post-started")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$1")" = post.js ]; then : > "$POST_STARTED"; fi
+sleep 30
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
+	job.TimeoutMinutes = 0.001
+	job.Env = map[string]string{"POST_STARTED": postStarted}
+	runner := Runner{
+		Node24: fakeNode, CleanupTimeout: 250 * time.Millisecond, PostActionTimeout: 3 * time.Second,
+		InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond,
+	}
+	started := time.Now()
+	result, err := runner.RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(postStarted); err != nil {
+		t.Fatalf("post action did not start during cleanup grace: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("job-timeout cleanup took %s, want cleanup grace rather than 3s post budget", elapsed)
+	}
+}
+
 func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()

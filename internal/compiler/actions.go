@@ -186,6 +186,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 			return "", plan.ActionLock{}, "", "", err
 		}
 	}
+	if descriptor.Service == actionintegration.ServiceCache {
+		if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	b.caps["network"] = true
 	return key, lock, materialized.RepositoryRoot, ref.Path, nil
 }
