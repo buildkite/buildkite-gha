@@ -183,6 +183,10 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 	if e != nil {
 		return newResult(), fmt.Errorf("resolve workspace: %w", e)
 	}
+	abs, e = filepath.EvalSymlinks(abs)
+	if e != nil {
+		return newResult(), fmt.Errorf("canonicalize workspace: %w", e)
+	}
 	action.Workspace = abs
 	_, action.explicitPATH = action.Env["PATH"]
 	workspace, e := os.Open(abs)
@@ -205,6 +209,10 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 		return newResult(), e
 	}
 	defer func() { _ = os.RemoveAll(temp) }()
+	temp, e = filepath.EvalSymlinks(temp)
+	if e != nil {
+		return newResult(), fmt.Errorf("canonicalize runner temp: %w", e)
+	}
 	if e := os.Chmod(temp, 0o777); e != nil {
 		return newResult(), fmt.Errorf("make Docker runner temp writable: %w", e)
 	}
@@ -536,7 +544,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -545,13 +553,15 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
 	}
+	cacheToken := ""
 	if action.Cache {
+		env = isolateCacheActionEnvironment(env)
 		cacheEnv, err := r.cacheActionEnvironment(ctx, processor)
 		if err != nil {
 			return fmt.Errorf("configure actions/cache v6 service: %w", err)
 		}
-		delete(env, "ACTIONS_CACHE_URL")
 		env = mergeStringMaps(env, cacheEnv)
+		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {
@@ -566,10 +576,73 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
-	if err := r.runProcess(ctx, processor, action.Path, env, result, stateOut, name, args...); err != nil {
+	var beforeResult Result
+	var beforeState map[string]string
+	if cacheToken != "" {
+		beforeResult = cloneResult(*result)
+		beforeState = cloneStrings(stateOut)
+	}
+	err := r.runProcess(ctx, processor, workspace, env, result, stateOut, name, args...)
+	if cacheToken != "" {
+		leaked := resultContains(*result, cacheToken)
+		err = processor.scrubError(err)
+		if leaked {
+			*result = beforeResult
+			restoreStringMap(stateOut, beforeState)
+			leakErr := errors.New("actions/cache runtime token leakage detected; phase effects were discarded")
+			if err != nil {
+				leakErr = errors.Join(err, leakErr)
+			}
+			return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, leakErr)
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
 	return nil
+}
+
+func cloneResult(result Result) Result {
+	result.Outputs = cloneStrings(result.Outputs)
+	result.Env = cloneStrings(result.Env)
+	result.State = cloneStrings(result.State)
+	result.Paths = append([]string(nil), result.Paths...)
+	result.Artifacts = append([]transport.ResultArtifact(nil), result.Artifacts...)
+	return result
+}
+
+func restoreStringMap(target, source map[string]string) {
+	if target == nil {
+		return
+	}
+	for name := range target {
+		delete(target, name)
+	}
+	mergeInto(target, source)
+}
+
+func resultContains(result Result, value string) bool {
+	for _, values := range []map[string]string{result.Outputs, result.Env, result.State} {
+		for name, candidate := range values {
+			if strings.Contains(name, value) || strings.Contains(candidate, value) {
+				return true
+			}
+		}
+	}
+	if strings.Contains(result.Summary, value) || strings.Contains(result.pathBase, value) {
+		return true
+	}
+	for _, path := range result.Paths {
+		if strings.Contains(path, value) {
+			return true
+		}
+	}
+	for _, artifact := range result.Artifacts {
+		if strings.Contains(artifact.Name, value) || strings.Contains(artifact.ID, value) || strings.Contains(artifact.Path, value) || strings.Contains(artifact.Digest, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r Runner) runProcess(ctx context.Context, processor *commandProcessor, dir string, env map[string]string, result *Result, state map[string]string, name string, args ...string) error {

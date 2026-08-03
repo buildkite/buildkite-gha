@@ -1438,6 +1438,95 @@ console.log('post-after-implicit-wait')
 	}
 }
 
+func TestJavaScriptActionLifecycleRunsInWorkspace(t *testing.T) {
+	node := requireNode24(t)
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/cwd/action.yml", "name: CWD\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for _, phase := range []string{"pre", "main", "post"} {
+		writeFixtureFile(t, workspace, ".github/actions/cwd/"+phase+".js", fmt.Sprintf(`
+require('node:fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t' + process.env.GITHUB_WORKSPACE + '\n')
+`, phase+":"))
+	}
+	cwdLog := filepath.Join(t.TempDir(), "cwd.log")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
+	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	data, err := os.ReadFile(cwdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("CWD log = %q, want pre/main/post entries", data)
+	}
+	for _, line := range lines {
+		phase, paths, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("CWD log line %q is malformed", line)
+		}
+		cwd, workspaceEnv, ok := strings.Cut(paths, "\t")
+		if !ok || cwd != resolvedWorkspace || workspaceEnv != resolvedWorkspace {
+			t.Fatalf("%s phase CWD/workspace = %q / %q, want %q", phase, cwd, workspaceEnv, resolvedWorkspace)
+		}
+	}
+}
+
+func TestJavaScriptActionCanonicalizesWorkspaceAndRunnerTemp(t *testing.T) {
+	node := requireNode24(t)
+	base := t.TempDir()
+	realParent := filepath.Join(base, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := filepath.Join(base, "link")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	workspace := filepath.Join(linkParent, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", linkParent)
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/cwd/action.yml", "name: CWD\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/cwd/main.js", `
+require('node:fs').writeFileSync(process.env.CWD_LOG, process.cwd() + '\t' + process.env.GITHUB_WORKSPACE + '\t' + process.env.RUNNER_TEMP)
+`)
+	cwdLog := filepath.Join(base, "cwd.log")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "cwd", Kind: "uses", Uses: "./.github/actions/cwd", Env: map[string]string{"CWD_LOG": cwdLog}}})
+	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	data, err := os.ReadFile(cwdLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(data), "\t")
+	if len(parts) != 3 {
+		t.Fatalf("CWD log = %q", data)
+	}
+	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parts[0] != resolvedWorkspace || parts[1] != resolvedWorkspace {
+		t.Fatalf("CWD/workspace = %q / %q, want %q", parts[0], parts[1], resolvedWorkspace)
+	}
+	if filepath.Dir(parts[2]) != realParent {
+		t.Fatalf("RUNNER_TEMP = %q, want canonical parent %q", parts[2], realParent)
+	}
+}
+
 func TestConcurrentStreamsShareMaskRegistration(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2828,7 +2917,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 	}
 	result := newResult()
 	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
-	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), resolvedNode, action, action.Main, nil, nil, &result); err != nil {
+	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(log)
