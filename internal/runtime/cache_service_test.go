@@ -196,6 +196,7 @@ for (const name of required) if (!process.env[name]) throw new Error("missing " 
 for (const name of [
   "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
+  "OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
   "TAR_OPTIONS",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
   "BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
@@ -235,6 +236,7 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary\n");
 		"ACTIONS_CACHE_URL": "https://legacy.invalid", "ACTIONS_RUNTIME_URL": "https://legacy.invalid",
 		"NODE_OPTIONS": "--require attacker", "NODE_PATH": "/attacker", "NODE_EXTRA_CA_CERTS": "/attacker.pem", "NODE_TLS_REJECT_UNAUTHORIZED": "0",
 		"SSLKEYLOGFILE": "/attacker/keys", "LD_AUDIT": "/attacker-audit.so", "LD_PRELOAD": "/attacker.so", "LD_LIBRARY_PATH": "/attacker/lib",
+		"OPENSSL_CONF": "/attacker/openssl.cnf", "OPENSSL_CONF_INCLUDE": "/attacker/includes", "OPENSSL_ENGINES": "/attacker/engines", "OPENSSL_MODULES": "/attacker/modules",
 		"TAR_OPTIONS": "--checkpoint=1 --checkpoint-action=exec=/attacker-command",
 		"HTTP_PROXY":  "http://attacker", "HTTPS_PROXY": "http://attacker", "ALL_PROXY": "http://attacker", "NO_PROXY": "cache.example",
 		"http_proxy": "http://attacker", "https_proxy": "http://attacker", "all_proxy": "http://attacker", "no_proxy": "cache.example",

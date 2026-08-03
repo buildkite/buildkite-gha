@@ -176,11 +176,12 @@ main-phase credential. The runtime exposes only `ACTIONS_CACHE_SERVICE_V2`,
 not forward the Agent job token, persist cache credentials into job state, or
 expose them to ordinary actions. Credential-bearing phases also discard
 workflow-controlled legacy cache URLs, Node/process injection settings, TLS
-overrides, tar and dynamic-loader controls, and upper- or lower-case proxy
-settings before overlaying the runtime-owned service values. Cache subprocesses
-use the fixed `/usr/local/bin:/usr/bin:/bin` tool path rather than workflow
-`PATH` changes. If a credential appears in a phase's command-file effects,
-those effects are discarded and the phase fails.
+and OpenSSL configuration/module overrides, tar and dynamic-loader controls,
+and upper- or lower-case proxy settings before overlaying the runtime-owned
+service values. Cache subprocesses use the fixed
+`/usr/local/bin:/usr/bin:/bin` tool path rather than workflow `PATH` changes. If
+a credential appears in a phase's command-file effects, those effects are
+discarded and the phase fails.
 
 Operators must set `BUILDKITE_GHA_CACHE_URL` to the origin-only URL of the
 compatible Results service; a non-root path is rejected because the stock
