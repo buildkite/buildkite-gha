@@ -66,6 +66,15 @@ func TestUploadArtifactCommitIsExact(t *testing.T) {
 	}
 }
 
+func TestCacheCommitIsExactV6(t *testing.T) {
+	if err := ValidateCacheCommit(CacheCommit); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+		t.Fatalf("unrecognized cache commit error = %v", err)
+	}
+}
+
 func TestValidateUploadArtifactInputs(t *testing.T) {
 	for _, inputs := range []map[string]string{
 		{"path": "payload/result.txt"},

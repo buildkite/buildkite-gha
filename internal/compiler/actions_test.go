@@ -178,6 +178,38 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	for _, path := range []string{"", "restore", "save"} {
+		writeAction(t, remote, path, "name: cache v6\nruns:\n  using: node24\n  main: index.js\n")
+	}
+	for _, path := range []string{"", "restore", "save"} {
+		name := "root"
+		if path != "" {
+			name = path
+		}
+		t.Run(name, func(t *testing.T) {
+			uses := "actions/cache"
+			if path != "" {
+				uses += "/" + path
+			}
+			uses += "@" + actionintegration.CacheCommit
+			_, locks, capabilities, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(locks) != 1 || locks[0].Commit != actionintegration.CacheCommit || !reflect.DeepEqual(capabilities, []string{"network"}) {
+				t.Fatalf("cache v6 locks/capabilities = %#v / %#v", locks, capabilities)
+			}
+		})
+	}
+
+	_, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@" + strings.Repeat("b", 40)})
+	if err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) || !strings.Contains(err.Error(), "v6.1.0") {
+		t.Fatalf("unsupported actions/cache commit error = %v", err)
+	}
+}
+
 func TestPublicActionSourceNil(t *testing.T) {
 	_, _, err := (PublicActionSource{}).Fetch(context.Background(), source.Reference{})
 	if err == nil {

@@ -209,6 +209,24 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		actionMaterializer = store
 	}
+	var cacheCredentials gharuntime.CacheCredentialProvider
+	cacheRequired, err := cacheServiceRequired(job.Actions)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	if cacheRequired {
+		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
+			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache v6 service: %v\n", err)
+			return 1
+		}
+	}
 	runner := gharuntime.Runner{
 		Stdout:      stdout,
 		Stderr:      stderr,
@@ -219,6 +237,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:     actionMaterializer,
 		Artifacts:   agent,
+		Cache:       cacheCredentials,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -299,6 +318,20 @@ func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 		}
 	}
 	return false
+}
+
+func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
+	required := false
+	for _, lock := range locks {
+		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+		if descriptor.Service == actionintegration.ServiceCache {
+			required = true
+			if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
+				return false, fmt.Errorf("unsupported cache action: %w", err)
+			}
+		}
+	}
+	return required, nil
 }
 
 func resultProducer(job plan.Job, planDigest string) (transport.Producer, bool, error) {
@@ -730,6 +763,12 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		}
 		for _, action := range artifact.Job.Actions {
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
+			if descriptor.Service == actionintegration.ServiceCache {
+				if err := actionintegration.ValidateCacheCommit(action.Commit); err != nil {
+					return fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err)
+				}
+				continue
+			}
 			if descriptor.Service != "" {
 				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service)
 			}

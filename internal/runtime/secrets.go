@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 // SecretResolver resolves only names declared by the verified job plan.
@@ -38,8 +39,9 @@ func (r AgentRedactor) AddRedaction(ctx context.Context, value string) error {
 	if executable == "" {
 		executable = "buildkite-agent"
 	}
-	command := exec.CommandContext(ctx, executable, "redactor", "add", value)
+	command := exec.CommandContext(ctx, executable, "redactor", "add")
 	command.Env = os.Environ()
+	command.Stdin = strings.NewReader(value)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("register secret with Buildkite Agent redactor: %w: %s", err, output)
 	}

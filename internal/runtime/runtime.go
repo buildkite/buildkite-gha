@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	defaultCleanupTimeout = 10 * time.Second
+	defaultCleanupTimeout    = 10 * time.Second
+	defaultPostActionTimeout = 10 * time.Minute
 	// Match actions/runner ProcessInvoker's graceful cancellation windows.
 	defaultInterruptGrace = 7500 * time.Millisecond
 	defaultTerminateGrace = 2500 * time.Millisecond
@@ -56,12 +57,14 @@ type Runner struct {
 	RuntimeExecutable string
 	Git               string
 	CleanupTimeout    time.Duration
+	PostActionTimeout time.Duration
 	InterruptGrace    time.Duration
 	TerminateGrace    time.Duration
 	Secrets           SecretResolver
 	Redactor          Redactor
 	Actions           ActionMaterializer
 	Artifacts         ArtifactStore
+	Cache             CacheCredentialProvider
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
@@ -86,6 +89,7 @@ type JavaScriptAction struct {
 	Post   string
 	Inputs map[string]string
 	Env    map[string]string
+	Cache  bool
 
 	nodeMajor int
 }
@@ -540,6 +544,14 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	env["GITHUB_ACTION_PATH"] = action.Path
 	for name, value := range stateEnv {
 		env["STATE_"+name] = value
+	}
+	if action.Cache {
+		cacheEnv, err := r.cacheActionEnvironment(ctx, processor)
+		if err != nil {
+			return fmt.Errorf("configure actions/cache v6 service: %w", err)
+		}
+		delete(env, "ACTIONS_CACHE_URL")
+		env = mergeStringMaps(env, cacheEnv)
 	}
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {

@@ -92,12 +92,12 @@
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "unsupported-cache-service",
-      "workflow": "testdata/unsupported/.github/workflows/cache.yml",
+      "id": "phase6-cache-v6",
+      "workflow": "testdata/phase6/.github/workflows/cache-v6.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "runtime-unsupported",
-      "evidence": "The production hosted-tokenless policy rejects the known GitHub Actions cache service dependency.",
-      "note": "Phase 6 owns the Buildkite cache compatibility adapter.",
+      "expectation": "compile-pass",
+      "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
+      "note": "Admission is not hosted runtime evidence; a separate exact-commit miss/save/restore proof remains required.",
       "action_preflight": "hosted-tokenless"
     },
     {

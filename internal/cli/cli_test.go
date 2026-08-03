@@ -685,9 +685,6 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 		service string
 	}{
 		{plan.ActionLock{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, "artifact"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache"}, "cache"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore"}, "cache"},
-		{plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "save"}, "cache"},
 	}
 	for _, test := range tests {
 		name := test.action.Repository
@@ -704,6 +701,49 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
+	}
+}
+
+func TestUnprivilegedUploadAllowsOnlyAuditedCacheV6Commit(t *testing.T) {
+	for _, path := range []string{"", "restore", "save"} {
+		action := plan.ActionLock{Source: "github", Repository: "actions/cache", Path: path, Commit: actionintegration.CacheCommit}
+		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Workflow: plan.Workflow{LogicalJobID: "cache-v6"},
+			Actions:  []plan.ActionLock{action},
+		}}}}
+		if err := validateUnprivilegedBundle(bundle); err != nil {
+			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+		}
+	}
+
+	action := plan.ActionLock{Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40)}
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow: plan.Workflow{LogicalJobID: "cache-old"},
+		Actions:  []plan.ActionLock{action},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+	}
+}
+
+func TestCacheServiceRequiredUsesOnlyAuditedCacheV6Locks(t *testing.T) {
+	required, err := cacheServiceRequired([]plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}})
+	if err != nil || required {
+		t.Fatalf("ordinary action cache requirement = %v, %v", required, err)
+	}
+
+	locks := []plan.ActionLock{
+		{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)},
+		{Source: "github", Repository: "actions/cache", Path: "restore", Commit: actionintegration.CacheCommit},
+	}
+	required, err = cacheServiceRequired(locks)
+	if err != nil || !required {
+		t.Fatalf("nested cache v6 requirement = %v, %v", required, err)
+	}
+
+	locks[1].Commit = strings.Repeat("b", 40)
+	if _, err := cacheServiceRequired(locks); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+		t.Fatalf("unsupported cache lock error = %v", err)
 	}
 }
 

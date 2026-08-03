@@ -38,6 +38,9 @@ const (
 	// archive semantics this adapter implements.
 	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
 	DownloadArtifactCommit = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
+	// CacheCommit is the only actions/cache implementation admitted to the
+	// Buildkite-backed cache-v2 service.
+	CacheCommit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 
 	MaxUploadArtifactNameBytes = 255
 	MaxUploadArtifactRoots     = 32
@@ -81,6 +84,14 @@ func ValidateUploadArtifactCommit(commit string) error {
 func ValidateDownloadArtifactCommit(commit string) error {
 	if commit != DownloadArtifactCommit {
 		return fmt.Errorf("actions/download-artifact native adapter supports only commit %s, resolved %q; Phase 6 is required", DownloadArtifactCommit, commit)
+	}
+	return nil
+}
+
+// ValidateCacheCommit rejects cache client and protocol drift from v6.1.0.
+func ValidateCacheCommit(commit string) error {
+	if commit != CacheCommit {
+		return fmt.Errorf("buildkite cache-v2 service supports only actions/cache v6.1.0 commit %s, resolved %q", CacheCommit, commit)
 	}
 	return nil
 }
