@@ -162,6 +162,24 @@ func TestValidateBindsEveryDependencyToOneLogicalNeed(t *testing.T) {
 	}
 }
 
+func TestValidateAllowsNamespacedLogicalNeed(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Dependencies = []string{"gha-delegated-second"}
+	job.NeedSources = map[string][]NeedSource{
+		"delegated.second": {{StepKey: "gha-delegated-second", PlanDigest: digest}},
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	delete(job.NeedSources, "delegated.second")
+	job.NeedSources["delegated/second"] = []NeedSource{{StepKey: "gha-delegated-second", PlanDigest: digest}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid prerequisite") {
+		t.Fatalf("Validate() error = %v, want invalid namespaced prerequisite rejection", err)
+	}
+}
+
 func TestPlanBoundaryRequiresConcreteCapabilities(t *testing.T) {
 	job := validJob()
 	job.RequiredCapabilities = nil
