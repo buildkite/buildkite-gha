@@ -27,7 +27,7 @@ jobs:
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .migration-cache
+          path: migration-cache
           key: ${{ env.POC_CACHE_KEY }}
 
       - name: Require miss and create payload
@@ -36,8 +36,8 @@ jobs:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           test "$CACHE_HIT" != true
-          mkdir -p .migration-cache
-          printf '%s\n' "$POC_CACHE_PAYLOAD" > .migration-cache/payload.txt
+          mkdir -p migration-cache
+          printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
 
   advanced-package:
     name: Restore cache and package payload
@@ -49,7 +49,7 @@ jobs:
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .migration-cache
+          path: migration-cache
           key: ${{ env.POC_CACHE_KEY }}
 
       - name: Require cache hit
@@ -58,7 +58,7 @@ jobs:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           test "$CACHE_HIT" = true
-          test "$(cat .migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+          test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
 
       - name: Exercise continue-on-error
         id: expected-failure
@@ -75,7 +75,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: migration-poc-payload
-          path: .migration-cache/payload.txt
+          path: migration-cache/payload.txt
           if-no-files-found: error
 
   advanced-verify:
