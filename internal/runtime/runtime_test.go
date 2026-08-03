@@ -749,7 +749,8 @@ echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
 echo "LEVEL=file" >> "$GITHUB_ENV"
 echo "secret=${{ secrets.CANARY }}"`},
 		{ID: "soft", Kind: "run", Command: "exit 7", ContinueOnError: true},
-		{ID: "after-soft", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Command: `test "$LEVEL" = file
+		{ID: "after-soft", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Env: map[string]string{"SOFT_OUTCOME": "${{ steps.soft.outcome }}"}, Command: `test "$LEVEL" = file
+test "$SOFT_OUTCOME:${{ steps.soft.conclusion }}" = failure:success
 case "$PATH" in "$GITHUB_WORKSPACE/bin"*) ;; *) exit 9 ;; esac
 echo after-soft`},
 	})

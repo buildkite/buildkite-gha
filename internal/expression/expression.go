@@ -31,16 +31,17 @@ type Expression struct {
 
 // Context contains the Phase 0 values available while evaluating a template.
 type Context struct {
-	Inputs      map[string]string
-	Matrix      map[string]any
-	Steps       map[string]map[string]string
-	Needs       map[string]map[string]string
-	NeedResults map[string]string
-	Secrets     map[string]string
-	Vars        map[string]string
-	Env         map[string]string
-	GitHub      map[string]any
-	Services    map[string]map[string]string
+	Inputs       map[string]string
+	Matrix       map[string]any
+	Steps        map[string]map[string]string
+	StepStatuses map[string]StepStatus
+	Needs        map[string]map[string]string
+	NeedResults  map[string]string
+	Secrets      map[string]string
+	Vars         map[string]string
+	Env          map[string]string
+	GitHub       map[string]any
+	Services     map[string]map[string]string
 }
 
 // StepStatus contains the values exposed for one completed step while
@@ -722,6 +723,19 @@ func evaluateReference(reference string, context Context) (string, error) {
 			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
 		return findString(outputs, path[2]), nil
+	case len(path) == 2 && strings.EqualFold(root, "steps"):
+		for candidate, status := range context.StepStatuses {
+			if !strings.EqualFold(candidate, path[0]) {
+				continue
+			}
+			switch {
+			case strings.EqualFold(path[1], "outcome"):
+				return status.Outcome, nil
+			case strings.EqualFold(path[1], "conclusion"):
+				return status.Conclusion, nil
+			}
+		}
+		return "", fmt.Errorf("expression references unavailable step %q", path[0])
 	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
 		outputs, ok := findOutputs(context.Needs, path[0])
 		if !ok {
