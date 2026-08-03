@@ -96,8 +96,8 @@
       "workflow": "testdata/phase6/.github/workflows/cache-v6.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
-      "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
-      "note": "Admission is not hosted runtime evidence; a separate exact-commit miss/save/restore proof remains required.",
+      "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials; an exact-commit hosted roundtrip harness is checked in.",
+      "note": "Admission and the dormant proof harness are not hosted runtime evidence. Keep this compile-pass until job-bound GHAC token minting is enabled and a verified miss, post-save, and dependent restore hit succeeds.",
       "action_preflight": "hosted-tokenless"
     },
     {

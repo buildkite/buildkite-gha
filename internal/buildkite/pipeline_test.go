@@ -315,8 +315,8 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Agents.Queue != "hosted" {
 		t.Fatalf("default pipeline queue = %q, want hosted", document.Agents.Queue)
 	}
-	if len(document.Steps) != 16 {
-		t.Fatalf("default pipeline = %#v, want thirteen gated loaders, repository checks, wait, and release", document.Steps)
+	if len(document.Steps) != 17 {
+		t.Fatalf("default pipeline = %#v, want fourteen gated loaders, repository checks, wait, and release", document.Steps)
 	}
 	steps := make(map[string]struct {
 		command     string
@@ -375,6 +375,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["phase-6-artifact-roundtrip-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml" || got.condition != `build.env("PHASE6_PROBE") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Phase 6 artifact roundtrip loader = %#v", got)
 	}
+	if got := steps["phase-6-cache-roundtrip-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/phase-6-cache-roundtrip.yml" || got.condition != `build.env("PHASE6_PROBE") == "cache-roundtrip" && build.env("SMOKE_PROBE") != "hosted"` {
+		t.Fatalf("Phase 6 cache roundtrip loader = %#v", got)
+	}
 	hosted := steps["hosted-smoke-loader"]
 	if hosted.condition != `build.env("SMOKE_PROBE") == "hosted"` {
 		t.Fatalf("hosted smoke loader = %#v", hosted)
@@ -401,6 +404,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		if count := strings.Count(hosted.command, "buildkite-agent pipeline upload .buildkite/"+fragment); count != 1 {
 			t.Fatalf("hosted smoke loader uploads %s %d times:\n%s", fragment, count, hosted.command)
 		}
+	}
+	if strings.Contains(hosted.command, "phase-6-cache-roundtrip") {
+		t.Fatalf("hosted smoke loader includes the feature-gated cache proof:\n%s", hosted.command)
 	}
 	if strings.Contains(hosted.command, "--replace") {
 		t.Fatalf("hosted smoke loader uses replacement upload:\n%s", hosted.command)
@@ -1291,6 +1297,141 @@ func TestPhase6ArtifactRoundtripProofContract(t *testing.T) {
 		if strings.Contains(verifierText, forbidden) {
 			t.Fatalf("Phase 6 artifact roundtrip verifier handles credentials directly through %q", forbidden)
 		}
+	}
+}
+
+func TestPhase6CacheRoundtripProofContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	importerBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-6-cache-roundtrip.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(importerBody)
+	for _, fragment := range []string{
+		`commit="$${PHASE6_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
+		`test -z "$$(git status --porcelain --untracked-files=all)"`,
+		`automatic: false`,
+		`runtime_version="0.0.0-phase6.$$commit"`,
+		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
+		`[[ -z "$$proof_workflow" ]] || rm -f -- "$$proof_workflow"`,
+		`proof_workflow="$$(mktemp testdata/phase6/.github/workflows/.phase-6-cache-roundtrip.XXXXXXXX.yml)"`,
+		`nonce="$${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}"`,
+		`sed "s/__PHASE6_CACHE_NONCE__/$$nonce/g" testdata/phase6/.github/workflows/cache-v6.yml`,
+		`! grep -q '__PHASE6_CACHE_NONCE__' "$$proof_workflow"`,
+		`"$$distribution_root/buildkite-gha" upload`,
+		`--event-path testdata/smoke/events/push.json`,
+		`--runtime-queue hosted`,
+		`"$$proof_workflow"`,
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("Phase 6 cache roundtrip importer lacks %q:\n%s", fragment, importerBody)
+		}
+	}
+	var upload struct {
+		Steps []struct {
+			Key                    string `yaml:"key"`
+			Command                string `yaml:"command"`
+			DependsOn              string `yaml:"depends_on"`
+			AllowDependencyFailure bool   `yaml:"allow_dependency_failure"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(importerBody, &upload); err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Steps) != 2 || upload.Steps[0].Key != "phase-6-cache-roundtrip-importer" {
+		t.Fatalf("Phase 6 cache roundtrip importer = %#v", upload.Steps)
+	}
+	loader := upload.Steps[1]
+	if loader.Key != "phase-6-cache-roundtrip-continuation-loader" || loader.DependsOn != "phase-6-cache-roundtrip-importer" || !loader.AllowDependencyFailure || loader.Command != "buildkite-agent pipeline upload .buildkite/phase-6-cache-roundtrip-continuation.yml" {
+		t.Fatalf("Phase 6 cache roundtrip continuation loader = %#v", loader)
+	}
+
+	continuationBody, err := os.ReadFile(filepath.Join(root, ".buildkite", "phase-6-cache-roundtrip-continuation.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		`key: "phase-6-native-after-cache-roundtrip"`,
+		`step: "gha-cache-producer"`,
+		`step: "gha-cache-consumer"`,
+		`allow_failure: true`,
+	} {
+		if !strings.Contains(string(continuationBody), fragment) {
+			t.Fatalf("Phase 6 cache roundtrip continuation lacks %q: %s", fragment, continuationBody)
+		}
+	}
+
+	fixture, err := os.ReadFile(filepath.Join(root, "testdata", "phase6", ".github", "workflows", "cache-v6.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureText := string(fixture)
+	for _, fragment := range []string{
+		"cache-producer:",
+		"cache-consumer:",
+		"needs: cache-producer",
+		"actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+		"PHASE6_CACHE_KEY: phase6-cache-roundtrip-__PHASE6_CACHE_NONCE__",
+		`CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}`,
+		`test "$CACHE_HIT" != true`,
+		`test "$CACHE_HIT" = true`,
+		"PHASE6_CACHE_PRODUCER=",
+		"PHASE6_CACHE_CONSUMER=",
+	} {
+		if !strings.Contains(fixtureText, fragment) {
+			t.Fatalf("Phase 6 cache roundtrip fixture lacks %q: %s", fragment, fixture)
+		}
+	}
+	if count := strings.Count(fixtureText, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"); count != 2 {
+		t.Fatalf("Phase 6 cache roundtrip fixture has %d audited cache action invocations, want two", count)
+	}
+	if strings.Contains(fixtureText, "restore-keys:") {
+		t.Fatal("Phase 6 cache roundtrip fixture permits a non-exact restore")
+	}
+
+	verifierPath := filepath.Join(root, "scripts", "phase-6-cache-roundtrip-verify")
+	verifier, err := os.ReadFile(verifierPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(verifierPath)
+	if err != nil || info.Mode()&0o111 == 0 {
+		t.Fatalf("Phase 6 cache roundtrip verifier is not executable: %v", err)
+	}
+	verifierText := string(verifier)
+	for _, fragment := range []string{
+		"set -euo pipefail",
+		`expected_commit=$2`,
+		`bk --no-pager api "/pipelines/$pipeline/builds/$build_number"`,
+		`producer_key=gha-cache-producer`,
+		`consumer_key=gha-cache-consumer`,
+		`$consumer_started < $producer_finished`,
+		`bk --no-pager api "/jobs/$producer_job/log"`,
+		`bk --no-pager api "/jobs/$consumer_job/log"`,
+		`expected_key="phase6-cache-roundtrip-$build_number"`,
+		`payload_digest="sha256:$(printf '%s\n' "$expected_payload" | sha256sum`,
+		`"cache_hit\":\"\"`,
+		`"cache_hit\":\"true\"`,
+		`prefix_count != 1 || $exact_count != 1`,
+		`PHASE6_CACHE_ROUNDTRIP_OBSERVATION=`,
+	} {
+		if !strings.Contains(verifierText, fragment) {
+			t.Fatalf("Phase 6 cache roundtrip verifier lacks %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"BUILDKITE_API_TOKEN", "Authorization:", "bk auth token", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_RESULTS_URL"} {
+		if strings.Contains(verifierText, forbidden) {
+			t.Fatalf("Phase 6 cache roundtrip verifier handles credentials or service configuration directly through %q", forbidden)
+		}
+	}
+
+	miseBody, err := os.ReadFile(filepath.Join(root, "mise.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(miseBody), "scripts/phase-6-cache-roundtrip-verify") {
+		t.Fatal("Phase 6 cache roundtrip verifier is absent from shell lint")
 	}
 }
 
