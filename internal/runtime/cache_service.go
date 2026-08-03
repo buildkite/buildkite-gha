@@ -13,7 +13,10 @@ import (
 	"time"
 )
 
-const cacheCredentialResponseLimit = 64 << 10
+const (
+	cacheCredentialResponseLimit = 64 << 10
+	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
+)
 
 var cacheRuntimeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 
@@ -177,12 +180,14 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 	isolated := cloneStrings(env)
 	for _, name := range []string{
 		"ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
-		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_PRELOAD", "LD_LIBRARY_PATH",
+		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
+		"TAR_OPTIONS",
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 	} {
 		delete(isolated, name)
 	}
+	isolated["PATH"] = cacheActionToolPath
 	return isolated
 }
 
