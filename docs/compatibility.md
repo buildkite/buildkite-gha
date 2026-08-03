@@ -174,7 +174,11 @@ action starts. A fresh token is minted for post-save rather than retaining a
 main-phase credential. The runtime exposes only `ACTIONS_CACHE_SERVICE_V2`,
 `ACTIONS_RESULTS_URL`, and `ACTIONS_RUNTIME_TOKEN` to the cache action; it does
 not forward the Agent job token, persist cache credentials into job state, or
-expose them to ordinary actions.
+expose them to ordinary actions. Credential-bearing phases also discard
+workflow-controlled legacy cache URLs, Node/process injection settings, TLS
+overrides, and upper- or lower-case proxy settings before overlaying the
+runtime-owned service values. If a credential appears in a phase's command-file
+effects, those effects are discarded and the phase fails.
 
 Operators must set `BUILDKITE_GHA_CACHE_URL` to the origin-only URL of the
 compatible Results service; a non-root path is rejected because the stock
