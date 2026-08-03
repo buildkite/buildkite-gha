@@ -65,6 +65,11 @@ steps:
     if: build.env("PHASE6_PROBE") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml"
 
+  - label: ":floppy_disk: Load Phase 6 cache roundtrip proof"
+    key: "phase-6-cache-roundtrip-loader"
+    if: build.env("PHASE6_PROBE") == "cache-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/phase-6-cache-roundtrip.yml"
+
   - label: ":pipeline: Load consolidated hosted smoke proof"
     key: "hosted-smoke-loader"
     if: build.env("SMOKE_PROBE") == "hosted"

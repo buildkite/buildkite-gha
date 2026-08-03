@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 2 )) || [[ ! $1 =~ ^[1-9][0-9]*$ ]] || [[ ! $2 =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'usage: scripts/phase-6-cache-roundtrip-verify <build-number> <commit>' >&2
+  exit 2
+fi
+
+readonly build_number=$1
+readonly expected_commit=$2
+readonly pipeline=${PHASE6_PIPELINE_SLUG:-buildkite-gha}
+readonly producer_key=gha-cache-producer
+readonly consumer_key=gha-cache-consumer
+readonly expected_key="phase6-cache-roundtrip-$build_number"
+readonly expected_payload="phase6-cache-payload:$build_number"
+
+command -v bk >/dev/null
+command -v jq >/dev/null
+command -v sha256sum >/dev/null
+
+build="$(bk --no-pager api "/pipelines/$pipeline/builds/$build_number")"
+commit="$(jq -r '.commit // ""' <<<"$build")"
+if [[ $commit != "$expected_commit" ]]; then
+  echo "build $build_number ran commit $commit, expected $expected_commit" >&2
+  exit 1
+fi
+readonly commit
+
+job_id() {
+  local step_key=$1
+  local -a matches
+  mapfile -t matches < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
+  if (( ${#matches[@]} != 1 )) || [[ ! ${matches[0]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
+    echo "build $build_number has ${#matches[@]} jobs with step key $step_key; expected exactly one" >&2
+    return 1
+  fi
+  if ! jq -e --arg job_id "${matches[0]}" '.jobs[] | select(.id == $job_id) | .state == "passed"' <<<"$build" >/dev/null; then
+    echo "cache roundtrip job ${matches[0]} ($step_key) did not pass" >&2
+    return 1
+  fi
+  printf '%s\n' "${matches[0]}"
+}
+
+producer_job="$(job_id "$producer_key")"
+consumer_job="$(job_id "$consumer_key")"
+readonly producer_job consumer_job
+
+producer_finished="$(jq -r --arg job_id "$producer_job" '.jobs[] | select(.id == $job_id) | .finished_at // ""' <<<"$build")"
+consumer_started="$(jq -r --arg job_id "$consumer_job" '.jobs[] | select(.id == $job_id) | .started_at // ""' <<<"$build")"
+readonly producer_finished consumer_started
+if [[ -z $producer_finished || -z $consumer_started || $consumer_started < $producer_finished ]]; then
+  echo "consumer $consumer_job did not start after producer $producer_job settled" >&2
+  exit 1
+fi
+
+producer_log="$(bk --no-pager api "/jobs/$producer_job/log" | jq -r '.content // ""')"
+consumer_log="$(bk --no-pager api "/jobs/$consumer_job/log" | jq -r '.content // ""')"
+readonly producer_log consumer_log
+payload_digest="sha256:$(printf '%s\n' "$expected_payload" | sha256sum | cut -d ' ' -f 1)"
+readonly payload_digest
+producer_prefix=PHASE6_CACHE_PRODUCER=
+consumer_prefix=PHASE6_CACHE_CONSUMER=
+expected_producer="${producer_prefix}{\"key\":\"$expected_key\",\"cache_hit\":\"\",\"payload\":\"$expected_payload\",\"payload_digest\":\"$payload_digest\",\"nonce\":\"$build_number\"}"
+expected_consumer="${consumer_prefix}{\"key\":\"$expected_key\",\"cache_hit\":\"true\",\"payload\":\"$expected_payload\",\"payload_digest\":\"$payload_digest\",\"nonce\":\"$build_number\"}"
+readonly producer_prefix consumer_prefix expected_producer expected_consumer
+
+verify_observation() {
+  local name=$1
+  local log=$2
+  local prefix=$3
+  local expected=$4
+  local prefix_count exact_count
+  prefix_count="$(grep -Fc "$prefix" <<<"$log" || true)"
+  exact_count="$(grep -Fc "$expected" <<<"$log" || true)"
+  if [[ $prefix_count != 1 || $exact_count != 1 ]]; then
+    echo "$name log has $prefix_count observations and $exact_count exact matches; expected one of each" >&2
+    return 1
+  fi
+}
+
+verify_observation producer "$producer_log" "$producer_prefix" "$expected_producer"
+verify_observation consumer "$consumer_log" "$consumer_prefix" "$expected_consumer"
+
+printf 'PHASE6_CACHE_ROUNDTRIP_OBSERVATION={"build":%s,"commit":"%s","producer_job":"%s","consumer_job":"%s","key":"%s","producer_cache_hit":"","consumer_cache_hit":"true","payload_digest":"%s"}\n' \
+  "$build_number" "$commit" "$producer_job" "$consumer_job" "$expected_key" "$payload_digest"

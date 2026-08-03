@@ -68,9 +68,11 @@ evidence, not runtime evidence.
 
 The exact audited `actions/upload-artifact` and exact-name
 `actions/download-artifact` commits pass admission through bounded native
-adapters. Cache actions, artifact merge/broad download modes, and unsupported
-commits still fail admission. Job and service container fixtures have
-separate hosted runtime evidence but remain outside production admission.
+adapters. The exact audited `actions/cache` v6.1.0 commit also passes through
+its cache-v2 credential boundary. Other cache commits, artifact merge/broad
+download modes, and unsupported artifact commits still fail admission. Job and
+service container fixtures have separate hosted runtime evidence but remain
+outside production admission.
 
 ### Hosted runtime proofs
 
@@ -99,6 +101,7 @@ phase selector only for targeted diagnosis:
 | Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
 | Upload-artifact publication | `PHASE6_PROBE=upload-artifact`, `PHASE6_COMMIT=<commit>` |
 | Artifact producer/consumer roundtrip | `PHASE6_PROBE=artifact-roundtrip`, `PHASE6_COMMIT=<commit>` |
+| Cache miss/save/restore roundtrip | `PHASE6_PROBE=cache-roundtrip`, `PHASE6_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After
@@ -139,6 +142,32 @@ contents, and action outputs. The roundtrip verifier additionally requires the
 producer and both consumer matrix jobs to pass, checks all three terminal
 manifests, and confirms both consumers observed the exact payload and compatible
 absolute `download-path` output.
+
+The cache roundtrip is intentionally excluded from `SMOKE_PROBE=hosted` while
+job-bound GHAC token minting is feature-disabled. Once minting is enabled and
+`BUILDKITE_GHA_CACHE_URL` names the reachable cache-v2 Results origin, dispatch
+the targeted proof against an exact commit:
+
+```sh
+commit=$(git rev-parse HEAD)
+test ${#commit} -eq 40
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env PHASE6_PROBE=cache-roundtrip --env PHASE6_COMMIT="$commit" --yes
+```
+
+The producer requires a miss for its build-unique exact key, creates the
+payload, and relies on the registered cache post action to save it. Its direct
+dependent must then restore an exact hit and verify the payload digest. After
+both generated jobs settle, independently bind those observations to the build,
+commit, job IDs, key, and digest:
+
+```sh
+scripts/phase-6-cache-roundtrip-verify <build-number> <commit>
+```
+
+Do not promote the fixture from `compile-pass` or claim hosted cache evidence
+until that command succeeds for a hosted build.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
