@@ -404,7 +404,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = errors.Join(runErr, runCtx.Err())
 	}
 
-	postCtx, cancelPosts := postPhaseContext(ctx, r.postActionTimeout(), r.cleanupTimeout())
+	postCtx, cancelPosts := postPhaseContext(runCtx, r.postActionTimeout(), r.cleanupTimeout())
 	defer cancelPosts()
 	registeredPosts := posts.snapshot()
 	for i := len(registeredPosts) - 1; i >= 0; i-- {
