@@ -38,6 +38,33 @@
       "action_preflight": "hosted-tokenless"
     },
     {
+      "id": "migration-poc-basic",
+      "workflow": "testdata/poc/.github/workflows/basic.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "This migration-oriented aggregate is locally validated and deterministically compiled; its exact-commit hosted proof is pending.",
+      "note": "Exercises checkout, setup-go, shell tests, conditions, outputs, and a job summary without expanding the supported profile.",
+      "action_preflight": "hosted-tokenless"
+    },
+    {
+      "id": "migration-poc-artifacts",
+      "workflow": "testdata/poc/.github/workflows/artifacts.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "This migration-oriented aggregate is locally validated and deterministically compiled; its exact-commit hosted proof is pending.",
+      "note": "Exercises build, job outputs, exact-name direct-needs artifact transfer, and downloaded binary execution.",
+      "action_preflight": "hosted-tokenless"
+    },
+    {
+      "id": "migration-poc-advanced",
+      "workflow": "testdata/poc/.github/workflows/advanced.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "This migration-oriented aggregate is locally validated and deterministically compiled; its exact-commit hosted proof is pending.",
+      "note": "Exercises a local reusable workflow, cache v6, continue-on-error, artifact transfer, matrix fan-out and fan-in, summaries, and annotations.",
+      "action_preflight": "hosted-tokenless"
+    },
+    {
       "id": "phase4-public-actions",
       "workflow": "testdata/phase4/.github/workflows/public-actions.yml",
       "event": "testdata/phase4/events/public-checkout.json",

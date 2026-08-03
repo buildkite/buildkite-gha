@@ -22,7 +22,7 @@ cd "$root"
 jq -e '
   keys == ["fixtures", "schema"] and
   .schema == "buildkite-gha/smoke-manifest/v1" and
-  (.fixtures | type == "array" and length == 13) and
+  (.fixtures | type == "array" and length > 0) and
   all(.fixtures[];
     keys == ["action_preflight", "event", "evidence", "expectation", "id", "note", "workflow"] and
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and

@@ -1,0 +1,77 @@
+name: Migration POC - build artifact
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  poc-artifact-producer:
+    name: Build and publish CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      archive-digest: ${{ steps.upload.outputs.artifact-digest }}
+    steps:
+      - name: Checkout the event commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+          token: ""
+
+      - name: Build distributable
+        shell: bash
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -o dist/buildkite-gha ./cmd/buildkite-gha
+          printf '%s\n' "$GITHUB_SHA" > dist/source-commit.txt
+
+      - name: Upload distributable
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: migration-poc-cli
+          path: dist
+          if-no-files-found: error
+
+  poc-artifact-consumer:
+    name: Consume and verify CLI
+    needs: poc-artifact-producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download distributable
+        id: download
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: migration-poc-cli
+          path: download
+
+      - name: Verify distributable
+        shell: bash
+        env:
+          ARCHIVE_DIGEST: ${{ needs.poc-artifact-producer.outputs.archive-digest }}
+          DOWNLOAD_PATH: ${{ steps.download.outputs.download-path }}
+        run: |
+          [[ "$ARCHIVE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$DOWNLOAD_PATH" == /*/download ]]
+          test "$(cat download/source-commit.txt)" = "$GITHUB_SHA"
+          chmod +x download/buildkite-gha
+          download/buildkite-gha --version
+
+      - name: Publish summary
+        shell: bash
+        env:
+          ARCHIVE_DIGEST: ${{ needs.poc-artifact-producer.outputs.archive-digest }}
+        run: |
+          {
+            echo '## Artifact migration POC'
+            echo
+            echo "Built, transferred, and executed the CLI artifact ($ARCHIVE_DIGEST)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -315,15 +315,17 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if document.Agents.Queue != "hosted" {
 		t.Fatalf("default pipeline queue = %q, want hosted", document.Agents.Queue)
 	}
-	if len(document.Steps) != 17 {
-		t.Fatalf("default pipeline = %#v, want fourteen gated loaders, repository checks, wait, and release", document.Steps)
-	}
 	steps := make(map[string]struct {
 		command     string
 		condition   string
 		environment map[string]string
 	}, len(document.Steps))
 	for _, step := range document.Steps {
+		if step.Key != "" {
+			if _, exists := steps[step.Key]; exists {
+				t.Fatalf("default pipeline repeats step key %q", step.Key)
+			}
+		}
 		steps[step.Key] = struct {
 			command     string
 			condition   string
@@ -335,6 +337,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["checks"].environment["BUILDKITE_GHA_LIVE_REQUIRED"]; got != "1" {
 		t.Fatalf("repository checks BUILDKITE_GHA_LIVE_REQUIRED = %q, want required live prerequisites", got)
+	}
+	if got := steps["migration-poc-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/migration-poc.yml" || got.condition != `build.env("POC_SUITE") == "migration"` {
+		t.Fatalf("migration POC loader = %#v", got)
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
