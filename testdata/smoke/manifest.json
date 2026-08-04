@@ -59,18 +59,18 @@
       "id": "migration-poc-advanced",
       "workflow": "testdata/poc/.github/workflows/advanced.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "The component behaviors have exact-commit hosted evidence, but the service-free Dockerfile-action revision awaits its released-plugin run.",
-      "note": "Build 303 proved the predecessor fixture's reusable output, artifact, matrix, summary, and annotation path. The revised fixture deliberately separates cache and adds public Dockerfile-action coverage.",
+      "expectation": "runtime-pass",
+      "evidence": "Published-plugin Buildkite build 336 passed the revised service-free advanced fixture and all generated jobs.",
+      "note": "At source commit d5102df7e81c49f27a30fb2830d9608a56ee84de, plugin v0.2.0 resolved to d009da173158270a3921b2997ae8fd3d68526d00 and proved the reusable output, public Dockerfile action, artifact, matrix, summary, and annotation path.",
       "action_preflight": "hosted-tokenless"
     },
     {
       "id": "migration-poc-cache",
       "workflow": "testdata/poc/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "Build 303 proved the cache-v2 implementation lifecycle; this stable released-plugin fixture awaits an exact-commit hosted run.",
-      "note": "The first run of a release commit must observe a producer miss and post-save before the direct dependent requires an exact hit; warm reruns verify the same immutable payload.",
+      "expectation": "runtime-pass",
+      "evidence": "Published-plugin Buildkite build 337 passed the stable cache-v2 fixture and all generated jobs.",
+      "note": "At source commit d5102df7e81c49f27a30fb2830d9608a56ee84de, plugin v0.2.0 resolved to d009da173158270a3921b2997ae8fd3d68526d00; the producer observed a miss and post-save before its direct dependent restored an exact primary-key hit and verified the payload.",
       "action_preflight": "hosted-tokenless"
     },
     {
@@ -133,7 +133,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
       "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
-      "note": "This minimal fixture remains compile-only conformance coverage. The predecessor combined advanced fixture proved the hosted roundtrip in Buildkite build 303; migration-poc-cache awaits released-plugin evidence.",
+      "note": "This minimal fixture remains compile-only conformance coverage. The stable migration-poc-cache fixture has published-plugin runtime evidence from Buildkite build 337.",
       "action_preflight": "hosted-tokenless"
     },
     {
