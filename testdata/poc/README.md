@@ -36,7 +36,18 @@ event bound to that same commit and substitutes the Buildkite build number into
 the cache key, making the expected producer miss and dependent consumer hit
 repeatable.
 
+## Recorded evidence
+
+[Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+passed all three POCs at exact commit
+`379344599c0653990687d017bd195d416c7bc29c`. The advanced workflow proved a
+build-unique cache miss, post-save, and dependent exact hit, then transferred
+the restored payload through the bounded artifact adapters to both matrix
+consumers. The successful workflow proves the summary and warning emission
+paths ran, while the dedicated Phase 6 fixtures retain the independent
+annotation-persistence observations.
+
 The historical phase fixtures and their recorded observations remain the
-conformance ledger. After this replacement suite has hosted runtime evidence,
-the duplicated phase-specific importer/continuation scaffolding can be removed
-separately without discarding those fixtures or claims.
+conformance ledger. The now-superseded targeted cache importer, continuation,
+and verifier were removed after build 290 passed. The remaining phase-specific
+loaders still feed the consolidated hosted smoke proof and are retained.

@@ -1392,20 +1392,22 @@ Explicitly defer from beta unless implementation evidence changes the order:
   --format text|json <workflow>`. Expected-negative fixtures preserve current
   boundaries: unsupported cache commits, artifact merge and broad download
   modes, and unsupported artifact commits are denied admission or input
-  validation. The exact cache v6.1.0 fixture is admitted but intentionally
-  remains `compile-pass` until hosted service evidence exists. Job and service
-  containers compile to schema-v4 plans and have hosted runtime evidence, while
-  production admission rejects their container provenance.
+  validation. The exact cache v6.1.0 fixture is admitted, and the advanced
+  migration POC passed its hosted miss, post-save, and dependent exact-hit
+  lifecycle in Buildkite build 290. Job and service containers compile to
+  schema-v4 plans and have hosted runtime evidence, while production admission
+  rejects their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
   container-runtime proofs, plus the Phase 6 job-summary, workflow-command,
-  upload-artifact, and artifact-roundtrip proofs. The dispatcher deliberately
-  excludes the feature-gated cache roundtrip until GHAC token minting is
-  enabled, and uploads each included importer and continuation
-  independently, then settles their generated and native terminal steps; it
-  does not flatten the importer/continuation topology. Existing `PHASE2_PROBE`,
+  upload-artifact, and artifact-roundtrip proofs. Cache runtime coverage now
+  belongs to the separately dispatched migration POC suite, and its obsolete
+  targeted Phase 6 cache importer was removed. The historical aggregate uploads
+  each included importer and continuation independently, then settles their
+  generated and native terminal steps; it does not flatten the
+  importer/continuation topology. Existing `PHASE2_PROBE`,
   `PHASE3_PROBE`, `PHASE4_PROBE`, all three `PHASE5_PROBE`, and `PHASE6_PROBE`
   selectors remain available for targeted runs.
 
@@ -2016,8 +2018,8 @@ Start with `testdata/smoke` rather than an external workflow catalog:
   compatibility and content preservation across jobs; and
 - `testdata/phase6/.github/workflows/cache-v6.yml` preserves the exact audited
   cache-v2 admission contract and the targeted build-unique miss, post-save,
-  and dependent exact-hit proof. It remains `compile-pass` until token minting
-  is enabled and the independent hosted verifier succeeds.
+  and dependent exact-hit shape as compile-only conformance coverage. The
+  advanced migration POC owns hosted runtime evidence from Buildkite build 290.
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression

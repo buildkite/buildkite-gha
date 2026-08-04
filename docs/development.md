@@ -101,7 +101,6 @@ phase selector only for targeted diagnosis:
 | Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
 | Upload-artifact publication | `PHASE6_PROBE=upload-artifact`, `PHASE6_COMMIT=<commit>` |
 | Artifact producer/consumer roundtrip | `PHASE6_PROBE=artifact-roundtrip`, `PHASE6_COMMIT=<commit>` |
-| Cache miss/save/restore roundtrip | `PHASE6_PROBE=cache-roundtrip`, `PHASE6_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After
@@ -143,31 +142,25 @@ producer and both consumer matrix jobs to pass, checks all three terminal
 manifests, and confirms both consumers observed the exact payload and compatible
 absolute `download-path` output.
 
-The cache roundtrip is intentionally excluded from `SMOKE_PROBE=hosted` while
-job-bound GHAC token minting is feature-disabled. Once minting is enabled and
-`BUILDKITE_GHA_CACHE_URL` names the reachable cache-v2 Results origin, dispatch
-the targeted proof against an exact commit:
+The migration POC suite covers basic CI, artifact transfer, and the cache v6
+roundtrip without adding another phase-specific proof. Run it with an exact
+commit and the operator-configured cache-v2 Results origin:
 
 ```sh
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
-  --env PHASE6_PROBE=cache-roundtrip --env PHASE6_COMMIT="$commit" --yes
+  --env POC_SUITE=migration --env POC_COMMIT="$commit" \
+  --env BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> --yes
 ```
 
-The producer requires a miss for its build-unique exact key, creates the
-payload, and relies on the registered cache post action to save it. Its direct
-dependent must then restore an exact hit and verify the payload digest. After
-both generated jobs settle, independently bind those observations to the build,
-commit, job IDs, key, and digest:
-
-```sh
-scripts/phase-6-cache-roundtrip-verify <build-number> <commit>
-```
-
-Do not promote the fixture from `compile-pass` or claim hosted cache evidence
-until that command succeeds for a hosted build.
+[Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+passed all three workflows at exact commit
+`379344599c0653990687d017bd195d416c7bc29c`, including the build-unique cache
+miss, post-save, dependent exact hit, and subsequent artifact fan-out. The
+minimal `testdata/phase6` cache fixture remains compile-only conformance
+coverage; the migration POC owns the hosted runtime claim.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
