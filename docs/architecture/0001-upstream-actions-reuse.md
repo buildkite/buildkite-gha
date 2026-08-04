@@ -16,8 +16,8 @@ This spike inspected the current released source of `nektos/act`,
 `rhysd/actionlint`, and GitHub's open runner. It considered workflow and action
 models, matrix expansion, expression evaluation, resolution and execution,
 workflow commands and environment files, dependency licensing, and version
-pinning. The repositories were cloned and inspected locally as well as checked
-against their release pages and documentation.
+pinning. The review included local repository inspection and checks against
+the release pages and documentation.
 
 ## Decision
 
@@ -177,12 +177,12 @@ runtimes.
 
 1. Build one internal parser adapter around actionlint and convert syntax nodes
    into owned workflow/action types with source spans.
-2. Implement static matrix expansion and expression evaluation behind owned
+1. Implement static matrix expansion and expression evaluation behind owned
    interfaces, seeded by act tests and verified by GitHub differential fixtures.
-3. Define provider resolution, immutable archives, runtime state, workflow
+1. Define provider resolution, immutable archives, runtime state, workflow
    commands, and environment files independently of act's `RunContext` and
    container interfaces.
-4. Add dependency-update CI that runs parser golden tests, the smoke corpus,
+1. Add dependency-update CI that runs parser golden tests, the smoke corpus,
    license inventory, and SBOM generation before changing the actionlint pin.
-5. Keep an explicit oracle manifest containing the act and official-runner
+1. Keep an explicit oracle manifest containing the act and official-runner
    revisions so behavior changes are reviewed rather than absorbed implicitly.
