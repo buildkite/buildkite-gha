@@ -45,8 +45,8 @@ calls `upload` directly.
 
 ## Released plugin demo
 
-After CLI `v0.2.0` exists at the exact commit, run the same workflows through
-the pinned companion plugin and its real anonymous release installer:
+Run the same workflows through the released companion plugin and its real
+anonymous release installer:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -87,10 +87,17 @@ dynamic pipeline dependency extension makes them wait for all generated jobs.
 passed the predecessor three-workflow suite at exact commit
 `9d29bf26492be760016d29c7ba0d00033b4f9b39`. Its then-combined advanced workflow
 proved the declared reusable output, build-unique cache miss/post-save/hit,
-artifact fan-out, summary, and warning paths. The revised service-free and
-cache fixtures deliberately surrender that whole-fixture classification until
-the released-plugin demo runs against their exact commit. Component and
-dedicated Phase 6 evidence remains valid.
+artifact fan-out, summary, and warning paths.
+
+[Buildkite build 336](https://buildkite.com/buildkite/buildkite-gha/builds/336)
+is the authoritative released-plugin service-free proof, and [Buildkite build
+337](https://buildkite.com/buildkite/buildkite-gha/builds/337) is the
+authoritative cache-extension proof. Both ran source commit
+`d5102df7e81c49f27a30fb2830d9608a56ee84de` through plugin `v0.2.0`, which
+resolved to `d009da173158270a3921b2997ae8fd3d68526d00` and installed the verified
+CLI `v0.2.0` distribution without an explicit CLI version override. Build 337
+observed the required producer miss and post-save followed by the direct
+dependent's exact primary-key hit and restore.
 
 The historical phase fixtures and their recorded observations remain the
 conformance ledger. The now-superseded targeted cache importer, continuation,

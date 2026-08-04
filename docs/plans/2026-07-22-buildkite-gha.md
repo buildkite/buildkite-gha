@@ -1346,9 +1346,11 @@ Cursor Origin public checkout remains a separate provider integration gate.
   restore an exact hit and verify the payload digest. Buildkite build 303 passed
   that lifecycle at exact merged commit
   `9d29bf26492be760016d29c7ba0d00033b4f9b39`. The minimal Phase 6 cache fixture
-  remains `compile-pass` conformance coverage. The stable cache extension now
-  awaits its exact-commit released-plugin run before receiving its own
-  `runtime-pass` classification.
+  remains `compile-pass` conformance coverage. The stable cache extension is
+  now `runtime-pass`: published-plugin build 337 proved its producer miss and
+  post-save, direct-dependent exact primary-key hit and restore, verified
+  payload, generated terminal, and default verified CLI distribution at source
+  commit `d5102df7e81c49f27a30fb2830d9608a56ee84de`.
   Together these results complete the GitHub/tokenless portion of delivery
   slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
   provider context/source contract. Delivery slice 3—the OIDC-authenticated,
@@ -1429,9 +1431,10 @@ Cursor Origin public checkout remains a separate provider integration gate.
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
   container-runtime proofs, plus the Phase 6 job-summary, workflow-command,
-  upload-artifact, and artifact-roundtrip proofs. The next cache runtime claim
-  belongs to the optional released-plugin demo extension; its obsolete targeted
-  Phase 6 cache importer remains removed. The historical aggregate uploads
+  upload-artifact, and artifact-roundtrip proofs. The cache runtime claim is
+  recorded separately by the optional released-plugin demo extension in build
+  337; its obsolete targeted Phase 6 cache importer remains removed. The
+  historical aggregate uploads
   each included importer and continuation independently, then settles their
   generated and native terminal steps; it does not flatten the
   importer/continuation topology. Existing `PHASE2_PROBE`,
@@ -2067,9 +2070,9 @@ Start with `testdata/smoke` rather than an external workflow catalog:
   cache-v2 admission contract and the targeted build-unique miss, post-save,
   and dependent exact-hit shape as compile-only conformance coverage. The
   predecessor advanced migration POC retains hosted implementation evidence
-  from Buildkite build 303; the stable released-plugin cache extension awaits
-  its own exact-commit proof, and build 290 remains the original implementation
-  proof.
+  from Buildkite build 303; the stable released-plugin cache extension has
+  exact-commit runtime evidence from build 337, and build 290 remains the
+  original implementation proof.
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression
