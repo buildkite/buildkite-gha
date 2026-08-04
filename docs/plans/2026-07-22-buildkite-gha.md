@@ -2212,6 +2212,88 @@ Each addition should be proposed only after the standalone implementation
 proves that a public Agent or pipeline contract cannot provide the required
 behavior safely.
 
+## Beta readiness reconciliation
+
+The project is not globally blocked on the protected-capability control plane.
+The public, tokenless product path is substantial enough to harden and demo
+while the signed no-op grant proof waits for a named platform owner and the
+interfaces required by [ADR 0003](../architecture/0003-protected-capability-control-plane.md).
+Private source, secrets, provider tokens, environments, and compatible OIDC
+remain fail-closed during that work.
+
+The current hosted evidence proves the runtime, but not yet the complete
+installation experience. Buildkite build 303 compiled a local development
+binary and invoked `upload` through `scripts/migration-poc-import`; it did not
+install a published binary through the companion plugin. The public CLI
+`v0.1.0` predates the current artifact, cache, annotation, and reusable-output
+work, while the current source advances the next release to `v0.2.0`. The
+companion plugin has no `v0.1.0` tag, its reviewed source commit still defaults
+to CLI `v0.1.0`, and its installer has only mock-backed tests rather than a
+hosted plugin-to-runtime proof.
+
+Treat a fully reproducible demo as the next product milestone, distinct from a
+public-beta declaration. It has two explicit lanes:
+
+1. The service-free baseline installs an immutable plugin revision, downloads
+   and verifies an exact CLI release, derives the public GitHub event, and runs
+   the basic, artifact, and advanced representative workflows as native
+   Buildkite jobs. It demonstrates public exact-SHA checkout, managed tool and
+   JavaScript runtimes, shell and composite behavior, local reusable-workflow
+   outputs, static matrix fan-out and fan-in, bounded job outputs, native
+   artifact transfer, summaries, warning/error annotations, and a native
+   continuation without depending on the capability service or a cache
+   service.
+2. The cache extension uses the same released plugin and CLI with an explicitly
+   configured origin-only Results URL. It additionally proves the audited
+   `actions/cache` v6.1.0 miss, post-save, and direct-dependent hit using
+   short-lived credentials minted for the exact Buildkite job. The development
+   Results endpoint and organization minting flag are acceptable for this
+   internal demo, but are not a general public-beta service contract.
+
+Both lanes must start from ordinary documented plugin configuration rather
+than a repository-only importer. A recorded run must name the exact Git commit,
+plugin revision, CLI release, Buildkite build, and any cache prerequisite. A
+clean Hosted Agent must be able to repeat the run without an unpublished local
+binary or retained workspace state. The visible result should contain the
+importer, generated jobs at basic through advanced complexity, native logs and
+dependencies, artifact and cache observations, and the final native
+continuation.
+
+Close the demo gap in this order, using small cross-repository changes:
+
+1. In this repository, add a production-plugin demo dispatcher and stable
+   representative fixtures. Keep the service-free baseline independent of the
+   cache extension, remove development-only source rewriting from the plugin
+   path, and preserve deterministic compile/admission coverage locally.
+2. Run the full local gate and existing exact-commit hosted proofs, then publish
+   the resulting CLI as `v0.2.0` with its current checksummed archive contract.
+   The plugin cannot prove the current runtime before that runtime has a public
+   immutable release; failures found by the plugin proof are fixed in a patch
+   release rather than by replacing release assets.
+3. In the companion plugin repository, default to the proven CLI release, add
+   a live installer/plugin smoke lane alongside the existing isolated tests,
+   and document the exact prerequisites. Prove the candidate plugin commit
+   against both demo lanes before tagging the plugin.
+4. Tag the companion plugin, update this repository's quick start from the
+   temporary commit pin to that tag, and rerun the service-free lane using only
+   the published quick-start configuration. Record that exact run as the
+   authoritative installation and demo evidence.
+5. Use failures and diagnostics from those runs, followed by several real
+   customer workflow migrations, to drive small compatibility or UX changes.
+   Do not add workflow-specific runtime branches to make a demo fixture pass.
+
+This milestone does not by itself satisfy every public-beta gate. The initial
+support target still names manual-input event envelopes plus job and service
+containers that the production plugin does not expose or admit. The release
+gate also currently requires signed, repeatable Hosted and self-hosted
+installation even though the implemented preview is checksummed and fixed to a
+Hosted runtime queue. Those are explicit scope decisions: either implement and
+prove them or deliberately revise the beta contract before claiming the
+initial support target is complete. A production cache endpoint and several
+customer migrations are also still outstanding. The signed no-op capability
+grant remains a parallel security-foundation item, not permission to block or
+weaken the service-free demo.
+
 ## Release gates
 
 ### Private alpha
