@@ -1,7 +1,6 @@
-name: Migration POC - build artifact
+name: Example - build artifact
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:

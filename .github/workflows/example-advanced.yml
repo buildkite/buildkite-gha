@@ -1,7 +1,6 @@
-name: Migration POC - advanced delivery
+name: Example - advanced delivery
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:
@@ -12,7 +11,7 @@ env:
 
 jobs:
   quality:
-    uses: ./.github/workflows/reusable-quality.yml
+    uses: ./.github/workflows/example-reusable-quality.yml
     with:
       package: ./internal/action/integration
 

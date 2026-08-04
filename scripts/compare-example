@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo 'usage: scripts/compare-example [--github-only|--buildkite-only] <basic|artifacts|advanced>' >&2
+}
+
+mode=both
+example=""
+while (( $# > 0 )); do
+  case "$1" in
+    --github-only)
+      [[ "$mode" == both ]] || { usage; exit 2; }
+      mode=github
+      ;;
+    --buildkite-only)
+      [[ "$mode" == both ]] || { usage; exit 2; }
+      mode=buildkite
+      ;;
+    -*)
+      usage
+      exit 2
+      ;;
+    *)
+      [[ -z "$example" ]] || { usage; exit 2; }
+      example=$1
+      ;;
+  esac
+  shift
+done
+
+case "$example" in
+  basic)
+    label="Basic CI"
+    workflow="example-basic.yml"
+    ;;
+  artifacts)
+    label="Artifact build and handoff"
+    workflow="example-artifacts.yml"
+    ;;
+  advanced)
+    label="Advanced delivery"
+    workflow="example-advanced.yml"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+cd "$root"
+
+branch="$(git branch --show-current)"
+[[ -n "$branch" ]] || { echo 'compare-example requires a checked-out branch' >&2; exit 1; }
+commit="$(git rev-parse HEAD)"
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+
+remote_line="$(git ls-remote --exit-code origin "refs/heads/$branch")" || {
+  echo "origin has no branch named $branch; push the branch before comparing it" >&2
+  exit 1
+}
+remote_commit=${remote_line%%[[:space:]]*}
+[[ "$remote_commit" == "$commit" ]] || {
+  echo "origin/$branch is at $remote_commit, not $commit; push the exact commit before comparing it" >&2
+  exit 1
+}
+
+github_url=""
+if [[ "$mode" == both || "$mode" == github ]]; then
+  command -v gh >/dev/null || { echo 'compare-example requires gh' >&2; exit 1; }
+  before_run_id="$(gh run list \
+    --repo buildkite/buildkite-gha \
+    --workflow "$workflow" \
+    --branch "$branch" \
+    --limit 100 \
+    --json databaseId \
+    --jq 'map(.databaseId) | max // 0')"
+
+  gh workflow run "$workflow" \
+    --repo buildkite/buildkite-gha \
+    --ref "$branch"
+
+  for _ in {1..30}; do
+    github_url="$(gh run list \
+      --repo buildkite/buildkite-gha \
+      --workflow "$workflow" \
+      --branch "$branch" \
+      --limit 100 \
+      --json databaseId,event,headSha,url \
+      --jq "[.[] | select(.databaseId > $before_run_id and .event == \"workflow_dispatch\" and .headSha == \"$commit\")] | sort_by(.databaseId) | last | .url // empty")"
+    [[ -z "$github_url" ]] || break
+    sleep 2
+  done
+fi
+
+buildkite_url=""
+if [[ "$mode" == both || "$mode" == buildkite ]]; then
+  command -v bk >/dev/null || { echo 'compare-example requires bk' >&2; exit 1; }
+  buildkite_url="$(bk build create \
+    --pipeline buildkite/buildkite-gha-examples \
+    --branch "$branch" \
+    --commit "$commit" \
+    --message "Compare $label with GitHub Actions at ${commit:0:12}" \
+    --env "EXAMPLE=$example" \
+    --env "EXAMPLE_COMMIT=$commit" \
+    --yes)"
+fi
+
+printf 'Example:   %s\n' "$example"
+printf 'Commit:    %s\n' "$commit"
+if [[ "$mode" == both || "$mode" == github ]]; then
+  if [[ -n "$github_url" ]]; then
+    printf 'Actions:   %s\n' "$github_url"
+  else
+    echo 'Actions:   dispatched, but its URL was not discoverable within 60 seconds' >&2
+  fi
+fi
+if [[ "$mode" == both || "$mode" == buildkite ]]; then
+  printf 'Buildkite: %s\n' "$buildkite_url"
+fi
+
+[[ "$mode" == buildkite || -n "$github_url" ]]

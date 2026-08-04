@@ -1,4 +1,4 @@
-name: Migration POC - reusable quality check
+name: Example - reusable quality check
 
 on:
   workflow_call:

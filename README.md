@@ -62,6 +62,33 @@ This gives teams a migration path: start with the existing Actions workflow,
 then move work into native Buildkite jobs over time. Automatic replacement of
 a named imported job is planned, but is not part of this preview.
 
+## Compare example runs
+
+The basic CI, artifact handoff, and advanced delivery examples are manual
+GitHub Actions workflows under `.github/workflows`. The dedicated
+`buildkite-gha-examples` pipeline imports those exact files one at a time and
+offers the same three choices through a Buildkite block step.
+
+To launch both providers at the current branch's exact remote commit and print
+their run URLs together:
+
+```sh
+scripts/compare-example basic
+scripts/compare-example artifacts
+scripts/compare-example advanced
+```
+
+The helper requires authenticated `gh` and `bk` CLIs. The current commit must
+be the head of the corresponding `origin` branch, and GitHub must already know
+the workflow from the repository's default branch. Pass `--github-only` or
+`--buildkite-only` to launch just one side.
+
+For the native manual experience, choose one of the `Example - ...` workflows
+in GitHub's Actions tab. In Buildkite, create a build on the
+`buildkite-gha-examples` pipeline and select the example when the build blocks.
+Compare the job graph, matrix presentation, logs, summaries, annotations,
+artifacts, retries, and cancellation behavior.
+
 ## Is my workflow a fit?
 
 The plugin path currently supports:

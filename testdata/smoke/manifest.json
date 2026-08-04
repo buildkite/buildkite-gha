@@ -39,7 +39,7 @@
     },
     {
       "id": "migration-poc-basic",
-      "workflow": "testdata/poc/.github/workflows/basic.yml",
+      "workflow": ".github/workflows/example-basic.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
@@ -48,7 +48,7 @@
     },
     {
       "id": "migration-poc-artifacts",
-      "workflow": "testdata/poc/.github/workflows/artifacts.yml",
+      "workflow": ".github/workflows/example-artifacts.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
@@ -57,7 +57,7 @@
     },
     {
       "id": "migration-poc-advanced",
-      "workflow": "testdata/poc/.github/workflows/advanced.yml",
+      "workflow": ".github/workflows/example-advanced.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Published-plugin Buildkite build 336 passed the revised service-free advanced fixture and all generated jobs.",

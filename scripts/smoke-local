@@ -26,7 +26,7 @@ jq -e '
   all(.fixtures[];
     keys == ["action_preflight", "event", "evidence", "expectation", "id", "note", "workflow"] and
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
-    (.workflow | type == "string" and length > 0 and startswith("testdata/") and (contains("..") | not)) and
+    (.workflow | type == "string" and length > 0 and (startswith("testdata/") or IN(".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml")) and (contains("..") | not)) and
     (.event | type == "string" and length > 0 and startswith("testdata/") and (contains("..") | not)) and
     (.expectation | IN("compile-pass", "compile-unsupported", "runtime-pass", "runtime-unsupported", "future")) and
     (.action_preflight | IN("none", "hosted-tokenless")) and

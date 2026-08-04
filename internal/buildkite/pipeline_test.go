@@ -433,6 +433,108 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 }
 
+func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
+	root := filepath.Join("..", "..")
+	source, err := os.ReadFile(filepath.Join(root, ".buildkite", "examples.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type option struct {
+		Label string `yaml:"label"`
+		Value string `yaml:"value"`
+	}
+	var document struct {
+		Agents struct {
+			Queue string `yaml:"queue"`
+		} `yaml:"agents"`
+		Steps []struct {
+			Block            string `yaml:"block"`
+			Label            string `yaml:"label"`
+			Key              string `yaml:"key"`
+			If               string `yaml:"if"`
+			Command          string `yaml:"command"`
+			TimeoutInMinutes int    `yaml:"timeout_in_minutes"`
+			Fields           []struct {
+				Select   string   `yaml:"select"`
+				Key      string   `yaml:"key"`
+				Required bool     `yaml:"required"`
+				Default  string   `yaml:"default"`
+				Options  []option `yaml:"options"`
+			} `yaml:"fields"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		t.Fatalf("parse examples pipeline: %v", err)
+	}
+	if document.Agents.Queue != "hosted" || len(document.Steps) != 2 {
+		t.Fatalf("examples pipeline structure = queue %q, steps %#v", document.Agents.Queue, document.Steps)
+	}
+	picker := document.Steps[0]
+	if picker.Key != "choose-example" || picker.Block == "" || picker.If != `build.env("EXAMPLE") == null` || len(picker.Fields) != 1 {
+		t.Fatalf("example picker = %#v", picker)
+	}
+	field := picker.Fields[0]
+	wantOptions := []option{{"Basic CI", "basic"}, {"Artifact build and handoff", "artifacts"}, {"Advanced delivery", "advanced"}}
+	if field.Select != "Example" || field.Key != "example" || !field.Required || field.Default != "basic" || fmt.Sprint(field.Options) != fmt.Sprint(wantOptions) {
+		t.Fatalf("example picker field = %#v", field)
+	}
+	loader := document.Steps[1]
+	if loader.Key != "example-loader" || loader.Label == "" || loader.TimeoutInMinutes != 10 {
+		t.Fatalf("example loader = %#v", loader)
+	}
+	for _, required := range []string{
+		`example="$${EXAMPLE:-}"`,
+		`buildkite-agent meta-data get example`,
+		`.github/workflows/example-basic.yml`,
+		`.github/workflows/example-artifacts.yml`,
+		`.github/workflows/example-advanced.yml`,
+		`EXAMPLE_COMMIT`,
+		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
+		`pipeline upload --no-interpolation --reject-secrets`,
+		`queue: "hosted"`,
+		`github-actions#v0.2.0`,
+	} {
+		if !strings.Contains(loader.Command, required) {
+			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
+		}
+	}
+	for _, forbidden := range []string{"mise run", "plugin-demo.yml", "cache.yml", "phase-4-actions-oracle.yml"} {
+		if strings.Contains(loader.Command, forbidden) {
+			t.Fatalf("example loader contains %q:\n%s", forbidden, loader.Command)
+		}
+	}
+
+	workflows := map[string]string{
+		"example-basic.yml":     "Example - basic CI",
+		"example-artifacts.yml": "Example - build artifact",
+		"example-advanced.yml":  "Example - advanced delivery",
+	}
+	for path, wantName := range workflows {
+		workflowSource, err := os.ReadFile(filepath.Join(root, ".github", "workflows", path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var workflowDocument struct {
+			Name string         `yaml:"name"`
+			On   map[string]any `yaml:"on"`
+		}
+		if err := yaml.Unmarshal(workflowSource, &workflowDocument); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if workflowDocument.Name != wantName || len(workflowDocument.On) != 1 {
+			t.Fatalf("%s trigger contract = name %q, on %#v", path, workflowDocument.Name, workflowDocument.On)
+		}
+		if _, exists := workflowDocument.On["workflow_dispatch"]; !exists {
+			t.Fatalf("%s is not manually dispatchable: %#v", path, workflowDocument.On)
+		}
+	}
+	if basic, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "example-basic.yml")); err != nil {
+		t.Fatal(err)
+	} else if strings.Contains(string(basic), "github.event_name") {
+		t.Fatalf("manual basic example retains event-specific behavior:\n%s", basic)
+	}
+}
+
 func TestProductionPluginDemoContract(t *testing.T) {
 	root := filepath.Join("..", "..")
 	source, err := os.ReadFile(filepath.Join(root, ".buildkite", "plugin-demo.yml"))
@@ -483,10 +585,10 @@ func TestProductionPluginDemoContract(t *testing.T) {
 		}{step.If, step.Command, step.TimeoutInMinutes, step.DependsOn, step.Plugins}
 	}
 	importers := map[string]string{
-		"plugin-demo-basic-importer":    "testdata/poc/.github/workflows/basic.yml",
-		"plugin-demo-artifact-importer": "testdata/poc/.github/workflows/artifacts.yml",
+		"plugin-demo-basic-importer":    ".github/workflows/example-basic.yml",
+		"plugin-demo-artifact-importer": ".github/workflows/example-artifacts.yml",
 		"plugin-demo-actions-importer":  ".github/workflows/phase-4-actions-oracle.yml",
-		"plugin-demo-advanced-importer": "testdata/poc/.github/workflows/advanced.yml",
+		"plugin-demo-advanced-importer": ".github/workflows/example-advanced.yml",
 		"plugin-demo-cache-importer":    "testdata/poc/.github/workflows/cache.yml",
 	}
 	for key, workflow := range importers {
@@ -532,7 +634,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 		}
 	}
 
-	advanced, err := os.ReadFile(filepath.Join(root, "testdata", "poc", ".github", "workflows", "advanced.yml"))
+	advanced, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "example-advanced.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,6 @@
-name: Migration POC - basic CI
+name: Example - basic CI
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:
@@ -13,7 +12,6 @@ env:
 jobs:
   poc-basic:
     name: Basic Go CI
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
