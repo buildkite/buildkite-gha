@@ -439,7 +439,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const plugin = "github-actions#d009da173158270a3921b2997ae8fd3d68526d00"
+	const plugin = "github-actions#v0.2.0"
 	type pluginConfig struct {
 		Workflow string `yaml:"workflow"`
 		Version  string `yaml:"version"`

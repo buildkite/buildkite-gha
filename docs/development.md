@@ -160,11 +160,17 @@ passed the predecessor three-workflow suite at exact commit
 `9d29bf26492be760016d29c7ba0d00033b4f9b39`, including declared reusable-output
 publication and caller consumption, the build-unique cache miss, post-save,
 dependent exact hit, and subsequent artifact fan-out. The revised stable
-service-free and cache fixtures retain compile/admission coverage but await
-exact-commit hosted evidence through the released plugin.
+service-free and cache fixtures retain compile/admission coverage.
 
-After CLI `v0.2.0` is published from the exact commit, exercise the complete
-customer installation path through the pinned companion plugin:
+The CLI `v0.2.0` release and companion plugin candidate at exact commit
+`d009da173158270a3921b2997ae8fd3d68526d00` exercised the complete customer
+installation path at source commit
+`71f23edfba88e18b57f58150c2b71d31141fbf03`. The service-free terminal passed
+in [Buildkite build 331](https://buildkite.com/buildkite/buildkite-gha/builds/331),
+and the cache miss, post-save, dependent exact hit, and cache terminal passed
+in [Buildkite build 332](https://buildkite.com/buildkite/buildkite-gha/builds/332).
+The plugin `v0.2.0` tag resolves to that proven plugin commit. Exercise the
+published customer installation path with:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -188,9 +194,9 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 The first cache run for the release commit must show a producer miss,
-post-save, and direct-dependent exact hit. The plugin demo is intentionally
-dormant before `v0.2.0` exists: it downloads and checksum-verifies the public
-release rather than falling back to a local binary.
+post-save, and direct-dependent exact hit. The plugin downloads and
+checksum-verifies the public release rather than falling back to a local
+binary.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
