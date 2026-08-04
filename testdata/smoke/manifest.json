@@ -59,9 +59,9 @@
       "id": "migration-poc-advanced",
       "workflow": "testdata/poc/.github/workflows/advanced.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "Exact-commit Buildkite build 290 proved the prior advanced flow; the added declared reusable-workflow output assertion awaits a refreshed hosted run.",
-      "note": "The current fixture compiles the reusable quality job's declared tested-package output into the caller and requires the dependent cache producer to observe its exact value before continuing. Build 290 remains evidence for the cache, artifact, matrix, summary, and annotation paths at commit 379344599c0653990687d017bd195d416c7bc29c, but not for this additive output assertion.",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-commit Buildkite build 303 passed the current advanced migration POC, including its caller-consumed declared reusable-workflow output.",
+      "note": "At commit 9d29bf26492be760016d29c7ba0d00033b4f9b39, the reusable quality job published tested-package through its workflow_call declaration and the dependent cache producer observed the exact expected value before the cache, artifact, matrix, summary, and annotation paths completed.",
       "action_preflight": "hosted-tokenless"
     },
     {
@@ -124,7 +124,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
       "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
-      "note": "This minimal fixture remains compile-only conformance coverage. The migration-poc-advanced fixture owns the exact-commit hosted cache roundtrip evidence from Buildkite build 290.",
+      "note": "This minimal fixture remains compile-only conformance coverage. The migration-poc-advanced fixture owns the current exact-commit hosted cache roundtrip evidence from Buildkite build 303.",
       "action_preflight": "hosted-tokenless"
     },
     {

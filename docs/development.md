@@ -155,12 +155,13 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> --yes
 ```
 
-[Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+[Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
 passed all three workflows at exact commit
-`379344599c0653990687d017bd195d416c7bc29c`, including the build-unique cache
-miss, post-save, dependent exact hit, and subsequent artifact fan-out. The
-minimal `testdata/phase6` cache fixture remains compile-only conformance
-coverage; the migration POC owns the hosted runtime claim.
+`9d29bf26492be760016d29c7ba0d00033b4f9b39`, including declared reusable-output
+publication and caller consumption, the build-unique cache miss, post-save,
+dependent exact hit, and subsequent artifact fan-out. The minimal
+`testdata/phase6` cache fixture remains compile-only conformance coverage; the
+migration POC owns the hosted runtime claim.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
