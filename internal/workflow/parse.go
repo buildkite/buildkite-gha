@@ -41,6 +41,9 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := validateRawContainers(path, &document); err != nil {
 		return nil, err
 	}
+	if err := validateRawConcurrency(path, &document); err != nil {
+		return nil, err
+	}
 	concurrency, err := parseConcurrencySyntax(path, &document)
 	if err != nil {
 		return nil, err
@@ -181,6 +184,27 @@ func validateRawContainers(path string, document *yaml.Node) error {
 			if err := validateRawContainer(path, container); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func validateRawConcurrency(path string, document *yaml.Node) error {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	if key := mappingKey(root, "concurrency"); key != nil {
+		return rawError(path, key, "workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite")
+	}
+	jobs := mappingValue(root, "jobs")
+	if jobs == nil || jobs.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(jobs.Content); i += 2 {
+		name, job := resolveAlias(jobs.Content[i]), jobs.Content[i+1]
+		if key := mappingKey(job, "concurrency"); key != nil {
+			return rawError(path, key, fmt.Sprintf("job %q concurrency is unsupported; only strategy.max-parallel is translated", name.Value))
 		}
 	}
 	return nil
@@ -1070,27 +1094,41 @@ func mappingEntries(node *yaml.Node) map[string]*yaml.Node {
 }
 
 func mappingValue(node *yaml.Node, name string) *yaml.Node {
+	node = resolveAlias(node)
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == name {
-			return node.Content[i+1]
+		if mappingKeyMatches(node.Content[i], name) {
+			return resolveAlias(node.Content[i+1])
 		}
 	}
 	return nil
 }
 
 func mappingKey(node *yaml.Node, name string) *yaml.Node {
+	node = resolveAlias(node)
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == name {
+		if mappingKeyMatches(node.Content[i], name) {
 			return node.Content[i]
 		}
 	}
 	return nil
+}
+
+func mappingKeyMatches(node *yaml.Node, name string) bool {
+	node = resolveAlias(node)
+	return node != nil && node.Kind == yaml.ScalarNode && node.Value == name
+}
+
+func resolveAlias(node *yaml.Node) *yaml.Node {
+	if node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
 }
 
 func stringList(node *yaml.Node) ([]string, error) {
