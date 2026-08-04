@@ -9,15 +9,15 @@ promises unless they appear here.
 
 The plugin and `upload` command use one fixed profile: `hosted-tokenless`.
 It is designed for public code that can run without protected credentials on a
-Linux x86-64 Buildkite Hosted Agent. Unsupported or privileged requests fail
+Linux x86-64 Buildkite hosted agent. Unsupported or privileged requests fail
 before the generated jobs are uploaded.
 
 There are three different compatibility claims:
 
-1. **Compilable** — the workflow syntax and static job graph can be translated.
-2. **Admitted** — action sources resolve and the generated plans satisfy the
+1. **Compilable:** The workflow syntax and static job graph can be translated.
+1. **Admitted:** Action sources resolve and the generated plans satisfy the
    `hosted-tokenless` upload policy.
-3. **Runtime-proven** — the repository's conformance or hosted test suite has
+1. **Runtime-proven:** The repository's conformance or hosted test suite has
    executed that behavior successfully.
 
 Compilation alone is not admission, and admission does not execute arbitrary
@@ -41,8 +41,8 @@ provide.
 | Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
 | `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. |
-| Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
-| Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
+| Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
+| Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
 | `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
 | `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and requires an operator-configured compatible Results service. The predecessor fixture's exact miss/save/dependent-hit lifecycle passed in Buildkite build 303. |
@@ -59,8 +59,8 @@ provide.
 ### Buildkite owns the run
 
 No shadow GitHub Actions run is created. Workflow jobs and matrix entries are
-visible as Buildkite jobs, with Buildkite scheduling, logs, cancellation,
-retries, and status.
+visible as Buildkite jobs, with scheduling, logs, cancellation, retries, and
+status managed in Buildkite Pipelines.
 
 Actions steps remain inside one compatibility runtime because they share a
 workspace, environment-file updates, action state, and cleanup lifecycle.
@@ -101,9 +101,9 @@ one job workspace and lifecycle.
 ### Buildkite owns triggers
 
 Select the workflow explicitly in the plugin and configure pipeline triggers in
-Buildkite. `buildkite-gha` uses the event snapshot to populate Actions contexts;
-it does not subscribe to GitHub events or turn workflow `on:` entries into
-Buildkite triggers.
+Buildkite Pipelines. `buildkite-gha` uses the event snapshot to populate Actions
+contexts; it does not subscribe to GitHub events or turn workflow `on:` entries
+into Buildkite triggers.
 
 The plugin derives `pull_request` for Buildkite pull request builds and `push`
 for branch, tag, scheduled, and manual builds. It does not currently provide
@@ -118,19 +118,20 @@ semantics when Buildkite has not supplied them.
 
 ### Checkout starts clean
 
-Generated jobs skip Buildkite's default checkout and allocate a fresh Actions
-workspace. A supported `actions/checkout` step performs a credential-free,
-shallow checkout of the public event repository at the exact event SHA. Private
-checkout, alternate repositories or refs, and credential persistence are not
-available in the preview.
+Generated jobs skip the default checkout in Buildkite Pipelines and allocate a
+fresh Actions workspace. A supported `actions/checkout` step performs a
+credential-free, shallow checkout of the public event repository at the exact
+event SHA. Private checkout, alternate repositories or refs, and credential
+persistence are not available in the preview.
 
 ### Artifact uploads use bounded native storage
 
 The producer-side adapter recognizes only
 `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`.
 It verifies that immutable action source and metadata, then replaces the whole
-upstream JavaScript lifecycle with a Buildkite Agent artifact upload. A mutable
-v4 reference is accepted only when resolution produces that audited commit.
+upstream JavaScript lifecycle with a native artifact upload through
+`buildkite-agent`. A mutable v4 reference is accepted only when resolution
+produces that audited commit.
 
 The supported inputs are `name`, `path`, `if-no-files-found`,
 `include-hidden-files`, `compression-level`, explicit `overwrite: false`, and
@@ -167,13 +168,13 @@ cache-v2 environment only to that verified action invocation.
 
 Before each pre, main, or post phase that runs, the runtime posts an empty body
 to the current job's
-`/v3/jobs/<BUILDKITE_JOB_ID>/ghac_tokens` Agent API endpoint using the ambient
+`/v3/jobs/<BUILDKITE_JOB_ID>/ghac_tokens` agent API endpoint using the ambient
 `BUILDKITE_AGENT_ACCESS_TOKEN`. The returned short-lived token is registered
 with both the local log scrubber and `buildkite-agent redactor add` before the
 action starts. A fresh token is minted for post-save rather than retaining a
 main-phase credential. The runtime exposes only `ACTIONS_CACHE_SERVICE_V2`,
 `ACTIONS_RESULTS_URL`, and `ACTIONS_RUNTIME_TOKEN` to the cache action; it does
-not forward the Agent job token, persist cache credentials into job state, or
+not forward the agent job token, persist cache credentials into job state, or
 expose them to ordinary actions. Credential-bearing phases also discard
 workflow-controlled legacy cache URLs, Node/process injection settings, TLS
 and OpenSSL configuration/module overrides, tar and dynamic-loader controls,
@@ -187,7 +188,7 @@ Operators must set `BUILDKITE_GHA_CACHE_URL` to the origin-only URL of the
 compatible Results service; a non-root path is rejected because the stock
 cache-v2 client uses root-relative Twirp endpoints. The Buildkite organization
 must also have GHAC token minting enabled, and jobs must be able to reach both
-that service and the Agent API.
+that service and the agent API.
 The service-issued token scopes cache access to the current organization and
 pipeline, grants writes only for an authorized ref, and limits cross-repository
 pull requests to the read-only default-branch scope. Missing configuration,
@@ -240,13 +241,13 @@ require glibc 2.28 or newer; the static Go CLI does not. `validate` and
 
 Validate the static workflow subset without an event:
 
-```sh
+```bash
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
 Apply the production profile with human-readable or machine-readable output:
 
-```sh
+```bash
 buildkite-gha validate --profile hosted-tokenless \
   --event-path .buildkite/events/current.json --format text \
   .github/workflows/ci.yml
@@ -294,7 +295,7 @@ and cannot authorize a protected capability.
 
 Render deterministic Buildkite pipeline YAML, or inspect the compiler IR:
 
-```sh
+```bash
 buildkite-gha compile --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
 
@@ -311,7 +312,7 @@ not a complete execution path.
 
 `upload` is the in-build command used by the plugin:
 
-```sh
+```bash
 buildkite-gha upload --runtime-queue hosted .github/workflows/ci.yml
 ```
 

@@ -4,14 +4,14 @@
 
 The repository pins Go and all lint and release tools with mise:
 
-```sh
+```bash
 mise trust mise.toml
 mise install
 ```
 
 Run the complete repository check with:
 
-```sh
+```bash
 mise run check
 ```
 
@@ -26,7 +26,7 @@ live prerequisites and fails rather than silently losing Phase 5 coverage.
 
 Focused tasks are also available:
 
-```sh
+```bash
 mise run format
 mise run build
 mise run test
@@ -43,7 +43,7 @@ The smoke inventory deliberately separates three kinds of evidence.
 
 ### Network-free compilation
 
-```sh
+```bash
 mise run smoke:local
 ```
 
@@ -57,7 +57,7 @@ and the precise meaning of each expectation.
 
 ### Production-policy preflight
 
-```sh
+```bash
 mise run smoke:profile
 ```
 
@@ -78,7 +78,7 @@ outside production admission.
 
 Run all implemented hosted proofs against one exact commit:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -107,7 +107,7 @@ outcome does not by itself prove that Buildkite persisted the annotation. After
 the targeted or aggregate build settles, use an authenticated `bk` CLI with
 `read_builds` access to verify the job-scoped annotation independently:
 
-```sh
+```bash
 scripts/phase-6-summary-annotation-verify <build-number> <commit>
 ```
 
@@ -119,7 +119,7 @@ fragments.
 Workflow-command annotation publication is also advisory. Verify its distinct
 warning and error contexts independently after the annotations proof settles:
 
-```sh
+```bash
 scripts/phase-6-workflow-annotations-verify <build-number> <commit>
 ```
 
@@ -131,7 +131,7 @@ absence of the registered masking canary.
 Artifact publication and consumption require independent native-storage
 observations after their targeted or aggregate builds settle:
 
-```sh
+```bash
 scripts/phase-6-upload-artifact-verify <build-number> <commit>
 scripts/phase-6-artifact-roundtrip-verify <build-number> <commit>
 ```
@@ -147,7 +147,7 @@ advanced service-free workflow without adding another phase-specific proof. It
 builds the exact checked-out source locally, so it is runtime evidence rather
 than installation evidence:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -166,7 +166,7 @@ exact-commit hosted evidence through the released plugin.
 After CLI `v0.2.0` is published from the exact commit, exercise the complete
 customer installation path through the pinned companion plugin:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -179,7 +179,7 @@ action, and advanced workflows, then a native terminal step. Add the cache
 extension only for an organization with GHAC token minting enabled and an
 explicitly configured compatible origin:
 
-```sh
+```bash
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
   --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" \
@@ -212,7 +212,7 @@ coverage, differential oracles, commits, and historical Buildkite evidence.
 
 From a clean, up-to-date `main`, run:
 
-```sh
+```bash
 mise run release
 ```
 
@@ -238,8 +238,8 @@ the `GHA_GITHUB_RELEASE_TOKEN` Buildkite Secret, restricted to webhook-created
   build_branch: "v*"
 ```
 
-Buildkite records a tag webhook's tag name as the build branch, so these claims
-exclude ordinary branch and pull request webhook builds. The publisher also
-verifies that the upstream tag, checked-out commit, and Buildkite commit agree
-before retrieving the token. Never expose this token through a shared agent
-environment hook.
+Buildkite Pipelines records a tag webhook's tag name as the build branch, so
+these claims exclude ordinary branch and pull request webhook builds. The
+publisher also verifies that the upstream tag, checked-out commit, and Buildkite
+commit agree before retrieving the token. Never expose this token through a
+shared agent environment hook.

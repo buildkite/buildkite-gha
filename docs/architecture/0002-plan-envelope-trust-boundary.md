@@ -34,7 +34,7 @@ Protected capabilities will instead use a control-plane service that:
 Plans continue to use content digests and producer-attributed artifacts. The
 runtime continues to verify build, importer, job, step, queue, plan, and runtime
 bindings, but those checks do not authorize protected resources. Buildkite
-pipeline signing remains optional installation-specific defence in depth.
+pipeline signing remains optional installation-specific defense in depth.
 
 The original Phase 0 decision is retained below as an implementation and
 conformance record. Its statements that KMS-backed plan envelopes provide the
@@ -117,30 +117,30 @@ resolution:
 1. Apply artifact size and JSON depth limits, reject duplicate keys, parse the
    envelope, and validate its structural schema. The plan may be hashed at this
    stage but is otherwise inert.
-2. Decode and structurally validate the protected header. Reject an unsupported
+1. Decode and structurally validate the protected header. Reject an unsupported
    `alg` or `typ`, an unknown `kid`, or a locally revoked key.
-3. Recreate the JCS claims bytes and verify the JWS signature. Claims do not
+1. Recreate the JCS claims bytes and verify the JWS signature. Claims do not
    influence routing, diagnostics containing attacker-chosen identifiers, or
    authorization until this succeeds.
-4. Check `iat <= now < exp`, `exp > iat`, and `exp - iat <= 86400`. Phase 0 has
+1. Check `iat <= now < exp`, `exp > iat`, and `exp - iat <= 86400`. Phase 0 has
    no clock-skew allowance: compiler and runtime queues must have synchronized
    clocks. A retry cannot mint or extend an envelope; an expired build must be
    rebuilt. A longer supported queue or retry window requires a later contract
    revision rather than an installer override.
-5. Match the organization, pipeline, and build UUIDs to immutable Buildkite job
+1. Match the organization, pipeline, and build UUIDs to immutable Buildkite job
    context.
-6. Match the step key and actual agent queue exactly. Phase 0 reads
+1. Match the step key and actual agent queue exactly. Phase 0 reads
    `BUILDKITE_STEP_KEY` and `BUILDKITE_AGENT_META_DATA_QUEUE`; an absent value is
    a verification failure.
-7. Re-evaluate current local policy using the verified provenance and require
+1. Re-evaluate current local policy using the verified provenance and require
    the envelope capability ceiling to be a subset of that policy. In
    particular, `manual-unattested` and untrusted events cannot reach protected
    queues or capabilities unless an explicit local rule permits the exact
    combination.
-8. Hash the received canonical plan bytes, compare its digest to the envelope,
+1. Hash the received canonical plan bytes, compare its digest to the envelope,
    validate the plan schema, and require its compiler identity, workflow/event
    digests, target step, and target queue to equal the envelope claims.
-9. Require the plan's capability request to be a subset of both the signed
+1. Require the plan's capability request to be a subset of both the signed
    ceiling and current local ceiling, then begin execution.
 
 Every missing, malformed, mismatched, expired, revoked, unsupported, or
@@ -201,16 +201,16 @@ need live Buildkite builds before production support is claimed:
 1. Does a signed bootstrap job dynamically uploading with AWS KMS produce steps
    accepted by every intended self-hosted, Hosted, and Kubernetes verifier
    configuration, including mixed queues during rotation?
-2. Which immutable job context is available before hooks and plugins, and can a
+1. Which immutable job context is available before hooks and plugins, and can a
    custom bootstrap supply `BUILDKITE_BUILD_ID`, `BUILDKITE_STEP_KEY`, and the
    actual queue to the verifier without any plan-controlled override path?
-3. Does artifact download constrained by the compiler step always return the
+1. Does artifact download constrained by the compiler step always return the
    intended immutable plan under retries and duplicate artifact names, and
    what observable producer identity can the runtime verify?
-4. What diagnostic and job state does each pipeline-signature rejection path
+1. What diagnostic and job state does each pipeline-signature rejection path
    produce, and can an unsigned or wrongly signed generated upload ever reach a
    command hook before it is blocked?
-5. How do jobs queued across a plan-key or pipeline-key rotation behave, and
+1. How do jobs queued across a plan-key or pipeline-key rotation behave, and
    what operational delay is required before removing the old verification
    root?
 

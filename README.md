@@ -1,12 +1,12 @@
 # buildkite-gha
 
-Run a GitHub Actions workflow as native Buildkite jobs—without creating a
+Run a GitHub Actions workflow as native Buildkite jobs without creating a
 GitHub Actions run.
 
 `buildkite-gha` translates each workflow job (and each static matrix entry)
 into a Buildkite job, then runs that job's Actions steps in a compatibility
-runtime. Buildkite remains the source of truth for scheduling, logs, retries,
-cancellation, and the build UI.
+runtime. Buildkite Pipelines is the source of truth for scheduling, logs,
+retries, cancellation, and the build interface.
 
 > [!IMPORTANT]
 > This is an experimental v0.1 preview for **public, tokenless, Linux x86-64
@@ -107,7 +107,7 @@ for the exact distinction and intentional behavior differences.
 
 Static validation does not contact Buildkite or execute the workflow:
 
-```sh
+```bash
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
@@ -123,7 +123,7 @@ Result: compilable
 To also resolve public actions and apply the same policy as the plugin's
 `hosted-tokenless` upload, provide an event snapshot:
 
-```sh
+```bash
 buildkite-gha validate \
   --profile hosted-tokenless \
   --event-path .buildkite/events/current.json \
@@ -153,7 +153,7 @@ share a workspace, environment changes, action state, containers, and
 post-action lifecycle in GitHub Actions, so they must stay inside one job here
 too.
 
-```diagram
+```text
 ┌──────────────────────────┐
 │ Actions workflow + event │
 └────────────┬─────────────┘
