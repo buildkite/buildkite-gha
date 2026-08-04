@@ -20,8 +20,9 @@ import (
 )
 
 type fakeActionSource struct {
-	root  string
-	calls map[string]int
+	root   string
+	calls  map[string]int
+	commit string
 }
 
 type contextActionSource struct{}
@@ -35,7 +36,9 @@ func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
 	commit := strings.Repeat("a", 40)
-	if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
+	if f.commit != "" {
+		commit = f.commit
+	} else if len(r.Ref) == 40 && strings.Trim(strings.ToLower(r.Ref), "0123456789abcdef") == "" {
 		commit = strings.ToLower(r.Ref)
 	}
 	return source.Resolved{Reference: r, Commit: commit}, source.Materialized{RepositoryRoot: f.root, ActionRoot: filepath.Join(f.root, r.Path), SourceDigest: d}, err
@@ -204,8 +207,17 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 		})
 	}
 
-	_, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@" + strings.Repeat("b", 40)})
-	if err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) || !strings.Contains(err.Error(), "v6.1.0") {
+	_, locks, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || locks[0].RequestedRef != "v6.1.0" || locks[0].Commit != actionintegration.CacheCommit {
+		t.Fatalf("version-ref cache lock = %#v", locks)
+	}
+
+	resolved := strings.Repeat("a", 40)
+	_, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "supported: actions/cache@v6.1.0 (commit "+actionintegration.CacheCommit+")") {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}
 }

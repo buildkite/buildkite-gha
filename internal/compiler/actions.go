@@ -188,7 +188,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	if descriptor.Service == actionintegration.ServiceCache {
 		if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
-			return "", plan.ActionLock{}, "", "", err
+			requested := lock.Repository
+			if lock.Path != "" {
+				requested += "/" + lock.Path
+			}
+			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted; supported: %s@v6.1.0 (commit %s)", requested, lock.RequestedRef, lock.Commit, requested, actionintegration.CacheCommit)
 		}
 	}
 	b.caps["network"] = true
