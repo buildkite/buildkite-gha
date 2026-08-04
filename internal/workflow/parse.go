@@ -202,7 +202,7 @@ func validateRawConcurrency(path string, document *yaml.Node) error {
 		return nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
-		name, job := jobs.Content[i], jobs.Content[i+1]
+		name, job := resolveAlias(jobs.Content[i]), jobs.Content[i+1]
 		if key := mappingKey(job, "concurrency"); key != nil {
 			return rawError(path, key, fmt.Sprintf("job %q concurrency is unsupported; only strategy.max-parallel is translated", name.Value))
 		}
