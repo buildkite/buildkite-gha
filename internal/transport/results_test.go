@@ -158,6 +158,15 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	if !reflect.DeepEqual(projected["delegated"].Outputs, map[string]string{"selected": "one"}) {
 		t.Fatalf("selected reusable output = %#v", projected["delegated"].Outputs)
 	}
+	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
+		"delegated": {
+			{Name: "selected", StepKey: first.StepKey, Output: "first"},
+			{Name: "selected", StepKey: second.StepKey, Output: "second"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), `conflicting projected output "selected"`) {
+		t.Fatalf("LoadNeeds() error = %v, want ambiguous projected matrix output rejection", err)
+	}
 
 	runner.dataByPath[secondPath] = mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success", Output{Name: "first", Value: "different"}))
 	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)

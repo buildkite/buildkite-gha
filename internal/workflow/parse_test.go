@@ -331,6 +331,9 @@ func TestParseOwnsReusableWorkflowCallsAndInputDeclarations(t *testing.T) {
       target:
         type: string
         required: true
+    outputs:
+      Published-Value:
+        value: ${{ jobs.nested.outputs.result }}
 jobs:
   nested:
     uses: ./.github/workflows/nested.yml
@@ -347,6 +350,10 @@ jobs:
 	}
 	if got := parsed.CallInputs["enabled"].Default.Data; got != true {
 		t.Fatalf("enabled default = %#v, want typed true", got)
+	}
+	output := parsed.CallOutputs["published-value"]
+	if output.Name != "Published-Value" || output.Value != "${{ jobs.nested.outputs.result }}" || output.Span.Start.Line != 12 {
+		t.Fatalf("workflow_call output = %#v, want source-cased owned declaration", output)
 	}
 	call := parsed.Jobs[0].Reusable
 	if call == nil || call.Uses != "./.github/workflows/nested.yml" {

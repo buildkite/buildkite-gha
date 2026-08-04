@@ -410,6 +410,259 @@ jobs:
 	}
 }
 
+func TestCompileProjectsOnlyDeclaredReusableWorkflowOutputs(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+  finish:
+    needs: delegated
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.delegated.outputs.Published-Value }}" = visible
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    outputs:
+      Published-Value:
+        value: ${{ jobs.build.outputs.Release }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      Release: ${{ steps.emit.outputs.release }}
+      private: ${{ steps.emit.outputs.private }}
+    steps:
+      - id: emit
+        run: |
+          echo release=visible >> "$GITHUB_OUTPUT"
+          echo private=hidden >> "$GITHUB_OUTPUT"
+`)
+
+	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want callee and caller", len(plans))
+	}
+	want := map[string][]plan.NeedOutput{
+		"delegated": {{Name: "Published-Value", StepKey: plans[0].Target.StepKey, Output: "release"}},
+	}
+	if !reflect.DeepEqual(plans[1].NeedOutputs, want) {
+		t.Fatalf("caller output projection = %#v, want %#v", plans[1].NeedOutputs, want)
+	}
+	if len(plans[1].NeedOutputs["delegated"]) != 1 || plans[1].NeedOutputs["delegated"][0].Output == "private" {
+		t.Fatalf("caller projection leaked undeclared output: %#v", plans[1].NeedOutputs)
+	}
+}
+
+func TestCompileKeepsInheritedReusablePrerequisiteOutputsStatusOnly(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  producer:
+    uses: ./.github/workflows/producer.yml
+  consumer:
+    needs: producer
+    uses: ./.github/workflows/consumer.yml
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      published:
+        value: ${{ jobs.build.outputs.result }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.emit.outputs.result }}
+    steps:
+      - id: emit
+        run: echo result=visible >> "$GITHUB_OUTPUT"
+`)
+	writeWorkflow(t, repository, "consumer.yml", `on: workflow_call
+jobs:
+  consume:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 2 || !reflect.DeepEqual(ir.Jobs[1].NeedOutputs, map[string][]NeedOutput{"producer": {}}) {
+		t.Fatalf("consumer inherited projections = %#v, want producer status only", ir.Jobs)
+	}
+}
+
+func TestCompileProjectsDeclaredReusableWorkflowMatrixAndNestedOutputs(t *testing.T) {
+	t.Run("matrix", func(t *testing.T) {
+		repository := t.TempDir()
+		callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+  finish:
+    needs: delegated
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n "${{ needs.delegated.outputs.release }}"
+`)
+		writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    outputs:
+      release:
+        value: ${{ jobs.build.outputs.release }}
+jobs:
+  build:
+    strategy:
+      matrix:
+        target: [linux, arm]
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.emit.outputs.release }}
+    steps:
+      - id: emit
+        run: echo "release=${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+`)
+
+		plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs := plans[len(plans)-1].NeedOutputs["delegated"]
+		if len(outputs) != 2 || outputs[0].Name != "release" || outputs[1].Name != "release" || outputs[0].StepKey == outputs[1].StepKey {
+			t.Fatalf("matrix output projections = %#v, want both exact producers", outputs)
+		}
+	})
+
+	t.Run("nested", func(t *testing.T) {
+		repository := t.TempDir()
+		callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  middle:
+    uses: ./.github/workflows/middle.yml
+  finish:
+    needs: middle
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.middle.outputs.published }}" = nested
+`)
+		writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    outputs:
+      published:
+        value: ${{ jobs.leaf.outputs.forwarded }}
+jobs:
+  leaf:
+    uses: ./.github/workflows/leaf.yml
+`)
+		writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    outputs:
+      forwarded:
+        value: ${{ jobs.build.outputs.result }}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.emit.outputs.result }}
+    steps:
+      - id: emit
+        run: echo result=nested >> "$GITHUB_OUTPUT"
+`)
+
+		plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs := plans[len(plans)-1].NeedOutputs["middle"]
+		if len(outputs) != 1 || outputs[0].Name != "published" || outputs[0].Output != "result" || outputs[0].StepKey != plans[0].Target.StepKey {
+			t.Fatalf("nested output projection = %#v", outputs)
+		}
+	})
+}
+
+func TestCompileRejectsUnsupportedReusableWorkflowOutputMappings(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "literal", value: "literal", want: "must be one static"},
+		{name: "compound", value: "${{ jobs.build.outputs.release }}-suffix", want: "must be one static"},
+		{name: "unknown job", value: "${{ jobs.missing.outputs.release }}", want: `references unknown job "missing"`},
+		{name: "undeclared job output", value: "${{ jobs.build.outputs.missing }}", want: `references undeclared output "missing"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n")
+			reusablePath := writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on:
+  workflow_call:
+    outputs:
+      published:
+        value: %s
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.emit.outputs.release }}
+    steps:
+      - id: emit
+        run: echo release=visible >> "$GITHUB_OUTPUT"
+`, test.value))
+			_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+			if err == nil || !strings.Contains(err.Error(), `workflow_call output "published"`) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Compile() error = %v, want located output mapping rejection containing %q", err, test.want)
+			}
+			_, err = Validate(reusablePath, readFile(t, reusablePath))
+			if err == nil || !strings.Contains(err.Error(), `workflow_call output "published"`) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want same standalone output mapping rejection containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileBoundsReusableWorkflowOutputProjections(t *testing.T) {
+	repository := t.TempDir()
+	values := make([]string, plan.MaxNeedOutputs+1)
+	for i := range values {
+		values[i] = fmt.Sprint(i)
+	}
+	callerPath := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n  finish:\n    needs: delegated\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on:
+  workflow_call:
+    outputs:
+      published:
+        value: ${{ jobs.build.outputs.release }}
+jobs:
+  build:
+    strategy:
+      matrix:
+        value: [%s]
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.emit.outputs.release }}
+    steps:
+      - id: emit
+        run: echo release=value >> "$GITHUB_OUTPUT"
+`, strings.Join(values, ", ")))
+
+	_, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err == nil || !strings.Contains(err.Error(), `workflow_call output "published" expands call projections beyond the maximum of 64`) {
+		t.Fatalf("Compile() error = %v, want bounded projection rejection", err)
+	}
+}
+
 func TestCompileExpandsMatrixReusableCallsDeterministically(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push

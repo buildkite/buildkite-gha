@@ -100,6 +100,21 @@ func Parse(text string, line, column int) (Expression, error) {
 	}, nil
 }
 
+// ReferencePath extracts one complete static variable reference. Dot and
+// literal string index access are accepted; functions, operators, literals,
+// compound templates, and dynamic indexes fail closed.
+func ReferencePath(text string) (string, []string, error) {
+	body, err := expressionBody(text)
+	if err != nil {
+		return "", nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return "", nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	return referencePath(node)
+}
+
 // EvaluateCompile evaluates one complete graph-time expression. The supported
 // surface is intentionally limited to literals, github/event/vars/matrix
 // references, and fromJSON applied to one of those values.

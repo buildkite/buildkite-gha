@@ -17,14 +17,15 @@ type Span struct {
 
 // Workflow is the actionlint-independent syntax needed by the Phase 0 compiler.
 type Workflow struct {
-	Name                    string               `json:"name,omitempty"`
-	Env                     map[string]string    `json:"env,omitempty"`
-	DefaultShell            string               `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string               `json:"default_working_directory,omitempty"`
-	CallInputs              map[string]CallInput `json:"call_inputs,omitempty"`
-	RequiredCallSecrets     []string             `json:"required_call_secrets,omitempty"`
-	Callable                bool                 `json:"callable,omitempty"`
-	Jobs                    []Job                `json:"jobs"`
+	Name                    string                `json:"name,omitempty"`
+	Env                     map[string]string     `json:"env,omitempty"`
+	DefaultShell            string                `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                `json:"default_working_directory,omitempty"`
+	CallInputs              map[string]CallInput  `json:"call_inputs,omitempty"`
+	CallOutputs             map[string]CallOutput `json:"call_outputs,omitempty"`
+	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
+	Callable                bool                  `json:"callable,omitempty"`
+	Jobs                    []Job                 `json:"jobs"`
 }
 
 // CallInput declares one statically resolvable workflow_call input.
@@ -32,6 +33,13 @@ type CallInput struct {
 	Type     string `json:"type"`
 	Required bool   `json:"required,omitempty"`
 	Default  *Value `json:"default,omitempty"`
+}
+
+// CallOutput declares one caller-visible workflow_call output.
+type CallOutput struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+	Span  Span   `json:"span"`
 }
 
 // Job is one logical GitHub Actions job.

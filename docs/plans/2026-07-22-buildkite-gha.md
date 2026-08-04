@@ -1378,11 +1378,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
   each consumer's `needs`, and a caller's `needs.<call>.result` aggregates the
   verified manifests from every flattened callee job rather than only terminal
   jobs. Schema-v5 plans carry an explicit output projection for call aliases;
-  the current empty projection prevents undeclared callee job outputs from
-  leaking while declared `workflow_call.outputs` remain a follow-up. Caller
-  prerequisites inherited by callee roots are likewise status-only: their
-  outputs are not exposed inside the called workflow. Call-level conditions
-  fail closed instead of being silently discarded.
+  direct `workflow_call.outputs` mappings from
+  `jobs.<job>.outputs.<name>` expose only their declared values, including
+  through nested local calls, while undeclared callee job outputs remain
+  hidden. Exact matrix producers are retained and conflicting values fail
+  closed instead of guessing GitHub's completion order; each call is bounded
+  to 64 concrete output projections. Literal and compound mappings remain
+  deferred. Caller prerequisites inherited by callee roots are likewise
+  status-only: their outputs are not exposed inside the called workflow.
+  Call-level conditions fail closed instead of being silently discarded.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all compilable smoke-manifest outputs pass the current

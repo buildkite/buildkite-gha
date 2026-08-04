@@ -83,6 +83,19 @@ func Parse(path string, source []byte) (*Workflow, error) {
 			}
 			owned.CallInputs[input.ID] = ownedInput
 		}
+		if len(call.Outputs) != 0 {
+			owned.CallOutputs = make(map[string]CallOutput, len(call.Outputs))
+		}
+		for name, output := range call.Outputs {
+			if output.Value == nil {
+				return nil, locatedError(path, output.Name.Pos, "workflow", fmt.Sprintf("workflow_call output %q has no value", output.Name.Value))
+			}
+			owned.CallOutputs[name] = CallOutput{
+				Name:  output.Name.Value,
+				Value: output.Value.Value,
+				Span:  spanFrom(output.Value.Pos, output.Value.Value),
+			}
+		}
 		for name, secret := range call.Secrets {
 			if secret.Required != nil && secret.Required.Expression != nil {
 				return nil, locatedError(path, secret.Required.Expression.Pos, "workflow", fmt.Sprintf("expression-valued required flag for workflow_call secret %q is unsupported", name))
