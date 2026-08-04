@@ -1,0 +1,70 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":test_tube: Basic released-plugin demo"
+    key: "plugin-demo-basic-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+          workflow: testdata/poc/.github/workflows/basic.yml
+          version: "0.2.0"
+
+  - label: ":package: Artifact released-plugin demo"
+    key: "plugin-demo-artifact-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+          workflow: testdata/poc/.github/workflows/artifacts.yml
+          version: "0.2.0"
+
+  - label: ":javascript: Actions released-plugin demo"
+    key: "plugin-demo-actions-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+          workflow: .github/workflows/phase-4-actions-oracle.yml
+          version: "0.2.0"
+
+  - label: ":rocket: Advanced released-plugin demo"
+    key: "plugin-demo-advanced-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+          workflow: testdata/poc/.github/workflows/advanced.yml
+          version: "0.2.0"
+
+  - label: ":white_check_mark: Service-free plugin demo complete"
+    key: "plugin-demo-service-free-terminal"
+    depends_on:
+      - "plugin-demo-basic-importer"
+      - "plugin-demo-artifact-importer"
+      - "plugin-demo-actions-importer"
+      - "plugin-demo-advanced-importer"
+    command: "echo 'The released plugin and CLI completed all service-free workflows.'"
+
+  - label: ":package: Cache released-plugin demo"
+    key: "plugin-demo-cache-importer"
+    if: build.env("DEMO_CACHE") == "1"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+          workflow: testdata/poc/.github/workflows/cache.yml
+          version: "0.2.0"
+
+  - label: ":white_check_mark: Cache plugin demo complete"
+    key: "plugin-demo-cache-terminal"
+    if: build.env("DEMO_CACHE") == "1"
+    depends_on:
+      - "plugin-demo-cache-importer"
+    command: "echo 'The released plugin and CLI completed the cache extension.'"

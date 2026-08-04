@@ -1,0 +1,76 @@
+name: Migration POC - cache extension
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  POC_CACHE_KEY: migration-plugin-v1-${{ github.sha }}
+  POC_CACHE_PAYLOAD: migration-plugin-cache:${{ github.sha }}
+
+jobs:
+  cache-producer:
+    name: Populate dependency cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Restore release-commit cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: migration-cache
+          key: ${{ env.POC_CACHE_KEY }}
+
+      - name: Create or verify payload
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          if [[ "$CACHE_HIT" == true ]]; then
+            test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+          else
+            mkdir -p migration-cache
+            printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
+          fi
+
+  cache-consumer:
+    name: Restore dependency cache
+    needs: cache-producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Restore producer cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: migration-cache
+          key: ${{ env.POC_CACHE_KEY }}
+
+      - name: Require exact cache hit
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+
+      - name: Publish cache summary
+        shell: bash
+        run: |
+          {
+            echo '## Cache migration POC'
+            echo
+            echo 'The dependent job restored the exact actions/cache v6 entry.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  poc-cache:
+    name: Cache POC complete
+    needs: cache-consumer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm cache roundtrip
+        shell: bash
+        run: echo 'Cache producer and consumer completed.'

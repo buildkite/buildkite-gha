@@ -22,21 +22,9 @@ scripts/phase-0-shell-oracle-checkout "$commit"
 test "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$commit"
 test -z "$(git status --porcelain --untracked-files=all)"
 
-if grep -q 'actions/cache@' "$workflow"; then
-  : "${BUILDKITE_GHA_CACHE_URL:?BUILDKITE_GHA_CACHE_URL is required by the advanced POC}"
-fi
-
 distribution_root=$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-migration-poc.XXXXXXXX")
 event_path=$(mktemp "${TMPDIR:-/tmp}/buildkite-gha-migration-event.XXXXXXXX.json")
-compiled_workflow=$(mktemp "$(dirname "$workflow")/.migration-poc.XXXXXXXX.yml")
-trap 'rm -rf -- "$distribution_root"; rm -f -- "$event_path" "$compiled_workflow"' EXIT
-
-nonce=${BUILDKITE_BUILD_NUMBER:?BUILDKITE_BUILD_NUMBER is required}
-sed "s/__POC_NONCE__/$nonce/g" "$workflow" > "$compiled_workflow"
-if grep -q '__POC_NONCE__' "$compiled_workflow"; then
-  echo "failed to substitute migration POC nonce in $workflow" >&2
-  exit 1
-fi
+trap 'rm -rf -- "$distribution_root"; rm -f -- "$event_path"' EXIT
 
 branch=${BUILDKITE_BRANCH:?BUILDKITE_BRANCH is required}
 jq -n \
@@ -65,4 +53,4 @@ CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
 "$distribution_root/buildkite-gha" upload \
   --event-path "$event_path" \
   --runtime-queue hosted \
-  "$compiled_workflow"
+  "$workflow"
