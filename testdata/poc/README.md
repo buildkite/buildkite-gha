@@ -38,18 +38,15 @@ repeatable.
 
 ## Recorded evidence
 
-[Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+[Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
 passed all three POCs at exact commit
-`379344599c0653990687d017bd195d416c7bc29c`. The advanced workflow proved a
-build-unique cache miss, post-save, and dependent exact hit, then transferred
-the restored payload through the bounded artifact adapters to both matrix
-consumers. The successful workflow proves the summary and warning emission
-paths ran, while the dedicated Phase 6 fixtures retain the independent
-annotation-persistence observations.
-
-The declared reusable-workflow output assertion was added after build 290 and
-must receive a fresh exact-commit hosted run before it is recorded as runtime
-evidence for the current advanced fixture.
+`9d29bf26492be760016d29c7ba0d00033b4f9b39`. The advanced workflow proved its
+declared reusable-workflow output reached the caller with the exact expected
+value, followed by a build-unique cache miss, post-save, and dependent exact
+hit. It then transferred the restored payload through the bounded artifact
+adapters to both matrix consumers. The successful workflow proves the summary
+and warning emission paths ran, while the dedicated Phase 6 fixtures retain
+the independent annotation-persistence observations.
 
 The historical phase fixtures and their recorded observations remain the
 conformance ledger. The now-superseded targeted cache importer, continuation,
