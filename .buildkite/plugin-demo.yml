@@ -8,9 +8,8 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#984ee8cabfa69a1413edf38c281da9dbccfb62bf:
           workflow: testdata/poc/.github/workflows/basic.yml
-          version: "0.2.0"
 
   - label: ":package: Artifact released-plugin demo"
     key: "plugin-demo-artifact-importer"
@@ -18,9 +17,8 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#984ee8cabfa69a1413edf38c281da9dbccfb62bf:
           workflow: testdata/poc/.github/workflows/artifacts.yml
-          version: "0.2.0"
 
   - label: ":javascript: Actions released-plugin demo"
     key: "plugin-demo-actions-importer"
@@ -28,9 +26,8 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#984ee8cabfa69a1413edf38c281da9dbccfb62bf:
           workflow: .github/workflows/phase-4-actions-oracle.yml
-          version: "0.2.0"
 
   - label: ":rocket: Advanced released-plugin demo"
     key: "plugin-demo-advanced-importer"
@@ -38,9 +35,8 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#984ee8cabfa69a1413edf38c281da9dbccfb62bf:
           workflow: testdata/poc/.github/workflows/advanced.yml
-          version: "0.2.0"
 
   - label: ":white_check_mark: Service-free plugin demo complete"
     key: "plugin-demo-service-free-terminal"
@@ -58,9 +54,8 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#984ee8cabfa69a1413edf38c281da9dbccfb62bf:
           workflow: testdata/poc/.github/workflows/cache.yml
-          version: "0.2.0"
 
   - label: ":white_check_mark: Cache plugin demo complete"
     key: "plugin-demo-cache-terminal"
