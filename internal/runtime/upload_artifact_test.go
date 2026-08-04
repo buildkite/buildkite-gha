@@ -137,7 +137,18 @@ func TestUploadArtifactDoesNotStageInContainerWritableRunnerTemp(t *testing.T) {
 	if _, err := r.runUploadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": "result.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(uploader.uploads) != 1 || uploader.uploads[0].root == sharedRunnerTemp || !strings.HasPrefix(uploader.uploads[0].root, os.TempDir()+string(filepath.Separator)) {
+	if len(uploader.uploads) != 1 {
+		t.Fatalf("uploads = %#v, want one", uploader.uploads)
+	}
+	stagingParent, err := filepath.EvalSymlinks(filepath.Dir(uploader.uploads[0].root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempDir, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uploader.uploads[0].root == sharedRunnerTemp || stagingParent != tempDir {
 		t.Fatalf("upload staging root = %q, shared runner temp = %q", uploader.uploads[0].root, sharedRunnerTemp)
 	}
 }
