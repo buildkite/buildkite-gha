@@ -1098,7 +1098,7 @@ func mappingValue(node *yaml.Node, name string) *yaml.Node {
 		return nil
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == name {
+		if mappingKeyMatches(node.Content[i], name) {
 			return node.Content[i+1]
 		}
 	}
@@ -1110,11 +1110,18 @@ func mappingKey(node *yaml.Node, name string) *yaml.Node {
 		return nil
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == name {
+		if mappingKeyMatches(node.Content[i], name) {
 			return node.Content[i]
 		}
 	}
 	return nil
+}
+
+func mappingKeyMatches(node *yaml.Node, name string) bool {
+	if node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node != nil && node.Kind == yaml.ScalarNode && node.Value == name
 }
 
 func stringList(node *yaml.Node) ([]string, error) {

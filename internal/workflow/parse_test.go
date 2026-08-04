@@ -119,6 +119,16 @@ func TestParseRejectsWorkflowAndJobConcurrencyWithLocation(t *testing.T) {
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
 			want:   "concurrency.yml:5:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
 		},
+		{
+			name:   "workflow-alias",
+			source: "on: push\nenv:\n  FIELD: &field concurrency\n*field: deploy\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "concurrency.yml:4:1: workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite",
+		},
+		{
+			name:   "jobs-and-job-aliases",
+			source: "on: push\nenv:\n  JOBS: &jobs jobs\n  FIELD: &field concurrency\n*jobs:\n  test:\n    runs-on: ubuntu-latest\n    *field: deploy\n    steps: [{run: true}]\n",
+			want:   "concurrency.yml:8:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := Parse("concurrency.yml", []byte(test.source))
