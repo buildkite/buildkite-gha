@@ -436,6 +436,15 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		helper[1] = translate(helper[1])
 	}
 	if helper[0] == "run" {
+		// The fake container executes on the host, so resolve image PATH commands
+		// before replacing the process environment with the simulated image PATH.
+		if len(helper) > 2 && !filepath.IsAbs(helper[2]) {
+			command, err := exec.LookPath(helper[2])
+			if err != nil {
+				os.Exit(126)
+			}
+			helper[2] = command
+		}
 		for j := 2; j < len(helper); j++ {
 			if strings.HasPrefix(helper[j], "/") {
 				helper[j] = translate(helper[j])
@@ -939,7 +948,7 @@ func TestRunJobContainerConcurrentExecUsesUniquePIDFiles(t *testing.T) {
 func TestRunJobContainerBarrierVisibility(t *testing.T) {
 	f := newJobDocker(t, "")
 	w := t.TempDir()
-	j := jobContainerPlan(t, w, []plan.Step{{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: `sleep .15; echo LATE=yes >> "$GITHUB_ENV"; echo value=x >> "$GITHUB_OUTPUT"; echo /late >> "$GITHUB_PATH"`}, {ID: "before", Kind: "run", Shell: "sh", Command: `test -z "${LATE-}"`}, {ID: "wait", Kind: "wait", Targets: []string{"bg"}}, {ID: "after", Kind: "run", Shell: "sh", Command: `test "$LATE" = yes; case "$PATH" in /late:*) ;; *) exit 9;; esac`}})
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: `/bin/sleep .15; echo LATE=yes >> "$GITHUB_ENV"; echo value=x >> "$GITHUB_OUTPUT"; echo /late >> "$GITHUB_PATH"`}, {ID: "before", Kind: "run", Shell: "sh", Command: `test -z "${LATE-}"`}, {ID: "wait", Kind: "wait", Targets: []string{"bg"}}, {ID: "after", Kind: "run", Shell: "sh", Command: `test "$LATE" = yes; case "$PATH" in /late:*) ;; *) exit 9;; esac`}})
 	if _, e := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w); e != nil {
 		t.Fatal(e)
 	}
@@ -1372,7 +1381,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	writeFixtureFile(t, actionSource, "main.js", mainJS)
 	lockID := remoteLifecycleLockID(1)
 	lazyDir := ".github/actions/lazy"
-	create := fmt.Sprintf("mkdir -p %s; printf '%%s' %s | base64 -d > %s/action.yml; printf '%%s' %s | base64 -d > %s/main.js",
+	create := fmt.Sprintf("/bin/mkdir -p %s; printf '%%s' %s | base64 -d > %s/action.yml; printf '%%s' %s | base64 -d > %s/main.js",
 		lazyDir, base64.StdEncoding.EncodeToString([]byte(actionYAML)), lazyDir,
 		base64.StdEncoding.EncodeToString([]byte(mainJS)), lazyDir)
 	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
@@ -1448,7 +1457,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		f := newJobDocker(t, "")
 		workspace := t.TempDir()
 		writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote Docker rejection\n")
-		remote := t.TempDir()
+		remote := canonicalTempDir(t)
 		writeFixtureFile(t, remote, "docker/action.yml", "name: docker\nruns:\n  using: docker\n  image: Dockerfile\n")
 		writeFixtureFile(t, remote, "docker/Dockerfile", "FROM scratch\n")
 		digest := digestTree(t, remote)
@@ -1533,7 +1542,7 @@ func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {
 	lockID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{
 		{ID: "background", Kind: "uses", Uses: "./.github/actions/cancel", Background: true, Action: &plan.ActionSelector{Lock: lockID}},
-		{ID: "await", Kind: "run", Shell: "sh", Command: `while [ ! -f "$READY" ]; do sleep .01; done`},
+		{ID: "await", Kind: "run", Shell: "sh", Command: `while [ ! -f "$READY" ]; do /bin/sleep .01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
 	})
 	job.Schema = plan.SchemaV4

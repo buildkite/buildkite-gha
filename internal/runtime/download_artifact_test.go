@@ -299,7 +299,7 @@ func TestDownloadArtifactRejectsUnsupportedMemberAndExpandedSize(t *testing.T) {
 
 func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	archive, size, digest := testDownloadZIP(t, "result.txt")
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	workflowPath := ".github/workflows/download.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: download proof\n")
 	remote := t.TempDir()

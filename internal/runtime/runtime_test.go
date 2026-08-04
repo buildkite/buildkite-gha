@@ -161,8 +161,10 @@ scenario=__SCENARIO__
 transcript="$state/transcript"
 record() {
   local mode entries
-  mode="$(stat -c %a "$DOCKER_CONFIG")"
-  entries="$(find "$DOCKER_CONFIG" -mindepth 1 -maxdepth 1 -print -quit | wc -l)"
+  if ! mode="$(stat -c %a "$DOCKER_CONFIG" 2>/dev/null)"; then
+    mode="$(stat -f %Lp "$DOCKER_CONFIG")"
+  fi
+  entries="$(find "$DOCKER_CONFIG" -mindepth 1 -maxdepth 1 -print -quit | wc -l | tr -d '[:space:]')"
   printf 'config=%s;mode=%s;entries=%s;host=%s;context=%s;builder=%s;buildkit=%s' \
     "$DOCKER_CONFIG" "$mode" "$entries" "${DOCKER_HOST-unset}" "${DOCKER_CONTEXT-unset}" \
     "${BUILDX_BUILDER-unset}" "${BUILDKIT_HOST-unset}" >> "$transcript"
@@ -453,7 +455,11 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 			mounts = append(mounts, run[i+1])
 		}
 	}
-	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
+	resolvedWorkspace, err := filepath.EvalSymlinks(action.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+resolvedWorkspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
 	}
 	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
@@ -1482,7 +1488,7 @@ require('node:fs').appendFileSync(process.env.CWD_LOG, %q + process.cwd() + '\t'
 
 func TestJavaScriptActionCanonicalizesWorkspaceAndRunnerTemp(t *testing.T) {
 	node := requireNode24(t)
-	base := t.TempDir()
+	base := canonicalTempDir(t)
 	realParent := filepath.Join(base, "real")
 	if err := os.Mkdir(realParent, 0o755); err != nil {
 		t.Fatal(err)
@@ -2087,7 +2093,7 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 }
 
 func TestJobTimeoutLimitsPostActionsToCleanupGrace(t *testing.T) {
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Job timeout post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/main.js", "")
@@ -2104,7 +2110,9 @@ sleep 30
 		t.Fatal(err)
 	}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
-	job.TimeoutMinutes = 0.001
+	// Leave enough of the job budget for process discovery on slower Darwin
+	// hosts; the post still has only the separate 250 ms cleanup grace.
+	job.TimeoutMinutes = 0.01
 	job.Env = map[string]string{"POST_STARTED": postStarted}
 	runner := Runner{
 		Node24: fakeNode, CleanupTimeout: 250 * time.Millisecond, PostActionTimeout: 3 * time.Second,
@@ -2757,7 +2765,7 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 }
 
 func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	log := filepath.Join(root, "args")
 	dataDir := filepath.Join(root, "data")
 	installation := filepath.Join(dataDir, "installs", "node", Node20Version)
@@ -2790,7 +2798,7 @@ func TestMiseNodeSelectionIsExactAndConfigFree(t *testing.T) {
 }
 
 func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	nodeRoot := filepath.Join(root, "node")
 	if err := os.MkdirAll(filepath.Join(nodeRoot, "bin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -2822,7 +2830,7 @@ func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 }
 
 func TestManagedMiseCacheReplacesNodeWithWrongDigest(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	dataDir := filepath.Join(root, "data")
 	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
 	node := filepath.Join(installation, "bin", "node")
@@ -2875,7 +2883,7 @@ esac
 }
 
 func TestManagedMiseCacheRefusesSymlinkedRemoval(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := canonicalTempDir(t)
 	outside := t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(dataDir, "installs")); err != nil {
 		t.Fatal(err)
@@ -2890,7 +2898,7 @@ func TestManagedMiseCacheRefusesSymlinkedRemoval(t *testing.T) {
 }
 
 func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	log := filepath.Join(root, "node-args")
 	dataDir := filepath.Join(root, "mise-data")
 	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
@@ -2940,7 +2948,7 @@ func TestMiseMissingIsClear(t *testing.T) {
 }
 
 func TestMiseNodeSelectionRejectsWrongExactVersion(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	installation := filepath.Join(root, "node")
 	node := filepath.Join(installation, "bin", "node")
 	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
@@ -3141,7 +3149,7 @@ runs:
 }
 
 func TestNestedCompositeEvaluatesEnvironmentOnceAndIsolatesStepScopes(t *testing.T) {
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/js/action.yml", `name: Nested JavaScript
@@ -4034,6 +4042,15 @@ func fixturePath(t *testing.T, parts ...string) string {
 	return path
 }
 
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func requireNode24(t *testing.T) string {
 	t.Helper()
 	if node := os.Getenv("BUILDKITE_GHA_TEST_NODE24"); node != "" {
@@ -4063,10 +4080,15 @@ func requireDocker(t *testing.T) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, docker, "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
+	dockerConfig := t.TempDir()
+	if err := os.Chmod(dockerConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dockerEnv := map[string]string{"DOCKER_CONFIG": dockerConfig}
+	if output, err := boundedDockerCombinedOutput(ctx, dockerEnv, docker, "info", "--format", "{{.ServerVersion}}"); err != nil {
 		livePrerequisiteUnavailable(t, "Docker unavailable: daemon probe failed: %v: %s", err, strings.TrimSpace(string(output)))
 	}
-	if output, err := exec.CommandContext(ctx, docker, "buildx", "inspect", "default").CombinedOutput(); err != nil || dockerBuilderDriver(string(output)) != "docker" {
+	if output, err := boundedDockerCombinedOutput(ctx, dockerEnv, docker, "buildx", "inspect", "default"); err != nil || dockerBuilderDriver(string(output)) != "docker" {
 		livePrerequisiteUnavailable(t, "Docker unavailable: default Buildx builder is not the local docker driver: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	return docker
