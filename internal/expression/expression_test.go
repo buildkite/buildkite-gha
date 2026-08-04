@@ -26,6 +26,31 @@ func TestParseUsesExpressionSyntaxFrontend(t *testing.T) {
 	}
 }
 
+func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
+	for _, source := range []string{
+		"${{ jobs.Build.outputs.Release }}",
+		"${{ jobs['Build'].outputs['Release'] }}",
+	} {
+		root, path, err := ReferencePath(source)
+		if err != nil {
+			t.Fatalf("ReferencePath(%q) error = %v", source, err)
+		}
+		if !strings.EqualFold(root, "jobs") || len(path) != 3 || !strings.EqualFold(path[0], "Build") || !strings.EqualFold(path[1], "outputs") || !strings.EqualFold(path[2], "Release") {
+			t.Fatalf("ReferencePath(%q) = %q / %#v", source, root, path)
+		}
+	}
+	for _, source := range []string{
+		"literal",
+		"${{ jobs.build.outputs.release }} suffix",
+		"${{ format('{0}', jobs.build.outputs.release) }}",
+		"${{ jobs[inputs.name].outputs.release }}",
+	} {
+		if _, _, err := ReferencePath(source); err == nil {
+			t.Fatalf("ReferencePath(%q) succeeded, want static-reference rejection", source)
+		}
+	}
+}
+
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{

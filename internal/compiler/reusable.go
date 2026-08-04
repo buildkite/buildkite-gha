@@ -22,6 +22,7 @@ const (
 var staticInputExpression = regexp.MustCompile(`(?i)\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
 var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}|inputs\.([A-Za-z_][A-Za-z0-9_-]*))\s*$`)
 var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
+var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
@@ -37,6 +38,20 @@ type needBinding struct {
 	// ordinary job needs, whose outputs pass through unchanged.
 	members        []string
 	projectOutputs bool
+	outputs        []needOutputBinding
+}
+
+type needOutputBinding struct {
+	name   string
+	member string
+	output string
+	path   string
+	span   workflow.Span
+}
+
+type reusableResolution struct {
+	jobs    []sourcedJob
+	outputs []needOutputBinding
 }
 
 type reusableResolver struct {
@@ -62,12 +77,19 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 			}
 		}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
+		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
+		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
 			bindings := make(map[string]needBinding, len(job.Needs))
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
 			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, needBindings: bindings}
+			workflowJobs[job.ID] = job
+			replacements[job.ID] = needBinding{members: []string{job.ID}}
+		}
+		if _, err := resolveWorkflowCallOutputs(sourcePath, parsed.CallOutputs, workflowJobs, replacements); err != nil {
+			return nil, err
 		}
 		return jobs, nil
 	}
@@ -81,7 +103,8 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return nil, err
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}}
-	return resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, 0)
+	return resolution.jobs, err
 }
 
 func hasReusableCall(parsed *workflow.Workflow) bool {
@@ -93,14 +116,14 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, depth int) ([]sourcedJob, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, depth int) (reusableResolution, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
 	}
 	order, err := topologicalOrder(path, jobs)
 	if err != nil {
-		return nil, err
+		return reusableResolution{}, err
 	}
 
 	replacements := make(map[string]needBinding, len(jobs))
@@ -110,15 +133,15 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		job = applyStaticInputs(job, inputs)
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
-				return nil, err
+				return reusableResolution{}, err
 			}
 		}
 		if job.Reusable != nil {
 			if err := rejectCallMatrixExpressions(path, job); err != nil {
-				return nil, err
+				return reusableResolution{}, err
 			}
 			if strings.TrimSpace(job.If) != "" {
-				return nil, jobError(path, job, "reusable-workflow call conditions are unsupported")
+				return reusableResolution{}, jobError(path, job, "reusable-workflow call conditions are unsupported")
 			}
 		}
 		needBindings := replacementNeeds(job.Needs, replacements)
@@ -126,6 +149,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			needBindings = cloneNeedBindings(externalNeeds)
 			for name, binding := range needBindings {
 				binding.projectOutputs = true
+				binding.outputs = nil
 				needBindings[name] = binding
 			}
 		}
@@ -142,7 +166,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			}
 			resolver.expanded++
 			if resolver.expanded > maxFlattenedJobs {
-				return nil, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
+				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
 			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, needBindings: needBindings})
 			replacements[id] = needBinding{members: []string{job.ID}}
@@ -151,61 +175,62 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 
 		call := job.Reusable
 		if call.Secrets || call.InheritSecrets {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secrets are runtime-dependent and unsupported")
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secrets are runtime-dependent and unsupported")
 		}
 		if depth >= maxReusableWorkflowDepth {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", maxReusableWorkflowDepth))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", maxReusableWorkflowDepth))
 		}
 		calleePath, err := resolver.localWorkflowPath(call.Uses)
 		if err != nil {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, err.Error())
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, err.Error())
 		}
 		if cycle := resolver.cycle(calleePath); cycle != "" {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow cycle detected: "+cycle)
 		}
 		source, err := os.ReadFile(calleePath)
 		if err != nil {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("read local reusable workflow %q: %v", call.Uses, err))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("read local reusable workflow %q: %v", call.Uses, err))
 		}
 		callee, err := workflow.Parse(calleePath, source)
 		if err != nil {
-			return nil, err
+			return reusableResolution{}, err
 		}
 		if !callee.Callable {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q does not declare on.workflow_call", call.Uses))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q does not declare on.workflow_call", call.Uses))
 		}
 		if len(callee.RequiredCallSecrets) != 0 {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q requires unsupported secret %q", call.Uses, callee.RequiredCallSecrets[0]))
 		}
 		calleeSourcePath, err := filepath.Rel(resolver.root, calleePath)
 		if err != nil {
-			return nil, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("locate local reusable workflow %q: %v", call.Uses, err))
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("locate local reusable workflow %q: %v", call.Uses, err))
 		}
 		calleeSourcePath = "./" + filepath.ToSlash(calleeSourcePath)
 		calleeDigest := "sha256:" + sha256Sum(source)
 
 		matrices, err := expandMatrix(path, job, expression.CompileContext{})
 		if err != nil {
-			return nil, err
+			return reusableResolution{}, err
 		}
 		var members []string
+		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix)
 			if err != nil {
-				return nil, err
+				return reusableResolution{}, err
 			}
 			component := job.ID
 			if len(matrices) > 1 {
 				suffix, err := matrixDigest(matrix)
 				if err != nil {
-					return nil, jobError(path, job, fmt.Sprintf("namespace reusable-workflow matrix: %v", err))
+					return reusableResolution{}, jobError(path, job, fmt.Sprintf("namespace reusable-workflow matrix: %v", err))
 				}
 				component += "-" + suffix
 			}
 			callNamespace := namespacedJobID(namespace, component)
 			if _, exists := callNamespaces[callNamespace]; exists {
-				return nil, jobError(path, job, fmt.Sprintf("reusable-workflow matrix produces duplicate namespace %q", callNamespace))
+				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow matrix produces duplicate namespace %q", callNamespace))
 			}
 			callNamespaces[callNamespace] = struct{}{}
 			callLabel := job.Name
@@ -220,20 +245,26 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			}
 
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeJobs, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, depth+1)
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
-				return nil, err
+				return reusableResolution{}, err
 			}
-			resolved = append(resolved, calleeJobs...)
-			for _, calleeJob := range calleeJobs {
+			resolved = append(resolved, calleeResolution.jobs...)
+			callOutputs = append(callOutputs, calleeResolution.outputs...)
+			for _, calleeJob := range calleeResolution.jobs {
 				members = append(members, calleeJob.ID)
 			}
 		}
 		sort.Strings(members)
-		replacements[id] = needBinding{members: members, projectOutputs: true}
+		sortNeedOutputBindings(callOutputs)
+		replacements[id] = needBinding{members: members, projectOutputs: true, outputs: callOutputs}
 	}
-	return resolved, nil
+	outputs, err := resolveWorkflowCallOutputs(path, parsed.CallOutputs, jobs, replacements)
+	if err != nil {
+		return reusableResolution{}, err
+	}
+	return reusableResolution{jobs: resolved, outputs: outputs}, nil
 }
 
 func replacementNeeds(needs []string, replacements map[string]needBinding) map[string]needBinding {
@@ -259,6 +290,89 @@ func bindingMembers(bindings map[string]needBinding) []string {
 	return members
 }
 
+func resolveWorkflowCallOutputs(path string, declarations map[string]workflow.CallOutput, jobs map[string]workflow.Job, replacements map[string]needBinding) ([]needOutputBinding, error) {
+	var resolved []needOutputBinding
+	for _, declarationID := range sortedValueKeys(declarations) {
+		declaration := declarations[declarationID]
+		if !callOutputNamePattern.MatchString(declaration.Name) {
+			return nil, workflowCallOutputError(path, declaration, "has an invalid name")
+		}
+		root, reference, err := expression.ReferencePath(declaration.Value)
+		if err != nil || !strings.EqualFold(root, "jobs") || len(reference) != 3 || !strings.EqualFold(reference[1], "outputs") {
+			return nil, workflowCallOutputError(path, declaration, "must be one static jobs.<job_id>.outputs.<output_name> reference")
+		}
+		job, ok := findWorkflowJob(jobs, reference[0])
+		if !ok {
+			return nil, workflowCallOutputError(path, declaration, fmt.Sprintf("references unknown job %q", reference[0]))
+		}
+		binding, ok := replacements[job.ID]
+		if !ok {
+			return nil, workflowCallOutputError(path, declaration, fmt.Sprintf("references unresolved job %q", reference[0]))
+		}
+		if !binding.projectOutputs {
+			output, ok := findOutputName(job.Outputs, reference[2])
+			if !ok {
+				return nil, workflowCallOutputError(path, declaration, fmt.Sprintf("references undeclared output %q on job %q", reference[2], job.ID))
+			}
+			for _, member := range binding.members {
+				resolved = append(resolved, needOutputBinding{name: declaration.Name, member: member, output: output, path: path, span: declaration.Span})
+			}
+			continue
+		}
+
+		found := false
+		for _, output := range binding.outputs {
+			if !strings.EqualFold(output.name, reference[2]) {
+				continue
+			}
+			found = true
+			output.name = declaration.Name
+			output.path = path
+			output.span = declaration.Span
+			resolved = append(resolved, output)
+		}
+		if !found {
+			return nil, workflowCallOutputError(path, declaration, fmt.Sprintf("references undeclared output %q on reusable job %q", reference[2], job.ID))
+		}
+	}
+	sortNeedOutputBindings(resolved)
+	return resolved, nil
+}
+
+func findWorkflowJob(jobs map[string]workflow.Job, name string) (workflow.Job, bool) {
+	for _, job := range jobs {
+		if strings.EqualFold(job.ID, name) {
+			return job, true
+		}
+	}
+	return workflow.Job{}, false
+}
+
+func findOutputName(outputs map[string]string, name string) (string, bool) {
+	for output := range outputs {
+		if strings.EqualFold(output, name) {
+			return output, true
+		}
+	}
+	return "", false
+}
+
+func sortNeedOutputBindings(outputs []needOutputBinding) {
+	sort.Slice(outputs, func(i, j int) bool {
+		if outputs[i].name != outputs[j].name {
+			return outputs[i].name < outputs[j].name
+		}
+		if outputs[i].member != outputs[j].member {
+			return outputs[i].member < outputs[j].member
+		}
+		return outputs[i].output < outputs[j].output
+	})
+}
+
+func workflowCallOutputError(path string, output workflow.CallOutput, message string) error {
+	return fmt.Errorf("%s:%d:%d: workflow_call output %q %s", path, output.Span.Start.Line, output.Span.Start.Column, output.Name, message)
+}
+
 func cloneNeedBindings(bindings map[string]needBinding) map[string]needBinding {
 	if bindings == nil {
 		return nil
@@ -272,6 +386,7 @@ func cloneNeedBindings(bindings map[string]needBinding) map[string]needBinding {
 
 func cloneNeedBinding(binding needBinding) needBinding {
 	binding.members = append([]string(nil), binding.members...)
+	binding.outputs = append([]needOutputBinding(nil), binding.outputs...)
 	return binding
 }
 

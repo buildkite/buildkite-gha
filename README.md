@@ -73,7 +73,8 @@ The plugin path currently supports:
 - JavaScript, composite, local, and anonymous public actions;
 - supported local and public Dockerfile actions;
 - static matrices, ordinary `needs` and outputs, and local reusable workflows
-  with statically resolved inputs and caller-visible results;
+  with statically resolved inputs, caller-visible results, and directly mapped
+  declared outputs;
 - the currently implemented job and step condition subset;
 - background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
@@ -93,7 +94,8 @@ It does **not** currently support:
 - runtime condition access to the `github.event` payload;
 - exhaustive validation of condition functions before execution;
 - job containers or service containers through the production plugin path;
-- declared local reusable-workflow outputs and reusable-call conditions;
+- compound or literal local reusable-workflow output mappings and reusable-call
+  conditions;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
 - Windows or macOS jobs.
 

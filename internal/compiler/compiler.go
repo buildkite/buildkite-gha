@@ -675,7 +675,29 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					if instance.NeedOutputs == nil {
 						instance.NeedOutputs = make(map[string][]NeedOutput)
 					}
-					instance.NeedOutputs[need] = []NeedOutput{}
+					projected := []NeedOutput{}
+					for _, output := range binding.outputs {
+						producers := byLogicalID[output.member]
+						if len(producers) == 0 {
+							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)
+						}
+						if len(projected)+len(producers) > plan.MaxNeedOutputs {
+							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)
+						}
+						for _, producer := range producers {
+							projected = append(projected, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
+						}
+					}
+					sort.Slice(projected, func(i, j int) bool {
+						if projected[i].Name != projected[j].Name {
+							return projected[i].Name < projected[j].Name
+						}
+						if projected[i].StepKey != projected[j].StepKey {
+							return projected[i].StepKey < projected[j].StepKey
+						}
+						return projected[i].Output < projected[j].Output
+					})
+					instance.NeedOutputs[need] = projected
 				}
 			}
 			sort.Strings(instance.Needs)
