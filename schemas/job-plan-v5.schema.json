@@ -16,7 +16,7 @@
     "matrix": {"type": "object"},
     "vars": {"$ref": "#/$defs/stringMap"},
     "dependencies": {"type": "array", "items": {"$ref": "#/$defs/buildkiteName"}, "uniqueItems": true},
-    "need_sources": {"type": "object", "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}},
+    "need_sources": {"type": "object", "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}},
     "need_outputs": {"type": "object", "additionalProperties": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/needOutput"}}},
     "env": {"$ref": "#/$defs/stringMap"},
     "condition": {"type": "string", "maxLength": 65536},

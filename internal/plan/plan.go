@@ -24,7 +24,8 @@ const (
 	Schema   = SchemaV2
 )
 
-const MaxNeedProducers = 256
+const MaxNeedProducers = 1024
+const maxLegacyNeedProducers = 256
 const MaxNeedOutputs = 64
 const MaxStepTargets = 256
 
@@ -403,8 +404,12 @@ func (job Job) Validate() error {
 	}
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
+	maxNeedProducers := MaxNeedProducers
+	if job.Schema != SchemaV5 {
+		maxNeedProducers = maxLegacyNeedProducers
+	}
 	for name, sources := range job.NeedSources {
-		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > maxNeedProducers {
 			return fmt.Errorf("job plan contains invalid prerequisite %q", name)
 		}
 		id := strings.ToLower(name)

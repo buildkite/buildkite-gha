@@ -864,6 +864,52 @@ func TestCompileBoundsReusableWorkflowGraphExpansion(t *testing.T) {
 	}
 }
 
+func TestCompileReusableCallResultSupportsMaximumCalleeMatrixAndJoin(t *testing.T) {
+	repository := t.TempDir()
+	values := make([]string, maxMatrixInstances)
+	for i := range values {
+		values[i] = fmt.Sprint(i)
+	}
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+  finish:
+    needs: delegated
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.delegated.result }}" = success
+`)
+	writeWorkflow(t, repository, "reusable.yml", fmt.Sprintf(`on: workflow_call
+jobs:
+  fanout:
+    strategy:
+      matrix:
+        value: [%s]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ matrix.value }}"
+  join:
+    needs: fanout
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`, strings.Join(values, ", ")))
+
+	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != maxMatrixInstances+2 {
+		t.Fatalf("plans = %d, want %d callee jobs and caller", len(plans), maxMatrixInstances+2)
+	}
+	caller := plans[len(plans)-1]
+	if got := len(caller.NeedSources["delegated"]); got != maxMatrixInstances+1 {
+		t.Fatalf("reusable-call result producers = %d, want matrix plus join (%d)", got, maxMatrixInstances+1)
+	}
+}
+
 func TestCompileRejectsRequiredReusableWorkflowSecrets(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
