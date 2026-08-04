@@ -70,6 +70,11 @@ steps:
     if: build.env("PHASE6_PROBE") == "cache-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/phase-6-cache-roundtrip.yml"
 
+  - label: ":rocket: Load migration POC suite"
+    key: "migration-poc-loader"
+    if: build.env("POC_SUITE") == "migration"
+    command: "buildkite-agent pipeline upload .buildkite/migration-poc.yml"
+
   - label: ":pipeline: Load consolidated hosted smoke proof"
     key: "hosted-smoke-loader"
     if: build.env("SMOKE_PROBE") == "hosted"

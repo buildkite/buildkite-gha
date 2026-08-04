@@ -1,0 +1,41 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":test_tube: Basic migration POC importer"
+    key: "migration-poc-basic-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "scripts/migration-poc-import testdata/poc/.github/workflows/basic.yml"
+
+  - label: ":package: Artifact migration POC importer"
+    key: "migration-poc-artifact-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "scripts/migration-poc-import testdata/poc/.github/workflows/artifacts.yml"
+
+  - label: ":rocket: Advanced migration POC importer"
+    key: "migration-poc-advanced-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "scripts/migration-poc-import testdata/poc/.github/workflows/advanced.yml"
+
+  - label: ":pipeline: Migration POC continuation loader"
+    key: "migration-poc-continuation-loader"
+    depends_on:
+      - "migration-poc-basic-importer"
+      - "migration-poc-artifact-importer"
+      - "migration-poc-advanced-importer"
+    command: "buildkite-agent pipeline upload .buildkite/migration-poc-continuation.yml"

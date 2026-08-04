@@ -1,0 +1,117 @@
+name: Migration POC - advanced delivery
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  POC_CACHE_KEY: migration-poc-v1-__POC_NONCE__
+  POC_CACHE_PAYLOAD: migration-poc-payload:__POC_NONCE__
+
+jobs:
+  quality:
+    uses: ./.github/workflows/reusable-quality.yml
+    with:
+      package: ./internal/action/integration
+
+  cache-producer:
+    name: Populate dependency cache
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Restore build-unique cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: migration-cache
+          key: ${{ env.POC_CACHE_KEY }}
+
+      - name: Require miss and create payload
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" != true
+          mkdir -p migration-cache
+          printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
+
+  advanced-package:
+    name: Restore cache and package payload
+    needs: cache-producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Restore producer cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: migration-cache
+          key: ${{ env.POC_CACHE_KEY }}
+
+      - name: Require cache hit
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+
+      - name: Exercise continue-on-error
+        id: expected-failure
+        continue-on-error: true
+        shell: bash
+        run: exit 7
+
+      - name: Verify continued outcome
+        if: steps.expected-failure.outcome == 'failure'
+        shell: bash
+        run: test "${{ steps.expected-failure.outcome }}" = failure
+
+      - name: Upload restored payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: migration-poc-payload
+          path: migration-cache/payload.txt
+          if-no-files-found: error
+
+  advanced-verify:
+    name: Verify payload (${{ matrix.variant }})
+    needs: advanced-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [primary, secondary]
+    steps:
+      - name: Download payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: migration-poc-payload
+          path: payload
+
+      - name: Verify payload
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          test "$(cat payload/payload.txt)" = "$POC_CACHE_PAYLOAD"
+          echo "::warning title=Migration POC::$VARIANT verified the cached artifact"
+          {
+            echo "## Advanced migration POC: $VARIANT"
+            echo
+            echo 'Reusable workflow, cache, artifact, matrix, and annotation checks passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  poc-advanced:
+    name: Advanced POC complete
+    needs: advanced-verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm fan-in
+        shell: bash
+        run: echo 'Both matrix consumers completed.'

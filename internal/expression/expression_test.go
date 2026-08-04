@@ -29,16 +29,19 @@ func TestParseUsesExpressionSyntaxFrontend(t *testing.T) {
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
-		Inputs:      map[string]string{"value": literal},
-		Matrix:      map[string]any{"value": literal, "secret": "reevaluated"},
-		Steps:       map[string]map[string]string{"producer": {"value": literal}},
-		Needs:       map[string]map[string]string{"producer": {"value": literal}},
-		NeedResults: map[string]string{"producer": "success"},
+		Inputs:       map[string]string{"value": literal},
+		Matrix:       map[string]any{"value": literal, "secret": "reevaluated"},
+		Steps:        map[string]map[string]string{"producer": {"value": literal}},
+		StepStatuses: map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success"}},
+		Needs:        map[string]map[string]string{"producer": {"value": literal}},
+		NeedResults:  map[string]string{"producer": "success"},
 	}
 	tests := map[string]string{
 		"${{ inputs.value }}":                 literal,
 		"${{ matrix.value }}":                 literal,
 		"${{ steps.Producer.outputs.value }}": literal,
+		"${{ steps.Producer.outcome }}":       "failure",
+		"${{ steps.Producer.conclusion }}":    "success",
 		"${{ needs.Producer.outputs.value }}": literal,
 		"${{ needs.Producer.result }}":        "success",
 		"before ${{ inputs.value }} after":    "before " + literal + " after",
@@ -146,6 +149,7 @@ func TestEvaluateFailsClosed(t *testing.T) {
 		{name: "unavailable github value", template: "${{ github.sha }}", want: `unavailable github value "sha"`},
 		{name: "unavailable matrix value", template: "${{ matrix.missing }}", want: `unavailable matrix value "missing"`},
 		{name: "unavailable step", template: "${{ steps.missing.outputs.value }}", want: `unavailable step "missing"`},
+		{name: "unavailable step outcome", template: "${{ steps.missing.outcome }}", want: `unavailable step "missing"`},
 		{name: "unavailable need", template: "${{ needs.missing.outputs.value }}", want: `unavailable need "missing"`},
 		{name: "unavailable need result", template: "${{ needs.missing.result }}", want: `unavailable need "missing"`},
 		{name: "unterminated", template: "${{ inputs.value", want: "unterminated expression"},

@@ -198,7 +198,12 @@ func commitStepExecution(execution stepExecution, jobResult *JobResult, eval *ex
 	mergeInto(jobResult.State, execution.result.State)
 	appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, execution.result.Summary, execution.result.summaryTruncated)
 	jobResult.Artifacts = append(jobResult.Artifacts, execution.result.Artifacts...)
-	statuses[id] = expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
+	status := expression.StepStatus{Outcome: execution.outcome, Conclusion: execution.conclusion, Outputs: execution.result.Outputs}
+	statuses[id] = status
+	if eval.StepStatuses == nil {
+		eval.StepStatuses = make(map[string]expression.StepStatus)
+	}
+	eval.StepStatuses[id] = status
 	if execution.conclusion != "success" {
 		return fmt.Errorf("step %q: %w", execution.step.ID, execution.err)
 	}
@@ -221,17 +226,27 @@ func commitResultEnvironment(env map[string]string, result Result) {
 
 func cloneExpressionContext(in expression.Context) expression.Context {
 	return expression.Context{
-		Inputs:      cloneStrings(in.Inputs),
-		Matrix:      cloneAnyMap(in.Matrix),
-		Steps:       cloneNestedStrings(in.Steps),
-		Needs:       cloneNestedStrings(in.Needs),
-		NeedResults: cloneStrings(in.NeedResults),
-		Secrets:     cloneStrings(in.Secrets),
-		Vars:        cloneStrings(in.Vars),
-		Env:         cloneStrings(in.Env),
-		GitHub:      cloneAnyMap(in.GitHub),
-		Services:    cloneNestedStrings(in.Services),
+		Inputs:       cloneStrings(in.Inputs),
+		Matrix:       cloneAnyMap(in.Matrix),
+		Steps:        cloneNestedStrings(in.Steps),
+		StepStatuses: cloneStepStatuses(in.StepStatuses),
+		Needs:        cloneNestedStrings(in.Needs),
+		NeedResults:  cloneStrings(in.NeedResults),
+		Secrets:      cloneStrings(in.Secrets),
+		Vars:         cloneStrings(in.Vars),
+		Env:          cloneStrings(in.Env),
+		GitHub:       cloneAnyMap(in.GitHub),
+		Services:     cloneNestedStrings(in.Services),
 	}
+}
+
+func cloneStepStatuses(in map[string]expression.StepStatus) map[string]expression.StepStatus {
+	out := make(map[string]expression.StepStatus, len(in))
+	for name, status := range in {
+		status.Outputs = cloneStrings(status.Outputs)
+		out[name] = status
+	}
+	return out
 }
 
 func cloneNestedStrings(in map[string]map[string]string) map[string]map[string]string {

@@ -183,7 +183,7 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 	needs := make(map[string]NeedResult, len(sources))
 	for _, name := range names {
 		producers := append([]ResultSource(nil), sources[name]...)
-		if !keyPattern.MatchString(name) || len(producers) == 0 || len(producers) > MaxResultProducers {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(producers) == 0 || len(producers) > MaxResultProducers {
 			return nil, fmt.Errorf("logical need %q has no valid producers", name)
 		}
 		sort.Slice(producers, func(i, j int) bool { return producers[i].StepKey < producers[j].StepKey })

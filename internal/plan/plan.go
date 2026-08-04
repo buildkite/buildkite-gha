@@ -28,6 +28,7 @@ const MaxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var actionLockIDPattern = regexp.MustCompile(`^a-[0-9a-f]{16}$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
@@ -389,7 +390,7 @@ func (job Job) Validate() error {
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
 	for name, sources := range job.NeedSources {
-		if !targetPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
 			return fmt.Errorf("job plan contains invalid prerequisite %q", name)
 		}
 		id := strings.ToLower(name)

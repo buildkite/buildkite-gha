@@ -120,12 +120,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
 	eval := expression.Context{
-		Matrix:      job.Matrix,
-		Steps:       make(map[string]map[string]string, len(job.Steps)),
-		Needs:       needOutputs(job.Needs),
-		NeedResults: needResults(job.Needs),
-		Vars:        job.Vars,
-		GitHub:      githubContext(job),
+		Matrix:       job.Matrix,
+		Steps:        make(map[string]map[string]string, len(job.Steps)),
+		StepStatuses: make(map[string]expression.StepStatus, len(job.Steps)),
+		Needs:        needOutputs(job.Needs),
+		NeedResults:  needResults(job.Needs),
+		Vars:         job.Vars,
+		GitHub:       githubContext(job),
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
@@ -298,7 +299,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	eval.Env = jobResult.Env
 	var posts postRegistry
-	statuses := make(map[string]expression.StepStatus, len(job.Steps))
+	statuses := eval.StepStatuses
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
 	var runErr error
@@ -1149,7 +1150,8 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	result := newResult()
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
-	statuses := make(map[string]expression.StepStatus)
+	eval.StepStatuses = make(map[string]expression.StepStatus)
+	statuses := eval.StepStatuses
 	compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeEnv["GITHUB_ACTION_PATH"] = actionPath
 	var runErr error

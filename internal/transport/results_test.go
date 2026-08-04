@@ -132,14 +132,14 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 			secondPath: mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "failure", Output{Name: "second", Value: "two"})),
 		},
 	}
-	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {second, first}})
+	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable.build": {second, first}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if needs["build"].Result != "failure" || !reflect.DeepEqual(needs["build"].Outputs, map[string]string{"first": "one", "second": "two"}) || len(needs["build"].Producers) != 2 || len(needs["build"].Artifacts) != 1 {
+	if needs["reusable.build"].Result != "failure" || !reflect.DeepEqual(needs["reusable.build"].Outputs, map[string]string{"first": "one", "second": "two"}) || len(needs["reusable.build"].Producers) != 2 || len(needs["reusable.build"].Artifacts) != 1 {
 		t.Fatalf("needs = %#v", needs)
 	}
-	if got := needs["build"].Artifacts[0]; got.Artifact != firstManifest.Artifacts[0] || got.Producer != firstManifest.Producer {
+	if got := needs["reusable.build"].Artifacts[0]; got.Artifact != firstManifest.Artifacts[0] || got.Producer != firstManifest.Producer {
 		t.Fatalf("retained artifact authority = %#v", got)
 	}
 
@@ -147,6 +147,10 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}})
 	if err == nil || !strings.Contains(err.Error(), "conflicting matrix output") {
 		t.Fatalf("LoadNeeds() error = %v, want ambiguous matrix output rejection", err)
+	}
+	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable/build": {first}})
+	if err == nil || !strings.Contains(err.Error(), "has no valid producers") {
+		t.Fatalf("LoadNeeds() error = %v, want invalid logical need rejection", err)
 	}
 }
 

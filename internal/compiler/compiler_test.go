@@ -372,6 +372,22 @@ jobs:
 	if prepare.SourcePath != "./.github/workflows/caller.yml" || finish.SourcePath != "./.github/workflows/caller.yml" {
 		t.Fatalf("caller source provenance = %q / %q", prepare.SourcePath, finish.SourcePath)
 	}
+	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 4 {
+		t.Fatalf("plans = %d, want 4", len(plans))
+	}
+	secondPlan, err := plan.Encode(plans[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(plans[3].NeedSources, map[string][]plan.NeedSource{
+		"delegated.second": {{StepKey: second.Key, PlanDigest: transport.Digest(secondPlan)}},
+	}) {
+		t.Fatalf("downstream reusable-workflow plan needs = %#v", plans[3].NeedSources)
+	}
 }
 
 func TestCompileExpandsMatrixReusableCallsDeterministically(t *testing.T) {
