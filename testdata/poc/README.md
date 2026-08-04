@@ -7,9 +7,9 @@ exact-commit Buildkite proof, rather than adding more phase-numbered probes:
   summary.
 - `artifacts.yml`: build, job outputs, a direct producer-to-consumer artifact
   handoff, and execution of the downloaded binary.
-- `advanced.yml`: a local reusable workflow, cache v6 miss/save/hit lifecycle,
-  `continue-on-error`, artifact handoff, matrix fan-out/fan-in, summaries, and
-  workflow-command annotations.
+- `advanced.yml`: a local reusable workflow with a caller-consumed declared
+  output, cache v6 miss/save/hit lifecycle, `continue-on-error`, artifact
+  handoff, matrix fan-out/fan-in, summaries, and workflow-command annotations.
 
 The suite stays within the `hosted-tokenless` admission profile. It does not
 imply support for secrets, job or service containers, remote reusable
@@ -46,6 +46,10 @@ the restored payload through the bounded artifact adapters to both matrix
 consumers. The successful workflow proves the summary and warning emission
 paths ran, while the dedicated Phase 6 fixtures retain the independent
 annotation-persistence observations.
+
+The declared reusable-workflow output assertion was added after build 290 and
+must receive a fresh exact-commit hosted run before it is recorded as runtime
+evidence for the current advanced fixture.
 
 The historical phase fixtures and their recorded observations remain the
 conformance ledger. The now-superseded targeted cache importer, continuation,

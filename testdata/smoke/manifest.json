@@ -59,9 +59,9 @@
       "id": "migration-poc-advanced",
       "workflow": "testdata/poc/.github/workflows/advanced.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "runtime-pass",
-      "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
-      "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, the local reusable workflow, build-unique cache v6 miss/save/hit lifecycle, continue-on-error status interpolation, artifact transfer, and matrix fan-out and fan-in passed while the jobs emitted summaries and annotations; dedicated Phase 6 fixtures own independent annotation-persistence evidence.",
+      "expectation": "compile-pass",
+      "evidence": "Exact-commit Buildkite build 290 proved the prior advanced flow; the added declared reusable-workflow output assertion awaits a refreshed hosted run.",
+      "note": "The current fixture compiles the reusable quality job's declared tested-package output into the caller and requires the dependent cache producer to observe its exact value before continuing. Build 290 remains evidence for the cache, artifact, matrix, summary, and annotation paths at commit 379344599c0653990687d017bd195d416c7bc29c, but not for this additive output assertion.",
       "action_preflight": "hosted-tokenless"
     },
     {
