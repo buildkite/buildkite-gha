@@ -105,6 +105,30 @@ func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
 	}
 }
 
+func TestParseRejectsWorkflowAndJobConcurrencyWithLocation(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			name:   "workflow",
+			source: "on: push\nconcurrency:\n  group: build-${{ github.ref }}\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			want:   "concurrency.yml:2:1: workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite",
+		},
+		{
+			name:   "job",
+			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
+			want:   "concurrency.yml:5:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse("concurrency.yml", []byte(test.source))
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseContainerShortForms(t *testing.T) {
 	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: redis:7\n      postgres: {image: postgres:16, ports: ['5432:5432/udp']}\n    steps: [{run: true}]\n")
 	parsed, err := Parse("short.yml", source)

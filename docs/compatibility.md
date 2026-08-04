@@ -33,6 +33,7 @@ provide.
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
+| Workflow and job concurrency | Not supported | `concurrency.group` and `cancel-in-progress` fail compilation instead of being silently discarded. Configure equivalent behavior in Buildkite. `strategy.max-parallel` is translated separately for static matrix jobs. |
 | Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Declared outputs mapped directly from `jobs.<job>.outputs.<name>` are exposed through `needs.<call>.outputs`; nested calls are supported and undeclared callee outputs remain hidden. Matrix-selected declarations verify every exact producer and fail closed when values conflict or exceed 64 concrete projections. Literal or compound output mappings, call-level conditions, and remote or runtime-dependent reusable workflows are deferred. Caller prerequisites inherited by callee roots are status-only. |
 | Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |

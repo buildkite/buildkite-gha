@@ -41,6 +41,9 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := validateRawContainers(path, &document); err != nil {
 		return nil, err
 	}
+	if err := validateRawConcurrency(path, &document); err != nil {
+		return nil, err
+	}
 	concurrency, err := parseConcurrencySyntax(path, &document)
 	if err != nil {
 		return nil, err
@@ -181,6 +184,27 @@ func validateRawContainers(path string, document *yaml.Node) error {
 			if err := validateRawContainer(path, container); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func validateRawConcurrency(path string, document *yaml.Node) error {
+	root := document
+	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
+		root = root.Content[0]
+	}
+	if key := mappingKey(root, "concurrency"); key != nil {
+		return rawError(path, key, "workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite")
+	}
+	jobs := mappingValue(root, "jobs")
+	if jobs == nil || jobs.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(jobs.Content); i += 2 {
+		name, job := jobs.Content[i], jobs.Content[i+1]
+		if key := mappingKey(job, "concurrency"); key != nil {
+			return rawError(path, key, fmt.Sprintf("job %q concurrency is unsupported; only strategy.max-parallel is translated", name.Value))
 		}
 	}
 	return nil
