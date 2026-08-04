@@ -10,7 +10,7 @@ steps:
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "scripts/migration-poc-import testdata/poc/.github/workflows/basic.yml"
+    command: "scripts/migration-poc-import .github/workflows/example-basic.yml"
 
   - label: ":package: Artifact migration POC importer"
     key: "migration-poc-artifact-importer"
@@ -20,7 +20,7 @@ steps:
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "scripts/migration-poc-import testdata/poc/.github/workflows/artifacts.yml"
+    command: "scripts/migration-poc-import .github/workflows/example-artifacts.yml"
 
   - label: ":rocket: Advanced migration POC importer"
     key: "migration-poc-advanced-importer"
@@ -30,7 +30,7 @@ steps:
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "scripts/migration-poc-import testdata/poc/.github/workflows/advanced.yml"
+    command: "scripts/migration-poc-import .github/workflows/example-advanced.yml"
 
   - label: ":pipeline: Migration POC continuation loader"
     key: "migration-poc-continuation-loader"

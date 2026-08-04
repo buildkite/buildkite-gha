@@ -1,17 +1,25 @@
 # Migration POC suite
 
-These workflows exercise common GitHub Actions migration shapes as one
-customer-shaped suite, rather than adding more phase-numbered probes:
+The canonical service-free example workflows at the repository root and the
+optional cache fixture in this directory exercise common GitHub Actions
+migration shapes as one customer-shaped suite:
 
-- `basic.yml`: checkout, tool setup, shell tests, conditions, outputs, and a job
-  summary.
-- `artifacts.yml`: build, job outputs, a direct producer-to-consumer artifact
-  handoff, and execution of the downloaded binary.
-- `advanced.yml`: a local reusable workflow with a caller-consumed declared
-  output, a public Dockerfile action, `continue-on-error`, artifact handoff,
-  matrix fan-out/fan-in, summaries, and workflow-command annotations.
+- `.github/workflows/example-basic.yml`: checkout, tool setup, shell tests,
+  conditions, outputs, and a job summary.
+- `.github/workflows/example-artifacts.yml`: build, job outputs, a direct
+  producer-to-consumer artifact handoff, and execution of the downloaded
+  binary.
+- `.github/workflows/example-advanced.yml`: a local reusable workflow with a
+  caller-consumed declared output, a public Dockerfile action,
+  `continue-on-error`, artifact handoff, matrix fan-out/fan-in, summaries, and
+  workflow-command annotations.
 - `cache.yml`: the optional `actions/cache` v6 miss/save/direct-dependent-hit
   extension.
+
+Keeping the service-free examples under the root `.github/workflows` directory
+makes each file both a native `workflow_dispatch` workflow and the exact source
+imported by the Buildkite comparison pipeline. The workflows are manual-only in
+this repository so they do not create extra Actions runs on every push.
 
 The released-plugin service-free lane also imports the repository's root-level
 Phase 4 workflow to prove checked-out local JavaScript and composite actions.

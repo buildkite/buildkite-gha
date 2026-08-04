@@ -8,9 +8,9 @@ fi
 
 workflow=$1
 case "$workflow" in
-  testdata/poc/.github/workflows/basic.yml | \
-    testdata/poc/.github/workflows/artifacts.yml | \
-    testdata/poc/.github/workflows/advanced.yml) ;;
+  .github/workflows/example-basic.yml | \
+    .github/workflows/example-artifacts.yml | \
+    .github/workflows/example-advanced.yml) ;;
   *)
     echo "unsupported migration POC workflow: $workflow" >&2
     exit 2

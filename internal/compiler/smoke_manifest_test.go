@@ -68,9 +68,10 @@ func TestSmokeManifestInventory(t *testing.T) {
 		if strings.TrimSpace(fixture.Evidence) == "" || strings.TrimSpace(fixture.Note) == "" {
 			t.Fatalf("%s: evidence and note are required", fixture.ID)
 		}
-		for _, path := range []string{fixture.Workflow, fixture.Event} {
+		for index, path := range []string{fixture.Workflow, fixture.Event} {
 			clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
-			if !strings.HasPrefix(path, "testdata/") || filepath.IsAbs(path) || clean != path || slicesContain(strings.Split(path, "/"), "..") {
+			allowedRootWorkflow := index == 0 && (path == ".github/workflows/example-basic.yml" || path == ".github/workflows/example-artifacts.yml" || path == ".github/workflows/example-advanced.yml")
+			if (!strings.HasPrefix(path, "testdata/") && !allowedRootWorkflow) || filepath.IsAbs(path) || clean != path || slicesContain(strings.Split(path, "/"), "..") {
 				t.Fatalf("%s: unsafe path %q", fixture.ID, path)
 			}
 			if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err != nil || !info.Mode().IsRegular() {
@@ -86,7 +87,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 	}
 
 	var checkedIn []string
-	for _, pattern := range []string{"testdata/smoke/.github/workflows/*.yml", "testdata/poc/.github/workflows/basic.yml", "testdata/poc/.github/workflows/artifacts.yml", "testdata/poc/.github/workflows/advanced.yml", "testdata/poc/.github/workflows/cache.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/phase5/runtime/.github/workflows/*.yml", "testdata/phase6/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
+	for _, pattern := range []string{".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml", "testdata/smoke/.github/workflows/*.yml", "testdata/poc/.github/workflows/cache.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/phase5/runtime/.github/workflows/*.yml", "testdata/phase6/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
 		if err != nil {
 			t.Fatal(err)

@@ -74,6 +74,24 @@ download modes, and unsupported artifact commits still fail admission. Job and
 service container fixtures have separate hosted runtime evidence but remain
 outside production admission.
 
+### Paired native UX runs
+
+After the example workflows exist on the default branch, launch the same
+workflow at the current branch's exact remote commit in both products:
+
+```sh
+scripts/compare-example basic
+scripts/compare-example artifacts
+scripts/compare-example advanced
+```
+
+This uses GitHub's native `workflow_dispatch` path and the dedicated
+`buildkite-gha-examples` pipeline. It prints both URLs for a side-by-side review
+of the graph, logs, summaries, annotations, artifacts, retries, and cancellation
+experience. Use `--github-only` or `--buildkite-only` to exercise one native
+manual trigger at a time. These runs are qualitative UX comparisons; they do
+not replace the normalized smoke evidence below.
+
 ### Hosted runtime proofs
 
 Run all implemented hosted proofs against one exact commit:
