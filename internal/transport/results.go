@@ -17,6 +17,15 @@ type ResultSource struct {
 	PlanDigest string
 }
 
+// OutputProjection selects one producer output for a caller-visible logical
+// need output. A present projection list, including an empty one, suppresses
+// passthrough of all other producer outputs.
+type OutputProjection struct {
+	Name    string
+	StepKey string
+	Output  string
+}
+
 // NeedResult is the verified runtime projection exposed to needs contexts.
 type NeedResult struct {
 	Result    string
@@ -165,7 +174,7 @@ func DownloadResult(ctx context.Context, agent Agent, root, buildID string, sour
 // LoadNeeds downloads every exact generated producer for each logical need and
 // returns only verified results and outputs. Conflicting matrix outputs fail
 // closed because Buildkite artifacts do not expose a trusted completion order.
-func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources map[string][]ResultSource) (map[string]NeedResult, error) {
+func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources map[string][]ResultSource, projections map[string][]OutputProjection) (map[string]NeedResult, error) {
 	if len(sources) > MaxResultProducers {
 		return nil, fmt.Errorf("result transport has %d logical needs, maximum is %d", len(sources), MaxResultProducers)
 	}
@@ -180,6 +189,20 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	projected := make(map[string][]OutputProjection, len(projections))
+	for name, outputs := range projections {
+		lower := strings.ToLower(name)
+		if _, exists := logicalNames[lower]; !exists {
+			return nil, fmt.Errorf("output projection %q has no logical need", name)
+		}
+		if _, exists := projected[lower]; exists {
+			return nil, fmt.Errorf("result transport repeats output projection %q", name)
+		}
+		if len(outputs) > MaxResultOutputs {
+			return nil, fmt.Errorf("logical need %q has more than %d output projections", name, MaxResultOutputs)
+		}
+		projected[lower] = append([]OutputProjection(nil), outputs...)
+	}
 	needs := make(map[string]NeedResult, len(sources))
 	for _, name := range names {
 		producers := append([]ResultSource(nil), sources[name]...)
@@ -189,6 +212,7 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 		sort.Slice(producers, func(i, j int) bool { return producers[i].StepKey < producers[j].StepKey })
 		need := NeedResult{Result: "skipped", Outputs: map[string]string{}}
 		outputNames := make(map[string]string)
+		manifests := make(map[string]ResultManifest, len(producers))
 		for i, producer := range producers {
 			if i > 0 && producers[i-1].StepKey == producer.StepKey {
 				return nil, fmt.Errorf("logical need %q repeats producer %q", name, producer.StepKey)
@@ -197,11 +221,15 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 			if err != nil {
 				return nil, fmt.Errorf("load logical need %q: %w", name, err)
 			}
+			manifests[strings.ToLower(producer.StepKey)] = manifest
 			need.Producers = append(need.Producers, manifest.Producer)
 			for _, artifact := range manifest.Artifacts {
 				need.Artifacts = append(need.Artifacts, NeedArtifact{Artifact: artifact, Producer: manifest.Producer})
 			}
 			need.Result = aggregateResult(need.Result, manifest.Result)
+			if _, isProjected := projected[strings.ToLower(name)]; isProjected {
+				continue
+			}
 			for _, output := range manifest.Outputs {
 				lower := strings.ToLower(output.Name)
 				if canonical, ok := outputNames[lower]; ok && need.Outputs[canonical] != output.Value {
@@ -217,9 +245,54 @@ func LoadNeeds(ctx context.Context, agent Agent, root, buildID string, sources m
 				need.Outputs[output.Name] = output.Value
 			}
 		}
+		if outputs, isProjected := projected[strings.ToLower(name)]; isProjected {
+			if err := projectNeedOutputs(name, outputs, manifests, need.Outputs); err != nil {
+				return nil, err
+			}
+		}
 		needs[name] = need
 	}
 	return needs, nil
+}
+
+func projectNeedOutputs(name string, projections []OutputProjection, manifests map[string]ResultManifest, outputs map[string]string) error {
+	projections = append([]OutputProjection(nil), projections...)
+	sort.Slice(projections, func(i, j int) bool {
+		if projections[i].Name != projections[j].Name {
+			return projections[i].Name < projections[j].Name
+		}
+		if projections[i].StepKey != projections[j].StepKey {
+			return projections[i].StepKey < projections[j].StepKey
+		}
+		return projections[i].Output < projections[j].Output
+	})
+	canonicalNames := make(map[string]string, len(projections))
+	for _, projection := range projections {
+		if !keyPattern.MatchString(projection.Name) || !keyPattern.MatchString(projection.StepKey) || !keyPattern.MatchString(projection.Output) {
+			return fmt.Errorf("logical need %q has invalid output projection", name)
+		}
+		manifest, exists := manifests[strings.ToLower(projection.StepKey)]
+		if !exists {
+			return fmt.Errorf("logical need %q output %q selects unknown producer %q", name, projection.Name, projection.StepKey)
+		}
+		value := ""
+		for _, output := range manifest.Outputs {
+			if strings.EqualFold(output.Name, projection.Output) {
+				value = output.Value
+				break
+			}
+		}
+		lower := strings.ToLower(projection.Name)
+		if canonical, exists := canonicalNames[lower]; exists {
+			if outputs[canonical] != value {
+				return fmt.Errorf("logical need %q has conflicting projected output %q without authoritative completion order", name, projection.Name)
+			}
+			continue
+		}
+		canonicalNames[lower] = projection.Name
+		outputs[projection.Name] = value
+	}
+	return nil
 }
 
 func aggregateResult(current, next string) string {

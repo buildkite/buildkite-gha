@@ -33,7 +33,7 @@ provide.
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
-| Local reusable workflows | Supported when statically resolvable | Remote and runtime-dependent reusable workflows are deferred. |
+| Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Caller prerequisites inherited by callee roots are status-only. Declared call outputs and call-level conditions are not yet supported; remote and runtime-dependent reusable workflows are deferred. |
 | Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
 | JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |

@@ -20,10 +20,12 @@ const (
 	SchemaV2 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
 	SchemaV3 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v3.schema.json"
 	SchemaV4 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v4.schema.json"
+	SchemaV5 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v5.schema.json"
 	Schema   = SchemaV2
 )
 
 const MaxNeedProducers = 256
+const MaxNeedOutputs = 64
 const MaxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -102,6 +104,14 @@ type NeedSource struct {
 	PlanDigest string `json:"plan_digest"`
 }
 
+// NeedOutput projects one named producer output into a logical prerequisite.
+// A NeedOutputs key with an empty list deliberately exposes no outputs.
+type NeedOutput struct {
+	Name    string `json:"name"`
+	StepKey string `json:"step_key"`
+	Output  string `json:"output"`
+}
+
 type Position struct {
 	Line   int `json:"line"`
 	Column int `json:"column"`
@@ -150,6 +160,7 @@ type Job struct {
 	Vars                 map[string]string       `json:"vars,omitempty"`
 	Dependencies         []string                `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
+	NeedOutputs          map[string][]NeedOutput `json:"need_outputs,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
 	Needs                   map[string]Need      `json:"-"`
@@ -291,14 +302,17 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
 		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
 	}
-	if job.Schema != SchemaV4 && (job.Container != nil || len(job.Services) != 0) {
+	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && (job.Container != nil || len(job.Services) != 0) {
 		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
+	}
+	if job.Schema != SchemaV5 && job.NeedOutputs != nil {
+		return fmt.Errorf("job plan %s does not support prerequisite output projections", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
@@ -418,6 +432,46 @@ func (job Job) Validate() error {
 	if len(sourcedDependencies) != len(dependencies) {
 		return fmt.Errorf("job plan dependencies and prerequisite producers differ")
 	}
+	needSourcesByName := make(map[string]map[string]struct{}, len(job.NeedSources))
+	for name, sources := range job.NeedSources {
+		steps := make(map[string]struct{}, len(sources))
+		for _, source := range sources {
+			steps[strings.ToLower(source.StepKey)] = struct{}{}
+		}
+		needSourcesByName[strings.ToLower(name)] = steps
+	}
+	projectedNeeds := make(map[string]struct{}, len(job.NeedOutputs))
+	for name, outputs := range job.NeedOutputs {
+		lowerName := strings.ToLower(name)
+		if _, exists := projectedNeeds[lowerName]; exists {
+			return fmt.Errorf("job plan contains duplicate prerequisite output projection %q", name)
+		}
+		projectedNeeds[lowerName] = struct{}{}
+		producers, exists := needSourcesByName[lowerName]
+		if !exists {
+			return fmt.Errorf("job plan prerequisite output projection %q has no matching prerequisite", name)
+		}
+		if len(outputs) > MaxNeedOutputs {
+			return fmt.Errorf("job plan prerequisite %q has more than %d projected outputs", name, MaxNeedOutputs)
+		}
+		seen := make(map[string]struct{}, len(outputs))
+		for i, output := range outputs {
+			if !targetPattern.MatchString(output.Name) || !targetPattern.MatchString(output.Output) || !targetPattern.MatchString(output.StepKey) {
+				return fmt.Errorf("job plan prerequisite %q has invalid output projection", name)
+			}
+			if _, exists := producers[strings.ToLower(output.StepKey)]; !exists {
+				return fmt.Errorf("job plan prerequisite %q output %q selects unknown producer %q", name, output.Name, output.StepKey)
+			}
+			if i > 0 && compareNeedOutput(outputs[i-1], output) >= 0 {
+				return fmt.Errorf("job plan prerequisite %q output projections must be unique and sorted", name)
+			}
+			key := strings.ToLower(output.Name) + "\x00" + strings.ToLower(output.StepKey)
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("job plan prerequisite %q repeats output projection %q from %q", name, output.Name, output.StepKey)
+			}
+			seen[key] = struct{}{}
+		}
+	}
 	if len(job.Steps) == 0 {
 		return fmt.Errorf("job plan contains no steps")
 	}
@@ -476,12 +530,22 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 || job.Schema == SchemaV4 {
+	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || (job.Schema == SchemaV5 && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func compareNeedOutput(left, right NeedOutput) int {
+	if left.Name != right.Name {
+		return strings.Compare(left.Name, right.Name)
+	}
+	if left.StepKey != right.StepKey {
+		return strings.Compare(left.StepKey, right.StepKey)
+	}
+	return strings.Compare(left.Output, right.Output)
 }
 
 func validateContainer(image string, env map[string]string, ports []string) error {

@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	schema             = "buildkite-gha/compiler-ir/v0"
+	schema             = "buildkite-gha/compiler-ir/v1"
 	maxMatrixInstances = 256
 )
 
@@ -75,29 +75,39 @@ type WorkflowSource struct {
 
 // JobInstance is one statically expanded job in the owned IR.
 type JobInstance struct {
-	Key                     string              `json:"key"`
-	LogicalJobID            string              `json:"logical_job_id"`
-	Label                   string              `json:"label"`
-	Needs                   []string            `json:"needs,omitempty"`
-	LogicalNeeds            []string            `json:"logical_needs,omitempty"`
-	RunsOn                  []string            `json:"runs_on"`
-	Queue                   string              `json:"queue"`
-	Matrix                  map[string]any      `json:"matrix,omitempty"`
-	FailFast                *bool               `json:"fail_fast,omitempty"`
-	MaxParallel             *int                `json:"max_parallel,omitempty"`
-	Steps                   []workflow.Step     `json:"steps"`
-	Env                     map[string]string   `json:"env,omitempty"`
-	If                      string              `json:"if,omitempty"`
-	TimeoutMinutes          float64             `json:"timeout_minutes,omitempty"`
-	DefaultShell            string              `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string              `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string   `json:"outputs,omitempty"`
-	Container               *workflow.Container `json:"container,omitempty"`
-	Services                []workflow.Service  `json:"services,omitempty"`
-	SourcePath              string              `json:"source_path"`
-	SourceDigest            string              `json:"source_digest"`
-	RepositoryRoot          string              `json:"-"`
-	Source                  workflow.Span       `json:"source"`
+	Key                     string                  `json:"key"`
+	LogicalJobID            string                  `json:"logical_job_id"`
+	Label                   string                  `json:"label"`
+	Needs                   []string                `json:"needs,omitempty"`
+	NeedGroups              map[string][]string     `json:"need_groups,omitempty"`
+	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
+	RunsOn                  []string                `json:"runs_on"`
+	Queue                   string                  `json:"queue"`
+	Matrix                  map[string]any          `json:"matrix,omitempty"`
+	FailFast                *bool                   `json:"fail_fast,omitempty"`
+	MaxParallel             *int                    `json:"max_parallel,omitempty"`
+	Steps                   []workflow.Step         `json:"steps"`
+	Env                     map[string]string       `json:"env,omitempty"`
+	If                      string                  `json:"if,omitempty"`
+	TimeoutMinutes          float64                 `json:"timeout_minutes,omitempty"`
+	DefaultShell            string                  `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string                  `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string       `json:"outputs,omitempty"`
+	Container               *workflow.Container     `json:"container,omitempty"`
+	Services                []workflow.Service      `json:"services,omitempty"`
+	SourcePath              string                  `json:"source_path"`
+	SourceDigest            string                  `json:"source_digest"`
+	RepositoryRoot          string                  `json:"-"`
+	Source                  workflow.Span           `json:"source"`
+}
+
+// NeedOutput selects one caller-visible output from a concrete prerequisite.
+// An empty output list explicitly prevents an aggregate need from exposing its
+// producers' internal outputs.
+type NeedOutput struct {
+	Name    string `json:"name"`
+	StepKey string `json:"step_key"`
+	Output  string `json:"output"`
 }
 
 // Report summarizes successful workflow validation.
@@ -217,10 +227,6 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 	plans := make([]plan.Job, 0, len(ir.Jobs))
 	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
 	planDigests := make(map[string]string, len(ir.Jobs))
-	logicalByKey := make(map[string]string, len(ir.Jobs))
-	for _, instance := range ir.Jobs {
-		logicalByKey[instance.Key] = instance.LogicalJobID
-	}
 	actionSource := newMemoizedActionSource(options.ActionSource)
 	for _, instance := range ir.Jobs {
 		steps := make([]plan.Step, len(instance.Steps))
@@ -304,7 +310,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 						span := instance.Steps[stepIndex].Span.Start
 						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
-					if len(instance.LogicalNeeds) == 0 {
+					if len(instance.NeedGroups) == 0 {
 						span := instance.Steps[stepIndex].Span.Start
 						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
 					}
@@ -339,18 +345,33 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 			sort.Strings(authorization.DockerCapabilitySources)
 		}
-		needSources := make(map[string][]plan.NeedSource, len(instance.LogicalNeeds))
-		for _, logicalNeed := range instance.LogicalNeeds {
-			for _, dependency := range instance.Needs {
-				if logicalByKey[dependency] != logicalNeed {
-					continue
-				}
+		needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
+		for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
+			dependencies := instance.NeedGroups[logicalNeed]
+			if len(dependencies) > plan.MaxNeedProducers {
+				return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
+			}
+			for _, dependency := range dependencies {
 				digest, ok := planDigests[dependency]
 				if !ok {
 					return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
 				}
 				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
 			}
+		}
+		var needOutputs map[string][]plan.NeedOutput
+		if len(instance.NeedOutputs) != 0 {
+			needOutputs = make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
+			for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
+				outputs := instance.NeedOutputs[logicalNeed]
+				needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
+				for i, output := range outputs {
+					needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
+				}
+			}
+		}
+		if len(needOutputs) != 0 {
+			jobSchema = plan.SchemaV5
 		}
 		secrets, err := requiredSecrets(instance)
 		if err != nil {
@@ -382,6 +403,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
 			NeedSources:             needSources,
+			NeedOutputs:             needOutputs,
 			Env:                     instance.Env,
 			Condition:               instance.If,
 			TimeoutMinutes:          instance.TimeoutMinutes,
@@ -563,6 +585,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
+	needBindings := make(map[string]map[string]needBinding, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
@@ -572,6 +595,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourcePaths[job.ID] = sourced.path
 		sourceDigests[job.ID] = sourced.digest
 		sourceRoots[job.ID] = sourced.root
+		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
 			return nil, err
 		}
@@ -613,7 +637,6 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Label:                   instanceLabel(job, matrix),
 				RunsOn:                  labels,
 				Queue:                   queue,
-				LogicalNeeds:            append([]string(nil), job.Needs...),
 				Matrix:                  matrix,
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
@@ -631,12 +654,32 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				RepositoryRoot:          sourceRoots[id],
 				Source:                  job.Span,
 			}
-			for _, need := range job.Needs {
-				for _, prerequisite := range byLogicalID[need] {
-					instance.Needs = append(instance.Needs, prerequisite.Key)
+			for _, need := range sortedKeys(needBindings[id]) {
+				binding := needBindings[id][need]
+				var members []string
+				for _, member := range binding.members {
+					for _, prerequisite := range byLogicalID[member] {
+						members = append(members, prerequisite.Key)
+					}
+				}
+				sort.Strings(members)
+				if len(members) == 0 {
+					return nil, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))
+				}
+				if instance.NeedGroups == nil {
+					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
+				}
+				instance.NeedGroups[need] = members
+				instance.Needs = append(instance.Needs, members...)
+				if binding.projectOutputs {
+					if instance.NeedOutputs == nil {
+						instance.NeedOutputs = make(map[string][]NeedOutput)
+					}
+					instance.NeedOutputs[need] = []NeedOutput{}
 				}
 			}
 			sort.Strings(instance.Needs)
+			instance.Needs = slices.Compact(instance.Needs)
 			byLogicalID[id] = append(byLogicalID[id], instance)
 		}
 	}
@@ -677,6 +720,15 @@ func cloneMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func expandMatrix(path string, job workflow.Job, context expression.CompileContext) ([]map[string]any, error) {

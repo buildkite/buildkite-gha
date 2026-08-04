@@ -25,9 +25,18 @@ var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([
 
 type sourcedJob struct {
 	workflow.Job
-	path   string
-	digest string
-	root   string
+	path         string
+	digest       string
+	root         string
+	needBindings map[string]needBinding
+}
+
+type needBinding struct {
+	// members are flattened logical job IDs owned by one source-level need.
+	// projectOutputs distinguishes reusable-call/status-only boundaries from
+	// ordinary job needs, whose outputs pass through unchanged.
+	members        []string
+	projectOutputs bool
 }
 
 type reusableResolver struct {
@@ -54,7 +63,11 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root}
+			bindings := make(map[string]needBinding, len(job.Needs))
+			for _, need := range job.Needs {
+				bindings[need] = needBinding{members: []string{need}}
+			}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, needBindings: bindings}
 		}
 		return jobs, nil
 	}
@@ -80,7 +93,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds []string, depth int) ([]sourcedJob, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, depth int) ([]sourcedJob, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -90,7 +103,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		return nil, err
 	}
 
-	replacements := make(map[string][]string, len(jobs))
+	replacements := make(map[string]needBinding, len(jobs))
 	var resolved []sourcedJob
 	for _, id := range order {
 		job := jobs[id]
@@ -104,12 +117,19 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if err := rejectCallMatrixExpressions(path, job); err != nil {
 				return nil, err
 			}
+			if strings.TrimSpace(job.If) != "" {
+				return nil, jobError(path, job, "reusable-workflow call conditions are unsupported")
+			}
 		}
-		needs := replacementNeeds(job.Needs, replacements)
+		needBindings := replacementNeeds(job.Needs, replacements)
 		if len(job.Needs) == 0 {
-			needs = append(needs, externalNeeds...)
-			sort.Strings(needs)
+			needBindings = cloneNeedBindings(externalNeeds)
+			for name, binding := range needBindings {
+				binding.projectOutputs = true
+				needBindings[name] = binding
+			}
 		}
+		needs := bindingMembers(needBindings)
 		if job.Reusable == nil {
 			job.ID = namespacedJobID(namespace, job.ID)
 			job.Needs = needs
@@ -124,8 +144,8 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return nil, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root})
-			replacements[id] = []string{job.ID}
+			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, needBindings: needBindings})
+			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
 
@@ -168,7 +188,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		if err != nil {
 			return nil, err
 		}
-		var terminals []string
+		var members []string
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix)
@@ -200,44 +220,59 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			}
 
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeJobs, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needs, depth+1)
+			calleeJobs, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				return nil, err
 			}
 			resolved = append(resolved, calleeJobs...)
-			terminals = append(terminals, terminalJobIDs(calleeJobs)...)
+			for _, calleeJob := range calleeJobs {
+				members = append(members, calleeJob.ID)
+			}
 		}
-		sort.Strings(terminals)
-		replacements[id] = terminals
+		sort.Strings(members)
+		replacements[id] = needBinding{members: members, projectOutputs: true}
 	}
 	return resolved, nil
 }
 
-func replacementNeeds(needs []string, replacements map[string][]string) []string {
-	var out []string
+func replacementNeeds(needs []string, replacements map[string]needBinding) map[string]needBinding {
+	out := make(map[string]needBinding, len(needs))
 	for _, need := range needs {
-		out = append(out, replacements[need]...)
+		out[need] = cloneNeedBinding(replacements[need])
 	}
-	sort.Strings(out)
 	return out
 }
 
-func terminalJobIDs(jobs []sourcedJob) []string {
-	needed := make(map[string]struct{})
-	for _, job := range jobs {
-		for _, need := range job.Needs {
-			needed[need] = struct{}{}
+func bindingMembers(bindings map[string]needBinding) []string {
+	seen := make(map[string]struct{})
+	for _, binding := range bindings {
+		for _, member := range binding.members {
+			seen[member] = struct{}{}
 		}
 	}
-	var terminals []string
-	for _, job := range jobs {
-		if _, ok := needed[job.ID]; !ok {
-			terminals = append(terminals, job.ID)
-		}
+	members := make([]string, 0, len(seen))
+	for member := range seen {
+		members = append(members, member)
 	}
-	sort.Strings(terminals)
-	return terminals
+	sort.Strings(members)
+	return members
+}
+
+func cloneNeedBindings(bindings map[string]needBinding) map[string]needBinding {
+	if bindings == nil {
+		return nil
+	}
+	cloned := make(map[string]needBinding, len(bindings))
+	for name, binding := range bindings {
+		cloned[name] = cloneNeedBinding(binding)
+	}
+	return cloned
+}
+
+func cloneNeedBinding(binding needBinding) needBinding {
+	binding.members = append([]string(nil), binding.members...)
+	return binding
 }
 
 func namespacedJobID(namespace, id string) string {

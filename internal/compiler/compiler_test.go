@@ -312,9 +312,10 @@ jobs:
       enabled: true
   finish:
     needs: delegated
+    if: always() && needs.delegated.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - run: finish
+      - run: test "${{ needs.delegated.result }}" = success
 `)
 	calleePath := writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -355,11 +356,14 @@ jobs:
 	first := byID["delegated.first"]
 	second := byID["delegated.second"]
 	finish := byID["finish"]
-	if !reflect.DeepEqual(first.Needs, []string{prepare.Key}) || !reflect.DeepEqual(first.LogicalNeeds, []string{"prepare"}) {
-		t.Fatalf("callee root needs = %#v / %#v, want caller prerequisite", first.Needs, first.LogicalNeeds)
+	if !reflect.DeepEqual(first.Needs, []string{prepare.Key}) || !reflect.DeepEqual(first.NeedGroups, map[string][]string{"prepare": {prepare.Key}}) || !reflect.DeepEqual(first.NeedOutputs, map[string][]NeedOutput{"prepare": {}}) {
+		t.Fatalf("callee root needs = %#v / %#v / %#v, want status-only caller prerequisite", first.Needs, first.NeedGroups, first.NeedOutputs)
 	}
-	if !reflect.DeepEqual(second.Needs, []string{first.Key}) || !reflect.DeepEqual(finish.Needs, []string{second.Key}) {
-		t.Fatalf("callee/caller dependencies = %#v / %#v", second.Needs, finish.Needs)
+	if !reflect.DeepEqual(second.Needs, []string{first.Key}) || !reflect.DeepEqual(second.NeedGroups, map[string][]string{"first": {first.Key}}) {
+		t.Fatalf("callee dependency = %#v / %#v, want source-local need name", second.Needs, second.NeedGroups)
+	}
+	if !reflect.DeepEqual(finish.Needs, []string{first.Key, second.Key}) || !reflect.DeepEqual(finish.NeedGroups, map[string][]string{"delegated": {first.Key, second.Key}}) || !reflect.DeepEqual(finish.NeedOutputs, map[string][]NeedOutput{"delegated": {}}) {
+		t.Fatalf("caller dependency projection = %#v / %#v / %#v", finish.Needs, finish.NeedGroups, finish.NeedOutputs)
 	}
 	if first.Key != "gha-delegated-first" || first.Label != "delegated tests / first" {
 		t.Fatalf("callee identity = key %q label %q", first.Key, first.Label)
@@ -379,13 +383,29 @@ jobs:
 	if len(plans) != 4 {
 		t.Fatalf("plans = %d, want 4", len(plans))
 	}
+	firstPlan, err := plan.Encode(plans[1])
+	if err != nil {
+		t.Fatal(err)
+	}
 	secondPlan, err := plan.Encode(plans[2])
 	if err != nil {
 		t.Fatal(err)
 	}
+	if plans[3].Schema != plan.SchemaV5 {
+		t.Fatalf("downstream reusable-workflow plan schema = %q, want v5", plans[3].Schema)
+	}
+	if plans[1].Schema != plan.SchemaV5 || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
+		t.Fatalf("callee root caller prerequisite projection = %q / %#v", plans[1].Schema, plans[1].NeedOutputs)
+	}
+	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Steps[0].Command != `test "${{ needs.delegated.result }}" = success` {
+		t.Fatalf("downstream reusable-workflow result expressions = %q / %q", plans[3].Condition, plans[3].Steps[0].Command)
+	}
 	if !reflect.DeepEqual(plans[3].NeedSources, map[string][]plan.NeedSource{
-		"delegated.second": {{StepKey: second.Key, PlanDigest: transport.Digest(secondPlan)}},
-	}) {
+		"delegated": {
+			{StepKey: first.Key, PlanDigest: transport.Digest(firstPlan)},
+			{StepKey: second.Key, PlanDigest: transport.Digest(secondPlan)},
+		},
+	}) || !reflect.DeepEqual(plans[3].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
 		t.Fatalf("downstream reusable-workflow plan needs = %#v", plans[3].NeedSources)
 	}
 }
@@ -401,6 +421,11 @@ jobs:
     uses: ./.github/workflows/reusable.yml
     with:
       target: ${{ matrix.target }}
+  finish:
+    needs: delegated
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.delegated.result }}" = success
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
@@ -431,8 +456,11 @@ jobs:
 	if err := json.Unmarshal(first, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 2 || ir.Jobs[0].LogicalJobID == ir.Jobs[1].LogicalJobID || ir.Jobs[0].Key == ir.Jobs[1].Key {
+	if len(ir.Jobs) != 3 || ir.Jobs[0].LogicalJobID == ir.Jobs[1].LogicalJobID || ir.Jobs[0].Key == ir.Jobs[1].Key {
 		t.Fatalf("matrix reusable jobs = %#v, want two namespaced identities", ir.Jobs)
+	}
+	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"delegated": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"delegated": {}}) {
+		t.Fatalf("matrix reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
 	}
 	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
 	sort.Strings(runs)
@@ -448,8 +476,11 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" || plans[0].Workflow.Digest != ir.Jobs[0].SourceDigest {
+	if len(plans) != 3 || plans[0].Workflow.Path != "./.github/workflows/reusable.yml" || plans[0].Workflow.Digest != ir.Jobs[0].SourceDigest {
 		t.Fatalf("callee plan provenance = %#v, want callee path and digest", plans)
+	}
+	if len(plans[2].NeedSources["delegated"]) != 2 || !reflect.DeepEqual(plans[2].NeedOutputs, map[string][]plan.NeedOutput{"delegated": {}}) {
+		t.Fatalf("matrix reusable plan projection = %#v / %#v", plans[2].NeedSources, plans[2].NeedOutputs)
 	}
 }
 
@@ -613,6 +644,16 @@ jobs:
 		}
 	})
 
+	t.Run("call condition", func(t *testing.T) {
+		repository := t.TempDir()
+		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    if: github.ref == 'refs/heads/main'\n    uses: ./.github/workflows/reusable.yml\n")
+		writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+		if err == nil || !strings.Contains(err.Error(), "reusable-workflow call conditions are unsupported") {
+			t.Fatalf("Compile() error = %v, want explicit call-condition rejection", err)
+		}
+	})
+
 	t.Run("symlink escape", func(t *testing.T) {
 		repository := t.TempDir()
 		path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/escaped.yml\n")
@@ -666,6 +707,11 @@ jobs:
     uses: ./.github/workflows/middle.yml
     with:
       target: linux
+  finish:
+    needs: middle
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.middle.result }}" = success
 `)
 	writeWorkflow(t, repository, "middle.yml", `on:
   workflow_call:
@@ -704,8 +750,8 @@ jobs:
 	if err := json.Unmarshal(result, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if len(ir.Jobs) != 2 {
-		t.Fatalf("jobs = %d, want 2 nested matrix instances", len(ir.Jobs))
+	if len(ir.Jobs) != 3 {
+		t.Fatalf("jobs = %d, want 2 nested matrix instances and their caller", len(ir.Jobs))
 	}
 	runs := []string{ir.Jobs[0].Steps[0].Run, ir.Jobs[1].Steps[0].Run}
 	sort.Strings(runs)
@@ -713,9 +759,15 @@ jobs:
 		t.Fatalf("nested static inputs = %#v", runs)
 	}
 	for _, job := range ir.Jobs {
+		if job.LogicalJobID == "finish" {
+			continue
+		}
 		if !strings.HasPrefix(job.Label, "middle / leaf linux") {
 			t.Fatalf("nested label = %q, want substituted caller input", job.Label)
 		}
+	}
+	if !reflect.DeepEqual(ir.Jobs[2].NeedGroups, map[string][]string{"middle": {ir.Jobs[0].Key, ir.Jobs[1].Key}}) || !reflect.DeepEqual(ir.Jobs[2].NeedOutputs, map[string][]NeedOutput{"middle": {}}) {
+		t.Fatalf("nested reusable caller projection = %#v / %#v", ir.Jobs[2].NeedGroups, ir.Jobs[2].NeedOutputs)
 	}
 }
 

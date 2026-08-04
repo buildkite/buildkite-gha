@@ -132,7 +132,7 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 			secondPath: mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "failure", Output{Name: "second", Value: "two"})),
 		},
 	}
-	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable.build": {second, first}})
+	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable.build": {second, first}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +142,29 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	if got := needs["reusable.build"].Artifacts[0]; got.Artifact != firstManifest.Artifacts[0] || got.Producer != firstManifest.Producer {
 		t.Fatalf("retained artifact authority = %#v", got)
 	}
+	projected, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{"delegated": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected["delegated"].Result != "failure" || len(projected["delegated"].Outputs) != 0 || len(projected["delegated"].Producers) != 2 {
+		t.Fatalf("projected reusable need = %#v, want aggregate failure without internal outputs", projected["delegated"])
+	}
+	projected, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"delegated": {second, first}}, map[string][]OutputProjection{
+		"delegated": {{Name: "selected", StepKey: first.StepKey, Output: "first"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(projected["delegated"].Outputs, map[string]string{"selected": "one"}) {
+		t.Fatalf("selected reusable output = %#v", projected["delegated"].Outputs)
+	}
 
 	runner.dataByPath[secondPath] = mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success", Output{Name: "first", Value: "different"}))
-	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}})
+	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "conflicting matrix output") {
 		t.Fatalf("LoadNeeds() error = %v, want ambiguous matrix output rejection", err)
 	}
-	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable/build": {first}})
+	_, err = LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"reusable/build": {first}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "has no valid producers") {
 		t.Fatalf("LoadNeeds() error = %v, want invalid logical need rejection", err)
 	}

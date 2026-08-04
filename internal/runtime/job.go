@@ -305,7 +305,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	var runErr error
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || (job.Schema == plan.SchemaV5 && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
 			if step.Kind != "uses" {
 				continue
@@ -978,7 +978,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 	var action metadata.Metadata
 	var actionLock *plan.ActionLock
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || (job.Schema == plan.SchemaV5 && len(job.Actions) != 0) {
 		if step.Action == nil {
 			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
 		}
