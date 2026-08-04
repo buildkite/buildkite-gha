@@ -439,7 +439,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const plugin = "github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb"
+	const plugin = "github-actions#v0.2.0"
 	type pluginConfig struct {
 		Workflow string `yaml:"workflow"`
 		Version  string `yaml:"version"`
@@ -495,7 +495,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 			t.Fatalf("released plugin importer %q = %#v", key, step)
 		}
 		config, exists := step.plugins[0][plugin]
-		if !exists || config.Workflow != workflow || config.Version != "0.2.0" {
+		if !exists || config.Workflow != workflow || config.Version != "" {
 			t.Fatalf("released plugin importer %q config = %#v", key, step.plugins)
 		}
 		wantCondition := ""

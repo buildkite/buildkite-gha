@@ -9,7 +9,7 @@ runtime. Buildkite remains the source of truth for scheduling, logs, retries,
 cancellation, and the build UI.
 
 > [!IMPORTANT]
-> This is an experimental v0.1 preview for **public, tokenless, Linux x86-64
+> This is an experimental v0.2 preview for **public, tokenless, Linux x86-64
 > workflows**. It deliberately rejects workflows that need private source,
 > secrets, provider tokens, or other protected capabilities.
 
@@ -24,17 +24,14 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#v0.2.0:
           workflow: .github/workflows/ci.yml
 ```
 
-The companion plugin has not published a `v0.1.0` tag yet, so this preview
-example pins its reviewed initial commit. Use `github-actions#v0.1.0` after that
-tag is published; do not replace the pin with a floating branch.
-
-The plugin downloads and verifies `buildkite-gha` v0.1.0 by default, derives the
+The released plugin downloads and verifies `buildkite-gha` v0.2.0 by default, derives the
 event context from the Buildkite build, and uploads the generated jobs to the
-fixed `hosted` queue.
+fixed `hosted` queue. Pin a released plugin version rather than a floating
+branch.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -52,7 +49,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb:
+      - github-actions#v0.2.0:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
