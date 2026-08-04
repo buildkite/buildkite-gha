@@ -129,6 +129,11 @@ func TestParseRejectsWorkflowAndJobConcurrencyWithLocation(t *testing.T) {
 			source: "on: push\nenv:\n  JOBS: &jobs jobs\n  FIELD: &field concurrency\n*jobs:\n  test:\n    runs-on: ubuntu-latest\n    *field: deploy\n    steps: [{run: true}]\n",
 			want:   "concurrency.yml:8:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
 		},
+		{
+			name:   "aliased-job",
+			source: "on: push\njobs:\n  anchor-holder:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include:\n          - &shared-job\n            runs-on: ubuntu-latest\n            concurrency: deploy\n            steps:\n              - run: echo ok\n    steps:\n      - run: echo holder\n  test: *shared-job\n",
+			want:   "concurrency.yml:10:13: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := Parse("concurrency.yml", []byte(test.source))
