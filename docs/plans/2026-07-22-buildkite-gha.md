@@ -2225,16 +2225,16 @@ interfaces required by [ADR 0003](../architecture/0003-protected-capability-cont
 Private source, secrets, provider tokens, environments, and compatible OIDC
 remain fail-closed during that work.
 
-The complete candidate installation experience is now proven. CLI `v0.2.0` is
+The complete published installation experience is now proven. CLI `v0.2.0` is
 public, and companion plugin `v0.2.0` resolves to the exact tested merge commit
 `d009da173158270a3921b2997ae8fd3d68526d00`, which defaults to that CLI release.
-At source commit `71f23edfba88e18b57f58150c2b71d31141fbf03`, Buildkite build 331 passed the
+At source commit `d5102df7e81c49f27a30fb2830d9608a56ee84de`, Buildkite build 336 passed the
 service-free terminal after the basic, artifact, JavaScript/composite, and
-advanced importers and generated jobs succeeded. Buildkite build 332 passed the
-cache producer miss and post-save, direct-dependent exact hit, cache terminal,
-and their generated jobs. Those runs pinned the exact plugin commit and omitted
-the CLI version override. A final rerun through the public plugin tag remains
-the authoritative published quick-start proof.
+advanced importers and generated jobs succeeded. Buildkite build 337 passed the
+same service-free lane plus the cache producer miss and post-save,
+direct-dependent primary-key hit and restore, cache terminal, and repository
+checks. Both runs used only the public plugin tag and its default verified CLI
+distribution. They are the authoritative published quick-start evidence.
 
 Treat a fully reproducible demo as the next product milestone, distinct from a
 public-beta declaration. It has two explicit lanes:
@@ -2264,28 +2264,29 @@ importer, generated jobs at basic through advanced complexity, native logs and
 dependencies, artifact and cache observations, and the final native
 continuation.
 
-The demo gap is closing in this order, using small cross-repository changes:
+The demo gap closed in this order, using small cross-repository changes:
 
-1. Completed: in this repository, add a production-plugin demo dispatcher and stable
-   representative fixtures. Keep the service-free baseline independent of the
-   cache extension, remove development-only source rewriting from the plugin
-   path, and preserve deterministic compile/admission coverage locally.
-2. Completed: run the full local gate and existing exact-commit hosted proofs, then publish
-   the resulting CLI as `v0.2.0` with its current checksummed archive contract.
-   The plugin cannot prove the current runtime before that runtime has a public
-   immutable release; failures found by the plugin proof are fixed in a patch
-   release rather than by replacing release assets.
-3. Completed: in the companion plugin repository, default to the proven CLI release, add
-   a live installer/plugin smoke lane alongside the existing isolated tests,
-   and document the exact prerequisites. Prove the candidate plugin commit
-   against both demo lanes before tagging the plugin.
-4. In progress: tag the companion plugin, update this repository's quick start from
-   the temporary commit pin to that tag, and rerun both demo lanes using only
-   the published configuration. Record those exact runs as the authoritative
-   installation and demo evidence.
-5. Ongoing: use failures and diagnostics from those runs, followed by several real
-   customer workflow migrations, to drive small compatibility or UX changes.
-   Do not add workflow-specific runtime branches to make a demo fixture pass.
+1. Completed: in this repository, add a production-plugin demo dispatcher and
+   stable representative fixtures. Keep the service-free baseline independent
+   of the cache extension, remove development-only source rewriting from the
+   plugin path, and preserve deterministic compile/admission coverage locally.
+2. Completed: run the full local gate and existing exact-commit hosted proofs,
+   then publish the resulting CLI as `v0.2.0` with its current checksummed
+   archive contract. The plugin cannot prove the current runtime before that
+   runtime has a public immutable release; failures found by the plugin proof
+   are fixed in a patch release rather than by replacing release assets.
+3. Completed: in the companion plugin repository, default to the proven CLI
+   release, add a live installer/plugin smoke lane alongside the existing
+   isolated tests, and document the exact prerequisites. Prove the candidate
+   plugin commit against both demo lanes before tagging the plugin.
+4. Completed: tag the companion plugin, update this repository's quick start
+   from the temporary commit pin to that tag, and rerun both demo lanes using
+   only the published configuration. Record those exact runs as the
+   authoritative installation and demo evidence.
+5. Ongoing: use failures and diagnostics from those runs, followed by several
+   real customer workflow migrations, to drive small compatibility or UX
+   changes. Do not add workflow-specific runtime branches to make a demo
+   fixture pass.
 
 This milestone does not by itself satisfy every public-beta gate. The initial
 support target still names manual-input event envelopes plus job and service
