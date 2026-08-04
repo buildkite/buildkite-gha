@@ -484,7 +484,11 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 
 func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
 	var stderr bytes.Buffer
-	dir := filepath.Join(t.TempDir(), "mise")
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, "mise")
 	if got := prepareMiseDataDir(dir, &stderr); got != dir || stderr.Len() != 0 {
 		t.Fatalf("prepareMiseDataDir() = %q, stderr = %q", got, stderr.String())
 	}
@@ -498,8 +502,14 @@ func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
 		t.Fatalf("prepareMiseDataDir(file) = %q, stderr = %q", got, stderr.String())
 	}
 
-	parent := t.TempDir()
-	target := t.TempDir()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(parent, "linked-cache")
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)

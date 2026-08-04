@@ -182,9 +182,12 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 func TestLoadRejectsCompositeControlsWithLocation(t *testing.T) {
 	for _, control := range []string{"background", "wait", "wait-all", "cancel", "parallel"} {
 		t.Run(control, func(t *testing.T) {
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			writeAction(t, root, "action.yml", "runs:\n  using: composite\n  steps:\n    - id: child\n      run: echo ok\n      "+control+": true\n")
-			_, err := Load(root, ".")
+			_, err = Load(root, ".")
 			want := fmt.Sprintf("parse action metadata %q:6:7: composite child 1 (id %q) declares unsupported control %q", filepath.Join(root, "action.yml"), "child", control)
 			if err == nil || err.Error() != want {
 				t.Fatalf("Load() error = %v, want %q", err, want)
