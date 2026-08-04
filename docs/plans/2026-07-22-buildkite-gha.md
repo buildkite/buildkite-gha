@@ -1220,6 +1220,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - provider API compatibility for arbitrary GitHub-mutating actions; and
 - a first-class Buildkite pipeline import schema.
 
+These deferrals cover the credential-returning Phase 6 slices. The preceding
+signed no-op grant proof remains a required security foundation, but does not
+make private source, secret, or provider-token delivery an initial beta gate.
+Cursor Origin public checkout remains a separate provider integration gate.
+
 ## Delivery plan
 
 ### Current progress
@@ -1291,8 +1296,9 @@ Explicitly defer from beta unless implementation evidence changes the order:
   `docker://`, Docker lifecycle overrides, private registries, arbitrary
   options, credentials, protected capabilities, and privileged queues continue
   to fail closed.
-- Phase 6 has begun with bounded job summaries and advisory job-scoped
-  Buildkite annotation publication. The checked-in exact-commit hosted proof
+- Phase 6's GitHub service-free compatibility track now includes bounded job
+  summaries and advisory job-scoped Buildkite annotation publication. The
+  checked-in exact-commit hosted proof
   compiles `testdata/phase6/.github/workflows/summary-annotation.yml`, settles
   the generated job through the existing importer/continuation topology, and
   requires an independent read-only API observation of its context, scope,
@@ -1337,10 +1343,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
   POC forms the exact-commit hosted proof: it requires a build-unique exact-key
   miss, creates a deterministic payload, saves through the registered post
   action, and requires a direct dependent to restore an exact hit and verify
-  the payload digest. Buildkite build 290 passed that lifecycle at exact
-  implementation commit `379344599c0653990687d017bd195d416c7bc29c`. The
+  the payload digest. Buildkite build 303 passed the current lifecycle at exact
+  merged commit `9d29bf26492be760016d29c7ba0d00033b4f9b39`. The
   minimal Phase 6 cache fixture remains `compile-pass` conformance coverage;
   the separately dispatched migration POC owns the hosted runtime claim.
+  Together these results complete the GitHub/tokenless portion of delivery
+  slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
+  provider context/source contract. Delivery slice 3—the OIDC-authenticated,
+  policy-checked, signed no-op grant—is the next control-plane slice; the
+  credential-returning slices remain deferred from the initial beta.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1383,8 +1394,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
   through nested local calls, while undeclared callee job outputs remain
   hidden. Exact matrix producers are retained and conflicting values fail
   closed instead of guessing GitHub's completion order; each call is bounded
-  to 64 concrete output projections. Literal and compound mappings remain
-  deferred. Caller prerequisites inherited by callee roots are likewise
+  to 64 concrete output projections. Buildkite build 303 proved that an exact
+  declared callee job output reached its direct caller with the expected value
+  in the full migration POC. Literal and compound mappings remain deferred.
+  Caller prerequisites inherited by callee roots are likewise
   status-only: their outputs are not exposed inside the called workflow.
   Call-level conditions fail closed instead of being silently discarded.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
@@ -1406,7 +1419,7 @@ Explicitly defer from beta unless implementation evidence changes the order:
   modes, and unsupported artifact commits are denied admission or input
   validation. The exact cache v6.1.0 fixture is admitted, and the advanced
   migration POC passed its hosted miss, post-save, and dependent exact-hit
-  lifecycle in Buildkite build 290. Job and service containers compile to
+  lifecycle in Buildkite build 303. Job and service containers compile to
   schema-v4 plans and have hosted runtime evidence, while production admission
   rejects their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
@@ -1539,6 +1552,14 @@ Phase 6 evidence:
   dependent before verifying the payload digest. The targeted cache importer,
   continuation, and verifier were removed after this proof; the minimal Phase 6
   fixture remains as compile-only conformance coverage.
+- [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
+  ran exact merged commit `9d29bf26492be760016d29c7ba0d00033b4f9b39`
+  and passed the current three-workflow migration POC suite. The advanced cache
+  producer hydrated the reusable quality job's verified result manifest,
+  required the exact declared `tested-package` output before creating its
+  payload, then completed the build-unique cache miss, post-save, dependent hit,
+  and artifact fan-out. This is the current hosted runtime claim; build 290
+  remains the original cache implementation proof.
 
 Phase 2 live evidence:
 
@@ -1894,6 +1915,14 @@ Delivery slices:
 6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
+Status: the GitHub/tokenless portion of slice 1 and all of slice 2 are
+implemented and hosted-proven. Cursor Origin public checkout remains pending on
+its provider context/source contract. Slice 3 is next and must establish the
+control-plane ownership, exact OIDC audience, independent GitHub provenance,
+policy, signing, and audit boundaries before any protected value is returned.
+Slices 4–6 remain long-term Phase 6 scope but are explicitly deferred from the
+initial beta.
+
 Definition of done:
 
 - `testdata/smoke/.github/workflows/artifact.yml` uploads one file in its
@@ -2034,7 +2063,8 @@ Start with `testdata/smoke` rather than an external workflow catalog:
 - `testdata/phase6/.github/workflows/cache-v6.yml` preserves the exact audited
   cache-v2 admission contract and the targeted build-unique miss, post-save,
   and dependent exact-hit shape as compile-only conformance coverage. The
-  advanced migration POC owns hosted runtime evidence from Buildkite build 290.
+  advanced migration POC owns current hosted runtime evidence from Buildkite
+  build 303; build 290 remains the original implementation proof.
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression
