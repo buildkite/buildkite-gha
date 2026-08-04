@@ -17,7 +17,7 @@ const (
 
 // ResolveNeeds converts compiler-owned producer identities into the verified
 // logical results and outputs consumed by runtime expression contexts.
-func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID string, sources map[string][]plan.NeedSource) (map[string]plan.Need, error) {
+func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID string, sources map[string][]plan.NeedSource, outputs map[string][]plan.NeedOutput) (map[string]plan.Need, error) {
 	transportSources := make(map[string][]transport.ResultSource, len(sources))
 	for name, producers := range sources {
 		for _, producer := range producers {
@@ -26,7 +26,14 @@ func ResolveNeeds(ctx context.Context, agent transport.Agent, root, buildID stri
 			})
 		}
 	}
-	verified, err := transport.LoadNeeds(ctx, agent, root, buildID, transportSources)
+	projections := make(map[string][]transport.OutputProjection, len(outputs))
+	for name, selected := range outputs {
+		projections[name] = make([]transport.OutputProjection, len(selected))
+		for i, output := range selected {
+			projections[name][i] = transport.OutputProjection{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
+		}
+	}
+	verified, err := transport.LoadNeeds(ctx, agent, root, buildID, transportSources, projections)
 	if err != nil {
 		return nil, err
 	}

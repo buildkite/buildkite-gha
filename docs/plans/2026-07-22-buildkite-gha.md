@@ -1374,6 +1374,15 @@ Explicitly defer from beta unless implementation evidence changes the order:
   best-effort UI/query mirror. Matrix fan-in with conflicting output values
   currently fails closed because the public artifact contract does not expose
   an authoritative completion order.
+- Static local reusable-workflow calls retain the source-level name written in
+  each consumer's `needs`, and a caller's `needs.<call>.result` aggregates the
+  verified manifests from every flattened callee job rather than only terminal
+  jobs. Schema-v5 plans carry an explicit output projection for call aliases;
+  the current empty projection prevents undeclared callee job outputs from
+  leaking while declared `workflow_call.outputs` remain a follow-up. Caller
+  prerequisites inherited by callee roots are likewise status-only: their
+  outputs are not exposed inside the called workflow. Call-level conditions
+  fail closed instead of being silently discarded.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all compilable smoke-manifest outputs pass the current

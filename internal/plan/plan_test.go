@@ -546,6 +546,65 @@ func TestV4ContainerContractAndLegacyRejection(t *testing.T) {
 	}
 }
 
+func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("4", 64)
+	job := validJob()
+	job.Schema = SchemaV5
+	job.Dependencies = []string{"gha-delegated-first", "gha-delegated-second"}
+	job.NeedSources = map[string][]NeedSource{
+		"delegated": {
+			{StepKey: "gha-delegated-first", PlanDigest: digest},
+			{StepKey: "gha-delegated-second", PlanDigest: digest},
+		},
+	}
+	job.NeedOutputs = map[string][]NeedOutput{"delegated": {}}
+	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build"}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(encoded); err != nil {
+		t.Fatal(err)
+	}
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v5.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV5, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v5 plan does not validate against schema: %v", err)
+	}
+
+	job.Steps = []Step{{ID: "step-1", Kind: "run", Command: "true"}}
+	job.NeedOutputs["delegated"] = []NeedOutput{{Name: "result", StepKey: "gha-delegated-first", Output: "internal"}}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	job.Schema = SchemaV4
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support prerequisite output projections") {
+		t.Fatalf("Validate() error = %v, want legacy projection rejection", err)
+	}
+	job.Schema = SchemaV5
+	job.NeedOutputs["delegated"][0].StepKey = "gha-other"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "selects unknown producer") {
+		t.Fatalf("Validate() error = %v, want producer binding rejection", err)
+	}
+}
+
 func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
 	if err != nil {

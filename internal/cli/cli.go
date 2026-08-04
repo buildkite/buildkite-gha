@@ -195,7 +195,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4) && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -247,7 +247,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var result gharuntime.JobResult
 	var runErr error
 	if len(job.NeedSources) != 0 {
-		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources)
+		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
 		if runErr != nil {
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}

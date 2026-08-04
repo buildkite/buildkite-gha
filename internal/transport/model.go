@@ -21,7 +21,7 @@ const (
 	MaxResultOutputs       = 64
 	MaxResultOutputBytes   = 1024
 	MaxResultManifestBytes = 96 * 1024
-	MaxResultProducers     = 256
+	MaxResultProducers     = 1024
 
 	MaxResultArtifacts         = 64
 	MaxResultArtifactNameBytes = 255
