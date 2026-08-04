@@ -455,7 +455,11 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 			mounts = append(mounts, run[i+1])
 		}
 	}
-	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+action.Workspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
+	resolvedWorkspace, err := filepath.EvalSymlinks(action.Workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 3 || !strings.HasSuffix(mounts[0], ",target=/github/file_commands") || mounts[1] != "type=bind,source="+resolvedWorkspace+",target=/github/workspace" || !strings.HasSuffix(mounts[2], ",target=/github/runner_temp") {
 		t.Fatalf("fixed Docker mounts = %#v", mounts)
 	}
 	if workdir := argumentAfter(t, run, "--workdir"); workdir != "/github/workspace" {
