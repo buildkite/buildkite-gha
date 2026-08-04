@@ -194,10 +194,13 @@ pull requests to the read-only default-branch scope. Missing configuration,
 disabled minting, malformed responses, redirects, or failed redaction stop the
 cache action before its JavaScript executes.
 
-This is an implemented and admitted contract, not yet a runtime-proof claim.
-The follow-up hosted fixture must independently demonstrate a miss, post-action
-save, and later restore hit at an exact implementation commit before the smoke
-inventory can mark cache v6 `runtime-pass`.
+This implemented and admitted contract has hosted runtime evidence. The
+advanced migration POC in [Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+demonstrated a build-unique miss, post-action save, and direct dependent exact
+hit at implementation commit
+`379344599c0653990687d017bd195d416c7bc29c`. The minimal Phase 6 cache fixture
+remains compile-only conformance coverage; the migration POC owns the runtime
+claim.
 
 ### Failures stay explicit
 

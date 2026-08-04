@@ -1333,15 +1333,14 @@ Explicitly defer from beta unless implementation evidence changes the order:
   the three cache-v2 variables only to the verified cache action. The ambient
   Agent job token never enters action code or plan/result state. Older majors,
   other commits, unsafe mint responses, redirects, missing service
-  configuration, and redaction failure all fail closed. The checked-in fixture
-  now forms an exact-commit targeted hosted proof: it requires a build-unique
-  exact-key miss, creates a deterministic payload, saves through the registered
-  post action, and requires a direct dependent to restore an exact hit and
-  verify the payload digest. A read-only verifier binds those observations to
-  the exact build, commit, and generated job IDs. Job-bound GHAC token minting
-  remains feature-disabled, so the proof is deliberately absent from the
-  aggregate hosted dispatcher and the fixture remains `compile-pass` with no
-  hosted runtime claim.
+  configuration, and redaction failure all fail closed. The advanced migration
+  POC forms the exact-commit hosted proof: it requires a build-unique exact-key
+  miss, creates a deterministic payload, saves through the registered post
+  action, and requires a direct dependent to restore an exact hit and verify
+  the payload digest. Buildkite build 290 passed that lifecycle at exact
+  implementation commit `379344599c0653990687d017bd195d416c7bc29c`. The
+  minimal Phase 6 cache fixture remains `compile-pass` conformance coverage;
+  the separately dispatched migration POC owns the hosted runtime claim.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1519,11 +1518,14 @@ Phase 6 evidence:
   was `sha256:e4a73e073cfea509c8fe18aa5ddedbfbcd9342de0b4c5372e6105c6f28f1f151`;
   the payload digest was
   `sha256:33dc6db44d6acaabdf47645944927ab2ce139bb7caabe9e23a82c71621ae239c`.
-- The cache-v2 roundtrip workflow, exact-commit importer, failure-tolerant
-  settlement step, and independent verifier are checked in but have no hosted
-  evidence yet. The proof remains dormant until job-bound GHAC token minting is
-  feature-enabled; compilation or profile admission alone must not be recorded
-  as a miss/save/restore result.
+- [Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+  ran exact implementation commit
+  `379344599c0653990687d017bd195d416c7bc29c`. The advanced migration POC
+  observed a build-unique exact-key miss, saved its deterministic payload
+  through the registered post action, and restored an exact hit in a direct
+  dependent before verifying the payload digest. The targeted cache importer,
+  continuation, and verifier were removed after this proof; the minimal Phase 6
+  fixture remains as compile-only conformance coverage.
 
 Phase 2 live evidence:
 
