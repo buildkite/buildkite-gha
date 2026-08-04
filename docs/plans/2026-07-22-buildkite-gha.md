@@ -1917,8 +1917,9 @@ Delivery slices:
 
 Status: the GitHub/tokenless portion of slice 1 and all of slice 2 are
 implemented and hosted-proven. Cursor Origin public checkout remains pending on
-its provider context/source contract. Slice 3 is next and must establish the
-control-plane ownership, exact OIDC audience, independent GitHub provenance,
+its provider context/source contract. Slice 3 is next; its proposed
+[control-plane contract](../architecture/0003-protected-capability-control-plane.md)
+must establish ownership, exact OIDC audience, independent GitHub provenance,
 policy, signing, and audit boundaries before any protected value is returned.
 Slices 4–6 remain long-term Phase 6 scope but are explicitly deferred from the
 initial beta.
