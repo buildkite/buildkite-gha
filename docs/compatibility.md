@@ -45,7 +45,7 @@ provide.
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, and `::error` are supported. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. `::notice`, groups, command echo control, and legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
 | `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
-| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and requires an operator-configured compatible Results service. Hosted runtime proof is still pending. |
+| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and requires an operator-configured compatible Results service. The exact miss/save/dependent-hit lifecycle passed in Buildkite build 290. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
@@ -194,10 +194,13 @@ pull requests to the read-only default-branch scope. Missing configuration,
 disabled minting, malformed responses, redirects, or failed redaction stop the
 cache action before its JavaScript executes.
 
-This is an implemented and admitted contract, not yet a runtime-proof claim.
-The follow-up hosted fixture must independently demonstrate a miss, post-action
-save, and later restore hit at an exact implementation commit before the smoke
-inventory can mark cache v6 `runtime-pass`.
+This implemented and admitted contract has hosted runtime evidence. The
+advanced migration POC in [Buildkite build 290](https://buildkite.com/buildkite/buildkite-gha/builds/290)
+demonstrated a build-unique miss, post-action save, and direct dependent exact
+hit at implementation commit
+`379344599c0653990687d017bd195d416c7bc29c`. The minimal Phase 6 cache fixture
+remains compile-only conformance coverage; the migration POC owns the runtime
+claim.
 
 ### Failures stay explicit
 
