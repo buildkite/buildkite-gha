@@ -70,6 +70,21 @@ steps:
     if: build.env("POC_SUITE") == "migration"
     command: "buildkite-agent pipeline upload .buildkite/migration-poc.yml"
 
+  - label: ":github: Load released plugin demo"
+    key: "plugin-demo-loader"
+    if: build.env("DEMO_SUITE") == "plugin"
+    command: |
+      set -euo pipefail
+      commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
+      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+      if [[ "$${DEMO_CACHE:-}" == "1" ]]; then
+        : "$${BUILDKITE_GHA_CACHE_URL:?BUILDKITE_GHA_CACHE_URL is required when DEMO_CACHE=1}"
+      fi
+      scripts/phase-0-shell-oracle-checkout "$$commit"
+      test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      buildkite-agent pipeline upload .buildkite/plugin-demo.yml
+
   - label: ":pipeline: Load consolidated hosted smoke proof"
     key: "hosted-smoke-loader"
     if: build.env("SMOKE_PROBE") == "hosted"

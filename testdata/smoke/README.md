@@ -46,8 +46,9 @@ Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
 The exact audited `actions/upload-artifact` and exact-name
 `actions/download-artifact` commits are admitted through bounded native
-adapters. Cache actions, artifact merge and broad download modes, and
-unsupported commits remain rejected; the profile leaves unknown generic
+adapters. The exact audited `actions/cache` v6.1.0 commit is also admitted;
+other cache commits, artifact merge and broad download modes, and unsupported
+artifact commits remain rejected. The profile leaves unknown generic
 service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are
 deliberately not marked for this profile: their execution is proven separately,

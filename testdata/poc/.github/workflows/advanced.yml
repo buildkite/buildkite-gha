@@ -8,8 +8,7 @@ permissions:
   contents: read
 
 env:
-  POC_CACHE_KEY: migration-poc-v1-__POC_NONCE__
-  POC_CACHE_PAYLOAD: migration-poc-payload:__POC_NONCE__
+  POC_ADVANCED_PAYLOAD: migration-poc-advanced:${{ github.sha }}
 
 jobs:
   quality:
@@ -17,50 +16,32 @@ jobs:
     with:
       package: ./internal/action/integration
 
-  cache-producer:
-    name: Populate dependency cache
+  advanced-package:
+    name: Exercise actions and package payload
     needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Restore build-unique cache
-        id: cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: migration-cache
-          key: ${{ env.POC_CACHE_KEY }}
-
-      - name: Require miss and create payload
+      - name: Require reusable workflow output and create payload
         shell: bash
         env:
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
           TESTED_PACKAGE: ${{ needs.quality.outputs.tested-package }}
         run: |
-          test "$CACHE_HIT" != true
           test "$TESTED_PACKAGE" = './internal/action/integration'
-          mkdir -p migration-cache
-          printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
+          mkdir -p migration-payload
+          printf '%s\n' "$POC_ADVANCED_PAYLOAD" > migration-payload/payload.txt
 
-  advanced-package:
-    name: Restore cache and package payload
-    needs: cache-producer
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Restore producer cache
-        id: cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Run public Dockerfile action
+        id: docker
+        uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
         with:
-          path: migration-cache
-          key: ${{ env.POC_CACHE_KEY }}
+          who-to-greet: Migration POC
 
-      - name: Require cache hit
+      - name: Verify Dockerfile action output
         shell: bash
         env:
-          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
-        run: |
-          test "$CACHE_HIT" = true
-          test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+          ACTION_TIME: ${{ steps.docker.outputs.time }}
+        run: test -n "$ACTION_TIME"
 
       - name: Exercise continue-on-error
         id: expected-failure
@@ -76,8 +57,8 @@ jobs:
       - name: Upload restored payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: migration-poc-payload
-          path: migration-cache/payload.txt
+          name: migration-poc-advanced
+          path: migration-payload/payload.txt
           if-no-files-found: error
 
   advanced-verify:
@@ -93,7 +74,7 @@ jobs:
       - name: Download payload
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: migration-poc-payload
+          name: migration-poc-advanced
           path: payload
 
       - name: Verify payload
@@ -101,12 +82,12 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
-          test "$(cat payload/payload.txt)" = "$POC_CACHE_PAYLOAD"
-          echo "::warning title=Migration POC::$VARIANT verified the cached artifact"
+          test "$(cat payload/payload.txt)" = "$POC_ADVANCED_PAYLOAD"
+          echo "::warning title=Migration POC::$VARIANT verified the advanced artifact"
           {
             echo "## Advanced migration POC: $VARIANT"
             echo
-            echo 'Reusable workflow output, cache, artifact, matrix, and annotation checks passed.'
+            echo 'Reusable output, Dockerfile action, artifact, matrix, and annotation checks passed.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   poc-advanced:

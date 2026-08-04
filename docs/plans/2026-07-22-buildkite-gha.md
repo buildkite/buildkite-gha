@@ -1339,14 +1339,16 @@ Cursor Origin public checkout remains a separate provider integration gate.
   the three cache-v2 variables only to the verified cache action. The ambient
   Agent job token never enters action code or plan/result state. Older majors,
   other commits, unsafe mint responses, redirects, missing service
-  configuration, and redaction failure all fail closed. The advanced migration
-  POC forms the exact-commit hosted proof: it requires a build-unique exact-key
-  miss, creates a deterministic payload, saves through the registered post
-  action, and requires a direct dependent to restore an exact hit and verify
-  the payload digest. Buildkite build 303 passed the current lifecycle at exact
-  merged commit `9d29bf26492be760016d29c7ba0d00033b4f9b39`. The
-  minimal Phase 6 cache fixture remains `compile-pass` conformance coverage;
-  the separately dispatched migration POC owns the hosted runtime claim.
+  configuration, and redaction failure all fail closed. The then-combined
+  advanced migration POC forms the exact-commit implementation proof: it
+  required a build-unique exact-key miss, created a deterministic payload,
+  saved through the registered post action, and required a direct dependent to
+  restore an exact hit and verify the payload digest. Buildkite build 303 passed
+  that lifecycle at exact merged commit
+  `9d29bf26492be760016d29c7ba0d00033b4f9b39`. The minimal Phase 6 cache fixture
+  remains `compile-pass` conformance coverage. The stable cache extension now
+  awaits its exact-commit released-plugin run before receiving its own
+  `runtime-pass` classification.
   Together these results complete the GitHub/tokenless portion of delivery
   slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
   provider context/source contract. Delivery slice 3—the OIDC-authenticated,
@@ -1417,19 +1419,19 @@ Cursor Origin public checkout remains a separate provider integration gate.
   --format text|json <workflow>`. Expected-negative fixtures preserve current
   boundaries: unsupported cache commits, artifact merge and broad download
   modes, and unsupported artifact commits are denied admission or input
-  validation. The exact cache v6.1.0 fixture is admitted, and the advanced
-  migration POC passed its hosted miss, post-save, and dependent exact-hit
-  lifecycle in Buildkite build 303. Job and service containers compile to
-  schema-v4 plans and have hosted runtime evidence, while production admission
-  rejects their container provenance.
+  validation. The exact cache v6.1.0 fixture is admitted, and the predecessor
+  advanced migration POC passed its hosted miss, post-save, and dependent
+  exact-hit lifecycle in Buildkite build 303. Job and service containers
+  compile to schema-v4 plans and have hosted runtime evidence, while production
+  admission rejects their container provenance.
 - A consolidated exact-commit hosted dispatcher is available with
   `SMOKE_PROBE=hosted` and `SMOKE_COMMIT=<full commit>`. It aggregates the
   Phase 2 shell/upload, Phase 3 concurrent, Phase 4 public-action, Phase 5
   hosted-Docker capability, Phase 5 Dockerfile-action, and Phase 5 complete
   container-runtime proofs, plus the Phase 6 job-summary, workflow-command,
-  upload-artifact, and artifact-roundtrip proofs. Cache runtime coverage now
-  belongs to the separately dispatched migration POC suite, and its obsolete
-  targeted Phase 6 cache importer was removed. The historical aggregate uploads
+  upload-artifact, and artifact-roundtrip proofs. The next cache runtime claim
+  belongs to the optional released-plugin demo extension; its obsolete targeted
+  Phase 6 cache importer remains removed. The historical aggregate uploads
   each included importer and continuation independently, then settles their
   generated and native terminal steps; it does not flatten the
   importer/continuation topology. Existing `PHASE2_PROBE`,
@@ -1554,12 +1556,12 @@ Phase 6 evidence:
   fixture remains as compile-only conformance coverage.
 - [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
   ran exact merged commit `9d29bf26492be760016d29c7ba0d00033b4f9b39`
-  and passed the current three-workflow migration POC suite. The advanced cache
-  producer hydrated the reusable quality job's verified result manifest,
+  and passed the then-current three-workflow migration POC suite. The advanced
+  cache producer hydrated the reusable quality job's verified result manifest,
   required the exact declared `tested-package` output before creating its
   payload, then completed the build-unique cache miss, post-save, dependent hit,
-  and artifact fan-out. This is the current hosted runtime claim; build 290
-  remains the original cache implementation proof.
+  and artifact fan-out. This remains hosted implementation evidence for the
+  cache lifecycle; build 290 remains the original cache implementation proof.
 
 Phase 2 live evidence:
 
@@ -2064,8 +2066,10 @@ Start with `testdata/smoke` rather than an external workflow catalog:
 - `testdata/phase6/.github/workflows/cache-v6.yml` preserves the exact audited
   cache-v2 admission contract and the targeted build-unique miss, post-save,
   and dependent exact-hit shape as compile-only conformance coverage. The
-  advanced migration POC owns current hosted runtime evidence from Buildkite
-  build 303; build 290 remains the original implementation proof.
+  predecessor advanced migration POC retains hosted implementation evidence
+  from Buildkite build 303; the stable released-plugin cache extension awaits
+  its own exact-commit proof, and build 290 remains the original implementation
+  proof.
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression

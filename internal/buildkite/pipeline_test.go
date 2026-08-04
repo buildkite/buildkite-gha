@@ -341,6 +341,24 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["migration-poc-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/migration-poc.yml" || got.condition != `build.env("POC_SUITE") == "migration"` {
 		t.Fatalf("migration POC loader = %#v", got)
 	}
+	pluginDemo := steps["plugin-demo-loader"]
+	if pluginDemo.condition != `build.env("DEMO_SUITE") == "plugin"` {
+		t.Fatalf("released plugin demo loader = %#v", pluginDemo)
+	}
+	for _, required := range []string{
+		`commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"`,
+		`[[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]`,
+		`[[ "$${DEMO_CACHE:-}" == "1" ]]`,
+		`$${BUILDKITE_GHA_CACHE_URL:?BUILDKITE_GHA_CACHE_URL is required when DEMO_CACHE=1}`,
+		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
+		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
+		`git status --porcelain --untracked-files=all`,
+		`buildkite-agent pipeline upload .buildkite/plugin-demo.yml`,
+	} {
+		if !strings.Contains(pluginDemo.command, required) {
+			t.Fatalf("released plugin demo loader lacks %q:\n%s", required, pluginDemo.command)
+		}
+	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
 	}
@@ -412,6 +430,139 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if strings.Contains(hosted.command, "--replace") {
 		t.Fatalf("hosted smoke loader uses replacement upload:\n%s", hosted.command)
+	}
+}
+
+func TestProductionPluginDemoContract(t *testing.T) {
+	root := filepath.Join("..", "..")
+	source, err := os.ReadFile(filepath.Join(root, ".buildkite", "plugin-demo.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const plugin = "github-actions#aca805f6eb2965201d4edaa57f3eec8ef9ea7ccb"
+	type pluginConfig struct {
+		Workflow string `yaml:"workflow"`
+		Version  string `yaml:"version"`
+	}
+	var document struct {
+		Agents struct {
+			Queue string `yaml:"queue"`
+		} `yaml:"agents"`
+		Steps []struct {
+			Key              string                    `yaml:"key"`
+			If               string                    `yaml:"if"`
+			Command          string                    `yaml:"command"`
+			TimeoutInMinutes int                       `yaml:"timeout_in_minutes"`
+			DependsOn        []string                  `yaml:"depends_on"`
+			Plugins          []map[string]pluginConfig `yaml:"plugins"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(source, &document); err != nil {
+		t.Fatalf("parse released plugin demo: %v", err)
+	}
+	if document.Agents.Queue != "hosted" || len(document.Steps) != 7 {
+		t.Fatalf("released plugin demo structure = queue %q, steps %#v", document.Agents.Queue, document.Steps)
+	}
+	steps := make(map[string]struct {
+		condition    string
+		command      string
+		timeout      int
+		dependencies []string
+		plugins      []map[string]pluginConfig
+	}, len(document.Steps))
+	for _, step := range document.Steps {
+		if _, exists := steps[step.Key]; step.Key == "" || exists {
+			t.Fatalf("invalid or duplicate released plugin demo key %q", step.Key)
+		}
+		steps[step.Key] = struct {
+			condition    string
+			command      string
+			timeout      int
+			dependencies []string
+			plugins      []map[string]pluginConfig
+		}{step.If, step.Command, step.TimeoutInMinutes, step.DependsOn, step.Plugins}
+	}
+	importers := map[string]string{
+		"plugin-demo-basic-importer":    "testdata/poc/.github/workflows/basic.yml",
+		"plugin-demo-artifact-importer": "testdata/poc/.github/workflows/artifacts.yml",
+		"plugin-demo-actions-importer":  ".github/workflows/phase-4-actions-oracle.yml",
+		"plugin-demo-advanced-importer": "testdata/poc/.github/workflows/advanced.yml",
+		"plugin-demo-cache-importer":    "testdata/poc/.github/workflows/cache.yml",
+	}
+	for key, workflow := range importers {
+		step := steps[key]
+		if step.command != "" || step.timeout != 15 || len(step.plugins) != 1 || len(step.plugins[0]) != 1 {
+			t.Fatalf("released plugin importer %q = %#v", key, step)
+		}
+		config, exists := step.plugins[0][plugin]
+		if !exists || config.Workflow != workflow || config.Version != "0.2.0" {
+			t.Fatalf("released plugin importer %q config = %#v", key, step.plugins)
+		}
+		wantCondition := ""
+		if key == "plugin-demo-cache-importer" {
+			wantCondition = `build.env("DEMO_CACHE") == "1"`
+		}
+		if step.condition != wantCondition {
+			t.Fatalf("released plugin importer %q condition = %q, want %q", key, step.condition, wantCondition)
+		}
+	}
+	serviceTerminal := steps["plugin-demo-service-free-terminal"]
+	wantServiceDependencies := map[string]bool{
+		"plugin-demo-basic-importer":    true,
+		"plugin-demo-artifact-importer": true,
+		"plugin-demo-actions-importer":  true,
+		"plugin-demo-advanced-importer": true,
+	}
+	if len(serviceTerminal.dependencies) != len(wantServiceDependencies) {
+		t.Fatalf("released plugin service-free terminal dependencies = %v", serviceTerminal.dependencies)
+	}
+	for _, dependency := range serviceTerminal.dependencies {
+		if !wantServiceDependencies[dependency] {
+			t.Fatalf("released plugin service-free terminal has unexpected dependency %q", dependency)
+		}
+	}
+	cacheTerminal := steps["plugin-demo-cache-terminal"]
+	if cacheTerminal.condition != `build.env("DEMO_CACHE") == "1"` || len(cacheTerminal.dependencies) != 1 || cacheTerminal.dependencies[0] != "plugin-demo-cache-importer" {
+		t.Fatalf("released plugin cache terminal = %#v", cacheTerminal)
+	}
+	text := string(source)
+	for _, forbidden := range []string{"scripts/migration-poc-import", "github-actions#main", "github-actions#master", "__POC_NONCE__"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("released plugin demo contains %q", forbidden)
+		}
+	}
+
+	advanced, err := os.ReadFile(filepath.Join(root, "testdata", "poc", ".github", "workflows", "advanced.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	advancedText := string(advanced)
+	for _, required := range []string{
+		"actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d",
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+		"actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+		"continue-on-error: true",
+	} {
+		if !strings.Contains(advancedText, required) {
+			t.Fatalf("advanced released-plugin fixture lacks %q", required)
+		}
+	}
+	if strings.Contains(advancedText, "actions/cache@") || strings.Contains(advancedText, "__POC_") {
+		t.Fatalf("service-free released-plugin fixture retains cache or source rewriting:\n%s", advanced)
+	}
+
+	cache, err := os.ReadFile(filepath.Join(root, "testdata", "poc", ".github", "workflows", "cache.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheText := string(cache)
+	if count := strings.Count(cacheText, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"); count != 2 {
+		t.Fatalf("released-plugin cache fixture has %d audited cache invocations, want two", count)
+	}
+	for _, forbidden := range []string{"restore-keys:", "__POC_", "BUILDKITE_"} {
+		if strings.Contains(cacheText, forbidden) {
+			t.Fatalf("released-plugin cache fixture contains %q", forbidden)
+		}
 	}
 }
 

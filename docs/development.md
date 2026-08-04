@@ -142,26 +142,55 @@ producer and both consumer matrix jobs to pass, checks all three terminal
 manifests, and confirms both consumers observed the exact payload and compatible
 absolute `download-path` output.
 
-The migration POC suite covers basic CI, artifact transfer, and the cache v6
-roundtrip without adding another phase-specific proof. Run it with an exact
-commit and the operator-configured cache-v2 Results origin:
+The pre-release migration POC covers basic CI, artifact transfer, and the
+advanced service-free workflow without adding another phase-specific proof. It
+builds the exact checked-out source locally, so it is runtime evidence rather
+than installation evidence:
 
 ```sh
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
-  --env POC_SUITE=migration --env POC_COMMIT="$commit" \
-  --env BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> --yes
+  --env POC_SUITE=migration --env POC_COMMIT="$commit" --yes
 ```
 
 [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
-passed all three workflows at exact commit
+passed the predecessor three-workflow suite at exact commit
 `9d29bf26492be760016d29c7ba0d00033b4f9b39`, including declared reusable-output
 publication and caller consumption, the build-unique cache miss, post-save,
-dependent exact hit, and subsequent artifact fan-out. The minimal
-`testdata/phase6` cache fixture remains compile-only conformance coverage; the
-migration POC owns the hosted runtime claim.
+dependent exact hit, and subsequent artifact fan-out. The revised stable
+service-free and cache fixtures retain compile/admission coverage but await
+exact-commit hosted evidence through the released plugin.
+
+After CLI `v0.2.0` is published from the exact commit, exercise the complete
+customer installation path through the pinned companion plugin:
+
+```sh
+commit=$(git rev-parse HEAD)
+test ${#commit} -eq 40
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" --yes
+```
+
+This service-free lane runs the basic, artifact, root-level JavaScript/composite
+action, and advanced workflows, then a native terminal step. Add the cache
+extension only for an organization with GHAC token minting enabled and an
+explicitly configured compatible origin:
+
+```sh
+bk build create --pipeline buildkite/buildkite-gha \
+  --branch "$(git branch --show-current)" --commit "$commit" \
+  --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" \
+  --env DEMO_CACHE=1 \
+  --env BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> --yes
+```
+
+The first cache run for the release commit must show a producer miss,
+post-save, and direct-dependent exact hit. The plugin demo is intentionally
+dormant before `v0.2.0` exists: it downloads and checksum-verifies the public
+release rather than falling back to a local binary.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
