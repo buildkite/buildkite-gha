@@ -164,7 +164,7 @@ record() {
   if ! mode="$(stat -c %a "$DOCKER_CONFIG" 2>/dev/null)"; then
     mode="$(stat -f %Lp "$DOCKER_CONFIG")"
   fi
-  entries="$(find "$DOCKER_CONFIG" -mindepth 1 -maxdepth 1 -print -quit | wc -l)"
+  entries="$(find "$DOCKER_CONFIG" -mindepth 1 -maxdepth 1 -print -quit | wc -l | tr -d '[:space:]')"
   printf 'config=%s;mode=%s;entries=%s;host=%s;context=%s;builder=%s;buildkit=%s' \
     "$DOCKER_CONFIG" "$mode" "$entries" "${DOCKER_HOST-unset}" "${DOCKER_CONTEXT-unset}" \
     "${BUILDX_BUILDER-unset}" "${BUILDKIT_HOST-unset}" >> "$transcript"
@@ -2106,7 +2106,9 @@ sleep 30
 		t.Fatal(err)
 	}
 	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "slow", Kind: "uses", Uses: "./.github/actions/slow"}})
-	job.TimeoutMinutes = 0.001
+	// Leave enough of the job budget for process discovery on slower Darwin
+	// hosts; the post still has only the separate 250 ms cleanup grace.
+	job.TimeoutMinutes = 0.01
 	job.Env = map[string]string{"POST_STARTED": postStarted}
 	runner := Runner{
 		Node24: fakeNode, CleanupTimeout: 250 * time.Millisecond, PostActionTimeout: 3 * time.Second,

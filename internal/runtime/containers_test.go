@@ -436,6 +436,15 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		helper[1] = translate(helper[1])
 	}
 	if helper[0] == "run" {
+		// The fake container executes on the host, so resolve image PATH commands
+		// before replacing the process environment with the simulated image PATH.
+		if len(helper) > 2 && !filepath.IsAbs(helper[2]) {
+			command, err := exec.LookPath(helper[2])
+			if err != nil {
+				os.Exit(126)
+			}
+			helper[2] = command
+		}
 		for j := 2; j < len(helper); j++ {
 			if strings.HasPrefix(helper[j], "/") {
 				helper[j] = translate(helper[j])
@@ -1448,7 +1457,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		f := newJobDocker(t, "")
 		workspace := t.TempDir()
 		writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote Docker rejection\n")
-		remote := t.TempDir()
+		remote := canonicalTempDir(t)
 		writeFixtureFile(t, remote, "docker/action.yml", "name: docker\nruns:\n  using: docker\n  image: Dockerfile\n")
 		writeFixtureFile(t, remote, "docker/Dockerfile", "FROM scratch\n")
 		digest := digestTree(t, remote)
