@@ -7,6 +7,10 @@ on:
         description: Go package to test
         required: true
         type: string
+    outputs:
+      tested-package:
+        description: Exact package covered by the reusable quality check
+        value: ${{ jobs.check.outputs.tested-package }}
 
 permissions:
   contents: read
@@ -16,6 +20,8 @@ jobs:
     name: Reusable package check
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      tested-package: ${{ steps.package-test.outputs.tested-package }}
     steps:
       - name: Checkout the event commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -28,7 +34,10 @@ jobs:
           token: ""
 
       - name: Test requested package
+        id: package-test
         shell: bash
         env:
           PACKAGE: ${{ inputs.package }}
-        run: go test "$PACKAGE"
+        run: |
+          go test "$PACKAGE"
+          printf 'tested-package=%s\n' "$PACKAGE" >> "$GITHUB_OUTPUT"

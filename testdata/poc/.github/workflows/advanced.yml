@@ -34,8 +34,10 @@ jobs:
         shell: bash
         env:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          TESTED_PACKAGE: ${{ needs.quality.outputs.tested-package }}
         run: |
           test "$CACHE_HIT" != true
+          test "$TESTED_PACKAGE" = './internal/action/integration'
           mkdir -p migration-cache
           printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
 
@@ -104,7 +106,7 @@ jobs:
           {
             echo "## Advanced migration POC: $VARIANT"
             echo
-            echo 'Reusable workflow, cache, artifact, matrix, and annotation checks passed.'
+            echo 'Reusable workflow output, cache, artifact, matrix, and annotation checks passed.'
           } >> "$GITHUB_STEP_SUMMARY"
 
   poc-advanced:
