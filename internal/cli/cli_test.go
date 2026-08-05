@@ -619,7 +619,7 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 	}
 	t.Setenv("PATH", linkRoot)
 	t.Setenv("MISE_TEST_POISON", "must-not-reach-version-check")
-	got, err := resolveRuntimeMise(context.Background(), "", t.TempDir(), io.Discard)
+	got, err := resolveRuntimeMise(context.Background(), "", t.TempDir(), t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 
 func TestResolveRuntimeMiseAcceptsNewerVersion(t *testing.T) {
 	realMise := setFakeMise(t, "2026.8.1")
-	got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", t.TempDir(), io.Discard, func(context.Context, string, io.Writer) (string, error) {
+	got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", t.TempDir(), t.TempDir(), io.Discard, func(context.Context, string, string, io.Writer) (string, error) {
 		return "", errors.New("unexpected managed mise install")
 	})
 	if err != nil || got != realMise {
@@ -648,7 +648,7 @@ func TestResolveRuntimeMiseAcceptsPrefixedVersionOutput(t *testing.T) {
 	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf 'mise v2026.8.1 linux-x64 (test)\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	got, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard)
+	got, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), t.TempDir(), io.Discard)
 	if err != nil || got != mise {
 		t.Fatalf("resolveRuntimeMise() = %q, %v; want %q", got, err, mise)
 	}
@@ -695,14 +695,18 @@ func TestResolveRuntimeMiseInstallsManagedCopyWhenNeeded(t *testing.T) {
 			dataDir := t.TempDir()
 			managed := filepath.Join(t.TempDir(), "mise")
 			called := 0
-			installer := func(_ context.Context, gotDataDir string, _ io.Writer) (string, error) {
+			privateRuntime := t.TempDir()
+			installer := func(_ context.Context, gotDataDir, gotPrivateRuntime string, _ io.Writer) (string, error) {
 				called++
 				if gotDataDir != dataDir {
 					t.Fatalf("installer data dir = %q, want %q", gotDataDir, dataDir)
 				}
+				if gotPrivateRuntime != privateRuntime {
+					t.Fatalf("installer private runtime = %q, want %q", gotPrivateRuntime, privateRuntime)
+				}
 				return managed, nil
 			}
-			got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", dataDir, io.Discard, installer)
+			got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", dataDir, privateRuntime, io.Discard, installer)
 			if err != nil || got != managed || called != 1 {
 				t.Fatalf("resolveRuntimeMiseWithInstaller() = %q, %v; calls = %d", got, err, called)
 			}
@@ -712,13 +716,13 @@ func TestResolveRuntimeMiseInstallsManagedCopyWhenNeeded(t *testing.T) {
 
 func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 	t.Run("configured path must be absolute", func(t *testing.T) {
-		if _, err := resolveRuntimeMise(context.Background(), "mise", t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+		if _, err := resolveRuntimeMise(context.Background(), "mise", t.TempDir(), t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
 	t.Run("old version", func(t *testing.T) {
 		mise := setFakeMise(t, "2026.5.11")
-		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.11", want "2026.5.12" or newer`) {
+		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.11", want "2026.5.12" or newer`) {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
@@ -727,7 +731,7 @@ func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 		if err := os.WriteFile(mise, []byte("mise"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "not an executable regular file") {
+		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "not an executable regular file") {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
@@ -773,13 +777,73 @@ func TestInstallRuntimeMiseRejectsInvalidArchive(t *testing.T) {
 	}
 }
 
+func TestManagedMiseCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "executed")
+	binary := []byte("#!/bin/sh\nprintf ran > '" + marker + "'\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
+	digest := sha256.Sum256(binary)
+	cached := filepath.Join(root, "linux-x64", "mise")
+	if err := os.MkdirAll(filepath.Dir(cached), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cached, binary, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	got, err := installRuntimeMiseFrom(context.Background(), root, nil, "", "", hex.EncodeToString(digest[:]))
+	if err != nil || got != cached {
+		t.Fatalf("installRuntimeMiseFrom() = %q, %v; want cache hit %q", got, err, cached)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shared cache executable ran during validation: %v", err)
+	}
+	if _, err := pinRuntimeMise(context.Background(), cached, t.TempDir(), hex.EncodeToString(digest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("private executable did not run during version validation: %v", err)
+	}
+}
+
+func TestPinRuntimeMiseCopiesVerifiedBytesPrivately(t *testing.T) {
+	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
+	digest := sha256.Sum256(binary)
+	cached := filepath.Join(t.TempDir(), "mise")
+	if err := os.WriteFile(cached, binary, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	privateRuntime := t.TempDir()
+	got, err := pinRuntimeMise(context.Background(), cached, privateRuntime, hex.EncodeToString(digest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join(privateRuntime, "mise") {
+		t.Fatalf("pinRuntimeMise() = %q, want private executable", got)
+	}
+	if err := os.Chmod(cached, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cached, []byte("tampered"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if copied, err := os.ReadFile(got); err != nil || !bytes.Equal(copied, binary) {
+		t.Fatalf("private mise changed with cache: %q, %v", copied, err)
+	}
+	if _, err := pinRuntimeMise(context.Background(), cached, t.TempDir(), hex.EncodeToString(digest[:])); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("pinRuntimeMise() accepted tampered cache: %v", err)
+	}
+}
+
 func TestInstallRuntimeMiseLiveRelease(t *testing.T) {
 	if os.Getenv("BUILDKITE_GHA_LIVE_REQUIRED") != "1" {
 		t.Skip("set BUILDKITE_GHA_LIVE_REQUIRED=1 to verify the pinned mise release")
 	}
-	got, err := installRuntimeMise(context.Background(), t.TempDir(), io.Discard)
+	privateRuntime := t.TempDir()
+	got, err := installRuntimeMise(context.Background(), t.TempDir(), privateRuntime, io.Discard)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if filepath.Dir(got) != privateRuntime {
+		t.Fatalf("installed mise path = %q, want job-private root %q", got, privateRuntime)
 	}
 	if _, err := validateRuntimeMise(context.Background(), got, runtimeMiseBinaryDigest); err != nil {
 		t.Fatalf("validate installed mise release: %v", err)

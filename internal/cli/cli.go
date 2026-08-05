@@ -266,7 +266,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var result gharuntime.JobResult
 	var runErr error
 	if jobUsesActions(job) {
-		runner.Mise, runErr = resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, stderr)
+		privateRuntime, err := os.MkdirTemp("", "buildkite-gha-runtime-")
+		if err != nil {
+			runErr = fmt.Errorf("create private action runtime: %w", err)
+		} else {
+			defer func() { _ = os.RemoveAll(privateRuntime) }()
+			runner.Mise, runErr = resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr)
+		}
 		if runErr != nil {
 			runErr = fmt.Errorf("prepare action runtime: %w", runErr)
 		}
@@ -328,11 +334,11 @@ func jobUsesActions(job plan.Job) bool {
 	return false
 }
 
-func resolveRuntimeMise(ctx context.Context, configured, dataDir string, stderr io.Writer) (string, error) {
-	return resolveRuntimeMiseWithInstaller(ctx, configured, dataDir, stderr, installRuntimeMise)
+func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
+	return resolveRuntimeMiseWithInstaller(ctx, configured, dataDir, privateRuntime, stderr, installRuntimeMise)
 }
 
-func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir string, stderr io.Writer, install func(context.Context, string, io.Writer) (string, error)) (string, error) {
+func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer, install func(context.Context, string, string, io.Writer) (string, error)) (string, error) {
 	if configured != "" {
 		if !filepath.IsAbs(configured) {
 			return "", fmt.Errorf("BUILDKITE_GHA_MISE must be an absolute path")
@@ -345,10 +351,40 @@ func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir st
 		}
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise on PATH is incompatible with minimum version %s; using the managed runtime copy\n", buildkitepipeline.MinimumMiseVersion)
 	}
-	return install(ctx, dataDir, stderr)
+	return install(ctx, dataDir, privateRuntime, stderr)
 }
 
 func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) (string, error) {
+	resolved, err := validateRuntimeMiseFile(candidate, expectedDigest)
+	if err != nil {
+		return "", err
+	}
+	command := exec.CommandContext(ctx, resolved, "--version")
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		if !strings.HasPrefix(name, "MISE_") {
+			command.Env = append(command.Env, value)
+		}
+	}
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("validate runtime mise executable: %w", err)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("validate runtime mise executable: empty version")
+	}
+	reported := fields[0]
+	if reported == "mise" && len(fields) > 1 {
+		reported = fields[1]
+	}
+	if !miseVersionAtLeast(reported, buildkitepipeline.MinimumMiseVersion) {
+		return "", fmt.Errorf("runtime mise executable reported version %q, want %q or newer", reported, buildkitepipeline.MinimumMiseVersion)
+	}
+	return resolved, nil
+}
+
+func validateRuntimeMiseFile(candidate, expectedDigest string) (string, error) {
 	if !filepath.IsAbs(candidate) {
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
@@ -375,28 +411,6 @@ func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) 
 		if actual != expectedDigest {
 			return "", fmt.Errorf("runtime mise executable checksum mismatch")
 		}
-	}
-	command := exec.CommandContext(ctx, resolved, "--version")
-	for _, value := range os.Environ() {
-		name, _, _ := strings.Cut(value, "=")
-		if !strings.HasPrefix(name, "MISE_") {
-			command.Env = append(command.Env, value)
-		}
-	}
-	output, err := command.Output()
-	if err != nil {
-		return "", fmt.Errorf("validate runtime mise executable: %w", err)
-	}
-	fields := strings.Fields(string(output))
-	if len(fields) == 0 {
-		return "", fmt.Errorf("validate runtime mise executable: empty version")
-	}
-	reported := fields[0]
-	if reported == "mise" && len(fields) > 1 {
-		reported = fields[1]
-	}
-	if !miseVersionAtLeast(reported, buildkitepipeline.MinimumMiseVersion) {
-		return "", fmt.Errorf("runtime mise executable reported version %q, want %q or newer", reported, buildkitepipeline.MinimumMiseVersion)
 	}
 	return resolved, nil
 }
@@ -433,7 +447,7 @@ func miseVersionAtLeast(actual, minimum string) bool {
 	return true
 }
 
-func installRuntimeMise(ctx context.Context, dataDir string, stderr io.Writer) (string, error) {
+func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		return "", fmt.Errorf("managed mise is unavailable on %s/%s; set BUILDKITE_GHA_MISE to a compatible absolute path", runtime.GOOS, runtime.GOARCH)
 	}
@@ -449,8 +463,8 @@ func installRuntimeMise(ctx context.Context, dataDir string, stderr io.Writer) (
 		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MinimumMiseVersion)
 	}
 	destination := filepath.Join(root, "linux-x64", "mise")
-	if resolved, err := validateRuntimeMise(ctx, destination, runtimeMiseBinaryDigest); err == nil {
-		return resolved, nil
+	if resolved, err := validateRuntimeMiseFile(destination, runtimeMiseBinaryDigest); err == nil {
+		return pinRuntimeMise(ctx, resolved, privateRuntime, runtimeMiseBinaryDigest)
 	}
 	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
 	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-linux-x64.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion)
@@ -466,13 +480,57 @@ func installRuntimeMise(ctx context.Context, dataDir string, stderr io.Writer) (
 			return nil
 		},
 	}
-	return installRuntimeMiseFrom(ctx, root, client, url, runtimeMiseArchiveDigest, runtimeMiseBinaryDigest)
+	cached, err := installRuntimeMiseFrom(ctx, root, client, url, runtimeMiseArchiveDigest, runtimeMiseBinaryDigest)
+	if err != nil {
+		return "", err
+	}
+	return pinRuntimeMise(ctx, cached, privateRuntime, runtimeMiseBinaryDigest)
+}
+
+func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest string) (string, error) {
+	if privateRuntime == "" {
+		return "", fmt.Errorf("private action runtime directory is required")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(privateRuntime)
+	if err != nil || resolvedRoot != privateRuntime {
+		return "", fmt.Errorf("private action runtime directory contains a symlink")
+	}
+	source, err := os.Open(cached)
+	if err != nil {
+		return "", fmt.Errorf("open cached mise executable: %w", err)
+	}
+	defer func() { _ = source.Close() }()
+	destination := filepath.Join(privateRuntime, "mise")
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o500)
+	if err != nil {
+		return "", fmt.Errorf("create private mise executable: %w", err)
+	}
+	hash := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(source, runtimeMiseBinaryLimit+1))
+	closeErr := output.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("copy private mise executable: %w", copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("write private mise executable: %w", closeErr)
+	}
+	if written > runtimeMiseBinaryLimit {
+		return "", fmt.Errorf("cached mise executable exceeds %d-byte limit", runtimeMiseBinaryLimit)
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
+		return "", fmt.Errorf("cached mise executable checksum verification failed")
+	}
+	resolved, err := validateRuntimeMise(ctx, destination, expectedDigest)
+	if err != nil {
+		return "", fmt.Errorf("validate private mise executable: %w", err)
+	}
+	return resolved, nil
 }
 
 func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
 	destinationDir := filepath.Join(root, "linux-x64")
 	destination := filepath.Join(destinationDir, "mise")
-	if resolved, err := validateRuntimeMise(ctx, destination, binaryDigest); err == nil {
+	if resolved, err := validateRuntimeMiseFile(destination, binaryDigest); err == nil {
 		return resolved, nil
 	}
 	parent := filepath.Dir(destinationDir)
@@ -503,7 +561,7 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 		return "", fmt.Errorf("remove staged mise archive: %w", err)
 	}
 	if _, err := os.Lstat(destinationDir); err == nil {
-		if resolved, validationErr := validateRuntimeMise(ctx, destination, binaryDigest); validationErr == nil {
+		if resolved, validationErr := validateRuntimeMiseFile(destination, binaryDigest); validationErr == nil {
 			return resolved, nil
 		}
 		invalid := destinationDir + fmt.Sprintf(".invalid-%d", time.Now().UnixNano())
@@ -514,15 +572,15 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 		return "", fmt.Errorf("inspect mise runtime cache: %w", err)
 	}
 	if err := os.Rename(staging, destinationDir); err != nil {
-		if resolved, validationErr := validateRuntimeMise(ctx, destination, binaryDigest); validationErr == nil {
+		if resolved, validationErr := validateRuntimeMiseFile(destination, binaryDigest); validationErr == nil {
 			return resolved, nil
 		}
 		return "", fmt.Errorf("publish mise runtime cache: %w", err)
 	}
 	staging = ""
-	resolved, err := validateRuntimeMise(ctx, destination, binaryDigest)
+	resolved, err := validateRuntimeMiseFile(destination, binaryDigest)
 	if err != nil {
-		return "", fmt.Errorf("validate installed mise executable: %w", err)
+		return "", fmt.Errorf("validate installed mise cache: %w", err)
 	}
 	return resolved, nil
 }

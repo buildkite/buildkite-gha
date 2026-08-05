@@ -851,8 +851,10 @@ action jobs use mise 2026.5.12 or newer without transporting an importer copy
 as an artifact. The runtime reuses a compatible trusted executable from an
 explicit absolute path or `PATH`; otherwise the static CLI downloads the pinned
 2026.5.12 official archive into the automatically attached hosted cache and
-verifies embedded archive and executable SHA-256 digests. It resolves and pins
-that executable before workflow code runs, then installs exactly
+verifies embedded archive and executable SHA-256 digests. Managed cache bytes
+are copied into a job-private directory and reverified before execution. The
+runtime resolves and pins that private executable before workflow code runs,
+then installs exactly
 `core:node@20.20.2` or `core:node@24.18.0` with mise configuration disabled,
 digest-verifies the resulting Node executable, and invokes that exact path
 directly. It never uses a fuzzy Node major, a data-dir plugin, repository mise
@@ -1069,9 +1071,10 @@ distribution, and invokes the fixed hosted-tokenless upload path. For action
 jobs, the static bridge reuses mise 2026.5.12 or newer when available or
 downloads and digest-verifies its pinned 2026.5.12 official archive in the
 automatically attached, integration-owned hosted cache volume. Node 20.20.2
-and 24.18.0 are installed by that pinned executable on demand into the same
-cache volume. Cached mise and Node executables are digest-verified before use, so
-cache sharing across builds is an optimization rather than a trust boundary.
+and 24.18.0 are installed by a reverified, job-private copy of that executable
+on demand into the same cache volume. Cached mise and Node executables are
+digest-verified before use, so cache sharing across builds is an optimization
+rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
