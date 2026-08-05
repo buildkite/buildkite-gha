@@ -2525,7 +2525,8 @@ func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
 		"::add-mask::---",
 		"::add-mask::+++",
 		"::add-mask::secret",
-		"::group::Compile secret%0A--- injected",
+		"::add-mask::foo\tbar",
+		"::group::Compile secret%0A--- injected foo\tbar",
 		"inside group",
 		"::endgroup::",
 		"::debug::modern debug",
@@ -2541,7 +2542,7 @@ func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
 	}
 	processor.expandCurrentSection()
 
-	if got, want := logs.String(), "--- Compile *** *** injected\ninside group\n^^^ +++\n"; got != want {
+	if got, want := logs.String(), "--- Compile *** *** injected ***\ninside group\n^^^ +++\n"; got != want {
 		t.Fatalf("logs = %q, want %q", got, want)
 	}
 }

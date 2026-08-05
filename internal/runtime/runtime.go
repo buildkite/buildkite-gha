@@ -1301,9 +1301,9 @@ func (p *commandProcessor) expandCurrentSection() {
 }
 
 func (p *commandProcessor) writeLogSectionLocked(target io.Writer, name string) {
-	name = sanitizeLogSectionText(name)
+	name = sanitizeLogSectionText(p.maskTextLocked(name))
 	if name != "" {
-		_, _ = fmt.Fprintln(target, "--- "+p.maskTextLocked(name))
+		_, _ = fmt.Fprintln(target, "--- "+name)
 	}
 }
 
