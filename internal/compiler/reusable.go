@@ -238,7 +238,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				callLabel = job.ID
 			}
 			if len(matrix) != 0 {
-				callLabel = instanceLabel(job, matrix)
+				callLabel = instanceLabel(job, matrix, expression.CompileContext{})
 			}
 			if labelPrefix != "" {
 				callLabel = labelPrefix + " / " + callLabel
