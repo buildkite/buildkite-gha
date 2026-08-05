@@ -102,7 +102,18 @@ steps:
         retry:
           automatic: false
         cache: "/cache/bkcache/github-actions-buildkite-plugin"
+        command: |
+          set -euo pipefail
+          mkdir -p .buildkite-gha/source-test
+          CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+            -ldflags "-X main.version=0.0.0-source-test" \
+            -o .buildkite-gha/source-test/buildkite-gha ./cmd/buildkite-gha
+          BUILDKITE_GHA_NODE20="\$(mise where node@20)/bin/node" \
+          BUILDKITE_GHA_NODE24="\$(mise where node@24)/bin/node" \
+            .buildkite-gha/source-test/buildkite-gha upload \
+              --runtime-queue hosted \
+              "$workflow"
         plugins:
-          - github-actions#v0.2.1:
-              workflow: "$workflow"
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
 YAML
