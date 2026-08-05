@@ -403,7 +403,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			)
 			continue
 		}
+		processor.logSection(stepDisplayName(step))
 		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, evalSnapshot, &posts, actions, prepared)
+		if execution.outcome == "failure" {
+			processor.expandCurrentSection()
+		}
 		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
 	for _, execution := range supervisor.waitAll() {
@@ -474,6 +478,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		jobResult.Conclusion = "success"
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func stepDisplayName(step plan.Step) string {
+	if step.Name != "" {
+		return step.Name
+	}
+	if step.Uses != "" {
+		return step.Uses
+	}
+	return step.ID
 }
 
 func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
