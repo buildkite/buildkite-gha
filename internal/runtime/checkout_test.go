@@ -251,6 +251,149 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	}
 }
 
+func TestPrivateCheckoutPinsGitBeforeActionPreHooks(t *testing.T) {
+	workspace := t.TempDir()
+	workflowSource := []byte("name: private checkout executable confinement\n")
+	sha := strings.Repeat("a", 40)
+	token := "ghs_private_checkout_secret"
+
+	trustedLog := filepath.Join(t.TempDir(), "trusted-git.log")
+	trustedDir := t.TempDir()
+	trustedGit := filepath.Join(trustedDir, "git")
+	trustedScript := `#!/bin/sh
+set -eu
+operation=
+for argument in "$@"; do
+  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  fetch)
+    test "$("$GIT_ASKPASS" 'Username for https://github.com')" = x-access-token
+    test "$("$GIT_ASKPASS" 'Password for https://github.com')" = ` + shellTestQuote(token) + `
+    ;;
+  checkout)
+    printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
+    mkdir -p .github/workflows
+    printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(workflowSource)) + ` | base64 -d > .github/workflows/test.yml
+    ;;
+esac
+printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
+`
+	if err := os.WriteFile(trustedGit, []byte(trustedScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	lookupDir := t.TempDir()
+	lookupGit := filepath.Join(lookupDir, "git")
+	if err := os.Symlink(trustedGit, lookupGit); err != nil {
+		t.Fatal(err)
+	}
+	poisonDir := t.TempDir()
+	poisonGitMarker := filepath.Join(t.TempDir(), "poison-git-ran")
+	poisonGit := filepath.Join(poisonDir, "git")
+	if err := os.WriteFile(poisonGit, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitMarker)+"\nexit 97\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	poisonCatMarker := filepath.Join(t.TempDir(), "poison-cat-ran")
+	poisonCat := filepath.Join(poisonDir, "cat")
+	if err := os.WriteFile(poisonCat, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonCatMarker)+"\nexit 98\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: checkout\nruns:\n  using: node24\n  main: dist/index.js\n")
+	writeFixtureFile(t, remote, "dist/index.js", "")
+	writeFixtureFile(t, remote, "poison/action.yml", "name: poison PATH\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "poison/pre.js", "")
+	writeFixtureFile(t, remote, "poison/main.js", "")
+	remoteDigest := digestTree(t, remote)
+
+	node := filepath.Join(t.TempDir(), "node24")
+	nodeScript := `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then
+  echo v24.0.0
+  exit 0
+fi
+if [ "${1##*/}" = pre.js ]; then
+  rm -f "$LOOKUP_GIT"
+  ln -s "$POISON_GIT" "$LOOKUP_GIT"
+  ln -s "$POISON_CAT" "$LOOKUP_CAT"
+fi
+`
+	if err := os.WriteFile(node, []byte(nodeScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	workflowDigest := sha256.Sum256(workflowSource)
+	poisonID, checkoutID := "a-0000000000000001", "a-0000000000000002"
+	job := plan.Job{
+		Schema: plan.SchemaV3,
+		Compiler: plan.Compiler{
+			Version: "phase4-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+		},
+		Workflow: plan.Workflow{
+			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",
+		},
+		Event: plan.Event{
+			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
+		},
+		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+		Env: map[string]string{
+			"LOOKUP_GIT": lookupGit,
+			"LOOKUP_CAT": filepath.Join(lookupDir, "cat"),
+			"POISON_CAT": poisonCat,
+			"POISON_GIT": poisonGit,
+		},
+		Steps: []plan.Step{
+			{ID: "poison", Kind: "uses", Uses: "owner/repo/poison@v1", Action: &plan.ActionSelector{Lock: poisonID}},
+			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+		},
+		Actions: []plan.ActionLock{
+			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
+			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: strings.Repeat("c", 40), SourceDigest: remoteDigest},
+		},
+	}
+	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return token, nil })
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: node, Checkout: provider, Redactor: redactor, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+	if _, err := os.Stat(trustedLog); err != nil {
+		t.Fatalf("trusted Git did not run: %v", err)
+	}
+	if target, err := filepath.EvalSymlinks(lookupGit); err != nil || target != poisonGit {
+		t.Fatalf("pre-hook Git replacement = %q, %v; want %q", target, err, poisonGit)
+	}
+	if target, err := filepath.EvalSymlinks(filepath.Join(lookupDir, "cat")); err != nil || target != poisonCat {
+		t.Fatalf("pre-hook cat replacement = %q, %v; want %q", target, err, poisonCat)
+	}
+	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "askpass reader selected through poisoned PATH": poisonCatMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if strings.Contains(logs.String(), token) {
+		t.Fatalf("checkout exposed token in logs: %q", logs.String())
+	}
+}
+
+func TestPrivateCheckoutRequiresPreResolvedGit(t *testing.T) {
+	job := plan.Job{
+		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
+		RequiredCapabilities: []string{"provider-token-read"},
+	}
+	if _, err := (Runner{Git: "git"}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
+		t.Fatalf("runCheckout() unresolved Git error = %v", err)
+	}
+}
+
 func TestPrivateCheckoutRedactorFailureAbortsBeforeFetchAndScrubsToken(t *testing.T) {
 	token := "ghs_private_checkout_secret"
 	marker := filepath.Join(t.TempDir(), "fetch-ran")

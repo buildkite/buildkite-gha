@@ -25,6 +25,30 @@ func validCheckoutRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
+func resolvePrivateCheckoutGit(configured string) (string, error) {
+	candidate := configured
+	if candidate == "" {
+		candidate = "git"
+	}
+	resolved, err := exec.LookPath(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve private checkout Git before workflow execution: %w", err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve private checkout Git absolute path before workflow execution: %w", err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize private checkout Git before workflow execution: %w", err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("private checkout requires a real executable Git resolved before workflow execution")
+	}
+	return resolved, nil
+}
+
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, inputs map[string]string) (Result, error) {
 	result := newResult()
 	private := job.HasCapability("provider-token-read")
@@ -46,7 +70,10 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		return result, fmt.Errorf("tokenless checkout adapter requires an empty workspace; Phase 6 is required for clean behavior")
 	}
 	git := r.Git
-	if git == "" {
+	if private && (git == "" || !filepath.IsAbs(git)) {
+		return result, fmt.Errorf("private checkout adapter requires Git to be resolved before workflow execution")
+	}
+	if !private && git == "" {
 		git, err = exec.LookPath("git")
 	}
 	if err != nil {
@@ -123,7 +150,7 @@ func (r Runner) runPrivateCheckoutFetch(ctx context.Context, processor *commandP
 	const script = `#!/bin/sh
 case "$1" in
   *sername*) printf '%s\n' x-access-token ;;
-  *assword*) cat <&3 ;;
+  *assword*) IFS= read -r token <&3 || exit 1; printf '%s\n' "$token" ;;
   *) exit 1 ;;
 esac
 `
@@ -134,7 +161,7 @@ esac
 	if err != nil {
 		return fmt.Errorf("create private checkout credential pipe: %w", err)
 	}
-	if _, err := io.WriteString(writer, token); err != nil {
+	if _, err := io.WriteString(writer, token+"\n"); err != nil {
 		_ = reader.Close()
 		_ = writer.Close()
 		return fmt.Errorf("write private checkout credential pipe: %w", err)
