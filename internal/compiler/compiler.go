@@ -298,6 +298,10 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 						span := instance.Steps[stepIndex].Span.Start
 						return nil, nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
+					if options.PrivateCheckout {
+						capabilities = append(capabilities, "provider-token-read")
+						authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+					}
 				}
 				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 					if err := actionintegration.ValidateUploadArtifactInputs(instance.Steps[stepIndex].With); err != nil {
@@ -318,7 +322,11 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 			jobSchema = plan.SchemaV3
 			actions = locks
-			capabilities = actionCapabilities
+			capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
+			sort.Strings(capabilities)
+			capabilities = slices.Compact(capabilities)
+			sort.Strings(authorization.ProviderTokenReadCapabilitySources)
+			authorization.ProviderTokenReadCapabilitySources = slices.Compact(authorization.ProviderTokenReadCapabilitySources)
 			if slices.Contains(actionCapabilities, "docker") {
 				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "dockerfile-actions")
 			}

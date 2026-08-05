@@ -9,9 +9,10 @@ runtime. Buildkite remains the source of truth for scheduling, logs, retries,
 cancellation, and the build UI.
 
 > [!IMPORTANT]
-> This is an experimental v0.2 preview for **public, tokenless, Linux x86-64
-> workflows**. It deliberately rejects workflows that need private source,
-> secrets, provider tokens, or other protected capabilities.
+> This is an experimental v0.2 preview for **Linux x86-64 workflows**. The
+> default remains public and tokenless. Direct upload has an explicit,
+> fail-closed private-checkout preview for the pipeline's exact repository;
+> private actions and workflow-visible protected credentials remain rejected.
 
 ## Try an existing workflow
 
@@ -111,7 +112,8 @@ The plugin path currently supports:
 
 It does **not** currently support:
 
-- private repositories or private actions;
+- private actions or general private-source access; direct upload has only the
+  explicit pipeline-repository checkout described in the compatibility guide;
 - workflow secrets, `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;

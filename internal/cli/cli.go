@@ -47,7 +47,7 @@ const managedMiseVersion = "2026.5.12"
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] --runtime-queue hosted <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] --runtime-queue hosted <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
@@ -94,7 +94,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
 				}
 				if args[0] == "upload" {
-					_, _ = fmt.Fprint(stdout, "\nThis unsigned, unprivileged path accepts an explicit event file or derives compatibility data from Buildkite; neither grants protected authority.\n")
+					_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
 				}
 				return 0
 			}
@@ -139,7 +139,7 @@ func help(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	}
 	if args[0] == "upload" {
-		_, _ = fmt.Fprint(stdout, "\nThis unsigned, unprivileged path accepts an explicit event file or derives compatibility data from Buildkite; neither grants protected authority.\n")
+		_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
 	}
 	return 0
 }
@@ -227,6 +227,18 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 	}
+	var checkoutTokens gharuntime.CheckoutTokenProvider
+	if job.HasCapability("provider-token-read") {
+		checkoutTokens, err = gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure private checkout token service: %v\n", err)
+			return 1
+		}
+	}
 	runner := gharuntime.Runner{
 		Stdout:      stdout,
 		Stderr:      stderr,
@@ -238,6 +250,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Actions:     actionMaterializer,
 		Artifacts:   agent,
 		Cache:       cacheCredentials,
+		Checkout:    checkoutTokens,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -480,7 +493,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false, false)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -597,7 +610,7 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, _, err := uploadArgs(args)
+	workflowPath, eventPath, _, privateCheckout, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
@@ -627,7 +640,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), true)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), true, privateCheckout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -687,7 +700,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, transportMise bool) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, transportMise, privateCheckout bool) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -698,8 +711,9 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	}
 	hasActions := irUsesActions(ir)
 	options := compiler.Options{
-		EventTrust: compiler.EventUntrusted,
-		GroupLabel: groupLabel,
+		EventTrust:     compiler.EventUntrusted,
+		GroupLabel:     groupLabel,
+		ResolveActions: privateCheckout,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
 				"ubuntu-latest": unprivilegedRuntimeQueue,
@@ -708,6 +722,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 			},
 			UntrustedQueues: []string{unprivilegedRuntimeQueue},
 		},
+		PrivateCheckout: privateCheckout,
 	}
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
@@ -740,7 +755,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
-	if err := validateUnprivilegedBundle(bundle); err != nil {
+	if err := validateUnprivilegedBundleWithPrivateCheckout(bundle, privateCheckout); err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
 	}
 	if !hasActions && bundleUsesActions(bundle) {
@@ -750,6 +765,10 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
+	return validateUnprivilegedBundleWithPrivateCheckout(bundle, false)
+}
+
+func validateUnprivilegedBundleWithPrivateCheckout(bundle compiler.Bundle, privateCheckout bool) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
@@ -757,6 +776,12 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 					return fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID)
 				}
 				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
+			}
+			if capability == "provider-token-read" {
+				if !privateCheckout || !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+					return fmt.Errorf("job %q requires provider-token-read without compiler-verified private checkout provenance", artifact.Job.Workflow.LogicalJobID)
+				}
+				continue
 			}
 			if capability != "network" && capability != "docker" {
 				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
@@ -873,35 +898,44 @@ func deterministicGzip(source []byte) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, err error) {
+func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, privateCheckout bool, err error) {
 	filtered := make([]string, 0, len(args))
 	runtimeQueueSeen := false
+	privateCheckoutSeen := false
 	for i := 0; i < len(args); i++ {
+		if args[i] == "--private-checkout" {
+			if privateCheckoutSeen {
+				return "", "", "", false, fmt.Errorf("--private-checkout may only be specified once")
+			}
+			privateCheckoutSeen = true
+			privateCheckout = true
+			continue
+		}
 		if args[i] != "--runtime-queue" {
 			filtered = append(filtered, args[i])
 			continue
 		}
 		if runtimeQueueSeen {
-			return "", "", "", fmt.Errorf("--runtime-queue may only be specified once")
+			return "", "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
 		}
 		runtimeQueueSeen = true
 		i++
 		if i == len(args) {
-			return "", "", "", fmt.Errorf("--runtime-queue requires a queue")
+			return "", "", "", false, fmt.Errorf("--runtime-queue requires a queue")
 		}
 		runtimeQueue = args[i]
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	if !runtimeQueueSeen {
-		return "", "", "", fmt.Errorf("--runtime-queue %s is required for unprivileged upload", unprivilegedRuntimeQueue)
+		return "", "", "", false, fmt.Errorf("--runtime-queue %s is required for unprivileged upload", unprivilegedRuntimeQueue)
 	}
 	if runtimeQueue != unprivilegedRuntimeQueue {
-		return "", "", "", fmt.Errorf("--runtime-queue must be %q for unprivileged upload", unprivilegedRuntimeQueue)
+		return "", "", "", false, fmt.Errorf("--runtime-queue must be %q for unprivileged upload", unprivilegedRuntimeQueue)
 	}
-	return workflowPath, eventPath, runtimeQueue, err
+	return workflowPath, eventPath, runtimeQueue, privateCheckout, err
 }
 
 func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,6 +15,12 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
+
+type checkoutTokenProviderFunc func(context.Context, string) (string, error)
+
+func (f checkoutTokenProviderFunc) Token(ctx context.Context, repository string) (string, error) {
+	return f(ctx, repository)
+}
 
 func TestTokenlessCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	workspace := t.TempDir()
@@ -159,6 +166,126 @@ func TestTokenlessCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) 
 	job.Event.Provider = "other"
 	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid github.com event") {
 		t.Fatalf("invalid event error = %v", err)
+	}
+}
+
+func TestPrivateCheckoutAdapterUsesOneShotAskpassCredential(t *testing.T) {
+	workspace := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	token := "ghs_private_checkout_secret"
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	askpassLog := filepath.Join(t.TempDir(), "askpass.log")
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+case "$*" in *` + token + `*) exit 30 ;; esac
+operation=
+for argument in "$@"; do
+  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init)
+    test -z "$GIT_ASKPASS"
+    mkdir -p .git
+    ;;
+  remote)
+    test -z "$GIT_ASKPASS"
+    ;;
+  fetch)
+    test -n "$GIT_ASKPASS"
+    if env | grep -F ` + shellTestQuote(token) + ` >/dev/null; then exit 31; fi
+    printf '%s' "$GIT_ASKPASS" > ` + shellTestQuote(askpassLog) + `
+    test "$("$GIT_ASKPASS" 'Username for https://github.com')" = x-access-token
+    test "$("$GIT_ASKPASS" 'Password for https://github.com')" = ` + shellTestQuote(token) + `
+    test -z "$("$GIT_ASKPASS" 'Password for https://github.com')"
+    ;;
+  checkout)
+    test -z "$GIT_ASKPASS"
+    printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
+    ;;
+esac
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var repositories []string
+	provider := checkoutTokenProviderFunc(func(_ context.Context, repository string) (string, error) {
+		repositories = append(repositories, repository)
+		return token, nil
+	})
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	job := plan.Job{
+		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	result, err := (Runner{Git: git, Checkout: provider, Redactor: redactor, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil)
+	if err != nil {
+		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
+	}
+	if result.Outputs["commit"] != sha || result.Outputs["ref"] != job.Event.Ref {
+		t.Fatalf("checkout outputs = %#v", result.Outputs)
+	}
+	if len(repositories) != 1 || repositories[0] != job.Event.Repository || len(redactor.values) != 1 || redactor.values[0] != token {
+		t.Fatalf("repositories/redactions = %#v / %#v", repositories, redactor.values)
+	}
+	gitBytes, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gitBytes), token) || strings.Contains(logs.String(), token) {
+		t.Fatalf("checkout exposed token in Git arguments or logs: %q / %q", gitBytes, logs.String())
+	}
+	helperBytes, err := os.ReadFile(askpassLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(string(helperBytes)); !os.IsNotExist(err) {
+		t.Fatalf("askpass helper survived checkout: %v", err)
+	}
+	configBytes, err := os.ReadFile(filepath.Join(workspace, ".git", "config"))
+	if err == nil && strings.Contains(string(configBytes), token) {
+		t.Fatalf("Git config contains checkout token: %q", configBytes)
+	}
+}
+
+func TestPrivateCheckoutRedactorFailureAbortsBeforeFetchAndScrubsToken(t *testing.T) {
+	token := "ghs_private_checkout_secret"
+	marker := filepath.Join(t.TempDir(), "fetch-ran")
+	git := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\ncase \"$*\" in *fetch*) touch " + shellTestQuote(marker) + " ;; init*) mkdir -p .git ;; esac\n"
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{
+		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return token, nil })
+	err := error(nil)
+	_, err = (Runner{Git: git, Checkout: provider, Redactor: failingCacheRedactor{token: token}}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("runCheckout() error = %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("Git fetch ran before redactor registration succeeded: %v", err)
+	}
+}
+
+func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/authority.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: authority\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "ordinary", Kind: "run", Command: "true"}})
+	job.RequiredCapabilities = []string{"provider-token-read"}
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "requires the private checkout token provider") {
+		t.Fatalf("missing provider error = %v", err)
+	}
+	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return "ghs_unused", nil })
+	if _, err := (Runner{Checkout: provider}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
+		t.Fatalf("ordinary provider-token-read error = %v", err)
 	}
 }
 

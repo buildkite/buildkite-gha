@@ -416,6 +416,61 @@ func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	}
 }
 
+func TestPrivateCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	compile := func(uses, with string, private bool) (Bundle, error) {
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: " + uses + "\n" + with)
+		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return CompileBundleWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", Options{
+			EventTrust: EventUntrusted,
+			Runners: RunnerPolicy{
+				Labels:          map[string]string{"ubuntu-latest": "hosted"},
+				UntrustedQueues: []string{"hosted"},
+			},
+			ResolveActions:  true,
+			ActionSource:    &fakeActionSource{root: remote, calls: map[string]int{}},
+			PrivateCheckout: private,
+		})
+	}
+
+	bundle, err := compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) ||
+		!reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+		t.Fatalf("private checkout plan = %#v", bundle.Plans)
+	}
+
+	bundle, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network"}) || len(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources) != 0 {
+		t.Fatalf("default checkout authority changed = %#v", bundle.Plans[0])
+	}
+
+	bundle, err = compile("owner/action@v1", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network"}) || len(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources) != 0 {
+		t.Fatalf("ordinary action received checkout authority = %#v", bundle.Plans[0])
+	}
+
+	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n", true)
+	if err == nil || !strings.Contains(err.Error(), "tokenless checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+		t.Fatalf("workflow token input error = %v", err)
+	}
+}
+
 func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")

@@ -60,6 +60,22 @@ func usesCheckoutAdapter(lock plan.ActionLock) bool {
 	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
+func jobUsesCheckoutAdapter(job plan.Job) bool {
+	locks := make(map[string]plan.ActionLock, len(job.Actions))
+	for _, lock := range job.Actions {
+		locks[lock.ID] = lock
+	}
+	for _, step := range job.Steps {
+		if step.Action == nil {
+			continue
+		}
+		if lock, ok := locks[step.Action.Lock]; ok && usesCheckoutAdapter(lock) {
+			return true
+		}
+	}
+	return false
+}
+
 func usesUploadArtifactAdapter(lock plan.ActionLock) bool {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite

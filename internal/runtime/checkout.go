@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,13 +17,26 @@ import (
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var checkoutSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+func validCheckoutRepository(repository string) bool {
+	if len(repository) > 140 || !checkoutRepositoryPattern.MatchString(repository) {
+		return false
+	}
+	parts := strings.Split(repository, "/")
+	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
+}
+
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, inputs map[string]string) (Result, error) {
 	result := newResult()
-	if job.Event.Provider != "github" || !checkoutRepositoryPattern.MatchString(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
-		return result, fmt.Errorf("tokenless checkout adapter requires a valid github.com event repository and exact SHA; Phase 6 is required for other events")
+	private := job.HasCapability("provider-token-read")
+	adapter := "tokenless checkout adapter"
+	if private {
+		adapter = "private checkout adapter"
+	}
+	if job.Event.Provider != "github" || !validCheckoutRepository(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
+		return result, fmt.Errorf("%s requires a valid github.com event repository and exact SHA; Phase 6 is required for other events", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
-		return result, fmt.Errorf("tokenless checkout adapter: %w", err)
+		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
 	entries, err := os.ReadDir(workspace)
 	if err != nil {
@@ -47,24 +61,29 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		"SSH_ASKPASS":         "",
 		"GIT_SSH_COMMAND":     "ssh -oBatchMode=yes",
 	}
-	run := func(args ...string) error {
-		base := []string{"-c", "credential.helper=", "-c", "http.extraheader=", "-c", "core.hooksPath=/dev/null"}
-		if err := r.runStreaming(ctx, processor, workspace, env, git, append(base, args...)...); err != nil {
-			return fmt.Errorf("tokenless checkout adapter git %s: %w", args[0], err)
+	base := []string{"-c", "credential.helper=", "-c", "http.extraheader=", "-c", "core.hooksPath=/dev/null"}
+	run := func(runEnv map[string]string, args ...string) error {
+		if err := r.runStreaming(ctx, processor, workspace, runEnv, git, append(base, args...)...); err != nil {
+			return fmt.Errorf("%s git %s: %w", adapter, args[0], err)
 		}
 		return nil
 	}
-	if err := run("init", "--template=", "."); err != nil {
+	if err := run(env, "init", "--template=", "."); err != nil {
 		return result, err
 	}
 	url := "https://github.com/" + job.Event.Repository + ".git"
-	if err := run("remote", "add", "origin", url); err != nil {
+	if err := run(env, "remote", "add", "origin", url); err != nil {
 		return result, err
 	}
-	if err := run("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", job.Event.SHA); err != nil {
+	fetchArgs := []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", job.Event.SHA}
+	if private {
+		if err := r.runPrivateCheckoutFetch(ctx, processor, workspace, env, git, base, job.Event.Repository, fetchArgs); err != nil {
+			return result, fmt.Errorf("%s git fetch: %w", adapter, err)
+		}
+	} else if err := run(env, fetchArgs...); err != nil {
 		return result, err
 	}
-	if err := run("checkout", "--detach", job.Event.SHA); err != nil {
+	if err := run(env, "checkout", "--detach", job.Event.SHA); err != nil {
 		return result, err
 	}
 	head, err := os.ReadFile(filepath.Join(workspace, ".git", "HEAD"))
@@ -74,4 +93,64 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	result.Outputs["ref"] = job.Event.Ref
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
+}
+
+func (r Runner) runPrivateCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base []string, repository string, fetchArgs []string) error {
+	if r.Checkout == nil {
+		return fmt.Errorf("private checkout token provider is not configured")
+	}
+	token, err := r.Checkout.Token(ctx, repository)
+	if err != nil {
+		return err
+	}
+	if len(token) > 16<<10 || !githubInstallationTokenPattern.MatchString(token) {
+		return fmt.Errorf("private checkout token provider returned an invalid token")
+	}
+	if r.Redactor == nil {
+		return fmt.Errorf("private checkout token provider requires a redactor")
+	}
+	processor.addMask(token)
+	if err := r.Redactor.AddRedaction(ctx, token); err != nil {
+		return processor.scrubError(err)
+	}
+
+	helperDir, err := os.MkdirTemp("", "buildkite-gha-askpass-")
+	if err != nil {
+		return fmt.Errorf("create private checkout askpass directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(helperDir) }()
+	helper := filepath.Join(helperDir, "askpass")
+	const script = `#!/bin/sh
+case "$1" in
+  *sername*) printf '%s\n' x-access-token ;;
+  *assword*) cat <&3 ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		return fmt.Errorf("create private checkout askpass helper: %w", err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create private checkout credential pipe: %w", err)
+	}
+	if _, err := io.WriteString(writer, token); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return fmt.Errorf("write private checkout credential pipe: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		_ = reader.Close()
+		return fmt.Errorf("close private checkout credential pipe: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	privateEnv := cloneStrings(env)
+	privateEnv["GIT_ASKPASS"] = helper
+	privateEnv["LC_ALL"] = "C"
+	cmd := exec.Command(git, append(base, fetchArgs...)...)
+	cmd.Dir = workspace
+	cmd.Env = processEnv(privateEnv)
+	cmd.ExtraFiles = []*os.File{reader}
+	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }

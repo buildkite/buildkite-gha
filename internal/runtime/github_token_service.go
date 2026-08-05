@@ -1,0 +1,155 @@
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+)
+
+const githubTokenResponseLimit = 64 << 10
+
+var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
+
+// CheckoutTokenProvider mints one repository-scoped credential for the
+// verified checkout adapter. The provider fixes permissions independently of
+// workflow inputs.
+type CheckoutTokenProvider interface {
+	Token(context.Context, string) (string, error)
+}
+
+// AgentGitHubTokenConfig identifies the exact current Buildkite job. Endpoint
+// and JobToken are runtime authority and are never forwarded to Git or action
+// code.
+type AgentGitHubTokenConfig struct {
+	Endpoint string
+	JobID    string
+	JobToken string
+	Client   *http.Client
+}
+
+// AgentGitHubTokens mints a read-only token for the pipeline's exact GitHub
+// repository through Buildkite's job-bound Agent API endpoint.
+type AgentGitHubTokens struct {
+	mintURL  string
+	jobToken string
+	client   *http.Client
+}
+
+func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
+	mintURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID)
+	if err != nil {
+		return nil, err
+	}
+	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
+		return nil, fmt.Errorf("GitHub token Agent job token is required")
+	}
+	client := config.Client
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	bounded := *client
+	bounded.Jar = nil
+	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if bounded.Timeout == 0 {
+		bounded.Timeout = 15 * time.Second
+	}
+	return &AgentGitHubTokens{mintURL: mintURL, jobToken: config.JobToken, client: &bounded}, nil
+}
+
+func (c *AgentGitHubTokens) Token(ctx context.Context, repository string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("GitHub checkout token provider is not configured")
+	}
+	if !validCheckoutRepository(repository) {
+		return "", fmt.Errorf("GitHub checkout token requires a valid event repository")
+	}
+	body, err := json.Marshal(struct {
+		RepositoryURL string            `json:"repo_url"`
+		Permissions   map[string]string `json:"permissions"`
+	}{
+		RepositoryURL: "https://github.com/" + repository,
+		Permissions:   map[string]string{"contents": "read"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode GitHub checkout token request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.mintURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create GitHub checkout token request: %w", err)
+	}
+	request.Header.Set("Authorization", "Token "+c.jobToken)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("request GitHub checkout token: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
+		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
+	if err != nil {
+		return "", fmt.Errorf("read GitHub checkout token response: %w", err)
+	}
+	if len(payload) > githubTokenResponseLimit {
+		return "", fmt.Errorf("GitHub checkout token response exceeds the %d-byte limit", githubTokenResponseLimit)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var decoded struct {
+		Token string `json:"token"`
+	}
+	if err := decoder.Decode(&decoded); err != nil {
+		return "", fmt.Errorf("decode GitHub checkout token response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("GitHub checkout token response has trailing data")
+	}
+	if len(decoded.Token) > 16<<10 || !githubInstallationTokenPattern.MatchString(decoded.Token) {
+		return "", fmt.Errorf("GitHub checkout token response contains an invalid token")
+	}
+	return decoded.Token, nil
+}
+
+func agentGitHubTokenURL(endpoint, jobID string) (string, error) {
+	if !validBuildkiteJobID(jobID) {
+		return "", fmt.Errorf("GitHub token Agent job ID is required")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("safe GitHub token Agent endpoint is required")
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github_scoped_access_token"
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+func githubTokenStatusError(status int, retryAfter string) error {
+	switch status {
+	case http.StatusBadRequest:
+		return fmt.Errorf("GitHub checkout token request was rejected")
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("GitHub checkout token request was denied")
+	case http.StatusNotFound:
+		return fmt.Errorf("GitHub scoped access tokens are not enabled for this organization")
+	case http.StatusServiceUnavailable:
+		retryAfter = strings.TrimSpace(retryAfter)
+		if retryAfterSecondsPattern.MatchString(retryAfter) {
+			return fmt.Errorf("GitHub checkout token service is temporarily unavailable; retry after %s seconds", retryAfter)
+		}
+		return fmt.Errorf("GitHub checkout token service is temporarily unavailable")
+	default:
+		return fmt.Errorf("GitHub checkout token service returned HTTP %d", status)
+	}
+}

@@ -1893,7 +1893,9 @@ the narrowest available boundary:
 - cache restore/save through the stock audited cache-v2 client, a compatible
   Results service, and short-lived job-bound GHAC credentials;
 - artifact upload/download through bounded native adapters;
-- public checkout under GitHub and Cursor Origin provider adapters; and
+- public checkout under GitHub and Cursor Origin provider adapters;
+- explicitly enabled private checkout of the pipeline's exact GitHub
+  repository through the current job's scoped Agent token endpoint; and
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -1925,20 +1927,27 @@ Delivery slices:
    all Agent authority outside action code.
 3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
    policy evaluation, and signed no-op grants before returning credentials.
-4. Add private checkout, private actions, and private reusable-workflow source
-   access through the narrowest practical credential or download interface.
+4. Add private source through the narrowest practical credential or download
+   interface. The first sub-slice is fixed `contents:read` checkout of the
+   pipeline's exact repository through the current job's scoped Agent endpoint;
+   private actions and private reusable-workflow source remain separate work.
 5. Add scoped GitHub tokens, selected secrets, and environment grants.
 6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
 Status: the GitHub/tokenless portion of slice 1 and all of slice 2 are
-implemented and hosted-proven. Cursor Origin public checkout remains pending on
-its provider context/source contract. Slice 3 is next; its proposed
+implemented and hosted-proven. The narrow CLI/runtime portion of slice 4 now
+supports explicitly enabled, read-only checkout of the pipeline's exact GitHub
+repository. Its local request, admission, redaction, askpass, and leakage
+boundaries are tested; hosted proof remains pending endpoint deployment,
+organization enablement, installer wiring, and a private-repository canary.
+Private actions and reusable workflows remain deferred. Cursor Origin public
+checkout remains pending on its provider context/source contract. Slice 3's
+proposed
 [control-plane contract](../architecture/0003-protected-capability-control-plane.md)
 must establish ownership, exact OIDC audience, independent GitHub provenance,
 policy, signing, and audit boundaries before any protected value is returned.
-Slices 4–6 remain long-term Phase 6 scope but are explicitly deferred from the
-initial beta.
+The remainder of slices 4–6 remains long-term Phase 6 scope.
 
 Definition of done:
 
@@ -2236,8 +2245,10 @@ The project is not globally blocked on the protected-capability control plane.
 The public, tokenless product path is substantial enough to harden and demo
 while the signed no-op grant proof waits for a named platform owner and the
 interfaces required by [ADR 0003](../architecture/0003-protected-capability-control-plane.md).
-Private source, secrets, provider tokens, environments, and compatible OIDC
-remain fail-closed during that work.
+Private actions and reusable workflows, workflow-visible provider tokens,
+secrets, environments, and compatible OIDC remain fail-closed during that work.
+The explicit private-checkout exception is limited to fixed read-only Git use
+for the pipeline repository and does not relax those deferrals.
 
 The complete published installation experience is now proven. The initial CLI
 and companion plugin `v0.2.0` releases remain the subject of the repository's
@@ -2505,8 +2516,9 @@ them in the phase that first needs the capability:
    queue policy for protected Docker capabilities and privileged workloads.
 6. Phase 6 will define the GitHub App installation-token compatibility contract
    for `github.token` and `GITHUB_TOKEN`, including repository/permission
-   narrowing and documented differences from native Actions tokens. Tokenless
-   workflows remain the default until then.
+   narrowing and documented differences from native Actions tokens. The
+   runtime-internal `contents:read` checkout credential does not define that
+   workflow-visible contract; tokenless workflows remain the default.
 
 ## Recommended first product milestone
 

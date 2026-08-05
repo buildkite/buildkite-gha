@@ -65,6 +65,7 @@ type Runner struct {
 	Actions           ActionMaterializer
 	Artifacts         ArtifactStore
 	Cache             CacheCredentialProvider
+	Checkout          CheckoutTokenProvider
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
@@ -697,6 +698,10 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
+	return r.runStreamingCommand(ctx, processor, cmd)
+}
+
+func (r Runner) runStreamingCommand(ctx context.Context, processor *commandProcessor, cmd *exec.Cmd) error {
 	configureProcessGroup(cmd)
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
@@ -764,7 +769,7 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 		waitErr = ctx.Err()
 	}
 	if waitErr != nil {
-		waitErr = fmt.Errorf("process %s: %w", name, waitErr)
+		waitErr = fmt.Errorf("process %s: %w", cmd.Path, waitErr)
 	}
 	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
 }
