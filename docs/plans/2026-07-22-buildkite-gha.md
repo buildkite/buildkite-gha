@@ -908,13 +908,16 @@ Implement the observable Actions contracts for:
 - `::stop-commands`; and
 - supported legacy command behavior and security restrictions.
 
-The runtime implements `::add-mask`, `::stop-commands`, `::warning`, and
-`::error`. It applies dynamically registered masks to subsequent log lines and
-scrubs all registered values from bounded job results before transport.
-Warnings and errors retain supported source metadata and publish as separate
-job-scoped Buildkite annotations without changing conclusions. Notices,
-groups, command echo control, and legacy workflow commands remain later
-compatibility work.
+The runtime implements `::add-mask`, `::stop-commands`, `::warning`, `::error`,
+`::group`, and `::endgroup`. It applies dynamically registered masks to
+subsequent log lines and scrubs all registered values from bounded job results
+before transport. Groups become collapsed Buildkite log sections; nested or
+overlapping Actions groups flatten into successive sections because Buildkite
+sections are linear. Warnings and errors retain supported source metadata and
+publish as separate job-scoped Buildkite annotations without changing
+conclusions. Debug and matcher presentation commands are consumed without
+runner debug or matcher behavior. Notices, command echo control, and other
+legacy workflow commands remain later compatibility work.
 
 Map warnings and errors to Buildkite log output and annotations. Map dynamic
 mask values to `buildkite-agent redactor add` before subsequent output is
@@ -928,7 +931,7 @@ Buildkite's 1 MiB body limit.
 
 Parallel step logs need explicit step identity. Prefer live prefixed output and
 per-step completion summaries over buffering all output until completion.
-Buildkite log groups are not assumed to support overlapping concurrent groups.
+Buildkite log sections do not preserve overlapping or nested Actions groups.
 
 ### Action resolution
 

@@ -1297,13 +1297,13 @@ func (p *commandProcessor) logSection(name string) {
 func (p *commandProcessor) expandCurrentSection() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.writeMaskedLineLocked(p.stdout, "^^^ +++")
+	_, _ = fmt.Fprintln(p.stdout, "^^^ +++")
 }
 
 func (p *commandProcessor) writeLogSectionLocked(target io.Writer, name string) {
 	name = sanitizeLogSectionText(name)
 	if name != "" {
-		p.writeMaskedLineLocked(target, "--- "+name)
+		_, _ = fmt.Fprintln(target, "--- "+p.maskTextLocked(name))
 	}
 }
 
@@ -1351,10 +1351,14 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 }
 
 func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) {
+	_, _ = fmt.Fprintln(target, p.maskTextLocked(line))
+}
+
+func (p *commandProcessor) maskTextLocked(text string) string {
 	for _, mask := range p.masks {
-		line = strings.ReplaceAll(line, mask, "***")
+		text = strings.ReplaceAll(text, mask, "***")
 	}
-	_, _ = fmt.Fprintln(target, line)
+	return text
 }
 
 func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading, severity string, command parsedWorkflowCommand) {

@@ -2522,7 +2522,10 @@ func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
 	for _, line := range []string{
-		"::group::Compile%0A--- injected",
+		"::add-mask::---",
+		"::add-mask::+++",
+		"::add-mask::secret",
+		"::group::Compile secret%0A--- injected",
 		"inside group",
 		"::endgroup::",
 		"::debug::modern debug",
@@ -2536,8 +2539,9 @@ func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
 			t.Fatalf("process(%q) error = %v", line, err)
 		}
 	}
+	processor.expandCurrentSection()
 
-	if got, want := logs.String(), "--- Compile --- injected\ninside group\n"; got != want {
+	if got, want := logs.String(), "--- Compile *** *** injected\ninside group\n^^^ +++\n"; got != want {
 		t.Fatalf("logs = %q, want %q", got, want)
 	}
 }
