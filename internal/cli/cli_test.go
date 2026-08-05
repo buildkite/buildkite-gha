@@ -2,14 +2,12 @@ package cli
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +16,7 @@ import (
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -438,7 +437,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	}
 }
 
-func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
+func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "local")
@@ -459,27 +458,19 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 	}
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "action-importer")
-	setFakeMise(t)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if len(runner.commands) != 4 {
-		t.Fatalf("commands = %d, want distribution, mise, plan, and pipeline", len(runner.commands))
+	if len(runner.commands) != 3 {
+		t.Fatalf("commands = %d, want distribution, plan, and pipeline", len(runner.commands))
 	}
-	miseArtifacts := 0
 	for path := range runner.uploaded {
-		if strings.Contains(path, "/runtimes/") {
-			t.Fatalf("upload contains a Node runtime artifact %q", path)
+		if strings.Contains(path, "/runtimes/") || strings.Contains(path, "/tools/mise/") {
+			t.Fatalf("upload contains a runtime tool artifact %q", path)
 		}
-		if strings.Contains(path, "/tools/mise/") && strings.HasSuffix(path, "/mise.gz") {
-			miseArtifacts++
-		}
-	}
-	if miseArtifacts != 1 {
-		t.Fatalf("uploaded mise artifacts = %d, want 1: %#v", miseArtifacts, runner.uploaded)
 	}
 	var pipeline struct {
 		Steps []struct {
@@ -491,21 +482,21 @@ func TestRunUploadJavaScriptActionTransportsMiseWithoutNode(t *testing.T) {
 			Env map[string]string `yaml:"env"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
+	if err := yaml.Unmarshal(runner.commands[2].stdin, &pipeline); err != nil {
 		t.Fatalf("parse uploaded pipeline: %v", err)
 	}
 	if len(pipeline.Steps) != 1 {
 		t.Fatalf("uploaded pipeline steps = %#v", pipeline.Steps)
 	}
 	command := pipeline.Steps[0].Command
-	if !strings.Contains(command, ".buildkite-gha/tools/mise/") || !strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
-		t.Fatalf("generated pipeline does not use the mise runtime boundary:\n%s", command)
+	if strings.Contains(command, ".buildkite-gha/tools/mise/") || strings.Contains(command, `export PATH="$bootstrap_dir:$PATH"`) || strings.Contains(command, "BUILDKITE_GHA_NODE") || strings.Contains(command, ".buildkite-gha/runtimes") {
+		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
 	step := pipeline.Steps[0]
 	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != ".buildkite-gha/cache-volume" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
-	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "/cache/bkcache/buildkite-gha/mise/2026.5.12" {
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != buildkitepipeline.MiseDataDir() {
 		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
 }
@@ -570,7 +561,6 @@ func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
 	}
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "docker-importer")
-	setFakeMise(t)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -603,52 +593,90 @@ func writeFakeNode(t *testing.T, root string, major int) string {
 	return path
 }
 
-func setFakeMise(t *testing.T) {
+func setFakeMise(t *testing.T, version string) string {
 	t.Helper()
 	root := t.TempDir()
 	mise := filepath.Join(root, "mise")
-	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf '2026.5.12 linux-x64 (test)\\n'\n"), 0o700); err != nil {
+	script := "#!/bin/sh\nif [ -n \"${MISE_TEST_POISON:-}\" ]; then printf 'poisoned\\n'; else printf '" + version + " linux-x64 (test)\\n'; fi\n"
+	if err := os.WriteFile(mise, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return mise
 }
 
-func TestManagedMiseArtifactRequiresPinnedVersionAndIsDeterministic(t *testing.T) {
-	setFakeMise(t)
-	first, err := managedMiseArtifact(context.Background())
+func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
+	realMise := setFakeMise(t, buildkitepipeline.RequiredMiseVersion)
+	linkRoot := t.TempDir()
+	link := filepath.Join(linkRoot, "mise")
+	if err := os.Symlink(realMise, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", linkRoot)
+	t.Setenv("MISE_TEST_POISON", "must-not-reach-version-check")
+	got, err := resolveRuntimeMise(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := managedMiseArtifact(context.Background())
+	want, err := filepath.EvalSymlinks(realMise)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Path != second.Path || first.Digest != second.Digest || !bytes.Equal(first.Contents, second.Contents) {
-		t.Fatalf("mise artifacts differ: first = %#v, second = %#v", first, second)
+	if got != want || !filepath.IsAbs(got) {
+		t.Fatalf("resolveRuntimeMise() = %q, want pinned %q", got, want)
 	}
-	reader, err := gzip.NewReader(bytes.NewReader(first.Contents))
-	if err != nil {
-		t.Fatal(err)
-	}
-	uncompressed, err := io.ReadAll(reader)
-	if closeErr := reader.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(uncompressed, []byte(managedMiseVersion)) {
-		t.Fatalf("mise artifact does not contain pinned executable: %q", uncompressed)
-	}
+}
 
-	root := t.TempDir()
-	wrong := filepath.Join(root, "mise")
-	if err := os.WriteFile(wrong, []byte("#!/bin/sh\nprintf '2026.5.13 linux-x64 (test)\\n'\n"), 0o700); err != nil {
-		t.Fatal(err)
+func TestResolveRuntimeMiseRejectsInvalidRuntimeCapability(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if _, err := resolveRuntimeMise(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "is required on the runtime agent") {
+			t.Fatalf("resolveRuntimeMise() error = %v", err)
+		}
+	})
+	t.Run("configured path must be absolute", func(t *testing.T) {
+		if _, err := resolveRuntimeMise(context.Background(), "mise"); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+			t.Fatalf("resolveRuntimeMise() error = %v", err)
+		}
+	})
+	t.Run("wrong version", func(t *testing.T) {
+		mise := setFakeMise(t, "2026.5.13")
+		if _, err := resolveRuntimeMise(context.Background(), mise); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
+			t.Fatalf("resolveRuntimeMise() error = %v", err)
+		}
+	})
+	t.Run("not executable", func(t *testing.T) {
+		mise := filepath.Join(t.TempDir(), "mise")
+		if err := os.WriteFile(mise, []byte("mise"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveRuntimeMise(context.Background(), mise); err == nil || !strings.Contains(err.Error(), "not an executable regular file") {
+			t.Fatalf("resolveRuntimeMise() error = %v", err)
+		}
+	})
+}
+
+func TestRunJobPublishesFailureWhenActionRuntimeMiseIsMissing(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Schema = plan.SchemaV3
+	job.Actions = []plan.ActionLock{{
+		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
+		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}}
+	job.Steps = []plan.Step{{
+		ID: "local", Kind: "uses", Uses: "./actions/build",
+		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
+	}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	t.Setenv("PATH", t.TempDir())
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prepare action runtime: mise 2026.5.12 is required on the runtime agent") {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if _, err := managedMiseArtifact(context.Background()); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
-		t.Fatalf("managedMiseArtifact() error = %v", err)
+	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "failure" {
+		t.Fatalf("published result = %q, want failure", manifest.Result)
 	}
 }
 

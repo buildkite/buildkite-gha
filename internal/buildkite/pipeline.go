@@ -13,19 +13,19 @@ import (
 
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
-const toolDirectory = ".buildkite-gha/tools"
+
+// RequiredMiseVersion is the runtime-agent capability required by generated
+// jobs that execute actions. The runtime pins mise before workflow code runs.
+const RequiredMiseVersion = "2026.5.12"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-var toolVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string
-	MiseDigest         string
-	MiseVersion        string
 	GroupLabel         string
 	Jobs               []Job
 }
@@ -39,24 +39,12 @@ func DistributionPath(digest string) (string, error) {
 	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
 }
 
-// MisePath returns the fixed artifact path for a content-addressed mise
-// executable archive.
-func MisePath(digest string) (string, error) {
-	if !digestPattern.MatchString(digest) {
-		return "", fmt.Errorf("invalid mise digest %q", digest)
-	}
-	return toolDirectory + "/mise/" + strings.TrimPrefix(digest, "sha256:") + "/mise.gz", nil
-}
-
-// MiseDataDir returns the runtime-owned hosted cache path for one exact mise
-// version. The generated cache path triggers Buildkite's documented
+// MiseDataDir returns the runtime-owned hosted cache path for the required
+// mise version. The generated cache path triggers Buildkite's documented
 // /cache/bkcache volume mount; cache contents are an accelerator, never an
 // authority.
-func MiseDataDir(version string) (string, error) {
-	if !toolVersionPattern.MatchString(version) {
-		return "", fmt.Errorf("invalid mise version %q", version)
-	}
-	return "/cache/bkcache/buildkite-gha/mise/" + version, nil
+func MiseDataDir() string {
+	return "/cache/bkcache/buildkite-gha/mise/" + RequiredMiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -95,20 +83,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var misePath string
-	var miseDataDir string
-	if pipeline.MiseDigest != "" {
-		misePath, err = MisePath(pipeline.MiseDigest)
-		if err != nil {
-			return nil, err
-		}
-		miseDataDir, err = MiseDataDir(pipeline.MiseVersion)
-		if err != nil {
-			return nil, err
-		}
-	} else if pipeline.MiseVersion != "" {
-		return nil, fmt.Errorf("mise version requires a mise digest")
-	}
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
 	stepIndent := "  "
@@ -125,7 +99,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
-		usesMise := misePath != "" && job.UsesActions
 		commands := []string{
 			"set -euo pipefail",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
@@ -138,25 +111,13 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
-		if usesMise {
-			commands = append(commands,
-				"buildkite-agent artifact download "+shellQuote(misePath)+` "$bootstrap_dir" --step `+shellQuote(pipeline.CompilerStep),
-				"mise_archive=\"$bootstrap_dir/"+misePath+`"`,
-				`mise="$bootstrap_dir/mise"`,
-				`actual_mise_digest="$(sha256sum "$mise_archive" | awk '{print "sha256:" $1}')"`,
-				`test "$actual_mise_digest" = `+shellQuote(pipeline.MiseDigest),
-				`gzip -dc "$mise_archive" > "$mise"`,
-				`chmod 0500 "$mise"`,
-				`export PATH="$bootstrap_dir:$PATH"`,
-			)
-		}
 		commands = append(commands, `"$distribution" run-job --plan "$plan"`)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(&out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		_, _ = fmt.Fprintf(&out, "%sagents:\n", attributeIndent)
 		_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		_, _ = fmt.Fprintf(&out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		if usesMise {
+		if job.UsesActions {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s    - \".buildkite-gha/cache-volume\"\n", attributeIndent)
@@ -166,8 +127,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
-		if usesMise {
-			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(miseDataDir))
+		if job.UsesActions {
+			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
 		}
 		if job.Concurrency != 0 {
 			_, _ = fmt.Fprintf(&out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)

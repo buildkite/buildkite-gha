@@ -2,8 +2,6 @@
 package cli
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -41,8 +39,6 @@ Commands:
 
 Run "buildkite-gha help <command>" for command help.
 `
-
-const managedMiseVersion = "2026.5.12"
 
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
@@ -259,10 +255,18 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	var result gharuntime.JobResult
 	var runErr error
-	if len(job.NeedSources) != 0 {
-		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
+	if jobUsesActions(job) {
+		runner.Mise, runErr = resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"))
 		if runErr != nil {
-			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
+			runErr = fmt.Errorf("prepare action runtime: %w", runErr)
+		}
+	}
+	if len(job.NeedSources) != 0 {
+		if runErr == nil {
+			job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
+			if runErr != nil {
+				runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
+			}
 		}
 	}
 	if runErr == nil {
@@ -300,6 +304,65 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+func jobUsesActions(job plan.Job) bool {
+	if len(job.Actions) != 0 {
+		return true
+	}
+	for _, step := range job.Steps {
+		if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveRuntimeMise(ctx context.Context, configured string) (string, error) {
+	candidate := configured
+	if candidate == "" {
+		var err error
+		candidate, err = exec.LookPath("mise")
+		if err != nil {
+			return "", fmt.Errorf("mise %s is required on the runtime agent: %w", buildkitepipeline.RequiredMiseVersion, err)
+		}
+	} else if !filepath.IsAbs(candidate) {
+		return "", fmt.Errorf("BUILDKITE_GHA_MISE must be an absolute path")
+	}
+	absolute, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime mise path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime mise executable: %w", err)
+	}
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect runtime mise executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("runtime mise executable %q is not an executable regular file", resolved)
+	}
+	command := exec.CommandContext(ctx, resolved, "--version")
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		if !strings.HasPrefix(name, "MISE_") {
+			command.Env = append(command.Env, value)
+		}
+	}
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("validate runtime mise executable: %w", err)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("validate runtime mise executable: empty version")
+	}
+	if fields[0] != buildkitepipeline.RequiredMiseVersion {
+		return "", fmt.Errorf("runtime mise executable reported version %q, want %q", fields[0], buildkitepipeline.RequiredMiseVersion)
+	}
+	return resolved, nil
 }
 
 func prepareMiseDataDir(path string, stderr io.Writer) string {
@@ -493,7 +556,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false, false)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -640,22 +703,19 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), true, privateCheckout)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), privateCheckout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	bundle := preflight.Bundle
-	artifacts := make([]transport.Artifact, 0, 2+len(bundle.Plans))
+	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
-	if preflight.MiseArtifact != nil {
-		artifacts = append(artifacts, *preflight.MiseArtifact)
-	}
 	for _, jobPlan := range bundle.Plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
@@ -675,9 +735,8 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 }
 
 type hostedTokenlessCompilation struct {
-	Bundle       compiler.Bundle
-	MiseArtifact *transport.Artifact
-	HasActions   bool
+	Bundle     compiler.Bundle
+	HasActions bool
 }
 
 type hostedTokenlessFailureKind string
@@ -700,7 +759,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, transportMise, privateCheckout bool) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, privateCheckout bool) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -741,16 +800,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		options.ResolveActions = true
 		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
 	}
-	var miseArtifact *transport.Artifact
-	if hasActions && transportMise {
-		artifact, err := managedMiseArtifact(ctx)
-		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, err)
-		}
-		miseArtifact = &artifact
-		options.MiseDigest = artifact.Digest
-		options.MiseVersion = managedMiseVersion
-	}
 	bundle, err := compiler.CompileBundleContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -761,7 +810,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	if !hasActions && bundleUsesActions(bundle) {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
-	return hostedTokenlessCompilation{Bundle: bundle, MiseArtifact: miseArtifact, HasActions: hasActions}, nil
+	return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
@@ -826,76 +875,6 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 		}
 	}
 	return false
-}
-
-func managedMiseArtifact(ctx context.Context) (transport.Artifact, error) {
-	mise, err := exec.LookPath("mise")
-	if err != nil {
-		return transport.Artifact{}, fmt.Errorf("mise is required on the importer for action workflows: %w", err)
-	}
-	realMise, err := filepath.EvalSymlinks(mise)
-	if err != nil {
-		return transport.Artifact{}, fmt.Errorf("resolve importer mise executable: %w", err)
-	}
-	contents, err := os.ReadFile(realMise)
-	if err != nil {
-		return transport.Artifact{}, fmt.Errorf("read importer mise executable: %w", err)
-	}
-	if err := validateMiseBytes(ctx, contents); err != nil {
-		return transport.Artifact{}, err
-	}
-	archive, err := deterministicGzip(contents)
-	if err != nil {
-		return transport.Artifact{}, fmt.Errorf("archive importer mise executable: %w", err)
-	}
-	digest := transport.Digest(archive)
-	path, err := buildkitepipeline.MisePath(digest)
-	if err != nil {
-		return transport.Artifact{}, err
-	}
-	return transport.Artifact{Path: path, Digest: digest, Contents: archive}, nil
-}
-
-func validateMiseBytes(ctx context.Context, contents []byte) error {
-	dir, err := os.MkdirTemp("", "buildkite-gha-mise-validation-")
-	if err != nil {
-		return fmt.Errorf("create mise validation directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	copyPath := filepath.Join(dir, "mise")
-	if err := os.WriteFile(copyPath, contents, 0o700); err != nil {
-		return fmt.Errorf("materialize importer mise executable for validation: %w", err)
-	}
-	command := exec.CommandContext(ctx, copyPath, "--version")
-	command.Env = []string{"HOME=" + dir, "PATH=/usr/local/bin:/usr/bin:/bin"}
-	output, err := command.Output()
-	if err != nil {
-		return fmt.Errorf("validate exact importer mise executable bytes: %w", err)
-	}
-	if strings.TrimSpace(string(output)) == "" {
-		return fmt.Errorf("validate exact importer mise executable bytes: empty version")
-	}
-	fields := strings.Fields(string(output))
-	if fields[0] != managedMiseVersion {
-		return fmt.Errorf("validate exact importer mise executable bytes: reported version %q, want %q", fields[0], managedMiseVersion)
-	}
-	return nil
-}
-
-func deterministicGzip(source []byte) ([]byte, error) {
-	var out bytes.Buffer
-	w, err := gzip.NewWriterLevel(&out, gzip.BestCompression)
-	if err != nil {
-		return nil, err
-	}
-	w.OS = 255
-	if _, err := w.Write(source); err != nil {
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, privateCheckout bool, err error) {

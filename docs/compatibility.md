@@ -263,11 +263,13 @@ is the recommended installation. For direct use, download
 archive checksum, and extract it to a stable location. The archive contains
 `buildkite-gha` and `LICENSE`.
 
-Action workflows also require mise 2026.5.12 on the importer `PATH` when
-invoking `upload` directly. The runtime uses it with repository configuration
-disabled to install exact Node 20.20.2 or 24.18.0 releases. Those Node binaries
-require glibc 2.28 or newer; the static Go CLI does not. `validate` and
-`compile` do not install Node or require mise.
+Generated jobs that execute actions require mise 2026.5.12 on the runtime
+agent `PATH`, or at the absolute path supplied in `BUILDKITE_GHA_MISE`.
+`run-job` resolves and validates that executable before workflow code can
+modify `PATH`, then uses it with repository configuration disabled to install
+exact Node 20.20.2 or 24.18.0 releases. Those Node binaries require glibc 2.28
+or newer; the static Go CLI does not. Shell-only jobs, importers, `validate`,
+and `compile` do not require mise.
 
 ### Validate
 
