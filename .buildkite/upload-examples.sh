@@ -56,15 +56,12 @@ fi
 
 case "$example" in
   basic)
-    label="Basic CI"
     workflow=".github/workflows/example-basic.yml"
     ;;
   artifacts)
-    label="Artifact build and handoff"
     workflow=".github/workflows/example-artifacts.yml"
     ;;
   advanced)
-    label="Advanced delivery"
     workflow=".github/workflows/example-advanced.yml"
     ;;
   *)
@@ -96,7 +93,7 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":github: $label"
+  - label: ":github: Run workflow"
     key: "example-$example-importer"
     timeout_in_minutes: 20
     retry:
