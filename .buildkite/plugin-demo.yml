@@ -8,7 +8,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.1:
+      - github-actions#v0.2.2:
           workflow: .github/workflows/example-basic.yml
 
   - label: ":package: Artifact released-plugin demo"
@@ -17,7 +17,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.1:
+      - github-actions#v0.2.2:
           workflow: .github/workflows/example-artifacts.yml
 
   - label: ":javascript: Actions released-plugin demo"
@@ -26,7 +26,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.1:
+      - github-actions#v0.2.2:
           workflow: .github/workflows/phase-4-actions-oracle.yml
 
   - label: ":rocket: Advanced released-plugin demo"
@@ -35,7 +35,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.1:
+      - github-actions#v0.2.2:
           workflow: .github/workflows/example-advanced.yml
 
   - label: ":white_check_mark: Service-free plugin demo complete"
@@ -54,7 +54,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.1:
+      - github-actions#v0.2.2:
           workflow: testdata/poc/.github/workflows/cache.yml
 
   - label: ":white_check_mark: Cache plugin demo complete"

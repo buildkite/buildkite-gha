@@ -532,7 +532,7 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`group: ":github: Run workflow"`,
 		`label: "Prepare workflow"`,
 		`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
-		`github-actions#v0.2.1`,
+		`github-actions#v0.2.2`,
 	} {
 		if !strings.Contains(loader.Command, required) {
 			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
@@ -660,7 +660,7 @@ func TestUploadExamplesScript(t *testing.T) {
 			`key: "example-basic-workflow"`,
 			`label: "Prepare workflow"`,
 			`key: "example-basic-importer"`,
-			`github-actions#v0.2.1`,
+			`github-actions#v0.2.2`,
 			`workflow: ".github/workflows/example-basic.yml"`,
 			`queue: "hosted"`,
 			`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
@@ -674,7 +674,7 @@ func TestUploadExamplesScript(t *testing.T) {
 				t.Fatalf("basic importer contains %q:\n%s", forbidden, pipeline)
 			}
 		}
-		if strings.Count(pipeline, "github-actions#v0.2.1") != 1 {
+		if strings.Count(pipeline, "github-actions#v0.2.2") != 1 {
 			t.Fatalf("basic importer does not contain exactly one plugin:\n%s", pipeline)
 		}
 	})
@@ -723,7 +723,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const plugin = "github-actions#v0.2.1"
+	const plugin = "github-actions#v0.2.2"
 	type pluginConfig struct {
 		Workflow string `yaml:"workflow"`
 		Version  string `yaml:"version"`
