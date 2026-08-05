@@ -531,6 +531,7 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`queue: "hosted"`,
 		`group: ":github: Run workflow"`,
 		`label: "Prepare workflow"`,
+		`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
 		`github-actions#v0.2.0`,
 	} {
 		if !strings.Contains(loader.Command, required) {
@@ -662,6 +663,7 @@ func TestUploadExamplesScript(t *testing.T) {
 			`github-actions#v0.2.0`,
 			`workflow: ".github/workflows/example-basic.yml"`,
 			`queue: "hosted"`,
+			`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
 		} {
 			if !strings.Contains(pipeline, required) {
 				t.Fatalf("basic importer lacks %q:\n%s", required, pipeline)
