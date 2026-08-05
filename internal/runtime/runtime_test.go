@@ -910,6 +910,34 @@ func TestEnvironmentSecretsCannotReadAmbientAgentVariables(t *testing.T) {
 	}
 }
 
+func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *testing.T) {
+	realDir := t.TempDir()
+	realAgent := filepath.Join(realDir, "buildkite-agent")
+	writeFixtureFile(t, realDir, "buildkite-agent", "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(realAgent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lookupDir := t.TempDir()
+	lookupAgent := filepath.Join(lookupDir, "buildkite-agent")
+	if err := os.Symlink(realAgent, lookupAgent); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	configured := &AgentRedactor{}
+	resolved, err := resolveAgentRedactorBeforeWorkflow(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, ok := resolved.(*AgentRedactor)
+	if !ok || pinned == configured || pinned.Executable != realAgent {
+		t.Fatalf("resolved redactor = %#v, want independent pointer pinned to %q", resolved, realAgent)
+	}
+	if configured.Executable != "" {
+		t.Fatalf("configured redactor mutated to %q", configured.Executable)
+	}
+}
+
 func TestFailureConditionsAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
