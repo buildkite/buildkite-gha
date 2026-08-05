@@ -180,8 +180,8 @@ publication and caller consumption, the build-unique cache miss, post-save,
 dependent exact hit, and subsequent artifact fan-out. The revised stable
 service-free and cache fixtures retain compile/admission coverage.
 
-The CLI and companion plugin `v0.2.0` releases exercised the complete customer
-installation path at source commit
+The initial CLI and companion plugin `v0.2.0` releases exercised the complete
+customer installation path at source commit
 `d5102df7e81c49f27a30fb2830d9608a56ee84de`. The service-free importer,
 generated jobs, native terminal, and repository checks passed in [Buildkite
 build 336](https://buildkite.com/buildkite/buildkite-gha/builds/336). The same
@@ -191,8 +191,26 @@ hit and restore, and cache terminal passed in [Buildkite build
 the public plugin tag resolved to the tested commit
 `d009da173158270a3921b2997ae8fd3d68526d00` and installed the same verified CLI
 distribution without an explicit CLI version override. These are the
-authoritative published installation proofs. Repeat the customer installation
-path with:
+authoritative initial published installation proofs.
+
+CLI `v0.2.1` was subsequently published at exact tag commit
+`a780787f049281290974292f00c29e92db717fb9` after [Buildkite release build
+351](https://buildkite.com/buildkite/buildkite-gha/builds/351) passed. Companion
+plugin `v0.2.1` resolves to exact commit
+`4910e56544e365bb545d3157c5aac058b6dabfaa` and defaults to that CLI release.
+At exact external repository commit
+[`8a74f88676a120e0bc6090b1aafc65edfd62ebbe`](https://github.com/mcncl/gotyper/commit/8a74f88676a120e0bc6090b1aafc65edfd62ebbe),
+[`mcncl/gotyper` build 11](https://buildkite.com/no-assembly/gotyper/builds/11)
+passed a two-job public workflow through the published plugin, including public
+checkout, setup-go, the audited cache v6 lifecycle, a direct dependency, race
+tests, static analysis, and a final binary build. This is the first external
+customer-shaped migration proof; several more migrations are still required by
+the public-beta gate.
+
+The generated example uploader and its `Run workflow` label landed on this
+repository's main branch after the CLI `v0.2.1` tag. They are current
+repository-demo UX rather than evidence about the released CLI runtime. Repeat
+the customer installation path with the current released-plugin demo:
 
 ```sh
 commit=$(git rev-parse HEAD)

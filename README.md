@@ -24,14 +24,14 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.0:
+      - github-actions#v0.2.1:
           workflow: .github/workflows/ci.yml
 ```
 
-The released plugin downloads and verifies `buildkite-gha` v0.2.0 by default, derives the
-event context from the Buildkite build, and uploads the generated jobs to the
-fixed `hosted` queue. Pin a released plugin version rather than a floating
-branch.
+The released plugin downloads and verifies `buildkite-gha` v0.2.1 by default,
+derives the event context from the Buildkite build, and uploads the generated
+jobs to the fixed `hosted` queue. Pin a released plugin version rather than a
+floating branch.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -49,7 +49,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.0:
+      - github-actions#v0.2.1:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"

@@ -107,6 +107,19 @@ CLI `v0.2.0` distribution without an explicit CLI version override. Build 337
 observed the required producer miss and post-save followed by the direct
 dependent's exact primary-key hit and restore.
 
+CLI `v0.2.1` was published at exact tag commit
+`a780787f049281290974292f00c29e92db717fb9` after [Buildkite release build
+351](https://buildkite.com/buildkite/buildkite-gha/builds/351) passed. Companion
+plugin `v0.2.1` resolves to exact commit
+`4910e56544e365bb545d3157c5aac058b6dabfaa` and installs CLI `v0.2.1` by default.
+The first independent migrated-repository proof used those published versions:
+at exact `mcncl/gotyper` commit
+[`8a74f88676a120e0bc6090b1aafc65edfd62ebbe`](https://github.com/mcncl/gotyper/commit/8a74f88676a120e0bc6090b1aafc65edfd62ebbe),
+[Buildkite build 11](https://buildkite.com/no-assembly/gotyper/builds/11)
+passed public checkout, setup-go, the audited cache v6 lifecycle, a direct
+two-job dependency, race tests, static analysis, and a final binary build on a
+compatible Hosted image.
+
 The historical phase fixtures and their recorded observations remain the
 conformance ledger. The now-superseded targeted cache importer, continuation,
 and verifier were removed after build 290 passed. The remaining phase-specific
