@@ -2551,10 +2551,11 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: step sections\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "success", Name: "Build\n+++ injected", Kind: "run", Shell: "sh", Command: "echo built"},
+		{ID: "success", Name: "Build (${{ matrix.version }})\n+++ injected", Kind: "run", Shell: "sh", Command: "echo built"},
 		{ID: "skipped", Name: "Must not appear", Kind: "run", Shell: "sh", Condition: "false", Command: "echo skipped"},
 		{ID: "failure", Kind: "run", Shell: "sh", Command: "echo broken; exit 1"},
 	})
+	job.Matrix = map[string]any{"version": "1.26"}
 	var logs bytes.Buffer
 
 	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
@@ -2562,7 +2563,7 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	got := logs.String()
-	for _, fragment := range []string{"--- Build +++ injected\n", "built\n", "--- failure\n", "broken\n", "^^^ +++\n"} {
+	for _, fragment := range []string{"--- Build (1.26) +++ injected\n", "built\n", "--- failure\n", "broken\n", "^^^ +++\n"} {
 		if !strings.Contains(got, fragment) {
 			t.Errorf("logs lack %q: %q", fragment, got)
 		}
