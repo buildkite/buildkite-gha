@@ -634,7 +634,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance := JobInstance{
 				Key:                     key,
 				LogicalJobID:            job.ID,
-				Label:                   instanceLabel(job, matrix),
+				Label:                   instanceLabel(job, matrix, context),
 				RunsOn:                  labels,
 				Queue:                   queue,
 				Matrix:                  matrix,
@@ -1202,10 +1202,20 @@ func loadLocalAction(repositoryRoot, uses string) (metadata.Metadata, error) {
 	return metadata.Load(repositoryRoot, relativeActionPath)
 }
 
-func instanceLabel(job workflow.Job, matrix map[string]any) string {
+func instanceLabel(job workflow.Job, matrix map[string]any, context expression.CompileContext) string {
 	label := job.Name
 	if label == "" {
 		label = job.ID
+	} else {
+		context.Matrix = matrix
+		if resolved, err := expression.EvaluateCompileTemplate(label, context); err == nil {
+			label = resolved
+			withoutMatrix := context
+			withoutMatrix.Matrix = nil
+			if _, err := expression.EvaluateCompileTemplate(job.Name, withoutMatrix); err != nil {
+				return label
+			}
+		}
 	}
 	if len(matrix) == 0 {
 		return label
