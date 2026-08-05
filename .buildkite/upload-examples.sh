@@ -93,12 +93,15 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":github: Run workflow"
-    key: "example-$example-importer"
-    timeout_in_minutes: 20
-    retry:
-      automatic: false
-    plugins:
-      - github-actions#v0.2.0:
-          workflow: "$workflow"
+  - group: ":github: Run workflow"
+    key: "example-$example-workflow"
+    steps:
+      - label: "Prepare workflow"
+        key: "example-$example-importer"
+        timeout_in_minutes: 20
+        retry:
+          automatic: false
+        plugins:
+          - github-actions#v0.2.0:
+              workflow: "$workflow"
 YAML

@@ -99,6 +99,41 @@ func TestEmitGolden(t *testing.T) {
 	}
 }
 
+func TestEmitMergesIntoContainingGroup(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		GroupLabel:         ":github: Run workflow",
+		Jobs:               []Job{{Key: "job", Label: "Job", Queue: "hosted", PlanDigest: testDigest("plan")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+			Key   string `yaml:"key"`
+			Steps []struct {
+				Key       string `yaml:"key"`
+				DependsOn []struct {
+					Step         string `yaml:"step"`
+					AllowFailure bool   `yaml:"allow_failure"`
+				} `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse grouped pipeline: %v\n%s", err, output)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Group != ":github: Run workflow" || document.Steps[0].Key != "" || len(document.Steps[0].Steps) != 1 {
+		t.Fatalf("grouped pipeline = %#v", document.Steps)
+	}
+	job := document.Steps[0].Steps[0]
+	if job.Key != "job" || len(job.DependsOn) != 1 || job.DependsOn[0].Step != "importer" || job.DependsOn[0].AllowFailure {
+		t.Fatalf("grouped job = %#v", job)
+	}
+}
+
 func TestEmitMiseBootstrap(t *testing.T) {
 	digest := testDigest("mise")
 	pipeline := Pipeline{
@@ -494,6 +529,8 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
 		`pipeline upload --no-interpolation --reject-secrets`,
 		`queue: "hosted"`,
+		`group: ":github: Run workflow"`,
+		`label: "Prepare workflow"`,
 		`github-actions#v0.2.0`,
 	} {
 		if !strings.Contains(loader.Command, required) {
@@ -618,7 +655,9 @@ func TestUploadExamplesScript(t *testing.T) {
 			t.Fatalf("upload importer: %v\n%s", err, output)
 		}
 		for _, required := range []string{
-			`:github: Run workflow`,
+			`group: ":github: Run workflow"`,
+			`key: "example-basic-workflow"`,
+			`label: "Prepare workflow"`,
 			`key: "example-basic-importer"`,
 			`github-actions#v0.2.0`,
 			`workflow: ".github/workflows/example-basic.yml"`,

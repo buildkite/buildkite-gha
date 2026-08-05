@@ -49,6 +49,9 @@ type Options struct {
 	// pipeline bootstrap commands and never changes compiler IR or plans.
 	MiseDigest  string
 	MiseVersion string
+	// GroupLabel merges generated jobs into the Buildkite group containing the
+	// importer. It affects pipeline presentation only, not compiler IR or plans.
+	GroupLabel string
 }
 
 func defaultOptions() Options {

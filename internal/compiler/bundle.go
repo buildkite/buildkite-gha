@@ -100,6 +100,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		DistributionDigest: compilerDistributionDigest,
 		MiseDigest:         options.MiseDigest,
 		MiseVersion:        options.MiseVersion,
+		GroupLabel:         options.GroupLabel,
 		Jobs:               jobs,
 	})
 	if err != nil {
