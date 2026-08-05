@@ -169,6 +169,22 @@ func TestTokenlessCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) 
 	}
 }
 
+func TestTokenlessCheckoutPreservesPublicRepositoryValidation(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
+		t.Fatalf("tokenless checkout repository validation error = %v", err)
+	}
+	job.RequiredCapabilities = []string{"provider-token-read"}
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid github.com event repository") {
+		t.Fatalf("private checkout repository validation error = %v", err)
+	}
+}
+
 func TestPrivateCheckoutAdapterUsesOneShotAskpassCredential(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)
@@ -283,10 +299,20 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	if err := os.WriteFile(trustedGit, []byte(trustedScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	trustedAgentMarker := filepath.Join(t.TempDir(), "trusted-agent-ran")
+	trustedAgent := filepath.Join(trustedDir, "buildkite-agent")
+	trustedAgentScript := "#!/bin/sh\nIFS= read -r value\ntest \"$value\" = " + shellTestQuote(token) + "\n: > " + shellTestQuote(trustedAgentMarker) + "\n"
+	if err := os.WriteFile(trustedAgent, []byte(trustedAgentScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 
 	lookupDir := t.TempDir()
 	lookupGit := filepath.Join(lookupDir, "git")
 	if err := os.Symlink(trustedGit, lookupGit); err != nil {
+		t.Fatal(err)
+	}
+	lookupAgent := filepath.Join(lookupDir, "buildkite-agent")
+	if err := os.Symlink(trustedAgent, lookupAgent); err != nil {
 		t.Fatal(err)
 	}
 	poisonDir := t.TempDir()
@@ -298,6 +324,11 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	poisonCatMarker := filepath.Join(t.TempDir(), "poison-cat-ran")
 	poisonCat := filepath.Join(poisonDir, "cat")
 	if err := os.WriteFile(poisonCat, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonCatMarker)+"\nexit 98\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	poisonAgentMarker := filepath.Join(t.TempDir(), "poison-agent-ran")
+	poisonAgent := filepath.Join(poisonDir, "buildkite-agent")
+	if err := os.WriteFile(poisonAgent, []byte("#!/bin/sh\n: > "+shellTestQuote(poisonAgentMarker)+"\nexit 99\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", lookupDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -321,6 +352,8 @@ if [ "${1##*/}" = pre.js ]; then
   rm -f "$LOOKUP_GIT"
   ln -s "$POISON_GIT" "$LOOKUP_GIT"
   ln -s "$POISON_CAT" "$LOOKUP_CAT"
+	  rm -f "$LOOKUP_AGENT"
+	  ln -s "$POISON_AGENT" "$LOOKUP_AGENT"
 fi
 `
 	if err := os.WriteFile(node, []byte(nodeScript), 0o700); err != nil {
@@ -343,10 +376,12 @@ fi
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Env: map[string]string{
-			"LOOKUP_GIT": lookupGit,
-			"LOOKUP_CAT": filepath.Join(lookupDir, "cat"),
-			"POISON_CAT": poisonCat,
-			"POISON_GIT": poisonGit,
+			"LOOKUP_AGENT": lookupAgent,
+			"LOOKUP_GIT":   lookupGit,
+			"POISON_AGENT": poisonAgent,
+			"LOOKUP_CAT":   filepath.Join(lookupDir, "cat"),
+			"POISON_CAT":   poisonCat,
+			"POISON_GIT":   poisonGit,
 		},
 		Steps: []plan.Step{
 			{ID: "poison", Kind: "uses", Uses: "owner/repo/poison@v1", Action: &plan.ActionSelector{Lock: poisonID}},
@@ -359,9 +394,8 @@ fi
 	}
 	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return token, nil })
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
-	redactor := &testRedactor{}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Checkout: provider, Redactor: redactor, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: node, Checkout: provider, Redactor: AgentRedactor{}, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -374,7 +408,13 @@ fi
 	if target, err := filepath.EvalSymlinks(filepath.Join(lookupDir, "cat")); err != nil || target != poisonCat {
 		t.Fatalf("pre-hook cat replacement = %q, %v; want %q", target, err, poisonCat)
 	}
-	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "askpass reader selected through poisoned PATH": poisonCatMarker} {
+	if target, err := filepath.EvalSymlinks(lookupAgent); err != nil || target != poisonAgent {
+		t.Fatalf("pre-hook Agent replacement = %q, %v; want %q", target, err, poisonAgent)
+	}
+	if _, err := os.Stat(trustedAgentMarker); err != nil {
+		t.Fatalf("trusted Agent redactor did not run: %v", err)
+	}
+	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "askpass reader selected through poisoned PATH": poisonCatMarker, "Agent redactor selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%s: %v", name, err)
 		}

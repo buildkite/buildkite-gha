@@ -122,11 +122,18 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if !jobUsesCheckoutAdapter(job) {
 			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
 		}
-		git, err := resolvePrivateCheckoutGit(r.Git)
+		git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "private checkout Git")
 		if err != nil {
 			return JobResult{}, err
 		}
 		r.Git = git
+		if r.Redactor == nil {
+			return JobResult{}, fmt.Errorf("provider-token-read capability requires the Buildkite Agent redactor")
+		}
+		r.Redactor, err = resolveAgentRedactorBeforeWorkflow(r.Redactor)
+		if err != nil {
+			return JobResult{}, err
+		}
 	}
 	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
 		return JobResult{}, fmt.Errorf("job has %d static dependencies but no hydrated prerequisite results", len(job.Dependencies))

@@ -25,30 +25,6 @@ func validCheckoutRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
-func resolvePrivateCheckoutGit(configured string) (string, error) {
-	candidate := configured
-	if candidate == "" {
-		candidate = "git"
-	}
-	resolved, err := exec.LookPath(candidate)
-	if err != nil {
-		return "", fmt.Errorf("resolve private checkout Git before workflow execution: %w", err)
-	}
-	resolved, err = filepath.Abs(resolved)
-	if err != nil {
-		return "", fmt.Errorf("resolve private checkout Git absolute path before workflow execution: %w", err)
-	}
-	resolved, err = filepath.EvalSymlinks(resolved)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize private checkout Git before workflow execution: %w", err)
-	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
-		return "", fmt.Errorf("private checkout requires a real executable Git resolved before workflow execution")
-	}
-	return resolved, nil
-}
-
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, inputs map[string]string) (Result, error) {
 	result := newResult()
 	private := job.HasCapability("provider-token-read")
@@ -56,7 +32,11 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if private {
 		adapter = "private checkout adapter"
 	}
-	if job.Event.Provider != "github" || !validCheckoutRepository(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
+	validRepository := checkoutRepositoryPattern.MatchString(job.Event.Repository)
+	if private {
+		validRepository = validCheckoutRepository(job.Event.Repository)
+	}
+	if job.Event.Provider != "github" || !validRepository || !checkoutSHAPattern.MatchString(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid github.com event repository and exact SHA; Phase 6 is required for other events", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {

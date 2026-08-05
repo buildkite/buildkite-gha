@@ -76,6 +76,30 @@ type Runner struct {
 	artifactRegistry  *artifactRegistry
 }
 
+func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
+	candidate := configured
+	if candidate == "" {
+		candidate = fallback
+	}
+	resolved, err := exec.LookPath(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s before workflow execution: %w", label, err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s absolute path before workflow execution: %w", label, err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize %s before workflow execution: %w", label, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%s must be a real executable resolved before workflow execution", label)
+	}
+	return resolved, nil
+}
+
 type managedNodeVerification struct {
 	mu    sync.Mutex
 	paths map[int]string

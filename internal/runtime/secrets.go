@@ -34,6 +34,32 @@ type AgentRedactor struct {
 	Executable string
 }
 
+func resolveAgentRedactorBeforeWorkflow(redactor Redactor) (Redactor, error) {
+	resolve := func(redactor AgentRedactor) (AgentRedactor, error) {
+		executable, err := resolveHostExecutableBeforeWorkflow(redactor.Executable, "buildkite-agent", "Buildkite Agent redactor")
+		if err != nil {
+			return AgentRedactor{}, err
+		}
+		redactor.Executable = executable
+		return redactor, nil
+	}
+	switch redactor := redactor.(type) {
+	case AgentRedactor:
+		return resolve(redactor)
+	case *AgentRedactor:
+		if redactor == nil {
+			return nil, fmt.Errorf("buildkite Agent redactor is nil")
+		}
+		resolved, err := resolve(*redactor)
+		if err != nil {
+			return nil, err
+		}
+		return &resolved, nil
+	default:
+		return redactor, nil
+	}
+}
+
 func (r AgentRedactor) AddRedaction(ctx context.Context, value string) error {
 	executable := r.Executable
 	if executable == "" {
