@@ -198,10 +198,24 @@ cache action before its JavaScript executes.
 This implemented and admitted contract has hosted runtime evidence. The
 then-combined advanced migration POC in [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
 demonstrated a build-unique miss, post-action save, and direct dependent exact
-hit at implementation commit
-`9d29bf26492be760016d29c7ba0d00033b4f9b39`. The minimal Phase 6 cache fixture
-remains compile-only conformance coverage. The stable released-plugin cache
-extension also remains compile/admission-only until its exact-commit hosted run.
+hit at implementation commit `9d29bf26492be760016d29c7ba0d00033b4f9b39`.
+The stable released-plugin extension subsequently proved the same producer
+miss, post-save, and direct-dependent exact primary-key hit in [Buildkite build
+337](https://buildkite.com/buildkite/buildkite-gha/builds/337). The minimal
+Phase 6 cache fixture remains compile-only conformance coverage; it is not the
+fixture that carries the runtime claim.
+
+An independent migrated-repository E2E adds customer-shaped evidence. At exact
+`mcncl/gotyper` commit
+[`8a74f88676a120e0bc6090b1aafc65edfd62ebbe`](https://github.com/mcncl/gotyper/commit/8a74f88676a120e0bc6090b1aafc65edfd62ebbe),
+[Buildkite build 11](https://buildkite.com/no-assembly/gotyper/builds/11)
+passed a public two-job workflow through plugin `v0.2.1`. The migrated workflow
+used exact audited checkout, setup-go, and cache commits, a shell-computed cache
+key, a direct `needs` edge, race tests, static analysis, and a final binary
+build. It explicitly disabled setup-go's token and built-in cache inputs, and
+its compatible Hosted image supplied the C compiler required by `go test
+-race`; this is evidence for the documented migrated subset, not a claim that
+unmodified workflows or every Hosted image are compatible.
 
 ### Failures stay explicit
 

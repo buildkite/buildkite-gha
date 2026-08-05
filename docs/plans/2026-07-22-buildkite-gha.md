@@ -1354,6 +1354,14 @@ Cursor Origin public checkout remains a separate provider integration gate.
   post-save, direct-dependent exact primary-key hit and restore, verified
   payload, generated terminal, and default verified CLI distribution at source
   commit `d5102df7e81c49f27a30fb2830d9608a56ee84de`.
+  The first independent migrated-repository E2E now adds customer-shaped
+  evidence for the released path. At exact `mcncl/gotyper` commit
+  `8a74f88676a120e0bc6090b1aafc65edfd62ebbe`, Buildkite build 11 passed a
+  public two-job workflow through plugin `v0.2.1`, including exact-commit
+  checkout and setup-go, the audited cache-v2 lifecycle, a direct dependency,
+  race tests, static analysis, and a final binary build on a compatible Hosted
+  image. This is one external migration, not yet the several required by the
+  public-beta gate.
   Together these results complete the GitHub/tokenless portion of delivery
   slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
   provider context/source contract. Delivery slice 3—the OIDC-authenticated,
@@ -2231,18 +2239,32 @@ interfaces required by [ADR 0003](../architecture/0003-protected-capability-cont
 Private source, secrets, provider tokens, environments, and compatible OIDC
 remain fail-closed during that work.
 
-The complete published installation experience is now proven. CLI `v0.2.0` is
-public, and companion plugin `v0.2.0` resolves to the exact tested merge commit
-`d009da173158270a3921b2997ae8fd3d68526d00`, which defaults to that CLI release.
-At source commit `d5102df7e81c49f27a30fb2830d9608a56ee84de`, Buildkite build 336 passed the
+The complete published installation experience is now proven. The initial CLI
+and companion plugin `v0.2.0` releases remain the subject of the repository's
+full released-plugin demo proofs: at source commit
+`d5102df7e81c49f27a30fb2830d9608a56ee84de`, Buildkite build 336 passed the
 service-free terminal after the basic, artifact, JavaScript/composite, and
 advanced importers and generated jobs succeeded. Buildkite build 337 passed the
 same service-free lane plus the cache producer miss and post-save,
 direct-dependent primary-key hit and restore, cache terminal, and repository
-checks. Both runs used only the public plugin tag and its default verified CLI
-distribution. They are the authoritative published quick-start evidence.
+checks. Both runs used only plugin `v0.2.0` at exact commit
+`d009da173158270a3921b2997ae8fd3d68526d00` and its default verified CLI
+`v0.2.0` distribution. They remain the authoritative full installation and
+cache-demo evidence.
 
-Treat a fully reproducible demo as the next product milestone, distinct from a
+CLI `v0.2.1` is public at exact tag commit
+`a780787f049281290974292f00c29e92db717fb9`; Buildkite release build 351 passed
+for that commit. Companion plugin `v0.2.1` resolves to exact commit
+`4910e56544e365bb545d3157c5aac058b6dabfaa` and defaults to CLI `v0.2.1`.
+At exact external repository commit
+`8a74f88676a120e0bc6090b1aafc65edfd62ebbe`, `mcncl/gotyper` Buildkite build 11
+passed a public two-job workflow through those published versions. This is the
+first independent customer-shaped installation proof. The generated example
+uploader and `Run workflow` label landed on main after the CLI `v0.2.1` tag;
+they are repository-demo UX rather than evidence about the released CLI
+runtime.
+
+The fully reproducible demo milestone is complete and remains distinct from a
 public-beta declaration. It has two explicit lanes:
 
 1. The service-free baseline installs an immutable plugin revision, downloads
@@ -2289,10 +2311,11 @@ The demo gap closed in this order, using small cross-repository changes:
    from the temporary commit pin to that tag, and rerun both demo lanes using
    only the published configuration. Record those exact runs as the
    authoritative installation and demo evidence.
-5. Ongoing: use failures and diagnostics from those runs, followed by several
-   real customer workflow migrations, to drive small compatibility or UX
-   changes. Do not add workflow-specific runtime branches to make a demo
-   fixture pass.
+5. Ongoing: use failures and diagnostics from those runs and real customer
+   workflow migrations to drive small compatibility or UX changes. The first
+   external migration passed at `mcncl/gotyper` commit
+   `8a74f88676a120e0bc6090b1aafc65edfd62ebbe`; several more remain. Do not add
+   workflow-specific runtime branches to make a demo fixture pass.
 
 This milestone does not by itself satisfy every public-beta gate. The initial
 support target still names manual-input event envelopes plus job and service
@@ -2302,9 +2325,10 @@ installation even though the implemented preview is checksummed and fixed to a
 Hosted runtime queue. Those are explicit scope decisions: either implement and
 prove them or deliberately revise the beta contract before claiming the
 initial support target is complete. A production cache endpoint and several
-customer migrations are also still outstanding. The signed no-op capability
-grant remains a parallel security-foundation item, not permission to block or
-weaken the service-free demo.
+customer migrations beyond the first `mcncl/gotyper` proof are also still
+outstanding. The signed no-op capability grant remains a parallel
+security-foundation item, not permission to block or weaken the service-free
+demo.
 
 ## Release gates
 
