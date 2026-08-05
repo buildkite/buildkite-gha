@@ -532,7 +532,7 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`group: ":github: Run workflow"`,
 		`label: "Prepare workflow"`,
 		`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
-		`github-actions#v0.2.0`,
+		`github-actions#v0.2.1`,
 	} {
 		if !strings.Contains(loader.Command, required) {
 			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
