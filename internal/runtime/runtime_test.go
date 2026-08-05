@@ -2518,6 +2518,62 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 	}
 }
 
+func TestWorkflowPresentationCommandsUseBuildkiteSections(t *testing.T) {
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	for _, line := range []string{
+		"::add-mask::---",
+		"::add-mask::+++",
+		"::add-mask::secret",
+		"::add-mask::foo\tbar",
+		"::group::Compile secret%0A--- injected foo\tbar",
+		"inside group",
+		"::endgroup::",
+		"::debug::modern debug",
+		"::add-matcher::matcher.json",
+		"::remove-matcher owner=test::",
+		"##[debug]legacy debug",
+		"##[add-matcher]legacy.json",
+		"##[remove-matcher]test",
+	} {
+		if err := processor.process(&logs, line); err != nil {
+			t.Fatalf("process(%q) error = %v", line, err)
+		}
+	}
+	processor.expandCurrentSection()
+
+	if got, want := logs.String(), "--- Compile *** *** injected ***\ninside group\n^^^ +++\n"; got != want {
+		t.Fatalf("logs = %q, want %q", got, want)
+	}
+}
+
+func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: step sections\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "success", Name: "Build (${{ matrix.version }})\n+++ injected", Kind: "run", Shell: "sh", Command: "echo built"},
+		{ID: "skipped", Name: "Must not appear", Kind: "run", Shell: "sh", Condition: "false", Command: "echo skipped"},
+		{ID: "failure", Kind: "run", Shell: "sh", Command: "echo broken; exit 1"},
+	})
+	job.Matrix = map[string]any{"version": "1.26"}
+	var logs bytes.Buffer
+
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	got := logs.String()
+	for _, fragment := range []string{"--- Build (1.26) +++ injected\n", "built\n", "--- failure\n", "broken\n", "^^^ +++\n"} {
+		if !strings.Contains(got, fragment) {
+			t.Errorf("logs lack %q: %q", fragment, got)
+		}
+	}
+	if strings.Contains(got, "Must not appear") || strings.Index(got, "^^^ +++") < strings.Index(got, "broken") {
+		t.Fatalf("logs contain a skipped heading or expand before failure output: %q", got)
+	}
+}
+
 func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)

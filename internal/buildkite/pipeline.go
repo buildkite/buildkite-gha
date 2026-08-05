@@ -26,6 +26,7 @@ type Pipeline struct {
 	DistributionDigest string
 	MiseDigest         string
 	MiseVersion        string
+	GroupLabel         string
 	Jobs               []Job
 }
 
@@ -110,13 +111,20 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	}
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
+	stepIndent := "  "
+	if pipeline.GroupLabel != "" {
+		_, _ = fmt.Fprintf(&out, "  - group: %s\n", yamlScalar(pipeline.GroupLabel))
+		out.WriteString("    steps:\n")
+		stepIndent = "      "
+	}
+	attributeIndent := stepIndent + "  "
 	for _, job := range jobs {
 		planPath, err := PlanPath(job.PlanDigest)
 		if err != nil {
 			return nil, fmt.Errorf("job %q: %w", job.Key, err)
 		}
-		_, _ = fmt.Fprintf(&out, "  - label: %s\n", yamlScalar(job.Label))
-		_, _ = fmt.Fprintf(&out, "    key: %s\n", yamlScalar(job.Key))
+		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
+		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		usesMise := misePath != "" && job.UsesActions
 		commands := []string{
 			"set -euo pipefail",
@@ -144,31 +152,31 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		commands = append(commands, `"$distribution" run-job --plan "$plan"`)
 		command := strings.Join(commands, "\n")
-		_, _ = fmt.Fprintf(&out, "    command: %s\n", yamlScalar(command))
-		out.WriteString("    agents:\n")
-		_, _ = fmt.Fprintf(&out, "      queue: %s\n", yamlScalar(job.Queue))
-		out.WriteString("    checkout:\n      skip: true\n")
+		_, _ = fmt.Fprintf(&out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		_, _ = fmt.Fprintf(&out, "%sagents:\n", attributeIndent)
+		_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+		_, _ = fmt.Fprintf(&out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		if usesMise {
-			out.WriteString("    cache:\n")
-			out.WriteString("      paths:\n")
-			out.WriteString("        - \".buildkite-gha/cache-volume\"\n")
-			out.WriteString("      name: \"buildkite-gha\"\n")
+			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
+			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
+			_, _ = fmt.Fprintf(&out, "%s    - \".buildkite-gha/cache-volume\"\n", attributeIndent)
+			_, _ = fmt.Fprintf(&out, "%s  name: \"buildkite-gha\"\n", attributeIndent)
 		}
-		out.WriteString("    env:\n")
-		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_DIGEST: %s\n", yamlScalar(job.PlanDigest))
-		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PATH: %s\n", yamlScalar(planPath))
-		_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_PLAN_PRODUCER: %s\n", yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
+		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
+		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
+		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
 		if usesMise {
-			_, _ = fmt.Fprintf(&out, "      BUILDKITE_GHA_MISE_DATA_DIR: %s\n", yamlScalar(miseDataDir))
+			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(miseDataDir))
 		}
 		if job.Concurrency != 0 {
-			_, _ = fmt.Fprintf(&out, "    concurrency: %d\n", job.Concurrency)
-			_, _ = fmt.Fprintf(&out, "    concurrency_group: %s\n", yamlScalar(job.ConcurrencyGroup))
+			_, _ = fmt.Fprintf(&out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
+			_, _ = fmt.Fprintf(&out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
 		}
-		out.WriteString("    depends_on:\n")
-		_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: false\n", yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(&out, "%sdepends_on:\n", attributeIndent)
+		_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
 		for _, dependency := range job.Dependencies {
-			_, _ = fmt.Fprintf(&out, "      - step: %s\n        allow_failure: true\n", yamlScalar(dependency))
+			_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
 		}
 	}
 	return out.Bytes(), nil

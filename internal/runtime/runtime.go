@@ -1271,10 +1271,60 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", command)
 			p.writeWorkflowCommandMessageLocked(target, "error", command.message)
 			return nil
+		case strings.EqualFold(command.name, "group"):
+			p.writeLogSectionLocked(target, command.message)
+			return nil
+		case strings.EqualFold(command.name, "endgroup"),
+			strings.EqualFold(command.name, "debug"),
+			strings.EqualFold(command.name, "add-matcher"),
+			strings.EqualFold(command.name, "remove-matcher"):
+			return nil
 		}
+	}
+	if isLegacyPresentationCommand(line) {
+		return nil
 	}
 	p.writeMaskedLineLocked(target, line)
 	return nil
+}
+
+func (p *commandProcessor) logSection(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.writeLogSectionLocked(p.stdout, name)
+}
+
+func (p *commandProcessor) expandCurrentSection() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, _ = fmt.Fprintln(p.stdout, "^^^ +++")
+}
+
+func (p *commandProcessor) writeLogSectionLocked(target io.Writer, name string) {
+	name = sanitizeLogSectionText(p.maskTextLocked(name))
+	if name != "" {
+		_, _ = fmt.Fprintln(target, "--- "+name)
+	}
+}
+
+func sanitizeLogSectionText(text string) string {
+	text = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text)
+	return strings.TrimSpace(text)
+}
+
+func isLegacyPresentationCommand(line string) bool {
+	line = strings.TrimLeftFunc(line, unicode.IsSpace)
+	for _, command := range []string{"##[debug]", "##[add-matcher]", "##[remove-matcher]"} {
+		if strings.HasPrefix(strings.ToLower(line), command) {
+			return true
+		}
+	}
+	return false
 }
 
 func validWorkflowCommandStopToken(token string) bool {
@@ -1301,10 +1351,14 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 }
 
 func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) {
+	_, _ = fmt.Fprintln(target, p.maskTextLocked(line))
+}
+
+func (p *commandProcessor) maskTextLocked(text string) string {
 	for _, mask := range p.masks {
-		line = strings.ReplaceAll(line, mask, "***")
+		text = strings.ReplaceAll(text, mask, "***")
 	}
-	_, _ = fmt.Fprintln(target, line)
+	return text
 }
 
 func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading, severity string, command parsedWorkflowCommand) {
