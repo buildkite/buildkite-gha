@@ -114,6 +114,7 @@ func TestCompileEvaluatesGitHubEventVarsAndMatrixForRunsOn(t *testing.T) {
 	workflow := []byte(`on: push
 jobs:
   test:
+    name: test-${{ matrix.os }}
     strategy:
       matrix: ${{ fromJSON(vars.MATRIX) }}
     runs-on: ${{ matrix.os }}
@@ -144,6 +145,9 @@ jobs:
 	}
 	if len(ir.Jobs) != 3 || ir.Jobs[0].Queue != "event-linux" || ir.Jobs[1].Queue != "linux" || ir.Jobs[2].Queue != "linux" {
 		t.Fatalf("context-selected queues = %#v", ir.Jobs)
+	}
+	if ir.Jobs[1].Label != "test-ubuntu-22.04" || ir.Jobs[2].Label != "test-ubuntu-24.04" {
+		t.Fatalf("matrix-resolved labels = %q and %q", ir.Jobs[1].Label, ir.Jobs[2].Label)
 	}
 }
 
