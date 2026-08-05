@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -606,7 +611,7 @@ func setFakeMise(t *testing.T, version string) string {
 }
 
 func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
-	realMise := setFakeMise(t, buildkitepipeline.RequiredMiseVersion)
+	realMise := setFakeMise(t, buildkitepipeline.MiseVersion)
 	linkRoot := t.TempDir()
 	link := filepath.Join(linkRoot, "mise")
 	if err := os.Symlink(realMise, link); err != nil {
@@ -614,7 +619,7 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 	}
 	t.Setenv("PATH", linkRoot)
 	t.Setenv("MISE_TEST_POISON", "must-not-reach-version-check")
-	got, err := resolveRuntimeMise(context.Background(), "")
+	got, err := resolveRuntimeMise(context.Background(), "", t.TempDir(), io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,21 +632,50 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 	}
 }
 
-func TestResolveRuntimeMiseRejectsInvalidRuntimeCapability(t *testing.T) {
-	t.Run("missing", func(t *testing.T) {
-		t.Setenv("PATH", t.TempDir())
-		if _, err := resolveRuntimeMise(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "is required on the runtime agent") {
-			t.Fatalf("resolveRuntimeMise() error = %v", err)
-		}
-	})
+func TestResolveRuntimeMiseInstallsManagedCopyWhenNeeded(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version string
+	}{
+		{name: "missing"},
+		{name: "wrong PATH version", version: "2026.5.13"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pathRoot := t.TempDir()
+			if test.version != "" {
+				mise := filepath.Join(pathRoot, "mise")
+				if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf '"+test.version+" linux-x64 (test)\\n'\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", pathRoot)
+			dataDir := t.TempDir()
+			managed := filepath.Join(t.TempDir(), "mise")
+			called := 0
+			installer := func(_ context.Context, gotDataDir string, _ io.Writer) (string, error) {
+				called++
+				if gotDataDir != dataDir {
+					t.Fatalf("installer data dir = %q, want %q", gotDataDir, dataDir)
+				}
+				return managed, nil
+			}
+			got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", dataDir, io.Discard, installer)
+			if err != nil || got != managed || called != 1 {
+				t.Fatalf("resolveRuntimeMiseWithInstaller() = %q, %v; calls = %d", got, err, called)
+			}
+		})
+	}
+}
+
+func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 	t.Run("configured path must be absolute", func(t *testing.T) {
-		if _, err := resolveRuntimeMise(context.Background(), "mise"); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+		if _, err := resolveRuntimeMise(context.Background(), "mise", t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
 	t.Run("wrong version", func(t *testing.T) {
 		mise := setFakeMise(t, "2026.5.13")
-		if _, err := resolveRuntimeMise(context.Background(), mise); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
+		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
@@ -650,13 +684,86 @@ func TestResolveRuntimeMiseRejectsInvalidRuntimeCapability(t *testing.T) {
 		if err := os.WriteFile(mise, []byte("mise"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := resolveRuntimeMise(context.Background(), mise); err == nil || !strings.Contains(err.Error(), "not an executable regular file") {
+		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), "not an executable regular file") {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
 }
 
-func TestRunJobPublishesFailureWhenActionRuntimeMiseIsMissing(t *testing.T) {
+func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
+	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MiseVersion + " linux-x64 (test)\\n'\n")
+	archive := runtimeMiseTestArchive(t, binary)
+	archiveHash := sha256.Sum256(archive)
+	binaryHash := sha256.Sum256(binary)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = response.Write(archive)
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	want := filepath.Join(root, "linux-x64", "mise")
+	for i := 0; i < 2; i++ {
+		got, err := installRuntimeMiseFrom(context.Background(), root, server.Client(), server.URL, hex.EncodeToString(archiveHash[:]), hex.EncodeToString(binaryHash[:]))
+		if err != nil || got != want {
+			t.Fatalf("installRuntimeMiseFrom() = %q, %v", got, err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("mise archive requests = %d, want one cache miss", requests)
+	}
+	if got, err := os.ReadFile(want); err != nil || !bytes.Equal(got, binary) {
+		t.Fatalf("installed mise = %q, %v", got, err)
+	}
+}
+
+func TestInstallRuntimeMiseRejectsInvalidArchive(t *testing.T) {
+	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MiseVersion + " linux-x64 (test)\\n'\n")
+	archive := runtimeMiseTestArchive(t, binary)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write(archive)
+	}))
+	defer server.Close()
+	binaryHash := sha256.Sum256(binary)
+	if _, err := installRuntimeMiseFrom(context.Background(), t.TempDir(), server.Client(), server.URL, strings.Repeat("0", 64), hex.EncodeToString(binaryHash[:])); err == nil || !strings.Contains(err.Error(), "archive checksum") {
+		t.Fatalf("installRuntimeMiseFrom() error = %v", err)
+	}
+}
+
+func TestInstallRuntimeMiseLiveRelease(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_LIVE_REQUIRED") != "1" {
+		t.Skip("set BUILDKITE_GHA_LIVE_REQUIRED=1 to verify the pinned mise release")
+	}
+	got, err := installRuntimeMise(context.Background(), t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRuntimeMise(context.Background(), got, runtimeMiseBinaryDigest); err != nil {
+		t.Fatalf("validate installed mise release: %v", err)
+	}
+}
+
+func runtimeMiseTestArchive(t *testing.T, binary []byte) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	gzipWriter := gzip.NewWriter(&out)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "mise/bin/mise", Mode: 0o755, Size: int64(len(binary)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write(binary); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	job := cliRunJobPlan()
 	job.Schema = plan.SchemaV3
 	job.Actions = []plan.ActionLock{{
@@ -669,10 +776,10 @@ func TestRunJobPublishesFailureWhenActionRuntimeMiseIsMissing(t *testing.T) {
 	}}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
-	t.Setenv("PATH", t.TempDir())
+	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prepare action runtime: mise 2026.5.12 is required on the runtime agent") {
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prepare action runtime: resolve runtime mise executable") {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "failure" {

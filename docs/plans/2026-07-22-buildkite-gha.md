@@ -847,13 +847,16 @@ at barriers, and the cross-stream masking race.
   compatible.
 
 The release archive contains only the static Go CLI and LICENSE. Generated
-action jobs require mise 2026.5.12 as a runtime-agent capability rather than
-transporting an importer copy as an artifact. The runtime resolves and pins
-the trusted executable before workflow code runs, then installs exactly
-`core:node@20.20.2` or `core:node@24.18.0` with mise configuration disabled,
-digest-verifies the resulting Node executable, and invokes that exact path
-directly. It never uses a fuzzy major, a data-dir plugin, repository mise
-configuration, or a workflow-modifiable tool-bin `PATH`.
+action jobs use mise 2026.5.12 without transporting an importer copy as an
+artifact. The runtime reuses an exact trusted executable from an explicit
+absolute path or `PATH`; otherwise the static CLI downloads the pinned official
+archive into the automatically attached hosted cache and verifies embedded
+archive and executable SHA-256 digests. It resolves and pins that executable
+before workflow code runs, then installs exactly `core:node@20.20.2` or
+`core:node@24.18.0` with mise configuration disabled, digest-verifies the
+resulting Node executable, and invokes that exact path directly. It never uses
+a fuzzy major, a data-dir plugin, repository mise configuration, or a
+workflow-modifiable tool-bin `PATH`.
 `MISE_*` workflow environment overrides therefore cannot redirect compatibility
 Node; ordinary shell steps retain them.
 Generated action jobs declare a dedicated, pipeline-scoped Buildkite hosted
@@ -1050,22 +1053,23 @@ Publish checksummed releases. Add signatures, provenance attestations, and
 SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
 arm64 can follow once action/runtime compatibility is measured.
 
-Distributions provide the static bridge CLI and LICENSE. Runtime agents provide
-the required mise version for action jobs; the bridge pins its absolute path
-before workflow code runs and uses it only to resolve digest-verified Node
-versions. Every generated job must execute the same bridge version that
-produced its plan unless the plan schema explicitly permits a compatible newer
-runtime.
+Distributions provide the static bridge CLI and LICENSE. For action jobs, the
+bridge reuses an exact runtime mise or installs and verifies its pinned release
+in the integration-owned cache. It pins the absolute executable path before
+workflow code runs and uses it only to resolve digest-verified Node versions.
+Every generated job must execute the same bridge version that produced its
+plan unless the plan schema explicitly permits a compatible newer runtime.
 
 The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
-distribution, and invokes the fixed hosted-tokenless upload path. Runtime
-agents provide mise 2026.5.12 for action jobs. Node 20.20.2 and 24.18.0 are
-installed by that pinned executable on demand into an automatically attached,
-integration-owned hosted cache volume. Cached Node executables are
-digest-verified before use, so
+distribution, and invokes the fixed hosted-tokenless upload path. For action
+jobs, the static bridge reuses mise 2026.5.12 when available or downloads and
+digest-verifies its pinned official archive in the automatically attached,
+integration-owned hosted cache volume. Node 20.20.2 and 24.18.0 are installed
+by that pinned executable on demand into the same cache volume. Cached mise and
+Node executables are digest-verified before use, so
 cache sharing across builds is an optimization rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
@@ -1266,9 +1270,9 @@ Cursor Origin public checkout remains a separate provider integration gate.
   on private sources or provider-dependent authentication. Action resolution is
   independent of event trust. Normal `upload` resolves local and anonymous
   public JavaScript/composite actions without transporting mise or Node
-  executable bytes; generated agents pin the required runtime mise capability
-  before workflow code and resolve compatibility versions through
-  `mise --no-config`.
+  executable bytes; generated agents reuse or install the pinned mise release
+  before workflow code and resolve compatibility versions through `mise
+  --no-config`.
   This path remains `EventUntrusted`, fixed to the
   ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
   or the Phase 5 compiler-proven Dockerfile-action provenance.

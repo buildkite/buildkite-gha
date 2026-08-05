@@ -14,9 +14,8 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 
-// RequiredMiseVersion is the runtime-agent capability required by generated
-// jobs that execute actions. The runtime pins mise before workflow code runs.
-const RequiredMiseVersion = "2026.5.12"
+// MiseVersion is the exact mise release used to provision action runtimes.
+const MiseVersion = "2026.5.12"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -44,7 +43,7 @@ func DistributionPath(digest string) (string, error) {
 // /cache/bkcache volume mount; cache contents are an accelerator, never an
 // authority.
 func MiseDataDir() string {
-	return "/cache/bkcache/buildkite-gha/mise/" + RequiredMiseVersion
+	return "/cache/bkcache/buildkite-gha/mise/" + MiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.

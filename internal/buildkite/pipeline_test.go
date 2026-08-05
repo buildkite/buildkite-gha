@@ -173,8 +173,8 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	}
 }
 
-func TestMiseDataDirUsesRequiredRuntimeVersion(t *testing.T) {
-	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/"+RequiredMiseVersion {
+func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
+	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/"+MiseVersion {
 		t.Fatalf("MiseDataDir() = %q", got)
 	}
 }
