@@ -103,6 +103,6 @@ steps:
           automatic: false
         cache: "/cache/bkcache/github-actions-buildkite-plugin"
         plugins:
-          - github-actions#v0.2.1:
+          - github-actions#e90a3a0778812fd368766144303db1bd0ae0acbf:
               workflow: "$workflow"
 YAML
