@@ -14,8 +14,9 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 
-// MiseVersion is the exact mise release used to provision action runtimes.
-const MiseVersion = "2026.5.12"
+// MinimumMiseVersion is the oldest supported mise release and the exact
+// release installed when no compatible runtime executable is available.
+const MinimumMiseVersion = "2026.5.12"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -43,7 +44,7 @@ func DistributionPath(digest string) (string, error) {
 // /cache/bkcache volume mount; cache contents are an accelerator, never an
 // authority.
 func MiseDataDir() string {
-	return "/cache/bkcache/buildkite-gha/mise/" + MiseVersion
+	return "/cache/bkcache/buildkite-gha/mise/" + MinimumMiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.

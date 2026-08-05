@@ -611,7 +611,7 @@ func setFakeMise(t *testing.T, version string) string {
 }
 
 func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
-	realMise := setFakeMise(t, buildkitepipeline.MiseVersion)
+	realMise := setFakeMise(t, buildkitepipeline.MinimumMiseVersion)
 	linkRoot := t.TempDir()
 	link := filepath.Join(linkRoot, "mise")
 	if err := os.Symlink(realMise, link); err != nil {
@@ -632,13 +632,56 @@ func TestResolveRuntimeMisePinsRequiredExecutable(t *testing.T) {
 	}
 }
 
+func TestResolveRuntimeMiseAcceptsNewerVersion(t *testing.T) {
+	realMise := setFakeMise(t, "2026.8.1")
+	got, err := resolveRuntimeMiseWithInstaller(context.Background(), "", t.TempDir(), io.Discard, func(context.Context, string, io.Writer) (string, error) {
+		return "", errors.New("unexpected managed mise install")
+	})
+	if err != nil || got != realMise {
+		t.Fatalf("resolveRuntimeMiseWithInstaller() = %q, %v; want %q", got, err, realMise)
+	}
+}
+
+func TestResolveRuntimeMiseAcceptsPrefixedVersionOutput(t *testing.T) {
+	root := t.TempDir()
+	mise := filepath.Join(root, "mise")
+	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf 'mise v2026.8.1 linux-x64 (test)\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard)
+	if err != nil || got != mise {
+		t.Fatalf("resolveRuntimeMise() = %q, %v; want %q", got, err, mise)
+	}
+}
+
+func TestMiseVersionAtLeast(t *testing.T) {
+	for _, test := range []struct {
+		actual string
+		want   bool
+	}{
+		{actual: "2026.5.12", want: true},
+		{actual: "v2026.5.12", want: true},
+		{actual: "2026.5.13", want: true},
+		{actual: "2026.8.1", want: true},
+		{actual: "2027.1.1", want: true},
+		{actual: "2026.5.11"},
+		{actual: "2025.12.31"},
+		{actual: "2026.5"},
+		{actual: "latest"},
+	} {
+		if got := miseVersionAtLeast(test.actual, buildkitepipeline.MinimumMiseVersion); got != test.want {
+			t.Errorf("miseVersionAtLeast(%q, %q) = %t, want %t", test.actual, buildkitepipeline.MinimumMiseVersion, got, test.want)
+		}
+	}
+}
+
 func TestResolveRuntimeMiseInstallsManagedCopyWhenNeeded(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		version string
 	}{
 		{name: "missing"},
-		{name: "wrong PATH version", version: "2026.5.13"},
+		{name: "old PATH version", version: "2026.5.11"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			pathRoot := t.TempDir()
@@ -673,9 +716,9 @@ func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
-	t.Run("wrong version", func(t *testing.T) {
-		mise := setFakeMise(t, "2026.5.13")
-		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.13", want "2026.5.12"`) {
+	t.Run("old version", func(t *testing.T) {
+		mise := setFakeMise(t, "2026.5.11")
+		if _, err := resolveRuntimeMise(context.Background(), mise, t.TempDir(), io.Discard); err == nil || !strings.Contains(err.Error(), `reported version "2026.5.11", want "2026.5.12" or newer`) {
 			t.Fatalf("resolveRuntimeMise() error = %v", err)
 		}
 	})
@@ -691,7 +734,7 @@ func TestResolveRuntimeMiseRejectsInvalidExplicitOverride(t *testing.T) {
 }
 
 func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
-	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MiseVersion + " linux-x64 (test)\\n'\n")
+	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
 	archive := runtimeMiseTestArchive(t, binary)
 	archiveHash := sha256.Sum256(archive)
 	binaryHash := sha256.Sum256(binary)
@@ -718,7 +761,7 @@ func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
 }
 
 func TestInstallRuntimeMiseRejectsInvalidArchive(t *testing.T) {
-	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MiseVersion + " linux-x64 (test)\\n'\n")
+	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
 	archive := runtimeMiseTestArchive(t, binary)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		_, _ = response.Write(archive)

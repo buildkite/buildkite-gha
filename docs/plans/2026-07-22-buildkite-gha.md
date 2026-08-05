@@ -847,16 +847,16 @@ at barriers, and the cross-stream masking race.
   compatible.
 
 The release archive contains only the static Go CLI and LICENSE. Generated
-action jobs use mise 2026.5.12 without transporting an importer copy as an
-artifact. The runtime reuses an exact trusted executable from an explicit
-absolute path or `PATH`; otherwise the static CLI downloads the pinned official
-archive into the automatically attached hosted cache and verifies embedded
-archive and executable SHA-256 digests. It resolves and pins that executable
-before workflow code runs, then installs exactly `core:node@20.20.2` or
-`core:node@24.18.0` with mise configuration disabled, digest-verifies the
-resulting Node executable, and invokes that exact path directly. It never uses
-a fuzzy major, a data-dir plugin, repository mise configuration, or a
-workflow-modifiable tool-bin `PATH`.
+action jobs use mise 2026.5.12 or newer without transporting an importer copy
+as an artifact. The runtime reuses a compatible trusted executable from an
+explicit absolute path or `PATH`; otherwise the static CLI downloads the pinned
+2026.5.12 official archive into the automatically attached hosted cache and
+verifies embedded archive and executable SHA-256 digests. It resolves and pins
+that executable before workflow code runs, then installs exactly
+`core:node@20.20.2` or `core:node@24.18.0` with mise configuration disabled,
+digest-verifies the resulting Node executable, and invokes that exact path
+directly. It never uses a fuzzy Node major, a data-dir plugin, repository mise
+configuration, or a workflow-modifiable tool-bin `PATH`.
 `MISE_*` workflow environment overrides therefore cannot redirect compatibility
 Node; ordinary shell steps retain them.
 Generated action jobs declare a dedicated, pipeline-scoped Buildkite hosted
@@ -1054,22 +1054,23 @@ SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
 arm64 can follow once action/runtime compatibility is measured.
 
 Distributions provide the static bridge CLI and LICENSE. For action jobs, the
-bridge reuses an exact runtime mise or installs and verifies its pinned release
-in the integration-owned cache. It pins the absolute executable path before
-workflow code runs and uses it only to resolve digest-verified Node versions.
-Every generated job must execute the same bridge version that produced its
-plan unless the plan schema explicitly permits a compatible newer runtime.
+bridge reuses a compatible mise at or above its tested minimum or installs and
+verifies its pinned fallback release in the integration-owned cache. It pins
+the absolute executable path before workflow code runs and uses it only to
+resolve digest-verified Node versions. Every generated job must execute the
+same bridge version that produced its plan unless the plan schema explicitly
+permits a compatible newer runtime.
 
 The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
 distribution, and invokes the fixed hosted-tokenless upload path. For action
-jobs, the static bridge reuses mise 2026.5.12 when available or downloads and
-digest-verifies its pinned official archive in the automatically attached,
-integration-owned hosted cache volume. Node 20.20.2 and 24.18.0 are installed
-by that pinned executable on demand into the same cache volume. Cached mise and
-Node executables are digest-verified before use, so
+jobs, the static bridge reuses mise 2026.5.12 or newer when available or
+downloads and digest-verifies its pinned 2026.5.12 official archive in the
+automatically attached, integration-owned hosted cache volume. Node 20.20.2
+and 24.18.0 are installed by that pinned executable on demand into the same
+cache volume. Cached mise and Node executables are digest-verified before use, so
 cache sharing across builds is an optimization rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin

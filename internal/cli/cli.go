@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -342,7 +343,7 @@ func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir st
 		if resolved, validationErr := validateRuntimeMise(ctx, candidate, ""); validationErr == nil {
 			return resolved, nil
 		}
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise on PATH does not match required version %s; using the managed runtime copy\n", buildkitepipeline.MiseVersion)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise on PATH is incompatible with minimum version %s; using the managed runtime copy\n", buildkitepipeline.MinimumMiseVersion)
 	}
 	return install(ctx, dataDir, stderr)
 }
@@ -390,10 +391,46 @@ func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) 
 	if len(fields) == 0 {
 		return "", fmt.Errorf("validate runtime mise executable: empty version")
 	}
-	if fields[0] != buildkitepipeline.MiseVersion {
-		return "", fmt.Errorf("runtime mise executable reported version %q, want %q", fields[0], buildkitepipeline.MiseVersion)
+	reported := fields[0]
+	if reported == "mise" && len(fields) > 1 {
+		reported = fields[1]
+	}
+	if !miseVersionAtLeast(reported, buildkitepipeline.MinimumMiseVersion) {
+		return "", fmt.Errorf("runtime mise executable reported version %q, want %q or newer", reported, buildkitepipeline.MinimumMiseVersion)
 	}
 	return resolved, nil
+}
+
+func miseVersionAtLeast(actual, minimum string) bool {
+	parse := func(value string) ([3]int, bool) {
+		var parsed [3]int
+		parts := strings.Split(strings.TrimPrefix(value, "v"), ".")
+		if len(parts) != len(parsed) {
+			return parsed, false
+		}
+		for index, part := range parts {
+			number, err := strconv.Atoi(part)
+			if err != nil || number < 0 {
+				return parsed, false
+			}
+			parsed[index] = number
+		}
+		return parsed, true
+	}
+	got, ok := parse(actual)
+	if !ok {
+		return false
+	}
+	want, ok := parse(minimum)
+	if !ok {
+		return false
+	}
+	for index := range got {
+		if got[index] != want[index] {
+			return got[index] > want[index]
+		}
+	}
+	return true
 }
 
 func installRuntimeMise(ctx context.Context, dataDir string, stderr io.Writer) (string, error) {
@@ -407,16 +444,16 @@ func installRuntimeMise(ctx context.Context, dataDir string, stderr io.Writer) (
 		if err != nil {
 			return "", fmt.Errorf("resolve mise runtime cache: %w", err)
 		}
-		root = filepath.Join(root, "buildkite-gha", "mise", buildkitepipeline.MiseVersion)
+		root = filepath.Join(root, "buildkite-gha", "mise", buildkitepipeline.MinimumMiseVersion)
 	} else {
-		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MiseVersion)
+		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MinimumMiseVersion)
 	}
 	destination := filepath.Join(root, "linux-x64", "mise")
 	if resolved, err := validateRuntimeMise(ctx, destination, runtimeMiseBinaryDigest); err == nil {
 		return resolved, nil
 	}
-	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MiseVersion)
-	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-linux-x64.tar.gz", buildkitepipeline.MiseVersion, buildkitepipeline.MiseVersion)
+	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
+	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-linux-x64.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion)
 	client := &http.Client{
 		Timeout: 2 * time.Minute,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
