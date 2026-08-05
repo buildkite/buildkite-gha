@@ -3,8 +3,10 @@ package buildkite
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -532,6 +534,145 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		t.Fatal(err)
 	} else if strings.Contains(string(basic), "github.event_name") {
 		t.Fatalf("manual basic example retains event-specific behavior:\n%s", basic)
+	}
+}
+
+func TestUploadExamplesScript(t *testing.T) {
+	root := filepath.Join("..", "..")
+	script, err := filepath.Abs(filepath.Join(root, ".buildkite", "upload-examples.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+
+	run := func(t *testing.T, environment map[string]string, arguments ...string) (string, string, error) {
+		t.Helper()
+		fakeBin := t.TempDir()
+		capture := filepath.Join(fakeBin, "pipeline.yml")
+		capturedArguments := filepath.Join(fakeBin, "arguments")
+		fakeAgent := filepath.Join(fakeBin, "buildkite-agent")
+		if err := os.WriteFile(fakeAgent, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURED_ARGUMENTS\"\ncat > \"$CAPTURE\"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(script, arguments...)
+		command.Dir = root
+		command.Env = []string{
+			"PATH=" + fakeBin + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"CAPTURE=" + capture,
+			"CAPTURED_ARGUMENTS=" + capturedArguments,
+		}
+		for key, value := range environment {
+			command.Env = append(command.Env, key+"="+value)
+		}
+		output, runErr := command.CombinedOutput()
+		pipeline, readErr := os.ReadFile(capture)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+		uploadArguments, readErr := os.ReadFile(capturedArguments)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+		if runErr == nil {
+			var document any
+			if err := yaml.Unmarshal(pipeline, &document); err != nil {
+				t.Fatalf("generated invalid YAML: %v\n%s", err, pipeline)
+			}
+		}
+		return string(pipeline), string(uploadArguments) + string(output), runErr
+	}
+
+	t.Run("interactive picker", func(t *testing.T) {
+		pipeline, output, err := run(t, nil)
+		if err != nil {
+			t.Fatalf("upload picker: %v\n%s", err, output)
+		}
+		for _, required := range []string{
+			`key: "choose-example"`,
+			`value: "basic"`,
+			`value: "artifacts"`,
+			`value: "advanced"`,
+			`example="$(buildkite-agent meta-data get example)"`,
+			`.buildkite/upload-examples.sh "$example"`,
+			`queue: "hosted"`,
+		} {
+			if !strings.Contains(pipeline, required) {
+				t.Fatalf("picker lacks %q:\n%s", required, pipeline)
+			}
+		}
+		if strings.Contains(pipeline, "github-actions#") {
+			t.Fatalf("picker unexpectedly contains importer:\n%s", pipeline)
+		}
+		if output != "pipeline\nupload\n--no-interpolation\n--reject-secrets\n" {
+			t.Fatalf("upload arguments = %q", output)
+		}
+	})
+
+	t.Run("environment selection", func(t *testing.T) {
+		pipeline, output, err := run(t, map[string]string{
+			"EXAMPLE":          "basic",
+			"EXAMPLE_COMMIT":   commit,
+			"BUILDKITE_COMMIT": commit,
+		})
+		if err != nil {
+			t.Fatalf("upload importer: %v\n%s", err, output)
+		}
+		for _, required := range []string{
+			`:github: Basic CI`,
+			`key: "example-basic-importer"`,
+			`github-actions#v0.2.0`,
+			`workflow: ".github/workflows/example-basic.yml"`,
+			`queue: "hosted"`,
+		} {
+			if !strings.Contains(pipeline, required) {
+				t.Fatalf("basic importer lacks %q:\n%s", required, pipeline)
+			}
+		}
+		for _, forbidden := range []string{"choose-example", "example-loader"} {
+			if strings.Contains(pipeline, forbidden) {
+				t.Fatalf("basic importer contains %q:\n%s", forbidden, pipeline)
+			}
+		}
+		if strings.Count(pipeline, "github-actions#v0.2.0") != 1 {
+			t.Fatalf("basic importer does not contain exactly one plugin:\n%s", pipeline)
+		}
+	})
+
+	t.Run("positional selection", func(t *testing.T) {
+		pipeline, output, err := run(t, map[string]string{"BUILDKITE_COMMIT": commit}, "artifacts")
+		if err != nil {
+			t.Fatalf("upload importer: %v\n%s", err, output)
+		}
+		if !strings.Contains(pipeline, `workflow: ".github/workflows/example-artifacts.yml"`) {
+			t.Fatalf("artifact importer has wrong workflow:\n%s", pipeline)
+		}
+	})
+
+	for _, test := range []struct {
+		name        string
+		environment map[string]string
+		arguments   []string
+	}{
+		{name: "unknown example", environment: map[string]string{"EXAMPLE": "other"}},
+		{name: "empty example", environment: map[string]string{"EXAMPLE": ""}},
+		{name: "malformed build commit", environment: map[string]string{"EXAMPLE": "basic", "BUILDKITE_COMMIT": "abc"}},
+		{name: "malformed comparison commit", environment: map[string]string{"EXAMPLE": "basic", "EXAMPLE_COMMIT": "abc", "BUILDKITE_COMMIT": commit}},
+		{name: "mismatched commit", environment: map[string]string{"EXAMPLE": "basic", "EXAMPLE_COMMIT": commit, "BUILDKITE_COMMIT": "1123456789abcdef0123456789abcdef01234567"}},
+		{name: "too many arguments", arguments: []string{"basic", "advanced"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pipeline, output, err := run(t, test.environment, test.arguments...)
+			if err == nil {
+				t.Fatalf("invalid invocation succeeded:\n%s", output)
+			}
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != 2 {
+				t.Fatalf("invalid invocation error = %v, output:\n%s", err, output)
+			}
+			if pipeline != "" {
+				t.Fatalf("invalid invocation uploaded pipeline:\n%s", pipeline)
+			}
+		})
 	}
 }
 
