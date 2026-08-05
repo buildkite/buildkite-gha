@@ -494,7 +494,7 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
 		`pipeline upload --no-interpolation --reject-secrets`,
 		`queue: "hosted"`,
-		`github-actions#v0.2.0`,
+		`github-actions#v0.2.1`,
 	} {
 		if !strings.Contains(loader.Command, required) {
 			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
@@ -620,7 +620,7 @@ func TestUploadExamplesScript(t *testing.T) {
 		for _, required := range []string{
 			`:github: Run workflow`,
 			`key: "example-basic-importer"`,
-			`github-actions#v0.2.0`,
+			`github-actions#v0.2.1`,
 			`workflow: ".github/workflows/example-basic.yml"`,
 			`queue: "hosted"`,
 		} {
@@ -633,7 +633,7 @@ func TestUploadExamplesScript(t *testing.T) {
 				t.Fatalf("basic importer contains %q:\n%s", forbidden, pipeline)
 			}
 		}
-		if strings.Count(pipeline, "github-actions#v0.2.0") != 1 {
+		if strings.Count(pipeline, "github-actions#v0.2.1") != 1 {
 			t.Fatalf("basic importer does not contain exactly one plugin:\n%s", pipeline)
 		}
 	})
@@ -682,7 +682,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const plugin = "github-actions#v0.2.0"
+	const plugin = "github-actions#v0.2.1"
 	type pluginConfig struct {
 		Workflow string `yaml:"workflow"`
 		Version  string `yaml:"version"`

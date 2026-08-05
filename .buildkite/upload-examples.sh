@@ -99,6 +99,6 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.2.0:
+      - github-actions#v0.2.1:
           workflow: "$workflow"
 YAML
