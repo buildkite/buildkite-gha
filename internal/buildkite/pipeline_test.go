@@ -618,7 +618,7 @@ func TestUploadExamplesScript(t *testing.T) {
 			t.Fatalf("upload importer: %v\n%s", err, output)
 		}
 		for _, required := range []string{
-			`:github: Basic CI`,
+			`:github: Run workflow`,
 			`key: "example-basic-importer"`,
 			`github-actions#v0.2.0`,
 			`workflow: ".github/workflows/example-basic.yml"`,
