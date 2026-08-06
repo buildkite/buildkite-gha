@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-06
 Target repository: `buildkite/buildkite-gha`
 
 > This is the active product and implementation plan. It records future UX,
@@ -10,6 +10,55 @@ Target repository: `buildkite/buildkite-gha`
 > For behavior users can rely on today, start with the [README](../../README.md)
 > and [compatibility guide](../compatibility.md). A planned example is not a
 > support promise until it is reflected in those user-facing docs.
+
+## Current status — 2026-08-06
+
+`buildkite-gha` is an experimental released preview for a documented Linux
+x86-64 Hosted subset. It is materially beyond a prototype, but the public-beta
+gates below are not met.
+
+- The latest published pairing is CLI
+  [`v0.4.1`](https://github.com/buildkite/buildkite-gha/releases/tag/v0.4.1)
+  and companion plugin
+  [`v0.4.1`](https://github.com/buildkite-plugins/github-actions-buildkite-plugin/releases/tag/v0.4.1).
+  CLI release build
+  [404](https://buildkite.com/buildkite/buildkite-gha/builds/404) passed at
+  exact tag commit `d10b5485165b37ea95c9cc7d65f0d34fe6ce8f2b`; plugin v0.4.1
+  at `21ecdb835dedcc603da24277708661ab1486ee4e` defaults to that CLI.
+- Current `main` is ahead of v0.4.1 with the runtime-managed mise fallback.
+  That behavior needs the next CLI and plugin release before it is part of the
+  published installation contract.
+- Phases 0–3 are complete. Phase 4 is implemented, although the exact complete
+  `testdata/smoke/.github/workflows/ci.yml` differential run remains unproven.
+  Phase 5's container runtime is complete and hosted-proven, while production
+  admission intentionally continues to reject job and service containers.
+- Phase 6 is partial. Summaries, annotations, artifacts, public checkout, and
+  cache v6 are implemented and have recorded hosted evidence. The official
+  cache Results service is now the default. Direct pipeline-repository private
+  checkout and explicit-permission `secrets.GITHUB_TOKEN` are implemented and
+  released, but their exact live canaries are not yet recorded in this
+  repository's evidence ledger.
+- Phases 7 and 8 remain largely outstanding. Phase 9 has checksummed releases,
+  a companion installer plugin, documentation, and substantial hardening, but
+  not release signatures/provenance/SBOMs, self-hosted proof, operational SLOs,
+  or a completed external security review.
+
+The next evidence-driven priorities are:
+
+1. Release and clean-agent prove current `main`, including both empty-cache and
+   preinstalled-mise action paths, then update the companion plugin default.
+2. Record live positive and negative canaries for private checkout and scoped
+   workflow tokens, including repository binding, organization disablement,
+   permission narrowing, and redaction failure.
+3. Migrate several more representative repositories and use those results to
+   decide whether public beta admits job/service containers and manual-input
+   semantics or explicitly narrows the initial beta target.
+
+The general protected-capability control plane, Cursor Origin, selected
+secrets/environments, dynamic graphs, remote reusable workflows, and native job
+replacement remain future product work. Historical proof records below remain
+valid for the exact versions and commits they name; they are not automatically
+evidence for v0.4.1 or current `main`.
 
 ## Summary
 
@@ -49,7 +98,7 @@ The unit of translation is the Actions job:
 | `runs-on` | Buildkite queue/agent selectors |
 | Static matrix | Expanded keyed Buildkite jobs |
 | Dynamic matrix | Deferred dynamic pipeline upload |
-| Job output | Namespaced Buildkite build metadata |
+| Job output | Producer-attributed result artifact with a metadata mirror |
 | Uploaded artifact | Buildkite artifact |
 | Action step | Executed inside the job compatibility runtime |
 | Parallel/background action steps | Concurrent processes inside that same job |
@@ -109,13 +158,16 @@ anonymous, tokenless actions may run on an ambient-clean fixed hosted queue
 without a privileged compiler, plan signer, or supporting service. They have no
 more authority than a shell step that downloads and executes public code.
 
-Protected capabilities are different. A plan may request a GitHub token,
-private source, secret, environment grant, privileged queue, or compatible OIDC
-identity, but it cannot authorize that request with its own event fields. A
-future control-plane service authenticates the requesting job with Buildkite Job
-OIDC, verifies provider provenance and customer policy, and issues a narrow,
-short-lived capability grant. Compilation and plan transport remain separate
-from that authorization decision.
+Protected capabilities are different. Narrow current-job Agent services now
+issue cache credentials, fixed read-only checkout tokens, and explicit-permission
+workflow tokens while independently enforcing their repository and permission
+contracts. A plan still cannot authorize those requests with its own event
+fields. General private source, selected secrets, environments, privileged
+queues, and compatible OIDC require the future control-plane service to
+authenticate the requesting job with Buildkite Job OIDC, verify provider
+provenance and customer policy, and issue a narrow, short-lived capability
+grant. Compilation and plan transport remain separate from that authorization
+decision.
 
 ### Compile jobs; interpret steps
 
@@ -1040,14 +1092,15 @@ again at credential exchange. Runtime enforcement must never treat a plan's
 self-declared event, trust classification, signature, or capability list as
 sufficient authority.
 
-When GitHub is the repository provider, populate `github.token` and
-`GITHUB_TOKEN` only from a repository- and permission-scoped GitHub App
-installation token brokered for the authenticated job. This approximates but
-does not duplicate native `GITHUB_TOKEN`: app identity, endpoint support,
-expiration, and event-recursion behavior can differ and must be documented. Do
-not invent a token or silently grant write access. Validation must identify
-actions and expressions requiring a provider token when no compatible grant can
-be issued.
+Any future general GitHub provider-token integration may populate `github.token`
+or an ambient `GITHUB_TOKEN` only from a repository- and permission-scoped
+GitHub App installation token brokered for the authenticated job. This would
+approximate but not duplicate native `GITHUB_TOKEN`: app identity, endpoint
+support, expiration, and event-recursion behavior can differ and must be
+documented. Do not invent a token or silently grant write access. Validation
+must identify actions and expressions requiring a provider token when no
+compatible grant can be issued. The current narrow integration populates only
+an explicit `secrets.GITHUB_TOKEN` reference.
 
 ### Installation and release model
 
@@ -1063,18 +1116,17 @@ resolve digest-verified Node versions. Every generated job must execute the
 same bridge version that produced its plan unless the plan schema explicitly
 permits a compatible newer runtime.
 
-The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
+The v0.1 preview bootstrap shipped as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
 distribution, and invokes the fixed hosted-tokenless upload path. For action
-jobs, the static bridge reuses mise 2026.5.12 or newer when available or
-downloads and digest-verifies its pinned 2026.5.12 official archive in the
-automatically attached, integration-owned hosted cache volume. Node 20.20.2
-and 24.18.0 are installed by a reverified, job-private copy of that executable
-on demand into the same cache volume. Cached mise and Node executables are
-digest-verified before use, so cache sharing across builds is an optimization
-rather than a trust boundary.
+jobs, the uploader required mise 2026.5.12 on the importer `PATH`, verified and
+archived the exact executable, and transported those content-addressed bytes to
+generated jobs. Each generated job reverified the archive before using mise to
+install Node 20.20.2 or 24.18.0 into the integration-owned hosted cache. This
+historical importer transport remained in v0.4.1; current `main` replaces it
+with the managed fallback described above.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
@@ -1221,8 +1273,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - GitHub Enterprise Server;
 - all repository event types;
 - remote private reusable workflows;
-- private checkout and private actions;
-- protected secrets and GitHub token issuance;
+- general private checkout/source and private actions; the direct uploader's
+  exact pipeline-repository checkout is the narrow landed exception;
+- protected secrets and general GitHub token issuance; explicit-permission
+  `secrets.GITHUB_TOKEN` for the event repository is the narrow landed
+  exception;
 - dynamic matrices and other runtime graph generation;
 - job-level replacement;
 - deployment environments and approval parity;
@@ -1230,14 +1285,19 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - provider API compatibility for arbitrary GitHub-mutating actions; and
 - a first-class Buildkite pipeline import schema.
 
-These deferrals cover the credential-returning Phase 6 slices. The preceding
-signed no-op grant proof remains a required security foundation, but does not
-make private source, secret, or provider-token delivery an initial beta gate.
-Cursor Origin public checkout remains a separate provider integration gate.
+These deferrals cover the general credential-returning Phase 6 slices. The
+narrow current-job Agent endpoints above do not establish the broader signed
+grant control plane and do not make private actions, selected secrets, or
+general provider-token delivery an initial beta gate. Cursor Origin public
+checkout remains a separate provider integration gate.
 
 ## Delivery plan
 
 ### Current progress
+
+This detailed implementation and evidence ledger expands the dated status
+summary above. Historical build records establish only the exact commits and
+versions they name.
 
 - The repository baseline, reviewed architecture plan, and staged
   `testdata/smoke` corpus are committed on `main`.
@@ -1277,10 +1337,11 @@ Cursor Origin public checkout remains a separate provider integration gate.
   executable bytes; generated agents reuse or install the pinned mise release
   before workflow code and resolve compatibility versions through `mise
   --no-config`.
-  This path remains `EventUntrusted`, fixed to the
-  ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
-  or the Phase 5 compiler-proven Dockerfile-action provenance.
-  Private remote action or repository source, provider tokens, secrets, job- or
+  This anonymous source path remains `EventUntrusted` and fixed to the
+  ambient-clean hosted queue. Normal upload separately admits only the
+  compiler-proven Dockerfile-action and cache paths, explicit-permission
+  workflow tokens, and the direct uploader's explicit private-checkout path.
+  Private remote actions, general repository source, selected secrets, job- or
   service-container provenance, privileged queues, and other protected
   capabilities fail closed.
   Because this repository is private, the historical live evidence is split:
@@ -1371,10 +1432,14 @@ Cursor Origin public checkout remains a separate provider integration gate.
   image. This is one external migration, not yet the several required by the
   public-beta gate.
   Together these results complete the GitHub/tokenless portion of delivery
-  slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
-  provider context/source contract. Delivery slice 3—the OIDC-authenticated,
-  policy-checked, signed no-op grant—is the next control-plane slice; the
-  credential-returning slices remain deferred from the initial beta.
+  slice 1 and delivery slice 2. Narrow portions of slices 4 and 5 have also
+  landed through the current-job Agent endpoint: fixed read-only private
+  checkout and explicit-permission workflow tokens. Their checked-in hosted
+  canaries remain pending. Cursor Origin public checkout still requires a
+  provider context/source contract. Slice 3—the OIDC-authenticated,
+  policy-checked, signed no-op grant—remains the foundation for general
+  credential-returning capabilities, not a prerequisite for the landed narrow
+  exceptions.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -1452,10 +1517,11 @@ Cursor Origin public checkout remains a separate provider integration gate.
   container-runtime proofs, plus the Phase 6 job-summary, workflow-command,
   upload-artifact, and artifact-roundtrip proofs. The cache runtime claim is
   recorded separately by the optional released-plugin demo extension in build
-  337; its obsolete targeted Phase 6 cache importer remains removed. The
-  historical aggregate uploads
-  each included importer and continuation independently, then settles their
-  generated and native terminal steps; it does not flatten the
+  337; private checkout and scoped workflow-token canaries are not yet part of
+  the consolidated ledger. The obsolete targeted Phase 6 cache importer remains
+  removed. The historical aggregate uploads each included importer and
+  continuation independently, then settled their generated and native terminal
+  steps; they did not flatten the
   importer/continuation topology. Existing `PHASE2_PROBE`,
   `PHASE3_PROBE`, `PHASE4_PROBE`, all three `PHASE5_PROBE`, and `PHASE6_PROBE`
   selectors remain available for targeted runs.
@@ -1697,7 +1763,7 @@ Definition of done:
 - Major semantic gaps discovered by the spikes are reflected in the support
   table rather than hidden.
 
-### Phase 1 — Validator and static compiler
+### Phase 1 — Validator and static compiler (complete)
 
 Implement:
 
@@ -1836,7 +1902,7 @@ Definition of done:
 - Private action authentication is either implemented safely or rejected
   clearly.
 
-### Phase 5 — Containers and services (complete)
+### Phase 5 — Containers and services (runtime complete; admission deferred)
 
 Implement the Linux Docker execution backend for:
 
@@ -1893,7 +1959,7 @@ Definition of done:
 - Workflow-declared privileged options remain rejected. Direct commands inside
   a job remain governed by that queue's job-level isolation.
 
-### Phase 6 — Core services and protected capability control plane
+### Phase 6 — Core services and protected capability control plane (partial)
 
 Deliver two explicit tracks. Buildkite-backed compatibility integrations use
 the narrowest available boundary:
@@ -1903,9 +1969,9 @@ the narrowest available boundary:
 - artifact upload/download through bounded native adapters;
 - public checkout under GitHub and Cursor Origin provider adapters;
 - explicitly enabled private checkout of the pipeline's exact GitHub
-  repository through the current job's scoped Agent token endpoint; and
+  repository through the current job's scoped Agent token endpoint;
 - compiler-authorized workflow `GITHUB_TOKEN` requests for the pipeline's exact
-  GitHub repository and explicit permission map through that same job endpoint;
+  GitHub repository and explicit permission map through that same job endpoint; and
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -1951,12 +2017,14 @@ Status: the GitHub/tokenless portion of slice 1 and all of slice 2 are
 implemented and hosted-proven. The narrow CLI/runtime portion of slice 4 now
 supports explicitly enabled, read-only checkout of the pipeline's exact GitHub
 repository. Its local request, admission, redaction, askpass, and leakage
-boundaries are tested; hosted proof remains pending endpoint deployment,
-organization enablement, installer wiring, and a private-repository canary.
+boundaries are tested; checked-in hosted proof remains pending a
+private-repository canary and companion-plugin option. The current companion
+plugin does not expose the direct uploader's private-checkout flag.
 The job-bound portion of slice 5 now compiles explicit workflow and job
-permissions into a v6 plan and provides a synthetic `secrets.GITHUB_TOKEN`
+permissions into a v6 plan and provides a short-lived `secrets.GITHUB_TOKEN`
 through the current-job endpoint, with independent runtime validation,
-redaction, and compiler-proven upload admission. Hosted proof remains pending.
+redaction, and compiler-proven upload admission. The endpoint is live, but an
+exact canary is not yet recorded in the checked-in evidence ledger.
 Private actions and reusable workflows remain deferred. Cursor Origin public
 checkout remains pending on its provider context/source contract. Slice 3's
 proposed
@@ -2021,7 +2089,7 @@ Definition of done:
 
 ### Phase 9 — Hardening and product integration
 
-Complete:
+Complete or harden:
 
 - threat modeling and external security review;
 - untrusted fork and privileged-container policies;
@@ -2244,7 +2312,6 @@ compatibility may justify Buildkite additions:
   skipped;
 - richer logical sub-step/timeline presentation inside one command job;
 - targeted matrix-sibling cancellation;
-- a productionized cache-v2 Results service and discoverable endpoint contract;
 - Buildkite Job OIDC claims and APIs sufficient for short-lived provider token
   brokering;
 - Origin event/context integration;
@@ -2261,14 +2328,16 @@ The project is not globally blocked on the protected-capability control plane.
 The public, tokenless product path is substantial enough to harden and demo
 while the signed no-op grant proof waits for a named platform owner and the
 interfaces required by [ADR 0003](../architecture/0003-protected-capability-control-plane.md).
-Private actions and reusable workflows, workflow-visible provider tokens,
+Private actions and reusable workflows, general provider tokens, selected
 secrets, environments, and compatible OIDC remain fail-closed during that work.
 The explicit private-checkout exception is limited to fixed read-only Git use
-for the pipeline repository and does not relax those deferrals.
+for the pipeline repository. The separate workflow-token exception requires an
+explicit `secrets.GITHUB_TOKEN` reference and non-empty permission map for that
+same repository. Neither exception relaxes the broader deferrals.
 
-The complete published installation experience is now proven. The initial CLI
-and companion plugin `v0.2.0` releases remain the subject of the repository's
-full released-plugin demo proofs: at source commit
+The initial v0.2 published installation experience is proven. Those CLI and
+companion plugin releases remain the subject of the repository's full
+released-plugin demo proofs: at source commit
 `d5102df7e81c49f27a30fb2830d9608a56ee84de`, Buildkite build 336 passed the
 service-free terminal after the basic, artifact, JavaScript/composite, and
 advanced importers and generated jobs succeeded. Buildkite build 337 passed the
@@ -2278,6 +2347,14 @@ checks. Both runs used only plugin `v0.2.0` at exact commit
 `d009da173158270a3921b2997ae8fd3d68526d00` and its default verified CLI
 `v0.2.0` distribution. They remain the authoritative full installation and
 cache-demo evidence.
+
+The current CLI and plugin v0.4.1 releases are public. CLI release build 404
+passed at exact tag commit `d10b5485165b37ea95c9cc7d65f0d34fe6ce8f2b`, and
+plugin tag commit `21ecdb835dedcc603da24277708661ab1486ee4e` defaults to that
+CLI. The repository has not yet recorded the equivalent complete clean-agent
+demo against this pairing. Current `main` also contains the post-v0.4.1
+runtime-managed mise fallback, which requires another release before it can be
+included in current-release proof.
 
 CLI `v0.2.1` is public at exact tag commit
 `a780787f049281290974292f00c29e92db717fb9`; Buildkite release build 351 passed
@@ -2291,8 +2368,8 @@ uploader and `Run workflow` label landed on main after the CLI `v0.2.1` tag;
 they are repository-demo UX rather than evidence about the released CLI
 runtime.
 
-The fully reproducible demo milestone is complete and remains distinct from a
-public-beta declaration. It has two explicit lanes:
+The historical v0.2 reproducible demo milestone is complete and remains
+distinct from a public-beta declaration. It has two explicit lanes:
 
 1. The service-free baseline installs an immutable plugin revision, downloads
    and verifies an exact CLI release, derives the public GitHub event, and runs
@@ -2303,12 +2380,12 @@ public-beta declaration. It has two explicit lanes:
    artifact transfer, summaries, warning/error annotations, and a native
    continuation without depending on the capability service or a cache
    service.
-2. The cache extension uses the same released plugin and CLI with an explicitly
-   configured origin-only Results URL. It additionally proves the audited
+2. The cache extension uses the same released plugin and CLI with the official
+   `https://ghacs.buildkite.com/` Results service by default and an optional
+   compatible origin-only override. It additionally proves the audited
    `actions/cache` v6.1.0 miss, post-save, and direct-dependent hit using
-   short-lived credentials minted for the exact Buildkite job. The development
-   Results endpoint and organization minting flag are acceptable for this
-   internal demo, but are not a general public-beta service contract.
+   short-lived credentials minted for the exact Buildkite job. Organization
+   token minting must be enabled.
 
 Both lanes must start from ordinary documented plugin configuration rather
 than a repository-only importer. A recorded run must name the exact Git commit,
@@ -2319,7 +2396,8 @@ importer, generated jobs at basic through advanced complexity, native logs and
 dependencies, artifact and cache observations, and the final native
 continuation.
 
-The demo gap closed in this order, using small cross-repository changes:
+For the historical v0.2 milestone, the demo gap closed in this order, using
+small cross-repository changes:
 
 1. Completed: in this repository, add a production-plugin demo dispatcher and
    stable representative fixtures. Keep the service-free baseline independent
@@ -2351,15 +2429,16 @@ gate also currently requires signed, repeatable Hosted and self-hosted
 installation even though the implemented preview is checksummed and fixed to a
 Hosted runtime queue. Those are explicit scope decisions: either implement and
 prove them or deliberately revise the beta contract before claiming the
-initial support target is complete. A production cache endpoint and several
-customer migrations beyond the first `mcncl/gotyper` proof are also still
-outstanding. The signed no-op capability grant remains a parallel
+initial support target is complete. Current-release clean-agent evidence,
+credential canaries, and several customer migrations beyond the first
+`mcncl/gotyper` proof are also still outstanding. The production cache endpoint
+is no longer a gap. The signed no-op capability grant remains a parallel
 security-foundation item, not permission to block or weaken the service-free
 demo.
 
 ## Release gates
 
-### Private alpha
+### Private alpha — substantially met for the public Hosted subset
 
 - Shell, JavaScript, and composite fixtures pass on Linux Hosted Agents.
 - The validator catches unsupported containers, platforms, and event fields.
@@ -2367,7 +2446,7 @@ demo.
 - No GitHub Actions run or private runner protocol is involved.
 - Secret and untrusted-fork tests pass.
 
-### Public beta
+### Public beta — not met
 
 - The initial support target is complete.
 - Checkout, cache, artifact, Docker, and services canaries are reliable.
@@ -2378,7 +2457,7 @@ demo.
 - At least several real customer workflows have been migrated without
   workflow-specific code in the runtime.
 
-### General availability
+### General availability — not met
 
 - Compatibility regressions are release-blocking and covered by fixtures.
 - Security review findings are resolved or explicitly accepted.
@@ -2522,21 +2601,27 @@ them in the phase that first needs the capability:
    the local `default` Docker driver and queue prerequisites; build 136 proved
    the complete container runtime. A compatibility image remains deferred until
    tool-cache differences demonstrate a concrete need.
-3. Phase 4 will set the customer-beta event and expression subset from the
-   hosted differential corpus.
+3. The current customer event and expression subset is empirical and documented
+   in the compatibility guide. Extend it only with differential and migration
+   evidence rather than assuming Phase 4 is complete syntax coverage.
 4. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
 5. The fixed Buildkite `hosted` queue's documented per-job disposable isolation
    and the Phase 5 probe are sufficient for tokenless, non-privileged Dockerfile
    actions built on the local driver. Phases 6 and 9 still own authorization and
    queue policy for protected Docker capabilities and privileged workloads.
-6. Phase 6 will define the GitHub App installation-token compatibility contract
-   for `github.token` and `GITHUB_TOKEN`, including repository/permission
-   narrowing and documented differences from native Actions tokens. The
-   runtime-internal `contents:read` checkout credential does not define that
-   workflow-visible contract; tokenless workflows remain the default.
+6. The narrow workflow-visible token contract is now defined for explicit
+   `secrets.GITHUB_TOKEN`: it binds the event repository and a non-empty
+   explicit permission map through the current-job Agent endpoint. `github.token`,
+   general provider-token grants, and the broader provenance-aware control
+   plane remain deferred. The runtime-internal `contents:read` checkout
+   credential is separate; tokenless workflows remain the default.
 
-## Recommended first product milestone
+## Historical first product milestone
+
+Most components of this original vertical slice have landed. The exact complete
+`ci.yml` differential execution remains the notable missing proof, so this
+section is retained as historical scope rather than the current next milestone.
 
 Do not begin by implementing every workflow keyword. Build a vertical slice
 that proves the product boundary:

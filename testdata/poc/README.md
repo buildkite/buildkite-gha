@@ -54,7 +54,9 @@ calls `upload` directly.
 ## Released plugin demo
 
 Run the same workflows through the released companion plugin and its real
-anonymous release installer:
+anonymous release installer. The checked-in dispatcher currently pins plugin
+`v0.2.2`; update that pin before using this lane as evidence for a newer
+release:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -68,7 +70,8 @@ bk build create \
 ```
 
 Add the optional cache extension only when the organization can mint GHAC
-tokens and the exact origin is configured:
+tokens. The runtime uses `https://ghacs.buildkite.com/` by default; set
+`BUILDKITE_GHA_CACHE_URL` only to override it with a compatible Results service:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -79,7 +82,6 @@ bk build create \
   -e DEMO_SUITE=plugin \
   -e DEMO_COMMIT="$commit" \
   -e DEMO_CACHE=1 \
-  -e BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> \
   --yes
 ```
 
@@ -98,9 +100,9 @@ proved the declared reusable output, build-unique cache miss/post-save/hit,
 artifact fan-out, summary, and warning paths.
 
 [Buildkite build 336](https://buildkite.com/buildkite/buildkite-gha/builds/336)
-is the authoritative released-plugin service-free proof, and [Buildkite build
+is the historical released-plugin service-free proof, and [Buildkite build
 337](https://buildkite.com/buildkite/buildkite-gha/builds/337) is the
-authoritative cache-extension proof. Both ran source commit
+historical cache-extension proof. Both ran source commit
 `d5102df7e81c49f27a30fb2830d9608a56ee84de` through plugin `v0.2.0`, which
 resolved to `d009da173158270a3921b2997ae8fd3d68526d00` and installed the verified
 CLI `v0.2.0` distribution without an explicit CLI version override. Build 337
@@ -119,6 +121,11 @@ at exact `mcncl/gotyper` commit
 passed public checkout, setup-go, the audited cache v6 lifecycle, a direct
 two-job dependency, race tests, static analysis, and a final binary build on a
 compatible Hosted image.
+
+The current published pairing is plugin and CLI v0.4.1. The historical builds
+above remain valid for the versions and commits they exercised; the repository
+does not yet record an equivalent clean-agent run of the complete suite against
+the v0.4.1 pairing.
 
 The historical phase fixtures and their recorded observations remain the
 conformance ledger. The now-superseded targeted cache importer, continuation,

@@ -31,13 +31,14 @@ Expectations have these precise meanings:
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently the cache service).
+  intentionally unavailable in the applicable proof environment.
 - `future`: the fixture is inventoried but not yet required to compile.
 
-Run `mise run smoke:local` to strictly validate the manifest, JSON-validate
-each workflow, and compare two nonempty pipeline compilations byte for byte.
-The default harness does not parse emitted YAML, fetch actions, or execute
-workflows; successful compilation is not runtime evidence.
+Run `mise run smoke:local` to strictly validate the JSON manifest, run CLI
+validation for every non-future workflow, and compare two nonempty pipeline
+compilations byte for byte. The default harness does not parse emitted YAML,
+fetch actions, or execute workflows; successful compilation is not runtime
+evidence.
 
 Run `mise run smoke:profile` for the opt-in networked preflight of entries marked
 `hosted-tokenless`. It anonymously resolves actions, compiles plans, and applies

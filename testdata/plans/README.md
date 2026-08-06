@@ -1,8 +1,8 @@
 # Plan-envelope conformance fixtures
 
-These fixtures exercise the Phase 0 trust contract without production Go code.
-They use disposable public test keys that must never be installed as production
-trust roots.
+These fixtures exercise the historical Phase 0 plan-envelope contract without
+production Go code. They use disposable public test keys that must never be
+installed as production trust roots.
 
 Run:
 
@@ -10,15 +10,17 @@ Run:
 python3 testdata/plans/validate.py
 ```
 
-The checker needs Python 3 and OpenSSL 3. It implements only the strict JSON
-subset used by this corpus, verifies the ES256 signatures, and applies the ADR's
-verification order. It is a conformance aid, not a production JCS, JSON Schema,
-or JOSE implementation. Production code must use complete implementations of
-RFC 7515 and RFC 8785 and validate against the schemas in `schemas/`.
+The checker needs Python 3 and an OpenSSL CLI capable of EC/DER signature
+verification. It implements only the strict JSON subset used by this corpus,
+verifies the ES256 signatures, and applies the ADR's verification order. It is
+a conformance aid, not a production JCS, JSON Schema, or JOSE implementation.
+Any production implementation based on this superseded experiment would need
+complete RFC 7515 and RFC 8785 implementations and schema validation.
 
 `cases.json` supplies the runtime-observed build, step, queue, time, and local
-capability ceiling. Negative cases remain cryptographically valid unless the
-condition under test is the signature or plan digest:
+capability ceiling. Negative cases preserve a syntactically valid signature;
+rejection occurs at the named digest, runtime-binding, policy, expiry, or
+trust-root stage:
 
 - `tampered` changes the signed plan's command without changing its envelope;
 - `wrong-build`, `wrong-job`, and `wrong-queue` replay a valid envelope in the

@@ -310,20 +310,21 @@ is the recommended installation. For direct use, download
 archive checksum, and extract it to a stable location. The archive contains
 `buildkite-gha` and `LICENSE`.
 
-Generated jobs that execute actions support mise 2026.5.12 or newer. `run-job`
-first checks `BUILDKITE_GHA_MISE` when set, then `PATH`; if neither supplies a
-compatible version, it downloads the pinned 2026.5.12 official archive into
-the automatically attached hosted cache. Both the archive and extracted
-executable are verified by embedded SHA-256 digests before use. Verified cache
-bytes are copied into a job-private directory and reverified there before
-execution, so the shared cache remains an accelerator rather than executable
-authority. An explicit `BUILDKITE_GHA_MISE` must be absolute and compatible
-rather than silently falling back. The runtime resolves and validates the
-executable before workflow code can modify `PATH`, then uses it with repository
-configuration disabled to install exact Node 20.20.2 or 24.18.0 releases.
-Those Node binaries require glibc 2.28 or newer; the static Go CLI does not.
-Shell-only jobs, importers, `validate`, and `compile` do not require or install
-mise.
+Published v0.4.1 action workflows require mise 2026.5.12 on the importer
+`PATH`; the uploader verifies and transports that exact executable for generated
+jobs. Current `main` contains an unreleased runtime-managed fallback: generated
+action jobs first check an explicit absolute `BUILDKITE_GHA_MISE`, then `PATH`,
+and otherwise download the pinned 2026.5.12 official archive into the
+automatically attached hosted cache. Both the archive and extracted executable
+are verified by embedded SHA-256 digests. Verified cache bytes are copied into
+a job-private directory and reverified before execution, so the shared cache is
+an accelerator rather than executable authority.
+
+Both paths resolve the executable before workflow code can modify `PATH` and
+use it with repository configuration disabled to install exact Node 20.20.2 or
+24.18.0 releases. Those Node binaries require glibc 2.28 or newer; the static Go
+CLI does not. Shell-only jobs, `validate`, and `compile` do not require or
+install mise.
 
 ### Validate
 

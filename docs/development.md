@@ -173,15 +173,16 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env POC_SUITE=migration --env POC_COMMIT="$commit" --yes
 ```
 
-[Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
+Historical implementation proof [Buildkite build
+303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
 passed the predecessor three-workflow suite at exact commit
 `9d29bf26492be760016d29c7ba0d00033b4f9b39`, including declared reusable-output
 publication and caller consumption, the build-unique cache miss, post-save,
 dependent exact hit, and subsequent artifact fan-out. The revised stable
 service-free and cache fixtures retain compile/admission coverage.
 
-The initial CLI and companion plugin `v0.2.0` releases exercised the complete
-customer installation path at source commit
+The initial CLI and companion plugin `v0.2.0` releases historically exercised
+the complete customer installation path at source commit
 `d5102df7e81c49f27a30fb2830d9608a56ee84de`. The service-free importer,
 generated jobs, native terminal, and repository checks passed in [Buildkite
 build 336](https://buildkite.com/buildkite/buildkite-gha/builds/336). The same
@@ -207,10 +208,23 @@ tests, static analysis, and a final binary build. This is the first external
 customer-shaped migration proof; several more migrations are still required by
 the public-beta gate.
 
+The current published pairing is CLI
+[`v0.4.1`](https://github.com/buildkite/buildkite-gha/releases/tag/v0.4.1) at
+exact tag commit `d10b5485165b37ea95c9cc7d65f0d34fe6ce8f2b` and companion
+plugin [`v0.4.1`](https://github.com/buildkite-plugins/github-actions-buildkite-plugin/releases/tag/v0.4.1)
+at exact tag commit `21ecdb835dedcc603da24277708661ab1486ee4e`. [Buildkite release
+build 404](https://buildkite.com/buildkite/buildkite-gha/builds/404) passed for
+the CLI tag, and the plugin defaults to that CLI version. The v0.2 builds above
+remain the recorded full installation proofs; a clean-agent run of the complete
+demo suite has not yet been recorded for the v0.4.1 pairing. Current `main` is
+also ahead of v0.4.1 with the runtime-managed mise fallback, so that behavior
+requires the next CLI and plugin release before it can be release-proven.
+
 The generated example uploader and its `Run workflow` label landed on this
-repository's main branch after the CLI `v0.2.1` tag. They are current
-repository-demo UX rather than evidence about the released CLI runtime. Repeat
-the customer installation path with the current released-plugin demo:
+repository's main branch after the CLI `v0.2.1` tag. They are repository-demo
+UX rather than evidence about the latest released CLI runtime. The checked-in
+dispatcher currently pins plugin `v0.2.2`; until that pin is updated, it cannot
+produce v0.4.1 release evidence. Run the pinned released-plugin demo with:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -235,7 +249,10 @@ bk build create --pipeline buildkite/buildkite-gha \
 The first cache run for the release commit must show a producer miss,
 post-save, and direct-dependent exact hit. The plugin downloads and
 checksum-verifies the public release rather than falling back to a local
-binary.
+binary. Before treating a run as current-release evidence, verify that the
+checked-in plugin pins name the intended release—updating them first when
+necessary—and record the exact source, plugin, CLI, and Buildkite build
+identities.
 
 The phase definitions under `.buildkite/` and the [active
 plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
@@ -262,9 +279,10 @@ mise run release
 ```
 
 The script runs `check`, chooses the next conventional-commit-derived v0 tag,
-and pushes it. The tag webhook build reruns repository checks, creates the
-GitHub release, and uploads the Linux x86-64 archive and checksum. Publication
-can be retried from the same tag build; existing draft assets are replaced.
+and pushes it without a second interactive confirmation. The tag webhook build
+reruns repository checks, creates the GitHub release, and uploads the Linux
+x86-64 archive and checksum. Publication can be retried from the same tag
+build; existing draft assets are replaced.
 
 The source repository must be public before the first tag is pushed because the
 companion plugin intentionally downloads release assets without a GitHub token.

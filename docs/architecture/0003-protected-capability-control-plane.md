@@ -10,7 +10,7 @@ The service-free compatibility path can execute public, anonymous workflow code
 without giving it authority beyond its Buildkite job. Summaries, annotations,
 native artifact adapters, public exact-SHA checkout, and the audited
 `actions/cache` v6 client all use public Agent or explicitly configured
-cache-v2 interfaces. With one narrow exception described below, they do not
+cache-v2 interfaces. With two narrow exceptions described below, they do not
 establish authority for private source, secrets, provider tokens, environments,
 privileged queues, or compatible OIDC claims.
 
@@ -209,7 +209,7 @@ job, exact pipeline repository, and caller-requested permission set. The server
 authenticates the request with the same job's Agent access token, independently
 requires the requested repository to equal the pipeline's configured GitHub
 repository, and validates permissions against its own allowlist. This supports
-one narrower integration without waiting for the general grant protocol:
+two bounded integrations without waiting for the general grant protocol:
 
 ```http
 POST /v3/jobs/<current-job-id>/github_scoped_access_token

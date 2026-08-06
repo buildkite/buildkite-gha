@@ -9,10 +9,11 @@ runtime. Buildkite remains the source of truth for scheduling, logs, retries,
 cancellation, and the build UI.
 
 > [!IMPORTANT]
-> This is an experimental v0.2 preview for **Linux x86-64 workflows**. The
-> default remains public and tokenless. Direct upload has an explicit,
-> fail-closed private-checkout preview for the pipeline's exact repository;
-> private actions and workflow-visible protected credentials remain rejected.
+> This is an experimental pre-1.0 preview for **Linux x86-64 workflows**. The
+> latest published plugin and CLI pairing is v0.4.1. The default remains public
+> and tokenless; narrow opt-ins exist for direct-CLI private checkout and an
+> explicit-permission `secrets.GITHUB_TOKEN`. Private actions and general
+> protected credentials remain rejected.
 
 ## Try an existing workflow
 
@@ -25,17 +26,17 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.2:
+      - github-actions#v0.4.1:
           workflow: .github/workflows/ci.yml
 ```
 
-The released plugin downloads and verifies `buildkite-gha` v0.2.3 by default,
+The v0.4.1 plugin downloads and verifies `buildkite-gha` v0.4.1 by default,
 derives the event context from the Buildkite build, and uploads the generated
 jobs to the fixed `hosted` queue. Pin a released plugin version rather than a
-floating branch. For action jobs, the runtime reuses mise 2026.5.12 or newer
-from `PATH` or the absolute path in `BUILDKITE_GHA_MISE`; when neither provides
-a compatible version, it downloads and verifies a managed 2026.5.12 copy in
-the hosted cache. Shell-only jobs do not require or install mise.
+floating branch. Action workflows using the v0.4.1 pairing require mise
+2026.5.12 on the importer `PATH`; shell-only workflows do not. Current `main`
+contains the runtime-managed mise fallback intended for the next CLI release,
+but that fallback is not part of v0.4.1.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -53,7 +54,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.2:
+      - github-actions#v0.4.1:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -119,8 +120,9 @@ It does **not** currently support:
 
 - private actions or general private-source access; direct upload has only the
   explicit pipeline-repository checkout described in the compatibility guide;
-- workflow secrets other than the scoped `GITHUB_TOKEN`, `github.token`,
-  GitHub-compatible OIDC, or protected queues;
+- general workflow secrets, `github.token`, GitHub-compatible OIDC, environment
+  grants, or protected queues; only explicit, scoped `secrets.GITHUB_TOKEN` is
+  supported;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload;
