@@ -385,8 +385,6 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	for _, required := range []string{
 		`commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"`,
 		`[[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]`,
-		`[[ "$${DEMO_CACHE:-}" == "1" ]]`,
-		`$${BUILDKITE_GHA_CACHE_URL:?BUILDKITE_GHA_CACHE_URL is required when DEMO_CACHE=1}`,
 		`scripts/phase-0-shell-oracle-checkout "$$commit"`,
 		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
 		`git status --porcelain --untracked-files=all`,
@@ -395,6 +393,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		if !strings.Contains(pluginDemo.command, required) {
 			t.Fatalf("released plugin demo loader lacks %q:\n%s", required, pluginDemo.command)
 		}
+	}
+	if strings.Contains(pluginDemo.command, "BUILDKITE_GHA_CACHE_URL") {
+		t.Fatalf("released plugin demo loader still requires a cache Results URL:\n%s", pluginDemo.command)
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)

@@ -1901,10 +1901,10 @@ the narrowest available boundary:
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
-requires an HTTP protocol, use an explicitly configured compatible service or
-provide a well-defined adapter rather than proxying GitHub's private service.
-Cache credentials authorize storage access only; they are distinct from the
-provider-feature grants below.
+requires an HTTP protocol, use the official compatible service by default with
+an explicit operator override, or provide a well-defined adapter rather than
+proxying GitHub's private service. Cache credentials authorize storage access
+only; they are distinct from the provider-feature grants below.
 
 Protected provider features use the supporting control-plane service:
 

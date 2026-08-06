@@ -62,6 +62,18 @@ func TestAgentCacheCredentialsMintsBoundedJobCredential(t *testing.T) {
 	}
 }
 
+func TestAgentCacheCredentialsDefaultsOfficialResultsService(t *testing.T) {
+	provider, err := NewAgentCacheCredentials(AgentCacheConfig{
+		Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.resultsURL != defaultCacheResultsURL {
+		t.Fatalf("default Results URL = %q, want %q", provider.resultsURL, defaultCacheResultsURL)
+	}
+}
+
 func TestAgentCacheCredentialsRejectsUnsafeConfiguration(t *testing.T) {
 	valid := AgentCacheConfig{
 		Endpoint: "https://agent.example/v3", JobID: testCacheJobID,
@@ -74,7 +86,6 @@ func TestAgentCacheCredentialsRejectsUnsafeConfiguration(t *testing.T) {
 		"invalid job ID":         func(c *AgentCacheConfig) { c.JobID = "../other" },
 		"missing job token":      func(c *AgentCacheConfig) { c.JobToken = "" },
 		"job token header split": func(c *AgentCacheConfig) { c.JobToken = "secret\r\nOther: value" },
-		"missing results URL":    func(c *AgentCacheConfig) { c.ResultsURL = "" },
 		"results credentials":    func(c *AgentCacheConfig) { c.ResultsURL = "https://user@cache.example/v2" },
 		"results path":           func(c *AgentCacheConfig) { c.ResultsURL += "/v2" },
 		"results query":          func(c *AgentCacheConfig) { c.ResultsURL += "?token=value" },

@@ -109,8 +109,8 @@ The plugin path currently supports:
   `permissions` for the event repository;
 - bounded native upload and exact-name download for the audited artifact v4
   commits; and
-- the audited `actions/cache` v6.1.0 commit through a configured compatible
-  cache-v2 Results service.
+- the audited `actions/cache` v6.1.0 commit through the official Buildkite
+  cache-v2 Results service, with an optional operator override.
 
 It does **not** currently support:
 
