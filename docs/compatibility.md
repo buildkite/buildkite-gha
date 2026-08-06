@@ -7,10 +7,13 @@ promises unless they appear here.
 
 ## The current execution profile
 
-The plugin and `upload` command use one fixed profile: `hosted-tokenless`.
-It is designed for public code that can run without protected credentials on a
-Linux x86-64 Buildkite Hosted Agent. Unsupported or privileged requests fail
-before the generated jobs are uploaded.
+The plugin and `upload` command default to one fixed profile:
+`hosted-tokenless`. It is designed for public code that can run without
+protected credentials on a Linux x86-64 Buildkite Hosted Agent. Unsupported or
+privileged requests fail before the generated jobs are uploaded. An explicit
+`upload --private-checkout` extension admits only the verified checkout adapter
+and only when the organization has enabled Buildkite's job-bound GitHub scoped
+access-token service.
 
 There are three different compatibility claims:
 
@@ -40,7 +43,7 @@ provide.
 | JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |
 | Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
 | Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
-| `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |
+| `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, and shallow credential-free fetch by default. Explicit private-checkout upload can authenticate that same fetch with fixed `contents:read` authority for the pipeline repository. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. |
 | Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups become collapsed Buildkite log sections; because Buildkite sections are linear, nested or overlapping Actions groups flatten into successive sections. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. Debug and matcher presentation commands are consumed without runner debug or matcher behavior. `::notice`, command echo control, and other legacy commands are not supported. |
@@ -50,8 +53,8 @@ provide.
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
-| Private repositories or actions | Not supported | The preview has no private-source capability broker. |
-| Secrets and provider tokens | Not supported | Includes `GITHUB_TOKEN`, GitHub App tokens, and protected environment grants. |
+| Private repositories or actions | Narrow checkout only | The direct uploader can opt into private checkout of the pipeline's exact GitHub repository. Private actions, alternate repositories, and reusable-workflow source remain unsupported. |
+| Secrets and provider tokens | Not exposed | `GITHUB_TOKEN`, `github.token`, GitHub App tokens for workflow use, protected secrets, and environment grants remain unsupported. The private-checkout credential is runtime-internal and available only to Git. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
 | Windows and macOS | Not supported | Unmapped runner labels fail validation. |
 
@@ -121,9 +124,24 @@ semantics when Buildkite has not supplied them.
 
 Generated jobs skip Buildkite's default checkout and allocate a fresh Actions
 workspace. A supported `actions/checkout` step performs a credential-free,
-shallow checkout of the public event repository at the exact event SHA. Private
-checkout, alternate repositories or refs, and credential persistence are not
-available in the preview.
+shallow checkout of the public event repository at the exact event SHA by
+default.
+
+With explicit installer configuration, direct upload may add
+`--private-checkout`. Compilation then adds `provider-token-read` only to a job
+containing the compiler-verified checkout adapter with its bounded inputs. At
+runtime, the CLI requests fixed `contents:read` authority from Buildkite's
+current-job Agent endpoint for `https://github.com/<event repository>`. The
+service independently requires that repository to be the pipeline's exact
+GitHub repository. The credential is registered with both runtime and Agent
+redaction before use, supplied to only the Git fetch through a one-shot askpass
+pipe, and never placed in the clone URL, arguments, Git config, plan, workflow
+environment, result, output, state, summary, or artifact.
+
+The option fails closed when scoped token minting is unavailable or disabled.
+It does not populate `GITHUB_TOKEN` or `github.token`, accept workflow-selected
+permissions, support write access, or enable private actions. Alternate
+repositories or refs and credential persistence remain unsupported.
 
 ### Artifact uploads use bounded native storage
 
@@ -330,10 +348,19 @@ not a complete execution path.
 buildkite-gha upload --runtime-queue hosted .github/workflows/ci.yml
 ```
 
+An installer may explicitly enable pipeline-repository private checkout:
+
+```sh
+buildkite-gha upload --private-checkout --runtime-queue hosted \
+  .github/workflows/ci.yml
+```
+
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
 it derives a bounded compatibility snapshot from the current Buildkite build.
 With `--event-path`, it uses that explicit snapshot. Both paths remain
-unattested and tokenless.
+unattested. They remain tokenless unless `--private-checkout` is explicitly
+selected; that exception is confined to the checkout adapter and independently
+repository-bound by the Agent service.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.

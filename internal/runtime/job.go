@@ -111,8 +111,28 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
-		if capability != "docker" && capability != "secrets" && capability != "network" {
+		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
+		}
+	}
+	if job.HasCapability("provider-token-read") {
+		if r.Checkout == nil {
+			return JobResult{}, fmt.Errorf("provider-token-read capability requires the private checkout token provider")
+		}
+		if !jobUsesCheckoutAdapter(job) {
+			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
+		}
+		git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "private checkout Git")
+		if err != nil {
+			return JobResult{}, err
+		}
+		r.Git = git
+		if r.Redactor == nil {
+			return JobResult{}, fmt.Errorf("provider-token-read capability requires the Buildkite Agent redactor")
+		}
+		r.Redactor, err = resolveAgentRedactorBeforeWorkflow(r.Redactor)
+		if err != nil {
+			return JobResult{}, err
 		}
 	}
 	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {

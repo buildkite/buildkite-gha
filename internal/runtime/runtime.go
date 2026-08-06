@@ -65,6 +65,7 @@ type Runner struct {
 	Actions           ActionMaterializer
 	Artifacts         ArtifactStore
 	Cache             CacheCredentialProvider
+	Checkout          CheckoutTokenProvider
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool
@@ -73,6 +74,30 @@ type Runner struct {
 	nodeVerification  *managedNodeVerification
 	nodeDigests       map[int]string
 	artifactRegistry  *artifactRegistry
+}
+
+func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
+	candidate := configured
+	if candidate == "" {
+		candidate = fallback
+	}
+	resolved, err := exec.LookPath(candidate)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s before workflow execution: %w", label, err)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s absolute path before workflow execution: %w", label, err)
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize %s before workflow execution: %w", label, err)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("%s must be a real executable resolved before workflow execution", label)
+	}
+	return resolved, nil
 }
 
 type managedNodeVerification struct {
@@ -697,6 +722,10 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = processEnv(env)
+	return r.runStreamingCommand(ctx, processor, cmd)
+}
+
+func (r Runner) runStreamingCommand(ctx context.Context, processor *commandProcessor, cmd *exec.Cmd) error {
 	configureProcessGroup(cmd)
 	stdout, stdoutWriter, err := os.Pipe()
 	if err != nil {
@@ -764,7 +793,7 @@ func (r Runner) runStreaming(ctx context.Context, processor *commandProcessor, d
 		waitErr = ctx.Err()
 	}
 	if waitErr != nil {
-		waitErr = fmt.Errorf("process %s: %w", name, waitErr)
+		waitErr = fmt.Errorf("process %s: %w", cmd.Path, waitErr)
 	}
 	return errors.Join(waitErr, streamErrs[0], streamErrs[1])
 }

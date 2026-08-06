@@ -102,6 +102,14 @@ func TestUntrustedOptionsPermitAnonymousPublicActionSource(t *testing.T) {
 	}
 }
 
+func TestPrivateCheckoutRequiresActionResolution(t *testing.T) {
+	options := defaultOptions()
+	options.PrivateCheckout = true
+	if err := options.validate(); err == nil || !strings.Contains(err.Error(), "requires ResolveActions") {
+		t.Fatalf("Options.validate() error = %v", err)
+	}
+}
+
 func TestOptionsRejectActionConfigurationWithoutResolution(t *testing.T) {
 	options := defaultOptions()
 	options.ActionSource = &fakeActionSource{}

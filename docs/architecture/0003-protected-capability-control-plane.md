@@ -10,9 +10,9 @@ The service-free compatibility path can execute public, anonymous workflow code
 without giving it authority beyond its Buildkite job. Summaries, annotations,
 native artifact adapters, public exact-SHA checkout, and the audited
 `actions/cache` v6 client all use public Agent or explicitly configured
-cache-v2 interfaces. They do not establish authority for private source,
-secrets, provider tokens, environments, privileged queues, or compatible OIDC
-claims.
+cache-v2 interfaces. With one narrow exception described below, they do not
+establish authority for private source, secrets, provider tokens, environments,
+privileged queues, or compatible OIDC claims.
 
 A plan cannot authorize those protected values. Workflow and event files are
 compiler inputs, dynamic pipeline upload is ordinary pipeline authority, and
@@ -202,6 +202,59 @@ plan. Rotation overlaps old and new public keys for the maximum grant lifetime;
 emergency revocation takes precedence over a still-published key. Private keys
 remain in the platform signing boundary.
 
+### Narrow job-bound private-checkout exception
+
+Buildkite's Agent API can mint a GitHub installation token for the exact current
+job, exact pipeline repository, and caller-requested permission set. The server
+authenticates the request with the same job's Agent access token, independently
+requires the requested repository to equal the pipeline's configured GitHub
+repository, and validates permissions against its own allowlist. This supports
+one narrower integration without waiting for the general grant protocol:
+
+```http
+POST /v3/jobs/<current-job-id>/github_scoped_access_token
+Authorization: Token <current-job Agent access token>
+Content-Type: application/json
+```
+
+```json
+{
+  "repo_url": "https://github.com/<event owner>/<event repository>",
+  "permissions": {
+    "contents": "read"
+  }
+}
+```
+
+The uploader must opt in explicitly. The compiler adds
+`provider-token-read` only after resolving the exact `actions/checkout`
+adapter and validating its repository, ref, depth, path, submodule, and
+credential-persistence inputs. Fresh same-process compiler provenance permits
+that one capability through upload admission; the default `hosted-tokenless`
+profile continues to reject it.
+
+The runtime configures the endpoint only when the immutable plan contains that
+capability and a root checkout selector names the verified adapter. The event
+repository and exact SHA remain the only checkout targets, and the server's
+independent pipeline-repository comparison is the authoritative repository
+restriction. The client fixes `contents:read`; no workflow input can choose a
+repository, permission, or access level for minting.
+
+The returned token is masked before Agent redaction registration. Failure to
+register redaction aborts before Git fetch. A one-shot askpass helper reads the
+token from an inherited pipe and is present only for the fetch process. The
+token is not placed in arguments, the clone URL, Git config, plans, ordinary
+step environments, workflow contexts, results, outputs, state, summaries, or
+artifacts. Redirects, unknown response fields, trailing data, oversized bodies,
+invalid tokens, disabled service responses, and unavailable/rate-limited
+responses fail closed with bounded diagnostics.
+
+This exception does not establish authenticated provider event or fork
+provenance and therefore does not authorize writes, arbitrary workflow
+`permissions:`, private actions or reusable workflows, `GITHUB_TOKEN`,
+`github.token`, secrets, environments, or OIDC. Those features still require
+the general control-plane decision in this ADR.
+
 ### Runtime verification and capability use
 
 The runtime treats the response as inert bytes until all of these checks pass:
@@ -260,21 +313,29 @@ record; a successful job alone does not prove policy or audit behavior.
 
 ## Deferred decisions
 
-This ADR does not authorize or choose storage for private checkout, private
-actions, reusable workflow source, selected secrets, `GITHUB_TOKEN`, environment
-grants, or compatibility OIDC claims. It does not choose a secret manager,
-GitHub App permission set, customer policy language, administrative UI, or
-production service hostname. Those decisions require separate reviewed slices
-after the no-op boundary is proven.
+Apart from the fixed read-only pipeline-repository checkout exception, this ADR
+does not authorize or choose storage for private actions, reusable workflow
+source, selected secrets, `GITHUB_TOKEN`, environment grants, or compatibility
+OIDC claims. It does not choose a secret manager, general GitHub App permission
+set, customer policy language, administrative UI, or production service
+hostname. Those decisions require separate reviewed slices after the no-op
+boundary is proven.
 
 The existing cache-v2 GHAC token exchange remains separate. Cache tokens are
 minted through the current Buildkite job, scoped by the cache service, and
 exposed only to the audited cache action lifecycle. A capability grant neither
 contains nor replaces them.
 
+The job-bound private-checkout exchange is likewise separate. Its server-side
+pipeline-repository binding and client-fixed `contents:read` permission are not
+a substitute for the event, policy, signing, and audit contract required by a
+general capability grant.
+
 ## Consequences
 
 - Public tokenless workflows retain no new service dependency.
+- Explicit private checkout can use the pipeline's own repository without
+  exposing a reusable workflow credential or broadening the default profile.
 - The first protected-path milestone can prove the security boundary without
   risking a real credential.
 - Provider provenance and policy must exist in a Buildkite-owned service before
