@@ -61,6 +61,10 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
 	}
+	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
+	if err != nil {
+		return nil, err
+	}
 	if parsed.Env != nil && parsed.Env.Expression != nil {
 		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
 	}
@@ -268,6 +272,11 @@ func validateRawContainer(path string, node *yaml.Node) error {
 
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
+	permissions, err := adaptPermissions(path, in.Permissions)
+	if err != nil {
+		return Job{}, err
+	}
+	out.Permissions = permissions
 	if in.WorkflowCall != nil {
 		call := in.WorkflowCall
 		out.Reusable = &ReusableWorkflowCall{
@@ -481,6 +490,38 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		return Job{}, err
 	}
 	return out, nil
+}
+
+func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {
+	if in == nil {
+		return nil, nil
+	}
+	if in.All != nil {
+		return nil, locatedError(path, in.All.Pos, "permissions", "permission aliases are unsupported; declare each required permission explicitly")
+	}
+	scopes := make(map[string]string, len(in.Scopes))
+	names := make([]string, 0, len(in.Scopes))
+	for name := range in.Scopes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		scope := in.Scopes[name]
+		if scope == nil || scope.Name == nil || scope.Value == nil {
+			return nil, locatedError(path, in.Pos, "permissions", "invalid permission declaration")
+		}
+		if name == "id-token" {
+			return nil, locatedError(path, scope.Name.Pos, "permissions", "id-token permission requires GitHub-compatible OIDC and is unsupported")
+		}
+		switch scope.Value.Value {
+		case "read", "write":
+			scopes[name] = scope.Value.Value
+		case "none":
+		default:
+			return nil, locatedError(path, scope.Value.Pos, "permissions", fmt.Sprintf("invalid access %q for permission %q", scope.Value.Value, name))
+		}
+	}
+	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
 }
 
 func workflowCallInputType(inputType actionlint.WorkflowCallEventInputType) string {

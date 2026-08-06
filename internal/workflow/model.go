@@ -19,6 +19,7 @@ type Span struct {
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
+	Permissions             *Permissions          `json:"permissions,omitempty"`
 	DefaultShell            string                `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                `json:"default_working_directory,omitempty"`
 	CallInputs              map[string]CallInput  `json:"call_inputs,omitempty"`
@@ -26,6 +27,13 @@ type Workflow struct {
 	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
+}
+
+// Permissions is an explicitly declared GitHub token permission set. Omitted
+// permissions remain nil so compilation never invents default authority.
+type Permissions struct {
+	Scopes map[string]string `json:"scopes"`
+	Span   Span              `json:"span"`
 }
 
 // CallInput declares one statically resolvable workflow_call input.
@@ -54,6 +62,7 @@ type Job struct {
 	MaxParallel             *int                   `json:"max_parallel,omitempty"`
 	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                     map[string]string      `json:"env,omitempty"`
+	Permissions             *Permissions           `json:"permissions,omitempty"`
 	If                      string                 `json:"if,omitempty"`
 	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`

@@ -111,7 +111,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return JobResult{}, err
 	}
 	for _, capability := range job.RequiredCapabilities {
-		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" {
+		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" && capability != "provider-token-write" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
 		}
 	}
@@ -127,9 +127,15 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return JobResult{}, err
 		}
 		r.Git = git
+	}
+	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
+		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
+	}
+	if job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write") {
 		if r.Redactor == nil {
-			return JobResult{}, fmt.Errorf("provider-token-read capability requires the Buildkite Agent redactor")
+			return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
 		}
+		var err error
 		r.Redactor, err = resolveAgentRedactorBeforeWorkflow(r.Redactor)
 		if err != nil {
 			return JobResult{}, err
@@ -184,6 +190,15 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
 		return jobResult, err
+	}
+	if job.GitHubToken != nil {
+		if secrets == nil {
+			secrets = map[string]string{}
+		}
+		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.GitHubToken.Permissions)
+		if err != nil {
+			return jobResult, err
+		}
 	}
 	eval.Secrets = secrets
 	if workspace == "" {
@@ -325,7 +340,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	var runErr error
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || (job.Schema == plan.SchemaV5 && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
 			if step.Kind != "uses" {
 				continue
@@ -630,6 +645,27 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 		values[name] = value
 	}
 	return values, nil
+}
+
+func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandProcessor, repository string, permissions map[string]string) (string, error) {
+	if r.WorkflowToken == nil {
+		return "", fmt.Errorf("GitHub workflow token provider is not configured")
+	}
+	token, err := r.WorkflowToken.WorkflowToken(ctx, repository, permissions)
+	if err != nil {
+		return "", err
+	}
+	if len(token) > 16<<10 || !githubInstallationTokenPattern.MatchString(token) {
+		return "", fmt.Errorf("GitHub workflow token provider returned an invalid token")
+	}
+	if r.Redactor == nil {
+		return "", fmt.Errorf("GitHub workflow token provider requires a redactor")
+	}
+	processor.addMask(token)
+	if err := r.Redactor.AddRedaction(ctx, token); err != nil {
+		return "", processor.scrubError(err)
+	}
+	return token, nil
 }
 
 func durationMinutes(minutes float64) time.Duration {
@@ -1015,7 +1051,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 	var action metadata.Metadata
 	var actionLock *plan.ActionLock
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || (job.Schema == plan.SchemaV5 && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && len(job.Actions) != 0) {
 		if step.Action == nil {
 			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
 		}

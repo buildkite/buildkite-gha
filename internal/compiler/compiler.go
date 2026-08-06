@@ -88,6 +88,7 @@ type JobInstance struct {
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
 	Steps                   []workflow.Step         `json:"steps"`
 	Env                     map[string]string       `json:"env,omitempty"`
+	Permissions             map[string]string       `json:"permissions,omitempty"`
 	If                      string                  `json:"if,omitempty"`
 	TimeoutMinutes          float64                 `json:"timeout_minutes,omitempty"`
 	DefaultShell            string                  `json:"default_shell,omitempty"`
@@ -385,10 +386,26 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		if err != nil {
 			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
+		var githubToken *plan.GitHubToken
+		if slices.Contains(secrets, "GITHUB_TOKEN") {
+			secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
+			if len(instance.Permissions) == 0 {
+				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references secrets.GITHUB_TOKEN but has no explicit effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+			}
+			permissions := make(map[string]string, len(instance.Permissions))
+			for name, access := range instance.Permissions {
+				permissions[strings.ReplaceAll(name, "-", "_")] = access
+			}
+			githubToken = &plan.GitHubToken{Permissions: permissions}
+			jobSchema = plan.SchemaV6
+			capabilities = append(capabilities, "provider-token-write")
+			authorization.ProviderTokenWriteCapabilitySources = []string{"workflow-permissions"}
+		}
 		if len(secrets) != 0 {
 			capabilities = append(capabilities, "secrets")
-			sort.Strings(capabilities)
 		}
+		sort.Strings(capabilities)
+		capabilities = slices.Compact(capabilities)
 		job := plan.Job{
 			Schema: jobSchema,
 			Compiler: plan.Compiler{
@@ -407,6 +424,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 			RequiredCapabilities:    capabilities,
 			RequiredSecrets:         secrets,
+			GitHubToken:             githubToken,
 			Matrix:                  instance.Matrix,
 			Vars:                    cloneMap(ir.Vars),
 			Dependencies:            append([]string(nil), instance.Needs...),
@@ -650,6 +668,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), job.Steps...),
 				Env:                     cloneMap(job.Env),
+				Permissions:             permissionScopes(job.Permissions),
 				If:                      job.If,
 				TimeoutMinutes:          job.TimeoutMinutes,
 				DefaultShell:            job.DefaultShell,
@@ -719,6 +738,13 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		instances = append(instances, byLogicalID[id]...)
 	}
 	return instances, nil
+}
+
+func permissionScopes(permissions *workflow.Permissions) map[string]string {
+	if permissions == nil {
+		return nil
+	}
+	return cloneMap(permissions.Scopes)
 }
 
 func supported(path string, job workflow.Job) error {

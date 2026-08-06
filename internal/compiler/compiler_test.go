@@ -17,8 +17,26 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
+
+func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 2, Column: 1}}
+	caller := &workflow.Permissions{Scopes: map[string]string{"contents": "read", "pull-requests": "write"}, Span: span}
+	callee := &workflow.Permissions{Scopes: map[string]string{"contents": "write", "issues": "write", "pull-requests": "read"}, Span: span}
+	effective := effectivePermissions(callee, nil, caller, true)
+	want := map[string]string{"contents": "read", "pull-requests": "read"}
+	if !reflect.DeepEqual(effective.Scopes, want) {
+		t.Fatalf("effective permissions = %#v, want %#v", effective.Scopes, want)
+	}
+	if inherited := effectivePermissions(nil, nil, caller, true); !reflect.DeepEqual(inherited.Scopes, caller.Scopes) || inherited == caller {
+		t.Fatalf("inherited permissions = %#v, want independent copy of %#v", inherited, caller)
+	}
+	if unbounded := effectivePermissions(callee, caller, nil, false); !reflect.DeepEqual(unbounded.Scopes, callee.Scopes) {
+		t.Fatalf("root job permissions = %#v, want job replacement %#v", unbounded, callee)
+	}
+}
 
 func TestCompileShellGoldenGraph(t *testing.T) {
 	workflowPath := smokePath(".github", "workflows", "shell.yml")

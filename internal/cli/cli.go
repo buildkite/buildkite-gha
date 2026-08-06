@@ -195,7 +195,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5) && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -228,29 +228,37 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	var checkoutTokens gharuntime.CheckoutTokenProvider
-	if job.HasCapability("provider-token-read") {
-		checkoutTokens, err = gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+	var workflowTokens gharuntime.WorkflowTokenProvider
+	if job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write") {
+		githubTokens, tokenErr := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
 			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
 			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 		})
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure private checkout token service: %v\n", err)
+		if tokenErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
 			return 1
+		}
+		if job.HasCapability("provider-token-read") {
+			checkoutTokens = githubTokens
+		}
+		if job.HasCapability("provider-token-write") {
+			workflowTokens = githubTokens
 		}
 	}
 	runner := gharuntime.Runner{
-		Stdout:      stdout,
-		Stderr:      stderr,
-		MiseDataDir: prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
-		Docker:      os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:         os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:     gharuntime.EnvironmentSecrets{},
-		Redactor:    gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-		Actions:     actionMaterializer,
-		Artifacts:   agent,
-		Cache:       cacheCredentials,
-		Checkout:    checkoutTokens,
+		Stdout:        stdout,
+		Stderr:        stderr,
+		MiseDataDir:   prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		Docker:        os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:           os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets:       gharuntime.EnvironmentSecrets{},
+		Redactor:      gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:       actionMaterializer,
+		Artifacts:     agent,
+		Cache:         cacheCredentials,
+		Checkout:      checkoutTokens,
+		WorkflowToken: workflowTokens,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -780,6 +788,12 @@ func validateUnprivilegedBundleWithPrivateCheckout(bundle compiler.Bundle, priva
 			if capability == "provider-token-read" {
 				if !privateCheckout || !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
 					return fmt.Errorf("job %q requires provider-token-read without compiler-verified private checkout provenance", artifact.Job.Workflow.LogicalJobID)
+				}
+				continue
+			}
+			if capability == "provider-token-write" {
+				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"workflow-permissions"}) {
+					return fmt.Errorf("job %q requires provider-token-write without compiler-verified workflow permission provenance", artifact.Job.Workflow.LogicalJobID)
 				}
 				continue
 			}

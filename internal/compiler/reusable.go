@@ -80,6 +80,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
+			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
 			bindings := make(map[string]needBinding, len(job.Needs))
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
@@ -103,7 +104,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return nil, err
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}}
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, 0)
 	return resolution.jobs, err
 }
 
@@ -116,7 +117,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, depth int) (reusableResolution, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -130,6 +131,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	var resolved []sourcedJob
 	for _, id := range order {
 		job := jobs[id]
+		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
 		job = applyStaticInputs(job, inputs)
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
@@ -244,8 +246,12 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				callLabel = labelPrefix + " / " + callLabel
 			}
 
+			calleePermissionCeiling := job.Permissions
+			if calleePermissionCeiling == nil {
+				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
+			}
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, depth+1)
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				return reusableResolution{}, err
@@ -265,6 +271,45 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		return reusableResolution{}, err
 	}
 	return reusableResolution{jobs: resolved, outputs: outputs}, nil
+}
+
+func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, bounded bool) *workflow.Permissions {
+	declared := job
+	if declared == nil {
+		declared = workflowDefault
+	}
+	if !bounded {
+		return clonePermissions(declared)
+	}
+	if declared == nil {
+		return clonePermissions(ceiling)
+	}
+	effective := &workflow.Permissions{Scopes: map[string]string{}, Span: declared.Span}
+	if ceiling == nil {
+		return effective
+	}
+	for name, access := range declared.Scopes {
+		ceilingAccess, ok := ceiling.Scopes[name]
+		if !ok {
+			continue
+		}
+		if access == "write" && ceilingAccess == "read" {
+			access = "read"
+		}
+		effective.Scopes[name] = access
+	}
+	return effective
+}
+
+func clonePermissions(in *workflow.Permissions) *workflow.Permissions {
+	if in == nil {
+		return nil
+	}
+	out := &workflow.Permissions{Scopes: make(map[string]string, len(in.Scopes)), Span: in.Span}
+	for name, access := range in.Scopes {
+		out.Scopes[name] = access
+	}
+	return out
 }
 
 func replacementNeeds(needs []string, replacements map[string]needBinding) map[string]needBinding {

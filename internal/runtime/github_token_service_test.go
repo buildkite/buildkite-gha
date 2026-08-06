@@ -46,6 +46,33 @@ func TestAgentGitHubTokensMintsFixedReadOnlyRepositoryCredential(t *testing.T) {
 	}
 }
 
+func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","permissions":{"contents":"read","pull_requests":"write"}}` {
+			t.Errorf("request body = %s", body)
+		}
+		_, _ = io.WriteString(w, `{"token":"ghs_workflow_token"}`)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"pull_requests": "write", "contents": "read"})
+	if err != nil || token != "ghs_workflow_token" {
+		t.Fatalf("WorkflowToken() = %q, %v", token, err)
+	}
+	for _, permissions := range []map[string]string{nil, {}, {"contents": "admin"}, {"administration": "write"}, {"models": "write"}} {
+		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", permissions); err == nil {
+			t.Fatalf("WorkflowToken(%#v) succeeded", permissions)
+		}
+	}
+}
+
 func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) {
 	valid := AgentGitHubTokenConfig{Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-token"}
 	for name, mutate := range map[string]func(*AgentGitHubTokenConfig){
