@@ -605,6 +605,104 @@ func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) 
 	}
 }
 
+func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
+	job := validJob()
+	job.Schema = SchemaV6
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v6.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV6, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v6 plan does not validate against schema: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{name: "other provider", edit: func(document map[string]any) {
+			document["event"].(map[string]any)["provider"] = "cursor-origin"
+		}},
+		{name: "missing repository", edit: func(document map[string]any) {
+			delete(document["event"].(map[string]any), "repository")
+		}},
+		{name: "malformed repository", edit: func(document map[string]any) {
+			document["event"].(map[string]any)["repository"] = "buildkite"
+		}},
+		{name: "dot repository component", edit: func(document map[string]any) {
+			document["event"].(map[string]any)["repository"] = "buildkite/.."
+		}},
+	} {
+		t.Run("schema rejects "+test.name, func(t *testing.T) {
+			encodedDocument, err := json.Marshal(planDocument)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var changed map[string]any
+			if err := json.Unmarshal(encodedDocument, &changed); err != nil {
+				t.Fatal(err)
+			}
+			test.edit(changed)
+			if err := schema.Validate(changed); err == nil {
+				t.Fatalf("v6 schema accepted token plan with %s", test.name)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		edit func(*Job)
+		want string
+	}{
+		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = []string{} }, want: "declared together"},
+		{name: "missing token", edit: func(j *Job) { j.GitHubToken = nil }, want: "declared together"},
+		{name: "legacy schema", edit: func(j *Job) { j.Schema = SchemaV5 }, want: "does not support GitHub workflow tokens"},
+		{name: "unknown permission", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"administration": "write"} }, want: "unsupported permission"},
+		{name: "invalid access", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"contents": "admin"} }, want: "unsupported permission"},
+		{name: "reserved ambient secret", edit: func(j *Job) {
+			j.RequiredCapabilities = []string{"provider-token-write", "secrets"}
+			j.RequiredSecrets = []string{"GITHUB_TOKEN"}
+		}, want: "scoped workflow token contract"},
+		{name: "other provider", edit: func(j *Job) { j.Event.Provider = "cursor-origin" }, want: "valid github.com event repository"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := job
+			changed.RequiredCapabilities = append([]string(nil), job.RequiredCapabilities...)
+			changed.RequiredSecrets = append([]string(nil), job.RequiredSecrets...)
+			permissions := map[string]string{}
+			for name, access := range job.GitHubToken.Permissions {
+				permissions[name] = access
+			}
+			changed.GitHubToken = &GitHubToken{Permissions: permissions}
+			test.edit(&changed)
+			if err := changed.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
 	if err != nil {

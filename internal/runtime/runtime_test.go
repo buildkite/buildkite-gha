@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -45,6 +46,26 @@ type testRedactor struct{ values []string }
 func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
 	r.values = append(r.values, value)
 	return nil
+}
+
+type testWorkflowTokenProvider struct {
+	token       string
+	repository  string
+	permissions map[string]string
+	calls       int
+}
+
+func (p *testWorkflowTokenProvider) WorkflowToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+	p.calls++
+	p.repository = repository
+	p.permissions = maps.Clone(permissions)
+	return p.token, nil
+}
+
+type failingTokenRedactor struct{ token string }
+
+func (r failingTokenRedactor) AddRedaction(context.Context, string) error {
+	return fmt.Errorf("failed to redact %s", r.token)
 }
 
 func TestValidateDockerMountPath(t *testing.T) {
@@ -1851,6 +1872,53 @@ func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
 	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "contains a registered secret") || strings.Contains(err.Error(), "do-not-publish") {
 		t.Fatalf("RunJob() error = %v, want non-disclosing secret-output rejection", err)
+	}
+}
+
+func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
+	const token = "ghs_scoped_workflow_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "use-token", Kind: "run", Shell: "sh", Command: `test "$GH_TOKEN" = "ghs_scoped_workflow_token" && printf '%s\n' "$GH_TOKEN"`,
+	}})
+	job.Schema = plan.SchemaV6
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	job.Env = map[string]string{"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
+	provider := &testWorkflowTokenProvider{token: token}
+	redactor := &testRedactor{}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if provider.calls != 1 || provider.repository != job.Event.Repository || !reflect.DeepEqual(provider.permissions, job.GitHubToken.Permissions) {
+		t.Fatalf("token request = calls %d, repository %q, permissions %#v", provider.calls, provider.repository, provider.permissions)
+	}
+	if !reflect.DeepEqual(redactor.values, []string{token}) {
+		t.Fatalf("redacted values = %#v", redactor.values)
+	}
+	if strings.Contains(logs.String(), token) || strings.Contains(fmt.Sprintf("%#v", result), token) || result.Env["GH_TOKEN"] != "***" || !strings.Contains(logs.String(), "***") {
+		t.Fatalf("workflow token leaked: result = %#v, logs = %q", result, logs.String())
+	}
+}
+
+func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
+	const token = "ghs_redaction_failure_token"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "never", Kind: "run", Command: "false"}})
+	job.Schema = plan.SchemaV6
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}}
+	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).RunJob(context.Background(), job, workspace)
+	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("RunJob() error = %v, want redaction failure without token disclosure", err)
 	}
 }
 

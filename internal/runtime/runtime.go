@@ -66,6 +66,7 @@ type Runner struct {
 	Artifacts         ArtifactStore
 	Cache             CacheCredentialProvider
 	Checkout          CheckoutTokenProvider
+	WorkflowToken     WorkflowTokenProvider
 	runnerTemp        string
 	implicitJobPATH   string
 	explicitJobPATH   bool

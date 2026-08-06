@@ -54,7 +54,7 @@ provide.
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
 | Private repositories or actions | Narrow checkout only | The direct uploader can opt into private checkout of the pipeline's exact GitHub repository. Private actions, alternate repositories, and reusable-workflow source remain unsupported. |
-| Secrets and provider tokens | Not exposed | `GITHUB_TOKEN`, `github.token`, GitHub App tokens for workflow use, protected secrets, and environment grants remain unsupported. The private-checkout credential is runtime-internal and available only to Git. |
+| Secrets and provider tokens | Narrow `GITHUB_TOKEN` support | An explicit `secrets.GITHUB_TOKEN` reference can receive a short-lived token for the event repository and a non-empty explicit permission map. `github.token`, other workflow secrets, and environment grants remain unsupported. The separate private-checkout credential is runtime-internal and available only to Git. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
 | Windows and macOS | Not supported | Unmapped runner labels fail validation. |
 
@@ -142,6 +142,52 @@ The option fails closed when scoped token minting is unavailable or disabled.
 It does not populate `GITHUB_TOKEN` or `github.token`, accept workflow-selected
 permissions, support write access, or enable private actions. Alternate
 repositories or refs and credential persistence remain unsupported.
+
+### Explicit permissions provide a scoped workflow token
+
+A job that statically references `${{ secrets.GITHUB_TOKEN }}` receives one
+short-lived GitHub installation token for the exact event repository when it
+also has a non-empty, explicit `permissions` mapping:
+
+```yaml
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment "$PR_NUMBER" --body "Checks passed"
+```
+
+Workflow permissions apply to jobs that omit job permissions. A job-level
+mapping replaces the workflow-level mapping rather than merging with it. Local
+reusable workflows inherit the caller's effective permissions and can only
+narrow them. `none` removes a permission. Omitted permissions, `{}`,
+`read-all`, `write-all`, and `id-token` do not produce a token; a static
+`GITHUB_TOKEN` reference without a non-empty effective mapping fails
+compilation.
+
+The compiler normalizes names such as `pull-requests` to the Agent API's
+`pull_requests`, emits the exact map into a v6 plan, and records same-process
+provenance for upload admission. The runtime requests the token once from the
+current-job Agent endpoint. The service independently requires the requested
+repository to match the pipeline's configured GitHub repository and applies
+its own permission allowlist and organization enablement. The token is
+registered with runtime and Agent redaction before expressions or steps can use
+it, and result values containing it are scrubbed.
+
+Only the explicit `secrets.GITHUB_TOKEN` context value is populated. The token
+is not an ambient `GITHUB_TOKEN` environment variable and `github.token`
+remains unsupported. Other secrets still use the existing explicit
+`BUILDKITE_GHA_SECRET_<NAME>` boundary and are not enabled by this feature.
+
+This job-bound service does not independently establish fork or actor trust.
+Pipelines that permit workflow changes from untrusted sources must apply the
+same care as GitHub Actions workflows granting write permissions, in addition
+to the service's repository and permission policy.
 
 ### Artifact uploads use bounded native storage
 

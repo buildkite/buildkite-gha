@@ -202,7 +202,7 @@ plan. Rotation overlaps old and new public keys for the maximum grant lifetime;
 emergency revocation takes precedence over a still-published key. Private keys
 remain in the platform signing boundary.
 
-### Narrow job-bound private-checkout exception
+### Narrow job-bound GitHub token exceptions
 
 Buildkite's Agent API can mint a GitHub installation token for the exact current
 job, exact pipeline repository, and caller-requested permission set. The server
@@ -249,11 +249,30 @@ artifacts. Redirects, unknown response fields, trailing data, oversized bodies,
 invalid tokens, disabled service responses, and unavailable/rate-limited
 responses fail closed with bounded diagnostics.
 
-This exception does not establish authenticated provider event or fork
-provenance and therefore does not authorize writes, arbitrary workflow
-`permissions:`, private actions or reusable workflows, `GITHUB_TOKEN`,
-`github.token`, secrets, environments, or OIDC. Those features still require
-the general control-plane decision in this ADR.
+A second bounded integration uses the same endpoint for a synthetic
+`secrets.GITHUB_TOKEN`. A workflow must declare an explicit, non-empty
+permission mapping and statically reference that exact secret. The compiler
+emits the API-normalized permission map into a v6 plan, adds
+`provider-token-write`, and records same-process `workflow-permissions`
+provenance. Upload admission accepts only that exact compiler provenance. A
+serialized plan cannot self-authorize the capability.
+
+The runtime requests one token for the plan's exact event repository and exact
+permission map. It validates both independently, masks the returned token, and
+requires Agent redaction registration before making the synthetic secret
+available to expression evaluation. Job-level permissions replace workflow
+defaults; flattened local reusable workflows can only narrow caller authority.
+Permission aliases, implicit defaults, empty grants, and `id-token` fail
+closed. `github.token` and ambient `GITHUB_TOKEN` environment injection remain
+unsupported.
+
+These exceptions do not establish authenticated provider event, fork, or actor
+provenance. The server's independent pipeline-repository comparison,
+organization enablement, and permission allowlist are authoritative, but
+pipelines remain responsible for whether untrusted workflow changes may request
+an allowed write permission. Private actions, arbitrary reusable-workflow
+source, selected non-provider secrets, environments, and OIDC still require the
+general control-plane decision in this ADR.
 
 ### Runtime verification and capability use
 
@@ -313,22 +332,24 @@ record; a successful job alone does not prove policy or audit behavior.
 
 ## Deferred decisions
 
-Apart from the fixed read-only pipeline-repository checkout exception, this ADR
-does not authorize or choose storage for private actions, reusable workflow
-source, selected secrets, `GITHUB_TOKEN`, environment grants, or compatibility
-OIDC claims. It does not choose a secret manager, general GitHub App permission
-set, customer policy language, administrative UI, or production service
-hostname. Those decisions require separate reviewed slices after the no-op
-boundary is proven.
+Apart from the fixed read-only pipeline-repository checkout and explicit scoped
+`secrets.GITHUB_TOKEN` exceptions above, this ADR does not authorize or choose
+storage for private actions, reusable workflow source, selected non-provider
+secrets, `github.token`, environment grants, or compatibility OIDC claims. It
+does not choose a secret manager, broader cross-repository GitHub App authority,
+customer policy language, administrative UI, or production service hostname.
+Those decisions require separate reviewed slices after the no-op boundary is
+proven.
 
 The existing cache-v2 GHAC token exchange remains separate. Cache tokens are
 minted through the current Buildkite job, scoped by the cache service, and
 exposed only to the audited cache action lifecycle. A capability grant neither
 contains nor replaces them.
 
-The job-bound private-checkout exchange is likewise separate. Its server-side
-pipeline-repository binding and client-fixed `contents:read` permission are not
-a substitute for the event, policy, signing, and audit contract required by a
+The job-bound GitHub token exchanges are likewise separate. Their server-side
+pipeline-repository binding and either client-fixed `contents:read` checkout
+permission or compiler-owned explicit workflow permission map are not a
+substitute for the event, policy, signing, and audit contract required by a
 general capability grant.
 
 ## Consequences

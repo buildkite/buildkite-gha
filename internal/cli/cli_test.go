@@ -708,6 +708,34 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedPrivateCheckout(t *testing.
 	}
 }
 
+func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T) {
+	job := plan.Job{
+		Workflow:             plan.Workflow{LogicalJobID: "comment"},
+		RequiredCapabilities: []string{"provider-token-write"},
+		GitHubToken:          &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}},
+	}
+	for _, test := range []struct {
+		name          string
+		authorization compiler.PlanAuthorization
+		wantError     bool
+	}{
+		{name: "verified permissions", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"workflow-permissions"}}},
+		{name: "missing provenance", wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"workflow-permissions", "step-input"}}, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
+			err := validateUnprivilegedBundle(bundle)
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow permission provenance")) {
+				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testing.T) {
 	for _, capabilities := range [][]string{nil, {"network"}, {"docker"}, {"docker", "network"}} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{

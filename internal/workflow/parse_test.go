@@ -56,6 +56,56 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
+func TestParseOwnsExplicitWorkflowAndJobPermissions(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+  pull-requests: write
+  issues: none
+jobs:
+  inherited:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  overridden:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("permissions.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Permissions == nil || parsed.Permissions.Span.Start.Line != 2 || parsed.Permissions.Scopes["contents"] != "read" || parsed.Permissions.Scopes["pull-requests"] != "write" {
+		t.Fatalf("workflow permissions = %#v", parsed.Permissions)
+	}
+	if _, exists := parsed.Permissions.Scopes["issues"]; exists {
+		t.Fatalf("none permission was retained: %#v", parsed.Permissions.Scopes)
+	}
+	if parsed.Jobs[0].Permissions != nil || parsed.Jobs[1].Permissions == nil || parsed.Jobs[1].Permissions.Scopes["issues"] != "write" || parsed.Jobs[1].Permissions.Span.Start.Line != 12 {
+		t.Fatalf("job permissions = %#v / %#v", parsed.Jobs[0].Permissions, parsed.Jobs[1].Permissions)
+	}
+}
+
+func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
+	for _, test := range []struct {
+		name, declaration, want string
+	}{
+		{name: "read all", declaration: "permissions: read-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
+		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
+		{name: "OIDC", declaration: "permissions:\n  id-token: write\n", want: "permissions.yml:3:3: job \"permissions\": id-token permission requires GitHub-compatible OIDC"},
+		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := []byte("on: push\n" + test.declaration + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			_, err := Parse("permissions.yml", source)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseOwnsLiteralContainersAndSortsServices(t *testing.T) {
 	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: postgres:16, ports: ['5432:5432']}\n    steps:\n      - run: true\n")
 	parsed, err := Parse("containers.yml", source)

@@ -21,6 +21,7 @@ const (
 	SchemaV3 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v3.schema.json"
 	SchemaV4 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v4.schema.json"
 	SchemaV5 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v5.schema.json"
+	SchemaV6 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v6.schema.json"
 	Schema   = SchemaV2
 )
 
@@ -39,6 +40,25 @@ var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
+var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+var githubTokenPermissionAccess = map[string]map[string]bool{
+	"actions":             {"read": true, "write": true},
+	"artifact_metadata":   {"read": true, "write": true},
+	"attestations":        {"read": true, "write": true},
+	"checks":              {"read": true, "write": true},
+	"contents":            {"read": true, "write": true},
+	"deployments":         {"read": true, "write": true},
+	"discussions":         {"read": true, "write": true},
+	"issues":              {"read": true, "write": true},
+	"models":              {"read": true},
+	"packages":            {"read": true, "write": true},
+	"pages":               {"read": true, "write": true},
+	"pull_requests":       {"read": true, "write": true},
+	"repository_projects": {"read": true, "write": true},
+	"security_events":     {"read": true, "write": true},
+	"statuses":            {"read": true, "write": true},
+}
 
 type ActionSelector struct {
 	Lock string `json:"lock"`
@@ -148,6 +168,12 @@ type Container struct {
 	Ports []string          `json:"ports,omitempty"`
 }
 
+// GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Permissions
+// are API-normalized and compiler-owned; the repository always comes from Event.
+type GitHubToken struct {
+	Permissions map[string]string `json:"permissions"`
+}
+
 // Job is one immutable, compiler-selected workflow job instance.
 type Job struct {
 	Schema               string                  `json:"schema"`
@@ -157,6 +183,7 @@ type Job struct {
 	Target               Target                  `json:"target"`
 	RequiredCapabilities []string                `json:"required_capabilities"`
 	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
+	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
 	Dependencies         []string                `json:"dependencies,omitempty"`
@@ -303,17 +330,20 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
 		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
 	}
-	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && (job.Container != nil || len(job.Services) != 0) {
+	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && (job.Container != nil || len(job.Services) != 0) {
 		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
 	}
-	if job.Schema != SchemaV5 && job.NeedOutputs != nil {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.NeedOutputs != nil {
 		return fmt.Errorf("job plan %s does not support prerequisite output projections", job.Schema)
+	}
+	if job.Schema != SchemaV6 && job.GitHubToken != nil {
+		return fmt.Errorf("job plan %s does not support GitHub workflow tokens", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
@@ -382,10 +412,25 @@ func (job Job) Validate() error {
 		if !secretNamePattern.MatchString(name) || i > 0 && job.RequiredSecrets[i-1] == name {
 			return fmt.Errorf("job plan contains invalid or repeated required secret %q", name)
 		}
+		if name == "GITHUB_TOKEN" {
+			return fmt.Errorf("job plan must provide GITHUB_TOKEN through the scoped workflow token contract")
+		}
 	}
 	if len(job.RequiredSecrets) != 0 {
 		if _, ok := capabilities["secrets"]; !ok {
 			return fmt.Errorf("job plan required secrets need the secrets capability")
+		}
+	}
+	_, workflowTokenCapability := capabilities["provider-token-write"]
+	if (job.GitHubToken != nil) != workflowTokenCapability {
+		return fmt.Errorf("job plan GitHub workflow token and provider-token-write capability must be declared together")
+	}
+	if job.GitHubToken != nil {
+		if job.Event.Provider != "github" || !validGitHubRepository(job.Event.Repository) {
+			return fmt.Errorf("GitHub workflow token requires a valid github.com event repository")
+		}
+		if err := validateGitHubTokenPermissions(job.GitHubToken.Permissions); err != nil {
+			return err
 		}
 	}
 	if !sort.StringsAreSorted(job.Dependencies) {
@@ -405,7 +450,7 @@ func (job Job) Validate() error {
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
 	maxNeedProducers := MaxNeedProducers
-	if job.Schema != SchemaV5 {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 {
 		maxNeedProducers = maxLegacyNeedProducers
 	}
 	for name, sources := range job.NeedSources {
@@ -535,9 +580,30 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || (job.Schema == SchemaV5 && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
+	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
 		if err := validateActionLocks(job); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validGitHubRepository(repository string) bool {
+	if len(repository) > 140 || !githubRepositoryPattern.MatchString(repository) {
+		return false
+	}
+	parts := strings.Split(repository, "/")
+	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
+}
+
+func validateGitHubTokenPermissions(permissions map[string]string) error {
+	if len(permissions) == 0 || len(permissions) > len(githubTokenPermissionAccess) {
+		return fmt.Errorf("GitHub workflow token requires a non-empty bounded permission set")
+	}
+	for name, access := range permissions {
+		allowed, ok := githubTokenPermissionAccess[name]
+		if !ok || !allowed[access] {
+			return fmt.Errorf("GitHub workflow token contains unsupported permission %q with access %q", name, access)
 		}
 	}
 	return nil

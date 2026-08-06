@@ -1896,6 +1896,8 @@ the narrowest available boundary:
 - public checkout under GitHub and Cursor Origin provider adapters;
 - explicitly enabled private checkout of the pipeline's exact GitHub
   repository through the current job's scoped Agent token endpoint; and
+- compiler-authorized workflow `GITHUB_TOKEN` requests for the pipeline's exact
+  GitHub repository and explicit permission map through that same job endpoint;
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -1931,7 +1933,9 @@ Delivery slices:
    interface. The first sub-slice is fixed `contents:read` checkout of the
    pipeline's exact repository through the current job's scoped Agent endpoint;
    private actions and private reusable-workflow source remain separate work.
-5. Add scoped GitHub tokens, selected secrets, and environment grants.
+5. Add scoped GitHub tokens, selected secrets, and environment grants. The
+   job-bound Agent endpoint now covers explicit workflow tokens; selected
+   secrets and general provenance-aware grants remain.
 6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
@@ -1941,6 +1945,10 @@ supports explicitly enabled, read-only checkout of the pipeline's exact GitHub
 repository. Its local request, admission, redaction, askpass, and leakage
 boundaries are tested; hosted proof remains pending endpoint deployment,
 organization enablement, installer wiring, and a private-repository canary.
+The job-bound portion of slice 5 now compiles explicit workflow and job
+permissions into a v6 plan and provides a synthetic `secrets.GITHUB_TOKEN`
+through the current-job endpoint, with independent runtime validation,
+redaction, and compiler-proven upload admission. Hosted proof remains pending.
 Private actions and reusable workflows remain deferred. Cursor Origin public
 checkout remains pending on its provider context/source contract. Slice 3's
 proposed
