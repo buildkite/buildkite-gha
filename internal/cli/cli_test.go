@@ -777,6 +777,24 @@ func TestInstallRuntimeMiseRejectsInvalidArchive(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeMiseRejectsOversizedCacheEntry(t *testing.T) {
+	cached := filepath.Join(t.TempDir(), "mise")
+	file, err := os.OpenFile(cached, os.O_CREATE|os.O_WRONLY, 0o500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(runtimeMiseBinaryLimit + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRuntimeMiseFile(context.Background(), cached, strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("validateRuntimeMiseFile() error = %v, want size rejection", err)
+	}
+}
+
 func TestManagedMiseCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
 	root := t.TempDir()
 	marker := filepath.Join(t.TempDir(), "executed")

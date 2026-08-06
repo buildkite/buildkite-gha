@@ -361,7 +361,7 @@ func resolveRuntimeMiseWithInstaller(ctx context.Context, configured, dataDir, p
 }
 
 func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) (string, error) {
-	resolved, err := validateRuntimeMiseFile(candidate, expectedDigest)
+	resolved, err := validateRuntimeMiseFile(ctx, candidate, expectedDigest)
 	if err != nil {
 		return "", err
 	}
@@ -390,7 +390,7 @@ func validateRuntimeMise(ctx context.Context, candidate, expectedDigest string) 
 	return resolved, nil
 }
 
-func validateRuntimeMiseFile(candidate, expectedDigest string) (string, error) {
+func validateRuntimeMiseFile(ctx context.Context, candidate, expectedDigest string) (string, error) {
 	if !filepath.IsAbs(candidate) {
 		absolute, err := filepath.Abs(candidate)
 		if err != nil {
@@ -410,7 +410,10 @@ func validateRuntimeMiseFile(candidate, expectedDigest string) (string, error) {
 		return "", fmt.Errorf("runtime mise executable %q is not an executable regular file", resolved)
 	}
 	if expectedDigest != "" {
-		actual, err := fileSHA256(resolved)
+		if info.Size() > runtimeMiseBinaryLimit {
+			return "", fmt.Errorf("runtime mise executable exceeds %d-byte limit", runtimeMiseBinaryLimit)
+		}
+		actual, err := fileSHA256(ctx, resolved, runtimeMiseBinaryLimit)
 		if err != nil {
 			return "", fmt.Errorf("hash runtime mise executable: %w", err)
 		}
@@ -469,7 +472,7 @@ func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, std
 		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MinimumMiseVersion)
 	}
 	destination := filepath.Join(root, "linux-x64", "mise")
-	if resolved, err := validateRuntimeMiseFile(destination, runtimeMiseBinaryDigest); err == nil {
+	if resolved, err := validateRuntimeMiseFile(ctx, destination, runtimeMiseBinaryDigest); err == nil {
 		return pinRuntimeMise(ctx, resolved, privateRuntime, runtimeMiseBinaryDigest)
 	}
 	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
@@ -536,7 +539,7 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
 	destinationDir := filepath.Join(root, "linux-x64")
 	destination := filepath.Join(destinationDir, "mise")
-	if resolved, err := validateRuntimeMiseFile(destination, binaryDigest); err == nil {
+	if resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest); err == nil {
 		return resolved, nil
 	}
 	parent := filepath.Dir(destinationDir)
@@ -567,7 +570,7 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 		return "", fmt.Errorf("remove staged mise archive: %w", err)
 	}
 	if _, err := os.Lstat(destinationDir); err == nil {
-		if resolved, validationErr := validateRuntimeMiseFile(destination, binaryDigest); validationErr == nil {
+		if resolved, validationErr := validateRuntimeMiseFile(ctx, destination, binaryDigest); validationErr == nil {
 			return resolved, nil
 		}
 		invalid := destinationDir + fmt.Sprintf(".invalid-%d", time.Now().UnixNano())
@@ -578,13 +581,13 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 		return "", fmt.Errorf("inspect mise runtime cache: %w", err)
 	}
 	if err := os.Rename(staging, destinationDir); err != nil {
-		if resolved, validationErr := validateRuntimeMiseFile(destination, binaryDigest); validationErr == nil {
+		if resolved, validationErr := validateRuntimeMiseFile(ctx, destination, binaryDigest); validationErr == nil {
 			return resolved, nil
 		}
 		return "", fmt.Errorf("publish mise runtime cache: %w", err)
 	}
 	staging = ""
-	resolved, err := validateRuntimeMiseFile(destination, binaryDigest)
+	resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest)
 	if err != nil {
 		return "", fmt.Errorf("validate installed mise cache: %w", err)
 	}
@@ -680,15 +683,37 @@ func extractRuntimeMise(archive, destination, expectedDigest string) error {
 	return nil
 }
 
-func fileSHA256(path string) (string, error) {
+func fileSHA256(ctx context.Context, path string, limit int64) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = file.Close() }()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+	buffer := make([]byte, 32*1024)
+	var read int64
+	for read <= limit {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		chunk := buffer
+		if remaining := limit + 1 - read; remaining < int64(len(chunk)) {
+			chunk = chunk[:remaining]
+		}
+		n, readErr := file.Read(chunk)
+		if n > 0 {
+			_, _ = hash.Write(chunk[:n])
+			read += int64(n)
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return "", readErr
+		}
+	}
+	if read > limit {
+		return "", fmt.Errorf("exceeds %d-byte limit", limit)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
