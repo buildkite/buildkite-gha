@@ -49,7 +49,7 @@ provide.
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups become collapsed Buildkite log sections; because Buildkite sections are linear, nested or overlapping Actions groups flatten into successive sections. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. Debug and matcher presentation commands are consumed without runner debug or matcher behavior. `::notice`, command echo control, and other legacy commands are not supported. |
 | `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
 | `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
-| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and requires an operator-configured compatible Results service. The predecessor fixture's exact miss/save/dependent-hit lifecycle passed in Buildkite build 303. |
+| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and defaults to the official Buildkite Results service, with an optional operator override. The predecessor fixture's exact miss/save/dependent-hit lifecycle passed in Buildkite build 303. |
 | Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
@@ -202,16 +202,17 @@ service values. Cache subprocesses use the fixed
 a credential appears in a phase's command-file effects, those effects are
 discarded and the phase fails.
 
-Operators must set `BUILDKITE_GHA_CACHE_URL` to the origin-only URL of the
-compatible Results service; a non-root path is rejected because the stock
+The runtime uses the official `https://ghacs.buildkite.com/` Results service by
+default. Operators can set `BUILDKITE_GHA_CACHE_URL` to override it with another
+compatible origin-only URL; a non-root path is rejected because the stock
 cache-v2 client uses root-relative Twirp endpoints. The Buildkite organization
-must also have GHAC token minting enabled, and jobs must be able to reach both
-that service and the Agent API.
+must have GHAC token minting enabled, and jobs must be able to reach both the
+Results service and the Agent API.
 The service-issued token scopes cache access to the current organization and
 pipeline, grants writes only for an authorized ref, and limits cross-repository
-pull requests to the read-only default-branch scope. Missing configuration,
-disabled minting, malformed responses, redirects, or failed redaction stop the
-cache action before its JavaScript executes.
+pull requests to the read-only default-branch scope. Disabled minting, malformed
+responses, redirects, unsafe override configuration, or failed redaction stop
+the cache action before its JavaScript executes.
 
 This implemented and admitted contract has hosted runtime evidence. The
 then-combined advanced migration POC in [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)

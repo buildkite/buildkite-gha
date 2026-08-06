@@ -222,15 +222,14 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 This service-free lane runs the basic, artifact, root-level JavaScript/composite
 action, and advanced workflows, then a native terminal step. Add the cache
-extension only for an organization with GHAC token minting enabled and an
-explicitly configured compatible origin:
+extension only for an organization with GHAC token minting enabled; the runtime
+uses the official Buildkite Results service by default:
 
 ```sh
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
   --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" \
-  --env DEMO_CACHE=1 \
-  --env BUILDKITE_GHA_CACHE_URL=<cache-v2-results-origin> --yes
+  --env DEMO_CACHE=1 --yes
 ```
 
 The first cache run for the release commit must show a producer miss,

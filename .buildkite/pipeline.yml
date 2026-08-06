@@ -77,9 +77,6 @@ steps:
       set -euo pipefail
       commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
       [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      if [[ "$${DEMO_CACHE:-}" == "1" ]]; then
-        : "$${BUILDKITE_GHA_CACHE_URL:?BUILDKITE_GHA_CACHE_URL is required when DEMO_CACHE=1}"
-      fi
       scripts/phase-0-shell-oracle-checkout "$$commit"
       test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"

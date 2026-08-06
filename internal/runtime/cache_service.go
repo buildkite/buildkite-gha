@@ -16,6 +16,7 @@ import (
 const (
 	cacheCredentialResponseLimit = 64 << 10
 	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
+	defaultCacheResultsURL       = "https://ghacs.buildkite.com/"
 )
 
 var cacheRuntimeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
@@ -59,6 +60,9 @@ func NewAgentCacheCredentials(config AgentCacheConfig) (*AgentCacheCredentials, 
 	}
 	if config.JobToken == "" || strings.ContainsAny(config.JobToken, "\r\n") {
 		return nil, fmt.Errorf("cache Agent job token is required")
+	}
+	if config.ResultsURL == "" {
+		config.ResultsURL = defaultCacheResultsURL
 	}
 	resultsURL, err := normalizeCacheResultsURL(config.ResultsURL)
 	if err != nil {
