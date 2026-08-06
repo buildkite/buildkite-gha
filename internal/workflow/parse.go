@@ -513,6 +513,9 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 		if name == "id-token" {
 			return nil, locatedError(path, scope.Name.Pos, "permissions", "id-token permission requires GitHub-compatible OIDC and is unsupported")
 		}
+		if !supportedGitHubTokenPermission(name) {
+			return nil, locatedError(path, scope.Name.Pos, "permissions", fmt.Sprintf("unsupported permission %q; use canonical GitHub permission names", name))
+		}
 		switch scope.Value.Value {
 		case "read", "write":
 			scopes[name] = scope.Value.Value
@@ -522,6 +525,15 @@ func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, er
 		}
 	}
 	return &Permissions{Scopes: scopes, Span: pointSpan(in.Pos)}, nil
+}
+
+func supportedGitHubTokenPermission(name string) bool {
+	switch name {
+	case "actions", "artifact-metadata", "attestations", "checks", "contents", "deployments", "discussions", "issues", "models", "packages", "pages", "pull-requests", "repository-projects", "security-events", "statuses":
+		return true
+	default:
+		return false
+	}
 }
 
 func workflowCallInputType(inputType actionlint.WorkflowCallEventInputType) string {

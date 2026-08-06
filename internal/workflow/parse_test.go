@@ -94,6 +94,7 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 		{name: "read all", declaration: "permissions: read-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "OIDC", declaration: "permissions:\n  id-token: write\n", want: "permissions.yml:3:3: job \"permissions\": id-token permission requires GitHub-compatible OIDC"},
+		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			source := []byte("on: push\n" + test.declaration + "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")

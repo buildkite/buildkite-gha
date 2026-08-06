@@ -192,6 +192,24 @@ jobs:
 	}
 }
 
+func TestCompileBundleRejectsPermissionNormalizationCollision(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  pull-requests: read
+  pull_requests: write
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), `unsupported permission "pull_requests"`) {
+		t.Fatalf("CompileBundle() error = %v, want non-canonical permission rejection", err)
+	}
+}
+
 func TestCompileBundleRejectsDynamicSecretIndex(t *testing.T) {
 	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      SECRET_NAME: TOKEN\n      TOKEN: ${{ secrets[env.SECRET_NAME] }}\n    steps:\n      - run: true\n")
 	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
