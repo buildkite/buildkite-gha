@@ -911,7 +911,7 @@ func TestEnvironmentSecretsCannotReadAmbientAgentVariables(t *testing.T) {
 }
 
 func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *testing.T) {
-	realDir := t.TempDir()
+	realDir := canonicalTempDir(t)
 	realAgent := filepath.Join(realDir, "buildkite-agent")
 	writeFixtureFile(t, realDir, "buildkite-agent", "#!/bin/sh\nexit 0\n")
 	if err := os.Chmod(realAgent, 0o700); err != nil {

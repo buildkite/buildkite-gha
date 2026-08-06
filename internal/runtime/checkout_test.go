@@ -315,7 +315,7 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	if err := os.Symlink(trustedAgent, lookupAgent); err != nil {
 		t.Fatal(err)
 	}
-	poisonDir := t.TempDir()
+	poisonDir := canonicalTempDir(t)
 	poisonGitMarker := filepath.Join(t.TempDir(), "poison-git-ran")
 	poisonGit := filepath.Join(poisonDir, "git")
 	if err := os.WriteFile(poisonGit, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitMarker)+"\nexit 97\n"), 0o700); err != nil {
