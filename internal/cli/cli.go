@@ -563,7 +563,7 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 	if err := extractRuntimeMise(archive, stagedExecutable, binaryDigest); err != nil {
 		return "", err
 	}
-	if _, err := validateRuntimeMise(ctx, stagedExecutable, binaryDigest); err != nil {
+	if _, err := validateRuntimeMiseFile(ctx, stagedExecutable, binaryDigest); err != nil {
 		return "", fmt.Errorf("validate downloaded mise executable: %w", err)
 	}
 	if err := os.Remove(archive); err != nil {

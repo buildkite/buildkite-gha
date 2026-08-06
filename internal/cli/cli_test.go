@@ -822,6 +822,31 @@ func TestManagedMiseCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
 	}
 }
 
+func TestManagedMiseColdCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "executed")
+	binary := []byte("#!/bin/sh\nprintf ran > '" + marker + "'\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
+	archive := runtimeMiseTestArchive(t, binary)
+	archiveDigest := sha256.Sum256(archive)
+	binaryDigest := sha256.Sum256(binary)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write(archive)
+	}))
+	defer server.Close()
+	cached, err := installRuntimeMiseFrom(context.Background(), t.TempDir(), server.Client(), server.URL, hex.EncodeToString(archiveDigest[:]), hex.EncodeToString(binaryDigest[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shared staging executable ran during validation: %v", err)
+	}
+	if _, err := pinRuntimeMise(context.Background(), cached, t.TempDir(), hex.EncodeToString(binaryDigest[:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("private executable did not run during version validation: %v", err)
+	}
+}
+
 func TestPinRuntimeMiseCopiesVerifiedBytesPrivately(t *testing.T) {
 	binary := []byte("#!/bin/sh\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
 	digest := sha256.Sum256(binary)
