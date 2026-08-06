@@ -332,22 +332,24 @@ record; a successful job alone does not prove policy or audit behavior.
 
 ## Deferred decisions
 
-Apart from the fixed read-only pipeline-repository checkout exception, this ADR
-does not authorize or choose storage for private actions, reusable workflow
-source, selected secrets, `GITHUB_TOKEN`, environment grants, or compatibility
-OIDC claims. It does not choose a secret manager, general GitHub App permission
-set, customer policy language, administrative UI, or production service
-hostname. Those decisions require separate reviewed slices after the no-op
-boundary is proven.
+Apart from the fixed read-only pipeline-repository checkout and explicit scoped
+`secrets.GITHUB_TOKEN` exceptions above, this ADR does not authorize or choose
+storage for private actions, reusable workflow source, selected non-provider
+secrets, `github.token`, environment grants, or compatibility OIDC claims. It
+does not choose a secret manager, broader cross-repository GitHub App authority,
+customer policy language, administrative UI, or production service hostname.
+Those decisions require separate reviewed slices after the no-op boundary is
+proven.
 
 The existing cache-v2 GHAC token exchange remains separate. Cache tokens are
 minted through the current Buildkite job, scoped by the cache service, and
 exposed only to the audited cache action lifecycle. A capability grant neither
 contains nor replaces them.
 
-The job-bound private-checkout exchange is likewise separate. Its server-side
-pipeline-repository binding and client-fixed `contents:read` permission are not
-a substitute for the event, policy, signing, and audit contract required by a
+The job-bound GitHub token exchanges are likewise separate. Their server-side
+pipeline-repository binding and either client-fixed `contents:read` checkout
+permission or compiler-owned explicit workflow permission map are not a
+substitute for the event, policy, signing, and audit contract required by a
 general capability grant.
 
 ## Consequences

@@ -54,7 +54,7 @@ provide.
 | `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
 | Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
 | Private repositories or actions | Narrow checkout only | The direct uploader can opt into private checkout of the pipeline's exact GitHub repository. Private actions, alternate repositories, and reusable-workflow source remain unsupported. |
-| Secrets and provider tokens | Not exposed | `GITHUB_TOKEN`, `github.token`, GitHub App tokens for workflow use, protected secrets, and environment grants remain unsupported. The private-checkout credential is runtime-internal and available only to Git. |
+| Secrets and provider tokens | Narrow `GITHUB_TOKEN` support | An explicit `secrets.GITHUB_TOKEN` reference can receive a short-lived token for the event repository and a non-empty explicit permission map. `github.token`, other workflow secrets, and environment grants remain unsupported. The separate private-checkout credential is runtime-internal and available only to Git. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
 | Windows and macOS | Not supported | Unmapped runner labels fail validation. |
 
