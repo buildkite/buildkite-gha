@@ -74,21 +74,43 @@ func TestAgentCacheCredentialsDefaultsOfficialResultsService(t *testing.T) {
 	}
 }
 
+func TestAgentCacheCredentialsAcceptsHTTPSAndLoopbackHTTP(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://service.example",
+		"http://127.0.0.1:1234",
+		"http://[::1]:1234",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			if _, err := NewAgentCacheCredentials(AgentCacheConfig{
+				Endpoint: endpoint + "/v3", JobID: testCacheJobID, JobToken: "job-token", ResultsURL: endpoint,
+			}); err != nil {
+				t.Fatalf("NewAgentCacheCredentials(%q): %v", endpoint, err)
+			}
+		})
+	}
+}
+
 func TestAgentCacheCredentialsRejectsUnsafeConfiguration(t *testing.T) {
 	valid := AgentCacheConfig{
 		Endpoint: "https://agent.example/v3", JobID: testCacheJobID,
 		JobToken: "job-token", ResultsURL: "https://cache.example",
 	}
 	for name, mutate := range map[string]func(*AgentCacheConfig){
-		"missing endpoint":       func(c *AgentCacheConfig) { c.Endpoint = "" },
-		"endpoint credentials":   func(c *AgentCacheConfig) { c.Endpoint = "https://user@agent.example/v3" },
-		"endpoint query":         func(c *AgentCacheConfig) { c.Endpoint += "?redirect=other" },
-		"invalid job ID":         func(c *AgentCacheConfig) { c.JobID = "../other" },
-		"missing job token":      func(c *AgentCacheConfig) { c.JobToken = "" },
-		"job token header split": func(c *AgentCacheConfig) { c.JobToken = "secret\r\nOther: value" },
-		"results credentials":    func(c *AgentCacheConfig) { c.ResultsURL = "https://user@cache.example/v2" },
-		"results path":           func(c *AgentCacheConfig) { c.ResultsURL += "/v2" },
-		"results query":          func(c *AgentCacheConfig) { c.ResultsURL += "?token=value" },
+		"missing endpoint":              func(c *AgentCacheConfig) { c.Endpoint = "" },
+		"endpoint credentials":          func(c *AgentCacheConfig) { c.Endpoint = "https://user@agent.example/v3" },
+		"endpoint query":                func(c *AgentCacheConfig) { c.Endpoint += "?redirect=other" },
+		"endpoint plaintext hostname":   func(c *AgentCacheConfig) { c.Endpoint = "http://localhost/v3" },
+		"endpoint plaintext private IP": func(c *AgentCacheConfig) { c.Endpoint = "http://10.0.0.1/v3" },
+		"endpoint plaintext public IP":  func(c *AgentCacheConfig) { c.Endpoint = "http://203.0.113.1/v3" },
+		"invalid job ID":                func(c *AgentCacheConfig) { c.JobID = "../other" },
+		"missing job token":             func(c *AgentCacheConfig) { c.JobToken = "" },
+		"job token header split":        func(c *AgentCacheConfig) { c.JobToken = "secret\r\nOther: value" },
+		"results credentials":           func(c *AgentCacheConfig) { c.ResultsURL = "https://user@cache.example/v2" },
+		"results path":                  func(c *AgentCacheConfig) { c.ResultsURL += "/v2" },
+		"results query":                 func(c *AgentCacheConfig) { c.ResultsURL += "?token=value" },
+		"results plaintext hostname":    func(c *AgentCacheConfig) { c.ResultsURL = "http://localhost" },
+		"results plaintext private IP":  func(c *AgentCacheConfig) { c.ResultsURL = "http://10.0.0.1" },
+		"results plaintext public IP":   func(c *AgentCacheConfig) { c.ResultsURL = "http://203.0.113.1" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := valid

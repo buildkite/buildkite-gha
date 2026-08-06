@@ -73,15 +73,34 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	}
 }
 
+func TestAgentGitHubTokensAcceptsHTTPSAndLoopbackHTTP(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://agent.example/v3",
+		"http://127.0.0.1:1234/v3",
+		"http://[::1]:1234/v3",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			if _, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint: endpoint, JobID: testCacheJobID, JobToken: "job-token",
+			}); err != nil {
+				t.Fatalf("NewAgentGitHubTokens(%q): %v", endpoint, err)
+			}
+		})
+	}
+}
+
 func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) {
 	valid := AgentGitHubTokenConfig{Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-token"}
 	for name, mutate := range map[string]func(*AgentGitHubTokenConfig){
-		"missing endpoint":       func(c *AgentGitHubTokenConfig) { c.Endpoint = "" },
-		"endpoint credentials":   func(c *AgentGitHubTokenConfig) { c.Endpoint = "https://user@agent.example/v3" },
-		"endpoint query":         func(c *AgentGitHubTokenConfig) { c.Endpoint += "?redirect=other" },
-		"invalid job ID":         func(c *AgentGitHubTokenConfig) { c.JobID = "../other" },
-		"missing job token":      func(c *AgentGitHubTokenConfig) { c.JobToken = "" },
-		"job token header split": func(c *AgentGitHubTokenConfig) { c.JobToken = "secret\r\nOther: value" },
+		"missing endpoint":              func(c *AgentGitHubTokenConfig) { c.Endpoint = "" },
+		"endpoint credentials":          func(c *AgentGitHubTokenConfig) { c.Endpoint = "https://user@agent.example/v3" },
+		"endpoint query":                func(c *AgentGitHubTokenConfig) { c.Endpoint += "?redirect=other" },
+		"endpoint plaintext hostname":   func(c *AgentGitHubTokenConfig) { c.Endpoint = "http://localhost/v3" },
+		"endpoint plaintext private IP": func(c *AgentGitHubTokenConfig) { c.Endpoint = "http://10.0.0.1/v3" },
+		"endpoint plaintext public IP":  func(c *AgentGitHubTokenConfig) { c.Endpoint = "http://203.0.113.1/v3" },
+		"invalid job ID":                func(c *AgentGitHubTokenConfig) { c.JobID = "../other" },
+		"missing job token":             func(c *AgentGitHubTokenConfig) { c.JobToken = "" },
+		"job token header split":        func(c *AgentGitHubTokenConfig) { c.JobToken = "secret\r\nOther: value" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			config := valid

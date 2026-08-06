@@ -65,8 +65,13 @@ func (r AgentRedactor) AddRedaction(ctx context.Context, value string) error {
 	if executable == "" {
 		executable = "buildkite-agent"
 	}
-	command := exec.CommandContext(ctx, executable, "redactor", "add")
-	command.Env = os.Environ()
+	// redactor add uses only the Job API, but its embedded Agent API config
+	// still requires an access-token value during CLI validation.
+	command := exec.CommandContext(ctx, executable, "redactor", "add", "--agent-access-token=unused")
+	command.Env = []string{
+		"BUILDKITE_AGENT_JOB_API_SOCKET=" + os.Getenv("BUILDKITE_AGENT_JOB_API_SOCKET"),
+		"BUILDKITE_AGENT_JOB_API_TOKEN=" + os.Getenv("BUILDKITE_AGENT_JOB_API_TOKEN"),
+	}
 	command.Stdin = strings.NewReader(value)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("register secret with Buildkite Agent redactor: %w: %s", err, output)
