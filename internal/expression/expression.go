@@ -69,6 +69,17 @@ type ConditionContext struct {
 	Unsuccessful bool
 }
 
+// ConditionScope identifies the runtime phase in which a workflow condition
+// is evaluated.
+type ConditionScope uint8
+
+const (
+	// JobCondition is evaluated before a job starts.
+	JobCondition ConditionScope = iota
+	// StepCondition is evaluated while a job is running.
+	StepCondition
+)
+
 // CompileContext contains the non-secret values available while constructing
 // a workflow graph. Values are snapshots supplied by the compiler; evaluation
 // never reads the process environment or a secret provider.
@@ -225,16 +236,12 @@ func SecretReferences(template string) ([]string, error) {
 // ConditionUsesContext reports whether a condition references a named context.
 // Conditions may omit the normal ${{ ... }} delimiters.
 func ConditionUsesContext(source, contextName string) (bool, error) {
-	condition := strings.TrimSpace(source)
-	if condition == "" {
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
 		return false, nil
-	}
-	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
-		condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
-	}
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(condition + "}}"))
-	if parseErr != nil {
-		return false, fmt.Errorf("parse condition: %w", parseErr)
 	}
 	found := false
 	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
@@ -250,6 +257,125 @@ func ConditionUsesContext(source, contextName string) (bool, error) {
 		found = strings.EqualFold(root, contextName)
 	})
 	return found, nil
+}
+
+// ValidateCondition verifies that a job or step condition uses only expression
+// syntax, functions, and contexts implemented by the corresponding runtime
+// phase. Runtime-dependent values are not evaluated.
+func ValidateCondition(source string, scope ConditionScope) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	return validateConditionNode(node, scope)
+}
+
+func parseCondition(source string) (actionlint.ExprNode, bool, error) {
+	condition := strings.TrimSpace(source)
+	if condition == "" {
+		return nil, true, nil
+	}
+	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
+		condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
+	}
+	node, err := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(condition + "}}"))
+	if err != nil {
+		return nil, false, fmt.Errorf("parse condition: %w", err)
+	}
+	return node, false, nil
+}
+
+func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {
+	switch node := node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return err
+		}
+		return validateConditionReference(root, path, scope)
+	case *actionlint.NotOpNode:
+		return validateConditionNode(node.Operand, scope)
+	case *actionlint.LogicalOpNode:
+		if err := validateConditionNode(node.Left, scope); err != nil {
+			return err
+		}
+		return validateConditionNode(node.Right, scope)
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
+		}
+		if err := validateConditionNode(node.Left, scope); err != nil {
+			return err
+		}
+		return validateConditionNode(node.Right, scope)
+	case *actionlint.FuncCallNode:
+		switch strings.ToLower(node.Callee) {
+		case "always", "success", "failure", "cancelled":
+			if len(node.Args) != 0 {
+				return fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+			}
+			return nil
+		default:
+			return fmt.Errorf("condition function %q is unsupported", node.Callee)
+		}
+	default:
+		return fmt.Errorf("unsupported condition expression")
+	}
+}
+
+func validateConditionReference(root string, path []string, scope ConditionScope) error {
+	reference := root
+	if len(path) != 0 {
+		reference += "." + strings.Join(path, ".")
+	}
+	switch strings.ToLower(root) {
+	case "github":
+		if len(path) == 1 {
+			switch strings.ToLower(path[0]) {
+			case "actor", "event_name", "ref", "repository", "sha":
+				return nil
+			}
+		}
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, event_name, ref, repository, and sha", reference)
+	case "needs":
+		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected needs.<job>.result or needs.<job>.outputs.<name>", reference)
+	case "vars", "matrix":
+		if len(path) == 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected %s.<name>", reference, strings.ToLower(root))
+	case "steps":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+		if len(path) == 2 && (strings.EqualFold(path[1], "outcome") || strings.EqualFold(path[1], "conclusion")) || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected steps.<step>.outcome, steps.<step>.conclusion, or steps.<step>.outputs.<name>", reference)
+	case "env":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+		if len(path) == 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected env.<name>", reference)
+	case "job":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+		if len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports") {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected job.services.<service>.ports[<port>]", reference)
+	default:
+		return fmt.Errorf("condition context %q is unsupported", root)
+	}
 }
 
 func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) error) error {
@@ -279,16 +405,12 @@ func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) e
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
 // unavailable values fail closed with an error.
 func EvaluateCondition(source string, context ConditionContext) (bool, error) {
-	condition := strings.TrimSpace(source)
-	if condition == "" {
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
-	}
-	if strings.HasPrefix(condition, "${{") && strings.HasSuffix(condition, "}}") {
-		condition = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(condition, "${{"), "}}"))
-	}
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(condition + "}}"))
-	if parseErr != nil {
-		return false, fmt.Errorf("parse condition: %w", parseErr)
 	}
 	value, err := evaluateConditionNode(node, context)
 	if err != nil {

@@ -754,8 +754,26 @@ func supported(path string, job workflow.Job) error {
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
 		return jobError(path, job, "runs-on must resolve statically")
 	}
+	if err := expression.ValidateCondition(job.If, expression.JobCondition); err != nil {
+		position := job.IfSpan.Start
+		if position.Line == 0 {
+			position = job.Span.Start
+		}
+		return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err))
+	}
 	ids := make(map[string]struct{}, len(job.Steps))
-	for _, step := range job.Steps {
+	for i, step := range job.Steps {
+		if err := expression.ValidateCondition(step.If, expression.StepCondition); err != nil {
+			position := step.IfSpan.Start
+			if position.Line == 0 {
+				position = step.Span.Start
+			}
+			label := fmt.Sprintf("step %d", i+1)
+			if step.ID != "" {
+				label = fmt.Sprintf("step %q", step.ID)
+			}
+			return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err))
+		}
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {

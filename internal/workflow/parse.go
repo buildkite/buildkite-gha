@@ -297,6 +297,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.If != nil {
 		out.If = in.If.Value
+		out.IfSpan = spanFrom(in.If.Pos, in.If.Value)
 	}
 	if in.Container != nil {
 		container, err := adaptContainer(path, in.ID.Value, in.Container)
@@ -434,6 +435,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if step.If != nil {
 			owned.If = step.If.Value
+			owned.IfSpan = spanFrom(step.If.Pos, step.If.Value)
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {

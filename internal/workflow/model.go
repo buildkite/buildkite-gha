@@ -64,6 +64,7 @@ type Job struct {
 	Env                     map[string]string      `json:"env,omitempty"`
 	Permissions             *Permissions           `json:"permissions,omitempty"`
 	If                      string                 `json:"if,omitempty"`
+	IfSpan                  Span                   `json:"-"`
 	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	Container               *Container             `json:"container,omitempty"`
@@ -141,6 +142,7 @@ type Step struct {
 	Env              map[string]string `json:"env,omitempty"`
 	With             map[string]string `json:"with,omitempty"`
 	If               string            `json:"if,omitempty"`
+	IfSpan           Span              `json:"-"`
 	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
 	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
 	Span             Span              `json:"span"`

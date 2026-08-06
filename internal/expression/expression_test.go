@@ -165,6 +165,59 @@ func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
 	}
 }
 
+func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		scope  ConditionScope
+	}{
+		{
+			name:   "job dependencies and identity",
+			source: "always() && needs.build.result == 'success' && needs.build.outputs.ready && github.ref == 'refs/heads/main' && vars.ENABLED && matrix.os",
+			scope:  JobCondition,
+		},
+		{
+			name:   "step status environment and services",
+			source: "${{ failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && env.LEVEL && job.services.redis.ports[6379] }}",
+			scope:  StepCondition,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateCondition(test.source, test.scope); err != nil {
+				t.Fatalf("ValidateCondition() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		scope  ConditionScope
+		want   string
+	}{
+		{name: "unsupported function", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" is unsupported`},
+		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
+		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition, want: "condition comparison > is unsupported"},
+		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
+		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
+		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
+		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
+		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
+		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
+		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
+		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateCondition(test.source, test.scope)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string
