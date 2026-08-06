@@ -959,6 +959,29 @@ func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *t
 	}
 }
 
+func TestAgentRedactorOnlyExposesJobAPIEnvironment(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh
+test "${BUILDKITE_AGENT_JOB_API_SOCKET-}" = "/tmp/job-api.sock" || exit 11
+test "${BUILDKITE_AGENT_JOB_API_TOKEN-}" = "job-api-token" || exit 12
+test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}" || exit 13
+test -z "${BUILDKITE_AGENT_ENDPOINT+x}" || exit 14
+test -z "${AMBIENT_SECRET+x}" || exit 15
+`)
+	if err := os.Chmod(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_AGENT_JOB_API_SOCKET", "/tmp/job-api.sock")
+	t.Setenv("BUILDKITE_AGENT_JOB_API_TOKEN", "job-api-token")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "agent-access-token")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "https://agent.example/v3")
+	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
+
+	if err := (AgentRedactor{Executable: agent}).AddRedaction(context.Background(), "redact-me"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFailureConditionsAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

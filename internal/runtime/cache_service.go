@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -129,8 +130,8 @@ func agentCacheMintURL(endpoint, jobID string) (string, error) {
 		return "", fmt.Errorf("cache Agent job ID is required")
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("safe cache Agent endpoint is required")
+	if err != nil || !validCredentialServiceURL(u) {
+		return "", fmt.Errorf("safe cache Agent endpoint using HTTPS or loopback HTTP is required")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/ghac_tokens"
 	u.RawPath = ""
@@ -139,12 +140,26 @@ func agentCacheMintURL(endpoint, jobID string) (string, error) {
 
 func normalizeCacheResultsURL(value string) (string, error) {
 	u, err := url.Parse(value)
-	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" && u.Path != "/" {
-		return "", fmt.Errorf("safe cache Results service URL is required")
+	if err != nil || !validCredentialServiceURL(u) || u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("safe cache Results service URL using HTTPS or loopback HTTP is required")
 	}
 	u.Path = "/"
 	u.RawPath = ""
 	return u.String(), nil
+}
+
+func validCredentialServiceURL(u *url.URL) bool {
+	if u == nil || u.Host == "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 func validBuildkiteJobID(value string) bool {

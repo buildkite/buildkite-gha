@@ -165,8 +165,8 @@ func agentGitHubTokenURL(endpoint, jobID string) (string, error) {
 		return "", fmt.Errorf("GitHub token Agent job ID is required")
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("safe GitHub token Agent endpoint is required")
+	if err != nil || !validCredentialServiceURL(u) {
+		return "", fmt.Errorf("safe GitHub token Agent endpoint using HTTPS or loopback HTTP is required")
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github_scoped_access_token"
 	u.RawPath = ""
