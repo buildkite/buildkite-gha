@@ -100,8 +100,6 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
-		MiseDigest:         options.MiseDigest,
-		MiseVersion:        options.MiseVersion,
 		GroupLabel:         options.GroupLabel,
 		Jobs:               jobs,
 	})

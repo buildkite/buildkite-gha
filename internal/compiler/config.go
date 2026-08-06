@@ -49,10 +49,6 @@ type Options struct {
 	// actions/checkout adapter steps. It does not expose a workflow token or
 	// alter the permissions fixed by the runtime credential provider.
 	PrivateCheckout bool
-	// MiseDigest is runtime transport policy only. It is emitted into generated
-	// pipeline bootstrap commands and never changes compiler IR or plans.
-	MiseDigest  string
-	MiseVersion string
 	// GroupLabel merges generated jobs into the Buildkite group containing the
 	// importer. It affects pipeline presentation only, not compiler IR or plans.
 	GroupLabel string

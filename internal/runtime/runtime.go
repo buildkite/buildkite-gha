@@ -52,6 +52,7 @@ type Runner struct {
 	Node24            string
 	ManagedNodeRoot   string
 	Mise              string
+	ResolveMise       func(context.Context) (string, error)
 	MiseDataDir       string
 	Docker            string
 	RuntimeExecutable string
@@ -899,15 +900,10 @@ func (r Runner) discoverNode(ctx context.Context, major int, explicit string) (s
 	if tool == "" {
 		return "", fmt.Errorf("unsupported Node runtime major %d", major)
 	}
-	mise := r.Mise
-	var err error
-	if mise == "" {
-		mise, err = exec.LookPath("mise")
-		if err != nil {
-			return "", fmt.Errorf("mise is required to run JavaScript actions: %w", err)
-		}
+	if r.Mise == "" {
+		return "", fmt.Errorf("mise is required to run JavaScript actions; no pinned runtime path was configured")
 	}
-	return r.installAndVerifyMiseNode(ctx, major, mise)
+	return r.installAndVerifyMiseNode(ctx, major, r.Mise)
 }
 
 func (r Runner) resolveMiseNodePath(ctx context.Context, major int) (string, error) {

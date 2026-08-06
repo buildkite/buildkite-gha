@@ -186,6 +186,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
 	}
 	defer cancelJob()
+	if r.Mise == "" && r.ResolveMise != nil {
+		r.Mise, err = r.ResolveMise(runCtx)
+		if err != nil {
+			return jobResult, err
+		}
+	}
 
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {

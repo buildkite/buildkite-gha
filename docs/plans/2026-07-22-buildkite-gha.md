@@ -846,23 +846,26 @@ at barriers, and the cross-stream masking race.
 - managed Node distributions rather than assuming the host's `node` is
   compatible.
 
-The release archive contains only the static Go CLI and LICENSE. The installer
-plugin bootstraps mise 2026.5.12, verifies its pinned release archive and exact
-cached executable tree by SHA-256, and follows the shared Buildkite hosted-cache
-and agent-cache conventions. For action workflows, upload deterministically
-archives that pinned importer mise executable, transports it as a
-content-addressed artifact, and re-verifies it in every generated action job.
-The runtime installs exactly `core:node@20.20.2` or `core:node@24.18.0` with
-mise configuration disabled, digest-verifies the resulting Node executable,
-and invokes that exact path directly. It never uses a fuzzy major, a data-dir
-plugin, repository mise configuration, or an unverified tool-bin `PATH`.
+The release archive contains only the static Go CLI and LICENSE. Generated
+action jobs use mise 2026.5.12 or newer without transporting an importer copy
+as an artifact. The runtime reuses a compatible trusted executable from an
+explicit absolute path or `PATH`; otherwise the static CLI downloads the pinned
+2026.5.12 official archive into the automatically attached hosted cache and
+verifies embedded archive and executable SHA-256 digests. Managed cache bytes
+are copied into a job-private directory and reverified before execution. The
+runtime resolves and pins that private executable before workflow code runs,
+then installs exactly
+`core:node@20.20.2` or `core:node@24.18.0` with mise configuration disabled,
+digest-verifies the resulting Node executable, and invokes that exact path
+directly. It never uses a fuzzy Node major, a data-dir plugin, repository mise
+configuration, or a workflow-modifiable tool-bin `PATH`.
 `MISE_*` workflow environment overrides therefore cannot redirect compatibility
 Node; ordinary shell steps retain them.
 Generated action jobs declare a dedicated, pipeline-scoped Buildkite hosted
 cache volume and use a runtime-owned `MISE_DATA_DIR`; the cache is a best-effort
 accelerator, not an authority. The runtime checks cached Node executable bytes
 against the official Linux x86-64 release digest, removes and reinstalls a
-mismatch through the transported mise executable, and fails closed if the
+mismatch through the pinned runtime mise executable, and fails closed if the
 replacement still differs. Shell-only jobs do not attach this cache. For job
 containers, the host resolves that verified Node installation and mounts the
 Node executable; mise is not required in the image. Node runtime bytes are not
@@ -1052,10 +1055,11 @@ Publish checksummed releases. Add signatures, provenance attestations, and
 SBOMs in Phase 9. The initial supported distribution is Linux x86-64; Linux
 arm64 can follow once action/runtime compatibility is measured.
 
-Distributions provide the static bridge CLI and LICENSE. The installer plugin
-provides the pinned, verified mise executable, and action workflows transport
-it as a content-addressed artifact so generated hosted jobs can resolve exact
-Node versions without preinstalled mise. Every generated job must execute the
+Distributions provide the static bridge CLI and LICENSE. For action jobs, the
+bridge reuses a compatible mise at or above its tested minimum or installs and
+verifies its pinned fallback release in the integration-owned cache. It pins
+the absolute executable path before workflow code runs and uses it only to
+resolve digest-verified Node versions. Every generated job must execute the
 same bridge version that produced its plan unless the plan schema explicitly
 permits a compatible newer runtime.
 
@@ -1063,11 +1067,14 @@ The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
-distribution, installs and digest-verifies the pinned mise executable, and
-invokes the fixed hosted-tokenless upload path. Node 20.20.2 and 24.18.0 are
-installed by mise on demand into an automatically attached, integration-owned
-hosted cache volume. Cached Node executables are digest-verified before use, so
-cache sharing across builds is an optimization rather than a trust boundary.
+distribution, and invokes the fixed hosted-tokenless upload path. For action
+jobs, the static bridge reuses mise 2026.5.12 or newer when available or
+downloads and digest-verifies its pinned 2026.5.12 official archive in the
+automatically attached, integration-owned hosted cache volume. Node 20.20.2
+and 24.18.0 are installed by a reverified, job-private copy of that executable
+on demand into the same cache volume. Cached mise and Node executables are
+digest-verified before use, so cache sharing across builds is an optimization
+rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
@@ -1266,9 +1273,10 @@ Cursor Origin public checkout remains a separate provider integration gate.
   lifecycle through exact mise-managed Node 20.20.2 or 24.18.0, and fail closed
   on private sources or provider-dependent authentication. Action resolution is
   independent of event trust. Normal `upload` resolves local and anonymous
-  public JavaScript/composite actions without transporting Node executable
-  bytes; generated agents use the exact content-addressed importer mise
-  executable to resolve compatibility versions through `mise --no-config`.
+  public JavaScript/composite actions without transporting mise or Node
+  executable bytes; generated agents reuse or install the pinned mise release
+  before workflow code and resolve compatibility versions through `mise
+  --no-config`.
   This path remains `EventUntrusted`, fixed to the
   ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
   or the Phase 5 compiler-proven Dockerfile-action provenance.
