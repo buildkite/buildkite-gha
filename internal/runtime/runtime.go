@@ -52,6 +52,7 @@ type Runner struct {
 	Node24            string
 	ManagedNodeRoot   string
 	Mise              string
+	ResolveMise       func(context.Context) (string, error)
 	MiseDataDir       string
 	Docker            string
 	RuntimeExecutable string

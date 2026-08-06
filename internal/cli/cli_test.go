@@ -894,6 +894,34 @@ func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	}
 }
 
+func TestRunJobSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Schema = plan.SchemaV3
+	job.Condition = "${{ false }}"
+	job.Actions = []plan.ActionLock{{
+		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
+		SourceDigest: "sha256:" + strings.Repeat("a", 64),
+	}}
+	job.Steps = []plan.Step{{
+		ID: "local", Kind: "uses", Uses: "./actions/build",
+		Action: &plan.ActionSelector{Lock: "a-0000000000000001"},
+	}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	t.Setenv("BUILDKITE_GHA_MISE", filepath.Join(t.TempDir(), "missing-mise"))
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "prepare action runtime") {
+		t.Fatalf("skipped job prepared action runtime: %q", stderr.String())
+	}
+	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "skipped" {
+		t.Fatalf("published result = %q, want skipped", manifest.Result)
+	}
+}
+
 func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")

@@ -263,26 +263,32 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: resolve runtime executable: %v\n", err)
 		return 1
 	}
+	var privateRuntime string
+	if jobUsesActions(job) {
+		runner.ResolveMise = func(ctx context.Context) (string, error) {
+			var err error
+			privateRuntime, err = os.MkdirTemp("", "buildkite-gha-runtime-")
+			if err != nil {
+				return "", fmt.Errorf("prepare action runtime: create private action runtime: %w", err)
+			}
+			mise, err := resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr)
+			if err != nil {
+				return "", fmt.Errorf("prepare action runtime: %w", err)
+			}
+			return mise, nil
+		}
+		defer func() {
+			if privateRuntime != "" {
+				_ = os.RemoveAll(privateRuntime)
+			}
+		}()
+	}
 	var result gharuntime.JobResult
 	var runErr error
-	if jobUsesActions(job) {
-		privateRuntime, err := os.MkdirTemp("", "buildkite-gha-runtime-")
-		if err != nil {
-			runErr = fmt.Errorf("create private action runtime: %w", err)
-		} else {
-			defer func() { _ = os.RemoveAll(privateRuntime) }()
-			runner.Mise, runErr = resolveRuntimeMise(ctx, os.Getenv("BUILDKITE_GHA_MISE"), runner.MiseDataDir, privateRuntime, stderr)
-		}
-		if runErr != nil {
-			runErr = fmt.Errorf("prepare action runtime: %w", runErr)
-		}
-	}
 	if len(job.NeedSources) != 0 {
-		if runErr == nil {
-			job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
-			if runErr != nil {
-				runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
-			}
+		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
+		if runErr != nil {
+			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
 	if runErr == nil {
