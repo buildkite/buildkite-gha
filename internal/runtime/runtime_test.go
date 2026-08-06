@@ -959,9 +959,13 @@ func TestResolveAgentRedactorBeforeWorkflowPinsPointerWithoutMutatingCaller(t *t
 	}
 }
 
-func TestAgentRedactorOnlyExposesJobAPIEnvironment(t *testing.T) {
+func TestAgentRedactorSatisfiesCLIValidationWithoutExposingAgentCredential(t *testing.T) {
 	agent := filepath.Join(t.TempDir(), "buildkite-agent")
 	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh
+test "$#" -eq 3 || { echo 'Missing agent-access-token. See: buildkite-agent redactor add --help' >&2; exit 10; }
+test "$1" = "redactor" || exit 11
+test "$2" = "add" || exit 12
+test "$3" = "--agent-access-token=unused" || { echo 'Missing agent-access-token. See: buildkite-agent redactor add --help' >&2; exit 13; }
 test "${BUILDKITE_AGENT_JOB_API_SOCKET-}" = "/tmp/job-api.sock" || exit 11
 test "${BUILDKITE_AGENT_JOB_API_TOKEN-}" = "job-api-token" || exit 12
 test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}" || exit 13
