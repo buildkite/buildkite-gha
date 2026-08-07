@@ -1,6 +1,7 @@
 package expression
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -165,6 +166,109 @@ func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
 	}
 }
 
+func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		scope  ConditionScope
+	}{
+		{
+			name:   "job dependencies and identity",
+			source: "always() && needs.build.result == 'success' && needs.build.outputs.ready && github.ref == 'refs/heads/main' && vars.ENABLED && matrix.os",
+			scope:  JobCondition,
+		},
+		{
+			name:   "step status environment and services",
+			source: "${{ failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && env.LEVEL && job.services.redis.ports[6379] }}",
+			scope:  StepCondition,
+		},
+		{name: "compatible booleans", source: "success() == true", scope: JobCondition},
+		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
+		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
+		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := ValidateCondition(test.source, test.scope); err != nil {
+				t.Fatalf("ValidateCondition() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		scope  ConditionScope
+		want   string
+	}{
+		{name: "unsupported function", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" is unsupported`},
+		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
+		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition, want: "condition comparison > is unsupported"},
+		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
+		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
+		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
+		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
+		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
+		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
+		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
+		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition, want: "condition equality compares incompatible string and boolean operands"},
+		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition, want: "condition equality compares incompatible boolean and number operands"},
+		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateCondition(test.source, test.scope)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		matrix map[string]any
+		want   string
+	}{
+		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
+		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
+		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
+		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}, want: "condition equality compares incompatible string and number operands"},
+		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}, want: "condition equality compares incompatible null and number operands"},
+		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}, want: `condition reference "matrix.version" is unavailable in this matrix instance`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
+			if test.want == "" && err != nil {
+				t.Fatalf("ValidateCondition() error = %v", err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	if err := ValidateCondition("matrix.version == 12", JobCondition); err != nil {
+		t.Fatalf("ValidateCondition() rejected unknown matrix type: %v", err)
+	}
+}
+
+func TestValidateConditionAcceptsCompilerNumericKinds(t *testing.T) {
+	values := []any{
+		int(-1), int8(-1), int16(-1), int32(-1), int64(-1),
+		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), ^uint64(0),
+		float32(1.5), float64(1.5), json.Number("1e3"),
+	}
+	for _, value := range values {
+		t.Run(reflect.TypeOf(value).String(), func(t *testing.T) {
+			if err := ValidateConditionWithMatrix("matrix.value != 0", JobCondition, map[string]any{"value": value}); err != nil {
+				t.Fatalf("ValidateConditionWithMatrix(%T) error = %v", value, err)
+			}
+		})
+	}
+}
+
 func TestEvaluateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -230,12 +334,38 @@ func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionSupportsJSONNumbers(t *testing.T) {
+	tests := []struct {
+		name      string
+		condition string
+		matrix    map[string]any
+		want      bool
+	}{
+		{name: "json number and int", condition: "matrix.value == 1", matrix: map[string]any{"value": json.Number("1")}, want: true},
+		{name: "json number and float", condition: "matrix.value == 1.5", matrix: map[string]any{"value": json.Number("1.5")}, want: true},
+		{name: "json numbers", condition: "matrix.left == matrix.right", matrix: map[string]any{"left": json.Number("1e3"), "right": json.Number("1000")}, want: true},
+		{name: "nonzero truthiness", condition: "matrix.value", matrix: map[string]any{"value": json.Number("0.25")}, want: true},
+		{name: "zero truthiness", condition: "matrix.value", matrix: map[string]any{"value": json.Number("0")}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateCondition(test.condition, ConditionContext{Matrix: test.matrix})
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v, want %v", test.condition, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if _, err := EvaluateCondition("1 < 2", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted unsupported ordered comparison")
 	}
 	if _, err := EvaluateCondition("true == 'true'", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() silently coerced mixed equality operands")
+	}
+	if _, err := EvaluateCondition("null == true", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted mixed null equality operands")
 	}
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)

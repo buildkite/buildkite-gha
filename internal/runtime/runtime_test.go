@@ -1888,6 +1888,45 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	}
 }
 
+func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	nonzeroMarker := filepath.Join(workspace, "nonzero")
+	zeroMarker := filepath.Join(workspace, "zero")
+	maxUintMarker := filepath.Join(workspace, "max-uint")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "nonzero", Kind: "run", Condition: "matrix.nonzero", Command: `touch "$NONZERO"`},
+		{ID: "zero", Kind: "run", Condition: "matrix.zero", Command: `touch "$ZERO"`},
+		{ID: "max-uint", Kind: "run", Condition: "matrix.max_uint != 0", Command: `touch "$MAX_UINT"`},
+	})
+	job.Condition = "matrix.count == 1"
+	job.Matrix = map[string]any{"count": 1, "nonzero": 2, "zero": 0, "max_uint": ^uint64(0)}
+	job.Env = map[string]string{"NONZERO": nonzeroMarker, "ZERO": zeroMarker, "MAX_UINT": maxUintMarker}
+
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (Runner{}).RunJob(context.Background(), decoded, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(nonzeroMarker); err != nil {
+		t.Fatalf("nonzero matrix condition did not run: %v", err)
+	}
+	if _, err := os.Stat(zeroMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("zero matrix condition unexpectedly ran: %v", err)
+	}
+	if _, err := os.Stat(maxUintMarker); err != nil {
+		t.Fatalf("max uint64 matrix condition did not run: %v", err)
+	}
+}
+
 func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

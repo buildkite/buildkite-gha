@@ -297,6 +297,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.If != nil {
 		out.If = in.If.Value
+		out.IfSpan = spanFrom(in.If.Pos, in.If.Value)
 	}
 	if in.Container != nil {
 		container, err := adaptContainer(path, in.ID.Value, in.Container)
@@ -434,6 +435,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if step.If != nil {
 			owned.If = step.If.Value
+			owned.IfSpan = spanFrom(step.If.Pos, step.If.Value)
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {
@@ -940,6 +942,9 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	}
 	if step.If, err = optionalScalar(entries["if"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["if"], "parallel member if must be a scalar")
+	}
+	if value := entries["if"]; value != nil {
+		step.IfSpan = yamlStepSpan(value, value)
 	}
 	if step.Env, err = scalarMap(entries["env"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["env"], "parallel member env must be a scalar mapping")

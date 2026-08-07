@@ -103,7 +103,8 @@ The plugin path currently supports:
 - static matrices, ordinary `needs` and outputs, and local reusable workflows
   with statically resolved inputs, caller-visible results, and directly mapped
   declared outputs;
-- the currently implemented job and step condition subset;
+- the documented job and step condition subset, with unsupported functions and
+  unavailable runtime contexts rejected before pipeline upload;
 - background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
@@ -123,8 +124,8 @@ It does **not** currently support:
   GitHub-compatible OIDC, or protected queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
-- runtime condition access to the `github.event` payload;
-- exhaustive validation of condition functions before execution;
+- runtime condition access to the `github.event` payload, or condition
+  functions and contexts outside the documented subset;
 - job containers or service containers through the production plugin path;
 - compound or literal local reusable-workflow output mappings and reusable-call
   conditions;
@@ -164,9 +165,9 @@ buildkite-gha validate \
 
 An `admitted` result means the plans satisfy upload policy. It does not execute
 the workflow or prove that arbitrary action code is independent of GitHub-only
-services. Condition validation is also not yet exhaustive: some unsupported
-functions or runtime contexts fail only when the job runs. JSON output is
-available with `--format json`.
+services. Condition preflight validates the supported syntax, functions,
+contexts, and statically known operand types, but cannot prove value-dependent
+runtime behavior. JSON output is available with `--format json`.
 
 ## What gets translated?
 

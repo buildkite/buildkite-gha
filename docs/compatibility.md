@@ -38,7 +38,7 @@ provide.
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
 | Workflow and job concurrency | Not supported | `concurrency.group` and `cancel-in-progress` fail compilation instead of being silently discarded. Configure equivalent behavior in Buildkite. `strategy.max-parallel` is translated separately for static matrix jobs. |
 | Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Declared outputs mapped directly from `jobs.<job>.outputs.<name>` are exposed through `needs.<call>.outputs`; nested calls are supported and undeclared callee outputs remain hidden. Matrix-selected declarations verify every exact producer and fail closed when values conflict or exceed 64 concrete projections. Literal or compound output mappings, call-level conditions, and remote or runtime-dependent reusable workflows are deferred. Caller prerequisites inherited by callee roots are status-only. |
-| Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
+| Job and step conditions | Supported subset | Validation accepts literals, logical operators, `==`, `!=`, and the zero-argument `always`, `success`, `failure`, and `cancelled` status functions. Job conditions can use `github` identity fields, `needs`, `vars`, and `matrix`; step conditions additionally support `steps`, `env`, and service ports. Unsupported functions, operators, reference shapes, and unavailable contexts fail before pipeline upload. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
 | JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |
 | Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
@@ -374,8 +374,8 @@ not call Buildkite, install Node, or execute workflow code.
 The snapshot supplies the compile-time Actions context. Generated plans retain
 the event name, repository, ref, SHA, actor, and a payload digest, but not the
 payload object itself. Runtime conditions can use those retained identity fields
-but cannot currently access `github.event`; an expression such as
-`github.event.action` may therefore pass validation and fail when the job runs.
+but cannot access `github.event`; validation rejects an expression such as
+`github.event.action` before pipeline upload.
 The snapshot is compatibility data, not proof that the event is trustworthy,
 and cannot authorize a protected capability.
 

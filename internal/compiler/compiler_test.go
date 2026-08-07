@@ -93,6 +93,186 @@ func TestCompileIsByteIdenticalAndCoversSmokeCorpus(t *testing.T) {
 	}
 }
 
+func TestCompilePreflightsUnsupportedConditionsWithLocation(t *testing.T) {
+	eventSource := readFile(t, smokePath("events", "push.json"))
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "job event payload",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: github.event.action == 'opened'
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:5:9: job "test": job condition: condition reference "github.event.action" is unavailable at runtime`,
+		},
+		{
+			name: "named step function",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: inspect
+        if: hashFiles('go.sum') != ''
+        run: true
+`,
+			want: `conditions.yml:7:13: job "test": step "inspect" condition: condition function "hashFiles" is unsupported`,
+		},
+		{
+			name: "anonymous step context",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - if: secrets.TOKEN
+        run: true
+`,
+			want: `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
+		},
+		{
+			name: "mixed equality",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: vars.ENABLED == true
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible string and boolean operands`,
+		},
+		{
+			name: "parallel member condition location",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - if:  vars.ENABLED == true
+            run: true
+`,
+			want: `conditions.yml:7:18: job "test": step "__parallel_6_9_1" condition: condition equality compares incompatible string and boolean operands`,
+		},
+		{
+			name: "concrete matrix type",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    if: matrix.version == 12
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:8:9: job "test": job condition: condition equality compares incompatible string and number operands`,
+		},
+		{
+			name: "concrete matrix step type",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    steps:
+      - if: matrix.version == 12
+        run: true
+`,
+			want: `conditions.yml:9:13: job "test": step 1 condition: condition equality compares incompatible string and number operands`,
+		},
+		{
+			name: "missing concrete matrix value",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: 12
+          - os: ubuntu-latest
+    if: matrix.version == 12
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:10:9: job "test": job condition: condition reference "matrix.version" is unavailable in this matrix instance`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for name, compile := range map[string]func() error{
+				"validate": func() error {
+					_, err := Validate("conditions.yml", []byte(test.source))
+					return err
+				},
+				"compile": func() error {
+					_, err := Compile("conditions.yml", []byte(test.source), eventSource)
+					return err
+				},
+				"plans": func() error {
+					_, err := CompilePlans("conditions.yml", []byte(test.source), eventSource, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+					return err
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					err := compile()
+					if err == nil || !strings.Contains(err.Error(), test.want) {
+						t.Fatalf("error = %v, want %q", err, test.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCompileRetainsSupportedRuntimeDependentConditions(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.produce.outputs.ready }}
+    steps:
+      - id: produce
+        run: echo "ready=true" >> "$GITHUB_OUTPUT"
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports: [6379]
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref
+    steps:
+      - id: test
+        if: success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready
+        run: true
+      - if: failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]
+        run: true
+`)
+	plans, err := CompilePlans("conditions.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
+		t.Fatalf("runtime conditions were not retained: %#v", plans)
+	}
+}
+
 func TestCompileExpandsMatrixIncludeExcludeAndDependencies(t *testing.T) {
 	source := []byte(`name: matrix conformance
 on: push
@@ -211,6 +391,42 @@ jobs:
 		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
 			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
 		}
+	}
+}
+
+func TestCompileAllowsCompatibleConcreteMatrixConditionTypes(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, 14.0]
+        experimental: [true, false]
+    if: matrix.version == 12
+    steps:
+      - if: matrix.experimental == true
+        run: true
+`)
+	if _, err := Compile("conditions.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
+func TestCompileAllowsMaxUint64MatrixCondition(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        value: [18446744073709551615]
+    if: matrix.value != 0
+    steps:
+      - run: true
+`)
+	if _, err := Compile("conditions.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatalf("Compile() error = %v", err)
 	}
 }
 
@@ -814,6 +1030,30 @@ jobs:
 	}
 	if got := conditions["disabled-call.string-gated"]; got != [2]string{"''", "''"} {
 		t.Fatalf("empty string conditions = %#v, want a falsy quoted expression literal", got)
+	}
+}
+
+func TestCompilePreflightsConditionsInReusableWorkflows(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - id: inspect
+        if: github.event.action == 'opened'
+        run: true
+`)
+
+	_, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition reference "github.event.action" is unavailable at runtime`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("CompilePlans() error = %v, want callee condition diagnostic %q", err, want)
 	}
 }
 

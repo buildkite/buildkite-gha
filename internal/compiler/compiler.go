@@ -641,6 +641,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			return nil, err
 		}
 		for _, matrix := range matrices {
+			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
+				return nil, err
+			}
 			labels, err := resolveRunsOn(job, context, matrix)
 			if err != nil {
 				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
@@ -754,6 +757,9 @@ func supported(path string, job workflow.Job) error {
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
 		return jobError(path, job, "runs-on must resolve statically")
 	}
+	if err := supportedConditions(path, job, nil, false); err != nil {
+		return err
+	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for _, step := range job.Steps {
 		if step.ID != "" {
@@ -762,6 +768,36 @@ func supported(path string, job workflow.Job) error {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
 			}
 			ids[id] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
+	validate := expression.ValidateCondition
+	if matrixKnown {
+		validate = func(source string, scope expression.ConditionScope) error {
+			return expression.ValidateConditionWithMatrix(source, scope, matrix)
+		}
+	}
+	if err := validate(job.If, expression.JobCondition); err != nil {
+		position := job.IfSpan.Start
+		if position.Line == 0 {
+			position = job.Span.Start
+		}
+		return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err))
+	}
+	for i, step := range job.Steps {
+		if err := validate(step.If, expression.StepCondition); err != nil {
+			position := step.IfSpan.Start
+			if position.Line == 0 {
+				position = step.Span.Start
+			}
+			label := fmt.Sprintf("step %d", i+1)
+			if step.ID != "" {
+				label = fmt.Sprintf("step %q", step.ID)
+			}
+			return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err))
 		}
 	}
 	return nil

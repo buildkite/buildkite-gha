@@ -199,6 +199,75 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
+func TestUnsupportedConditionPreflightAppliesToEveryCompilerEntryPoint(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "conditions.yml")
+	if err := os.WriteFile(workflowPath, []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    if: matrix.version == 12
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	want := `job condition: condition equality compares incompatible string and number operands`
+
+	t.Run("validate json", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.Report
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_COMPILE" || !strings.Contains(report.Diagnostics[0].Message, want) {
+			t.Fatalf("report = %#v", report)
+		}
+	})
+
+	t.Run("profile", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProfileReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Compile.Result != "incompatible" || report.Admission.Result != "not-evaluated" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, want) {
+			t.Fatalf("profile report = %#v", report)
+		}
+	})
+
+	t.Run("compile", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 || !strings.Contains(stderr.String(), want) {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+	})
+
+	t.Run("upload before Buildkite calls", func(t *testing.T) {
+		t.Setenv("BUILDKITE", "true")
+		t.Setenv("BUILDKITE_STEP_KEY", "condition-importer")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		args := []string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("unsupported condition made Buildkite calls: %#v", runner.commands)
+		}
+	})
+}
+
 func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")

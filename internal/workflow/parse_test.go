@@ -305,7 +305,7 @@ jobs:
       - id: prior
         run: echo "ready=true" >> "$GITHUB_OUTPUT"
       - parallel:
-          - if: steps.prior.outputs.ready == 'true'
+          - if:  steps.prior.outputs.ready == 'true'
             env:
               MATRIX_OS: ${{ matrix.os }}
               NEED_VALUE: ${{ needs.prepare.outputs.artifact }}
@@ -316,7 +316,7 @@ jobs:
 		t.Fatal(err)
 	}
 	steps := parsed.Jobs[1].Steps
-	if len(steps) != 3 || steps[1].If != "steps.prior.outputs.ready == 'true'" || steps[1].Env["MATRIX_OS"] != "${{ matrix.os }}" || steps[1].Env["NEED_VALUE"] != "${{ needs.prepare.outputs.artifact }}" {
+	if len(steps) != 3 || steps[1].If != "steps.prior.outputs.ready == 'true'" || steps[1].IfSpan.Start.Line != 20 || steps[1].IfSpan.Start.Column != 18 || steps[1].Env["MATRIX_OS"] != "${{ matrix.os }}" || steps[1].Env["NEED_VALUE"] != "${{ needs.prepare.outputs.artifact }}" {
 		t.Fatalf("parallel member context expressions = %#v", steps)
 	}
 }
