@@ -173,7 +173,7 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 		case bool, json.Number, float64, int:
 			_, _ = fmt.Fprint(&evaluated, value)
 		default:
-			return "", fmt.Errorf("expression in runner label resolved to %T, want a scalar", value)
+			return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 		}
 		remaining = remaining[end+len(close):]
 	}

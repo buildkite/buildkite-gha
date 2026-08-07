@@ -36,7 +36,7 @@ provide.
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
-| Workflow and job concurrency | Not supported | `concurrency.group` and `cancel-in-progress` fail compilation instead of being silently discarded. Configure equivalent behavior in Buildkite. `strategy.max-parallel` is translated separately for static matrix jobs. |
+| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting builds/jobs instead of replacing GitHub's previously pending entry. `cancel-in-progress` remains unsupported. |
 | Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Declared outputs mapped directly from `jobs.<job>.outputs.<name>` are exposed through `needs.<call>.outputs`; nested calls are supported and undeclared callee outputs remain hidden. Matrix-selected declarations verify every exact producer and fail closed when values conflict or exceed 64 concrete projections. Literal or compound output mappings, call-level conditions, and remote or runtime-dependent reusable workflows are deferred. Caller prerequisites inherited by callee roots are status-only. |
 | Job and step conditions | Supported subset | Validation accepts literals, logical operators, `==`, `!=`, and the zero-argument `always`, `success`, `failure`, and `cancelled` status functions. Job conditions can use `github` identity fields, `needs`, `vars`, and `matrix`; step conditions additionally support `steps`, `env`, and service ports. Unsupported functions, operators, reference shapes, and unavailable contexts fail before pipeline upload. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
@@ -77,6 +77,50 @@ Buildkite annotations. Their publication is attempted after the authoritative
 logical result; an annotation API failure is reported as a warning but does not
 rewrite an otherwise successful job. Successfully parsed warning/error command
 lines are consumed and their decoded messages remain visible in the job log.
+
+### Concurrency groups queue instead of canceling
+
+Literal workflow and job `concurrency` shorthand is supported, as is the
+mapping form when `cancel-in-progress` is omitted or the literal `false`:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    concurrency: deploy-${{ matrix.target }}
+```
+
+Groups must resolve during compilation. Direct substitutions can use `vars`,
+concrete `matrix` values for job groups, statically substituted `inputs` in jobs
+from local reusable workflows, and the available `github` fields: `actor`,
+`event`, `event_name`, `ref`, `repository`, `repository_owner`, `sha`, and
+`workflow`. Other fields and expression operators/functions fail closed; for
+example, `github.head_ref || github.run_id` is not available. Runtime
+`needs`/`strategy` values and workflow-level concurrency in a called reusable
+workflow also fail closed. A matrix job may combine
+`strategy.max-parallel` with concurrency only when every matrix entry resolves
+to the same case-insensitive group; the group limit of one then subsumes
+`max-parallel`.
+
+Generated group identities are hashed with the event repository. This keeps
+GitHub's repository scope and case-insensitive matching without exposing event
+values or exceeding Buildkite's 200-character concurrency-key limit. A
+workflow-level group emits Buildkite's ordered opening/closing gate steps, so
+jobs inside one admitted workflow run retain their normal parallelism.
+
+This is queue compatibility, not cancellation parity. Buildkite retains all
+waiting entries in FIFO order, while GitHub's default concurrency mode replaces
+an existing pending entry. The newer GitHub `queue` property is not yet accepted
+by the pinned syntax frontend; generated Buildkite groups always queue all
+entries. Literal `cancel-in-progress: true` and every expression-valued
+`cancel-in-progress` fail compilation because the bridge has no safely scoped
+cross-build cancellation mechanism. For a workflow-level gate, cancel the
+Buildkite build rather than one generated job: an individually canceled
+dependency does not execute the closing gate step, while whole-build
+cancellation removes that build's queued gate jobs.
 
 ### Concurrent steps stay inside the job
 

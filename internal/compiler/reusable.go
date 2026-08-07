@@ -208,6 +208,9 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("locate local reusable workflow %q: %v", call.Uses, err))
 		}
 		calleeSourcePath = "./" + filepath.ToSlash(calleeSourcePath)
+		if callee.Concurrency != nil {
+			return reusableResolution{}, fmt.Errorf("%s:%d:%d: workflow concurrency in a called reusable workflow is unsupported", calleeSourcePath, callee.Concurrency.Span.Start.Line, callee.Concurrency.Span.Start.Column)
+		}
 		calleeDigest := "sha256:" + sha256Sum(source)
 
 		matrices, err := expandMatrix(path, job, expression.CompileContext{})
@@ -586,6 +589,11 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 	job.If = replaceStaticInputCondition(job.If, inputs)
 	job.DefaultShell = replaceStaticInputs(job.DefaultShell, inputs)
 	job.DefaultWorkingDirectory = replaceStaticInputs(job.DefaultWorkingDirectory, inputs)
+	if job.Concurrency != nil {
+		concurrency := *job.Concurrency
+		concurrency.Group = replaceStaticInputs(concurrency.Group, inputs)
+		job.Concurrency = &concurrency
+	}
 	job.Env = replaceMapInputs(job.Env, inputs)
 	job.Outputs = replaceMapInputs(job.Outputs, inputs)
 	job.RunsOn = append([]string(nil), job.RunsOn...)
@@ -628,6 +636,9 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 	}
 	jobValues := []string{job.Name, job.DefaultShell, job.DefaultWorkingDirectory}
+	if job.Concurrency != nil {
+		jobValues = append(jobValues, job.Concurrency.Group)
+	}
 	jobValues = append(jobValues, job.RunsOn...)
 	jobValues = appendMapValues(jobValues, job.Env)
 	jobValues = appendMapValues(jobValues, job.Outputs)

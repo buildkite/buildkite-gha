@@ -2,6 +2,8 @@ package compiler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -92,21 +94,38 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 			Dependencies: append([]string(nil), ir.Jobs[i].Needs...),
 			UsesActions:  planUsesActions(job),
 		}
-		if ir.Jobs[i].MaxParallel != nil {
+		if ir.Jobs[i].ConcurrencyGroup != "" {
+			jobs[i].Concurrency = 1
+			jobs[i].ConcurrencyGroup = buildkiteConcurrencyGroup(ir.Event.Repository, ir.Jobs[i].ConcurrencyGroup)
+		} else if ir.Jobs[i].MaxParallel != nil {
 			jobs[i].Concurrency = *ir.Jobs[i].MaxParallel
 			jobs[i].ConcurrencyGroup = "buildkite-gha/" + strings.TrimPrefix(ir.Workflow.Digest, "sha256:") + "/" + ir.Jobs[i].LogicalJobID
+		}
+	}
+	var concurrencyGate *buildkitepipeline.ConcurrencyGate
+	if ir.Workflow.ConcurrencyGroup != "" {
+		concurrencyGate = &buildkitepipeline.ConcurrencyGate{
+			Group: buildkiteConcurrencyGroup(ir.Event.Repository, ir.Workflow.ConcurrencyGroup),
+			Queue: jobs[0].Queue,
 		}
 	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
 		GroupLabel:         options.GroupLabel,
+		ConcurrencyGate:    concurrencyGate,
 		Jobs:               jobs,
 	})
 	if err != nil {
 		return Bundle{}, fmt.Errorf("emit Buildkite pipeline: %w", err)
 	}
 	return Bundle{IR: ir, Plans: artifacts, Pipeline: pipeline}, nil
+}
+
+func buildkiteConcurrencyGroup(repository Repository, group string) string {
+	scope := strings.ToLower(repository.Owner+"/"+repository.Name) + "\x00" + canonicalConcurrencyGroup(group)
+	digest := sha256.Sum256([]byte(scope))
+	return "buildkite-gha/concurrency/" + hex.EncodeToString(digest[:])
 }
 
 func planUsesActions(job plan.Job) bool {

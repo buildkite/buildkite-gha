@@ -68,9 +68,10 @@ type ExecutionBoundary struct {
 
 // WorkflowSource binds the IR to its input workflow bytes.
 type WorkflowSource struct {
-	Path   string `json:"path"`
-	Name   string `json:"name,omitempty"`
-	Digest string `json:"digest"`
+	Path             string `json:"path"`
+	Name             string `json:"name,omitempty"`
+	Digest           string `json:"digest"`
+	ConcurrencyGroup string `json:"concurrency_group,omitempty"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
@@ -86,6 +87,7 @@ type JobInstance struct {
 	Matrix                  map[string]any          `json:"matrix,omitempty"`
 	FailFast                *bool                   `json:"fail_fast,omitempty"`
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
+	ConcurrencyGroup        string                  `json:"concurrency_group,omitempty"`
 	Steps                   []workflow.Step         `json:"steps"`
 	Env                     map[string]string       `json:"env,omitempty"`
 	Permissions             map[string]string       `json:"permissions,omitempty"`
@@ -125,8 +127,17 @@ func Validate(path string, source []byte) (Report, error) {
 		return Report{}, err
 	}
 	options := defaultOptions()
-	event := Event{Trust: options.EventTrust, Payload: map[string]any{}}
-	instances, err := expand(path, source, parsed, compileContext(event, nil), options)
+	event := Event{
+		Event: "validation", Trust: options.EventTrust,
+		Repository: Repository{Owner: "validation", Name: "validation"},
+		Ref:        "refs/heads/validation", SHA: strings.Repeat("0", 40), Actor: "validation",
+		Payload: map[string]any{},
+	}
+	context := compileContext(event, nil, path, parsed.Name)
+	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
+		return Report{}, err
+	}
+	instances, err := expand(path, source, parsed, context, options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -153,7 +164,11 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 		return Report{}, err
 	}
 	event.Trust = options.EventTrust
-	instances, err := expand(path, source, parsed, compileContext(event, options.Vars.snapshot()), options)
+	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
+	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
+		return Report{}, err
+	}
+	instances, err := expand(path, source, parsed, context, options)
 	if err != nil {
 		return Report{}, err
 	}
@@ -530,14 +545,19 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	}
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
-	jobs, err := expand(path, source, parsed, compileContext(event, vars), options)
+	context := compileContext(event, vars, path, parsed.Name)
+	workflowConcurrencyGroup, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	if err != nil {
+		return IR{}, err
+	}
+	jobs, err := expand(path, source, parsed, context, options)
 	if err != nil {
 		return IR{}, err
 	}
 	digest := sha256.Sum256(source)
 	return IR{
 		Schema:   schema,
-		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:])},
+		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
 		Event:    event,
 		Vars:     vars,
 		Execution: ExecutionBoundary{
@@ -585,8 +605,11 @@ func parseEvent(source []byte) (Event, error) {
 	}, nil
 }
 
-func compileContext(event Event, vars map[string]string) expression.CompileContext {
+func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
 	repository := event.Repository.Owner + "/" + event.Repository.Name
+	if workflowName == "" {
+		workflowName = canonicalWorkflowName(workflowPath)
+	}
 	return expression.CompileContext{
 		GitHub: map[string]any{
 			"event_name":       event.Event,
@@ -596,10 +619,23 @@ func compileContext(event Event, vars map[string]string) expression.CompileConte
 			"ref":              event.Ref,
 			"sha":              event.SHA,
 			"actor":            event.Actor,
+			"workflow":         workflowName,
 		},
 		Event: event.Payload,
 		Vars:  vars,
 	}
+}
+
+func canonicalWorkflowName(path string) string {
+	if isRepositoryWorkflowPath(path) {
+		root, canonicalPath, err := workflowRepository(path)
+		if err == nil {
+			if relative, err := repositoryWorkflowPath(root, canonicalPath); err == nil {
+				return strings.TrimPrefix(relative, "./")
+			}
+		}
+	}
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
@@ -640,6 +676,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		if err != nil {
 			return nil, err
 		}
+		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
 				return nil, err
@@ -651,6 +688,13 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			queue, err := options.Runners.resolve(labels, options.EventTrust)
 			if err != nil {
 				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+			}
+			concurrencyGroup, err := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
+			if err != nil {
+				return nil, err
+			}
+			if concurrencyGroup != "" {
+				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
 			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
@@ -669,6 +713,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Matrix:                  matrix,
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
+				ConcurrencyGroup:        concurrencyGroup,
 				Steps:                   append([]workflow.Step(nil), job.Steps...),
 				Env:                     cloneMap(job.Env),
 				Permissions:             permissionScopes(job.Permissions),
@@ -734,6 +779,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance.Needs = slices.Compact(instance.Needs)
 			byLogicalID[id] = append(byLogicalID[id], instance)
 		}
+		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
+			position := job.Concurrency.Span.Start
+			return nil, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")
+		}
 	}
 
 	var instances []JobInstance
@@ -741,6 +790,32 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		instances = append(instances, byLogicalID[id]...)
 	}
 	return instances, nil
+}
+
+func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
+	if concurrency == nil {
+		return "", nil
+	}
+	context.Matrix = matrix
+	group, err := expression.EvaluateCompileTemplate(concurrency.Group, context)
+	if err != nil {
+		message := fmt.Sprintf("concurrency group cannot be resolved at compile time: %v", err)
+		if jobID == "" {
+			return "", fmt.Errorf("%s:%d:%d: workflow %s", path, concurrency.Span.Start.Line, concurrency.Span.Start.Column, message)
+		}
+		return "", locatedJobError(path, workflow.Job{ID: jobID}, concurrency.Span.Start.Line, concurrency.Span.Start.Column, message)
+	}
+	if strings.TrimSpace(group) == "" {
+		if jobID == "" {
+			return "", fmt.Errorf("%s:%d:%d: workflow concurrency group resolved to an empty string", path, concurrency.Span.Start.Line, concurrency.Span.Start.Column)
+		}
+		return "", locatedJobError(path, workflow.Job{ID: jobID}, concurrency.Span.Start.Line, concurrency.Span.Start.Column, "concurrency group resolved to an empty string")
+	}
+	return group, nil
+}
+
+func canonicalConcurrencyGroup(group string) string {
+	return strings.ToLower(group)
 }
 
 func permissionScopes(permissions *workflow.Permissions) map[string]string {

@@ -644,9 +644,14 @@ Pipeline upload is limited in size and job count. The emitter must detect the
 current limit, fail clearly or split large uploads without changing dependency
 semantics, and never depend on the visual ordering of multiple uploads.
 
-Buildkite concurrency groups can model queued access and `strategy.max-parallel`
-for expanded matrix jobs. They do not directly implement GHA
-`concurrency.cancel-in-progress`; report that as a compatibility gap until the
+Buildkite concurrency groups model queued job access and `strategy.max-parallel`
+for expanded matrix jobs. Ordered opening/closing concurrency gates serialize a
+whole imported workflow without serializing that workflow's internal jobs.
+User groups are case-normalized and hashed with the event repository so their
+Buildkite organization-wide identity preserves GitHub's repository scope and
+fits Buildkite's concurrency-key limit. These mechanisms queue every waiting
+entry; they do not implement GHA's pending-entry replacement or
+`concurrency.cancel-in-progress`. Report those as compatibility gaps until the
 bridge has an explicit, safely scoped cancellation mechanism.
 
 ### Graph and result semantics
