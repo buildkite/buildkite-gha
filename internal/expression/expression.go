@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -309,7 +311,14 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 		if err := validateConditionNode(node.Left, scope); err != nil {
 			return err
 		}
-		return validateConditionNode(node.Right, scope)
+		if err := validateConditionNode(node.Right, scope); err != nil {
+			return err
+		}
+		left, right := conditionOperandCategory(node.Left), conditionOperandCategory(node.Right)
+		if left != "unknown" && right != "unknown" && left != right {
+			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
+		}
+		return nil
 	case *actionlint.FuncCallNode:
 		switch strings.ToLower(node.Callee) {
 		case "always", "success", "failure", "cancelled":
@@ -323,6 +332,25 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 	default:
 		return fmt.Errorf("unsupported condition expression")
 	}
+}
+
+func conditionOperandCategory(node actionlint.ExprNode) string {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return "null"
+	case *actionlint.BoolNode, *actionlint.NotOpNode, *actionlint.LogicalOpNode, *actionlint.CompareOpNode, *actionlint.FuncCallNode:
+		return "boolean"
+	case *actionlint.IntNode, *actionlint.FloatNode:
+		return "number"
+	case *actionlint.StringNode:
+		return "string"
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, _, err := referencePath(node)
+		if err == nil && !strings.EqualFold(root, "matrix") {
+			return "string"
+		}
+	}
+	return "unknown"
 }
 
 func validateConditionReference(root string, path []string, scope ConditionScope) error {
@@ -564,18 +592,21 @@ func conditionTruthy(value any) bool {
 		return false
 	case bool:
 		return value
-	case int:
-		return value != 0
-	case float64:
-		return value != 0
 	case string:
 		return value != ""
-	default:
-		return false
 	}
+	number, ok := conditionNumber(value)
+	return ok && number.Sign() != 0
 }
 
 func conditionEqual(left, right any) (bool, error) {
+	if leftNumber, ok := conditionNumber(left); ok {
+		rightNumber, ok := conditionNumber(right)
+		if !ok {
+			return false, fmt.Errorf("mixed-type condition equality is unsupported")
+		}
+		return leftNumber.Cmp(rightNumber) == 0, nil
+	}
 	switch left := left.(type) {
 	case nil:
 		return right == nil, nil
@@ -591,22 +622,24 @@ func conditionEqual(left, right any) (bool, error) {
 			return false, fmt.Errorf("mixed-type condition equality is unsupported")
 		}
 		return left == right, nil
-	case int:
-		switch right := right.(type) {
-		case int:
-			return left == right, nil
-		case float64:
-			return float64(left) == right, nil
-		}
-	case float64:
-		switch right := right.(type) {
-		case int:
-			return left == float64(right), nil
-		case float64:
-			return left == right, nil
-		}
 	}
 	return false, fmt.Errorf("mixed-type condition equality is unsupported")
+}
+
+func conditionNumber(value any) (*big.Rat, bool) {
+	var source string
+	switch value := value.(type) {
+	case int:
+		return new(big.Rat).SetInt64(int64(value)), true
+	case float64:
+		source = strconv.FormatFloat(value, 'g', -1, 64)
+	case json.Number:
+		source = value.String()
+	default:
+		return nil, false
+	}
+	number, ok := new(big.Rat).SetString(source)
+	return number, ok
 }
 
 func containsStatusFunction(node actionlint.ExprNode) bool {

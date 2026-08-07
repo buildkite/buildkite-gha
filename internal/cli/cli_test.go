@@ -206,13 +206,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - if: github.event.pull_request.draft
+      - if: vars.ENABLED == true
         run: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	want := `step 1 condition: condition reference "github.event.pull_request.draft" is unavailable at runtime`
+	want := `step 1 condition: condition equality compares incompatible string and boolean operands`
 
 	t.Run("validate json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer

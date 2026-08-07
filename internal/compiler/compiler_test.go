@@ -137,6 +137,31 @@ jobs:
 `,
 			want: `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
 		},
+		{
+			name: "mixed equality",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: vars.ENABLED == true
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible string and boolean operands`,
+		},
+		{
+			name: "parallel member condition location",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          - if:  vars.ENABLED == true
+            run: true
+`,
+			want: `conditions.yml:7:18: job "test": step "__parallel_6_9_1" condition: condition equality compares incompatible string and boolean operands`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for name, compile := range map[string]func() error{

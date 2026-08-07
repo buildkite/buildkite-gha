@@ -1,6 +1,7 @@
 package expression
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -181,6 +182,10 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 			source: "${{ failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && env.LEVEL && job.services.redis.ports[6379] }}",
 			scope:  StepCondition,
 		},
+		{name: "compatible booleans", source: "success() == true", scope: JobCondition},
+		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
+		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
+		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {
@@ -207,6 +212,8 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
 		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
 		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
+		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition, want: "condition equality compares incompatible string and boolean operands"},
+		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition, want: "condition equality compares incompatible boolean and number operands"},
 		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -280,6 +287,29 @@ func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
 		}
+	}
+}
+
+func TestEvaluateConditionSupportsJSONNumbers(t *testing.T) {
+	tests := []struct {
+		name      string
+		condition string
+		matrix    map[string]any
+		want      bool
+	}{
+		{name: "json number and int", condition: "matrix.value == 1", matrix: map[string]any{"value": json.Number("1")}, want: true},
+		{name: "json number and float", condition: "matrix.value == 1.5", matrix: map[string]any{"value": json.Number("1.5")}, want: true},
+		{name: "json numbers", condition: "matrix.left == matrix.right", matrix: map[string]any{"left": json.Number("1e3"), "right": json.Number("1000")}, want: true},
+		{name: "nonzero truthiness", condition: "matrix.value", matrix: map[string]any{"value": json.Number("0.25")}, want: true},
+		{name: "zero truthiness", condition: "matrix.value", matrix: map[string]any{"value": json.Number("0")}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateCondition(test.condition, ConditionContext{Matrix: test.matrix})
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v, want %v", test.condition, got, err, test.want)
+			}
+		})
 	}
 }
 

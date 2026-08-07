@@ -165,9 +165,9 @@ buildkite-gha validate \
 
 An `admitted` result means the plans satisfy upload policy. It does not execute
 the workflow or prove that arbitrary action code is independent of GitHub-only
-services. Condition validation is also not yet exhaustive: some unsupported
-functions or runtime contexts fail only when the job runs. JSON output is
-available with `--format json`.
+services. Condition preflight validates the supported syntax, functions,
+contexts, and statically known operand types, but cannot prove value-dependent
+runtime behavior. JSON output is available with `--format json`.
 
 ## What gets translated?
 

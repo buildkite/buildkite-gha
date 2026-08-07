@@ -943,6 +943,9 @@ func parseParallelStep(path string, node *yaml.Node) (Step, error) {
 	if step.If, err = optionalScalar(entries["if"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["if"], "parallel member if must be a scalar")
 	}
+	if value := entries["if"]; value != nil {
+		step.IfSpan = yamlStepSpan(value, value)
+	}
 	if step.Env, err = scalarMap(entries["env"]); err != nil {
 		return Step{}, yamlNodeError(path, entries["env"], "parallel member env must be a scalar mapping")
 	}
