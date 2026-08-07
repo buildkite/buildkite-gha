@@ -126,11 +126,16 @@ func Write(w io.Writer, format string, report Report) error {
 			return err
 		}
 		if report.Result == "compilable" {
-			_, err := fmt.Fprintf(w, "✓ %d logical jobs and %d static instances compile\n", report.LogicalJobs, report.Instances)
-			return err
+			if _, err := fmt.Fprintf(w, "✓ %d logical jobs and %d static instances compile\n", report.LogicalJobs, report.Instances); err != nil {
+				return err
+			}
 		}
 		for _, diagnostic := range report.Diagnostics {
-			if _, err := fmt.Fprintf(w, "✗ [%s] %s\n", diagnostic.Code, diagnostic.Message); err != nil {
+			marker := "✗"
+			if diagnostic.Level == "warning" {
+				marker = "!"
+			}
+			if _, err := fmt.Fprintf(w, "%s [%s] %s\n", marker, diagnostic.Code, diagnostic.Message); err != nil {
 				return err
 			}
 		}

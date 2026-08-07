@@ -907,11 +907,11 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		return 1
 	}
-	writeCompilerWarnings(stderr, "validate", workflowPath, report.Warnings)
 	if profile != "" {
 		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
-			if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)); writeErr != nil {
+			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)
+			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
@@ -926,7 +926,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			}
 			var failure *hostedTokenlessFailure
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
-				if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileBlocked(workflowPath, profile, report.LogicalJobs, report.Instances, profileErr)); writeErr != nil {
+				profileReport := compatibility.ProfileBlocked(workflowPath, profile, report.LogicalJobs, report.Instances, profileErr)
+				if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 					_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 				}
 				return 1
@@ -935,22 +936,43 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
 				code = "E_ENVIRONMENT"
 			}
-			if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, code, profileErr)); writeErr != nil {
+			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, code, profileErr)
+			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
 		}
-		if writeErr := compatibility.WriteProfile(stdout, format, compatibility.Admitted(workflowPath, profile, report.LogicalJobs, report.Instances, preflight.HasActions)); writeErr != nil {
+		profileReport := compatibility.Admitted(workflowPath, profile, report.LogicalJobs, report.Instances, preflight.HasActions)
+		if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			return 1
 		}
 		return 0
 	}
-	if err := compatibility.Write(stdout, format, compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)); err != nil {
+	compatibilityReport := compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)
+	compatibilityReport.Diagnostics = append(compatibilityReport.Diagnostics, compilerWarningDiagnostics(workflowPath, report.Warnings)...)
+	if err := compatibility.Write(stdout, format, compatibilityReport); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func withCompilerWarnings(report compatibility.ProfileReport, path string, warnings []compiler.Warning) compatibility.ProfileReport {
+	report.Diagnostics = append(compilerWarningDiagnostics(path, warnings), report.Diagnostics...)
+	return report
+}
+
+func compilerWarningDiagnostics(path string, warnings []compiler.Warning) []compatibility.Diagnostic {
+	diagnostics := make([]compatibility.Diagnostic, len(warnings))
+	for i, warning := range warnings {
+		diagnostics[i] = compatibility.Diagnostic{
+			Level:   "warning",
+			Code:    warning.Code,
+			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message),
+		}
+	}
+	return diagnostics
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, format, profile string, err error) {

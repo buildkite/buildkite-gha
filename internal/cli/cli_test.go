@@ -234,7 +234,52 @@ jobs:
 		if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		assertWarning(t, "validate", stderr.String())
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+		for _, want := range []string{
+			"! [W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
+			workflowPath + ":4:23:",
+			"cancel-in-progress is not enforced",
+		} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+			}
+		}
+	})
+
+	t.Run("validate JSON", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+		var report compatibility.Report
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || !strings.Contains(report.Diagnostics[0].Message, workflowPath+":4:23:") {
+			t.Fatalf("report diagnostics = %#v", report.Diagnostics)
+		}
+	})
+
+	t.Run("validate profile JSON", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("stderr = %q, want empty", stderr.String())
+		}
+		var report compatibility.ProfileReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if len(report.Diagnostics) != 1 || report.Diagnostics[0].Level != "warning" || report.Diagnostics[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || !strings.Contains(report.Diagnostics[0].Message, workflowPath+":4:23:") {
+			t.Fatalf("profile report diagnostics = %#v", report.Diagnostics)
+		}
 	})
 
 	t.Run("compile pipeline", func(t *testing.T) {

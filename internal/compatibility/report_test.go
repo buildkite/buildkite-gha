@@ -9,6 +9,10 @@ import (
 )
 
 func TestWriteReports(t *testing.T) {
+	warningReport := Compilable("ci.yml", 2, 3)
+	warningReport.Diagnostics = append(warningReport.Diagnostics, Diagnostic{
+		Level: "warning", Code: "W_EXAMPLE", Message: "compatibility is approximate",
+	})
 	for _, test := range []struct {
 		name   string
 		format string
@@ -16,6 +20,7 @@ func TestWriteReports(t *testing.T) {
 		want   string
 	}{
 		{name: "text success", format: "text", report: Compilable("ci.yml", 2, 3), want: "✓ 2 logical jobs and 3 static instances compile"},
+		{name: "text success warning", format: "text", report: warningReport, want: "! [W_EXAMPLE] compatibility is approximate"},
 		{name: "text failure", format: "text", report: Blocked("ci.yml", errors.New("unsupported operating system")), want: "[E_COMPILE] unsupported operating system"},
 		{name: "json", format: "json", report: Compilable("ci.yml", 2, 3), want: `"schema": "buildkite-gha/compatibility-report/v1"`},
 	} {
