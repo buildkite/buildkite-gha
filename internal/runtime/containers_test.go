@@ -3,7 +3,9 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1123,6 +1125,77 @@ func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 	for _, mount := range mounts {
 		if strings.Contains(mount.target, "node24") || strings.Contains(mount.target, "/nodes") {
 			t.Fatalf("native adapter gained Node mount: %#v", mount)
+		}
+	}
+}
+
+func TestRunJobContainerCheckoutPopulatesNoMiseWorkspaceAction(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	workflowSource := []byte("name: container\n")
+	workflowDigest := sha256.Sum256(workflowSource)
+	localSource := []byte("name: local\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo 'CHECKOUT_CHAIN=ok' >> \"$GITHUB_ENV\"\n")
+	localFixture := t.TempDir()
+	writeFixtureFile(t, localFixture, "action.yml", string(localSource))
+
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	writeFixtureFile(t, remote, "index.js", "throw new Error('adapter must not execute checkout JavaScript')\n")
+	remoteDigest := digestTree(t, remote)
+
+	sha := strings.Repeat("a", 40)
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+operation=
+for argument in "$@"; do
+  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  checkout)
+    printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
+    mkdir -p .github/workflows .github/actions/local
+    printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(workflowSource)) + ` | base64 -d > .github/workflows/container.yml
+    printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(localSource)) + ` | base64 -d > .github/actions/local/action.yml
+    ;;
+esac
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	requiresMise := false
+	checkoutID, localID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := plan.Job{
+		Schema:   plan.SchemaV7,
+		Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("1", 64)},
+		Workflow: plan.Workflow{Path: ".github/workflows/container.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "container"},
+		Event: plan.Event{
+			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64),
+			Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
+		},
+		Target:               plan.Target{StepKey: "gha-container", Queue: "trusted"},
+		RequiredCapabilities: []string{"docker", "network"},
+		Steps: []plan.Step{
+			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: checkoutID}},
+			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
+		},
+		Actions: []plan.ActionLock{
+			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("b", 40), SourceDigest: remoteDigest},
+			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: digestTree(t, localFixture)},
+		},
+		RequiresMise: &requiresMise,
+		Container:    &plan.Container{Image: "debian:bookworm-slim"},
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Git: git, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Env["CHECKOUT_CHAIN"] != "ok" {
+		t.Fatalf("container checkout chain result = %#v, error = %v", result, err)
+	}
+	for _, call := range f.calls(t) {
+		if slices.Contains(call.Args, "/__buildkite-gha/node20") || slices.Contains(call.Args, "/__buildkite-gha/node24") || slices.Contains(call.Args, "/__buildkite-gha/nodes") {
+			t.Fatalf("no-mise container checkout chain mounted or probed Node: %#v", call.Args)
 		}
 	}
 }
