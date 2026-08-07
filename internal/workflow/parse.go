@@ -41,7 +41,8 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := validateRawContainers(path, &document); err != nil {
 		return nil, err
 	}
-	if err := validateRawConcurrencyCancellation(path, &document); err != nil {
+	workflowCancellation, err := validateRawConcurrencyCancellation(path, &document)
+	if err != nil {
 		return nil, err
 	}
 	concurrency, err := parseConcurrencySyntax(path, &document)
@@ -64,6 +65,13 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	owned.Concurrency, err = adaptConcurrency(path, "", parsed.Concurrency)
 	if err != nil {
 		return nil, err
+	}
+	if workflowCancellation != nil {
+		if owned.Concurrency == nil {
+			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency cancellation has no concurrency group", path, workflowCancellation.Line, workflowCancellation.Column)
+		}
+		owned.Concurrency.CancelInProgress = true
+		owned.Concurrency.CancelInProgressPosition = *workflowCancellation
 	}
 	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
 	if err != nil {
@@ -204,43 +212,45 @@ func rawError(path string, node *yaml.Node, message string) error {
 // actionlint v1.7.12 compares YAML boolean text case-sensitively, even though
 // YAML accepts True and TRUE. Decode cancellation booleans from the raw tree so
 // no true spelling can be silently adapted as false.
-func validateRawConcurrencyCancellation(path string, document *yaml.Node) error {
+func validateRawConcurrencyCancellation(path string, document *yaml.Node) (*Position, error) {
 	root := document
 	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
 		root = root.Content[0]
 	}
-	if err := validateRawConcurrencyCancellationValue(path, "", mappingValue(root, "concurrency")); err != nil {
-		return err
+	workflowCancellation, err := validateRawConcurrencyCancellationValue(path, "", mappingValue(root, "concurrency"))
+	if err != nil {
+		return nil, err
 	}
 	jobs := mappingValue(root, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return nil
+		return workflowCancellation, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
 		name, job := resolveAlias(jobs.Content[i]), jobs.Content[i+1]
-		if err := validateRawConcurrencyCancellationValue(path, name.Value, mappingValue(job, "concurrency")); err != nil {
-			return err
+		if _, err := validateRawConcurrencyCancellationValue(path, name.Value, mappingValue(job, "concurrency")); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return workflowCancellation, nil
 }
 
-func validateRawConcurrencyCancellationValue(path, jobID string, concurrency *yaml.Node) error {
+func validateRawConcurrencyCancellationValue(path, jobID string, concurrency *yaml.Node) (*Position, error) {
 	if concurrency == nil || concurrency.Kind != yaml.MappingNode {
-		return nil
+		return nil, nil
 	}
 	cancel := mappingValue(concurrency, "cancel-in-progress")
 	if cancel == nil || cancel.Kind != yaml.ScalarNode || cancel.ShortTag() != "!!bool" {
-		return nil
+		return nil, nil
 	}
 	var enabled bool
 	if err := cancel.Decode(&enabled); err != nil || !enabled {
-		return nil
+		return nil, nil
 	}
 	if jobID == "" {
-		return rawError(path, cancel, "workflow concurrency cancel-in-progress is unsupported")
+		position := nodePosition(cancel)
+		return &position, nil
 	}
-	return rawError(path, cancel, fmt.Sprintf("job %q: concurrency cancel-in-progress is unsupported", jobID))
+	return nil, rawError(path, cancel, fmt.Sprintf("job %q: concurrency cancel-in-progress is unsupported", jobID))
 }
 
 func validateRawContainer(path string, node *yaml.Node) error {
@@ -528,7 +538,7 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	if in == nil {
 		return nil, nil
 	}
-	if in.CancelInProgress != nil && (in.CancelInProgress.Expression != nil || in.CancelInProgress.Value) {
+	if in.CancelInProgress != nil && (in.CancelInProgress.Expression != nil || (in.CancelInProgress.Value && jobID != "")) {
 		position := in.CancelInProgress.Pos
 		if in.CancelInProgress.Expression != nil {
 			position = in.CancelInProgress.Expression.Pos

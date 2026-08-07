@@ -907,6 +907,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		return 1
 	}
+	writeCompilerWarnings(stderr, "validate", workflowPath, report.Warnings)
 	if profile != "" {
 		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
@@ -1010,8 +1011,17 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		return 1
 	}
 	var result []byte
+	var warnings []compiler.Warning
 	if format == "ir-json" {
 		result, err = compiler.Compile(workflowPath, source, event)
+		if err == nil {
+			var ir compiler.IR
+			if decodeErr := json.Unmarshal(result, &ir); decodeErr != nil {
+				err = fmt.Errorf("decode compiler IR: %w", decodeErr)
+			} else {
+				warnings = ir.Warnings
+			}
+		}
 	} else {
 		digest, digestErr := executableDigest()
 		if digestErr != nil {
@@ -1021,16 +1031,24 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
 		err = compileErr
 		result = bundle.Pipeline
+		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
+	writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
 	if _, err := stdout.Write(result); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []compiler.Warning) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, path, warning.Line, warning.Column, warning.Code, warning.Message)
+	}
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
@@ -1070,6 +1088,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		return 1
 	}
 	bundle := preflight.Bundle
+	writeCompilerWarnings(stderr, "upload", workflowPath, bundle.IR.Warnings)
 	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {

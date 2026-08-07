@@ -54,10 +54,19 @@ type Repository struct {
 type IR struct {
 	Schema    string            `json:"schema"`
 	Workflow  WorkflowSource    `json:"workflow"`
+	Warnings  []Warning         `json:"warnings,omitempty"`
 	Event     Event             `json:"event"`
 	Vars      map[string]string `json:"vars,omitempty"`
 	Execution ExecutionBoundary `json:"execution"`
 	Jobs      []JobInstance     `json:"jobs"`
+}
+
+// Warning is one source-located, non-fatal compatibility diagnostic.
+type Warning struct {
+	Code    string `json:"code"`
+	Line    int    `json:"line"`
+	Column  int    `json:"column"`
+	Message string `json:"message"`
 }
 
 // ExecutionBoundary makes the compile-only Phase 0 boundary explicit.
@@ -117,6 +126,7 @@ type NeedOutput struct {
 type Report struct {
 	LogicalJobs int
 	Instances   int
+	Warnings    []Warning
 }
 
 // Validate parses and validates the supported static graph without requiring an
@@ -141,7 +151,7 @@ func Validate(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -172,7 +182,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	if err != nil {
 		return Report{}, err
 	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -560,12 +570,26 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
 		Event:    event,
 		Vars:     vars,
+		Warnings: compilerWarnings(parsed.Concurrency),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
 		},
 		Jobs: jobs,
 	}, nil
+}
+
+func compilerWarnings(concurrency *workflow.Concurrency) []Warning {
+	if concurrency == nil || !concurrency.CancelInProgress {
+		return nil
+	}
+	position := concurrency.CancelInProgressPosition
+	return []Warning{{
+		Code:    "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+		Line:    position.Line,
+		Column:  position.Column,
+		Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
+	}}
 }
 
 func parseEvent(source []byte) (Event, error) {

@@ -199,6 +199,85 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
+func TestWorkflowConcurrencyCancellationWarnsAndRetainsGate(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "concurrency.yml")
+	workflow := []byte(`on: push
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	assertWarning := func(t *testing.T, command, output string) {
+		t.Helper()
+		for _, want := range []string{
+			"buildkite-gha: " + command + ": warning:",
+			workflowPath + ":4:23:",
+			"[W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED]",
+			"cancel-in-progress is not enforced",
+			"Buildkite pipeline settings",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("stderr = %q, want %q", output, want)
+			}
+		}
+	}
+
+	t.Run("validate", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"validate", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		assertWarning(t, "validate", stderr.String())
+	})
+
+	t.Run("compile pipeline", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		assertWarning(t, "compile", stderr.String())
+		if count := strings.Count(stdout.String(), "concurrency_group:"); count != 2 {
+			t.Fatalf("pipeline concurrency gates = %d, want 2\n%s", count, stdout.String())
+		}
+	})
+
+	t.Run("compile IR", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := Run([]string{"compile", "--format", "ir-json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		assertWarning(t, "compile", stderr.String())
+		var ir compiler.IR
+		if err := json.Unmarshal(stdout.Bytes(), &ir); err != nil {
+			t.Fatal(err)
+		}
+		if len(ir.Warnings) != 1 || ir.Workflow.ConcurrencyGroup != "ci-refs/heads/main" {
+			t.Fatalf("IR = %#v", ir)
+		}
+	})
+
+	t.Run("upload", func(t *testing.T) {
+		t.Setenv("BUILDKITE", "true")
+		t.Setenv("BUILDKITE_STEP_KEY", "concurrency-importer")
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		assertWarning(t, "upload", stderr.String())
+		if len(runner.commands) == 0 || strings.Count(string(runner.commands[len(runner.commands)-1].stdin), "concurrency_group:") != 2 {
+			t.Fatalf("uploaded commands = %#v", runner.commands)
+		}
+	})
+}
+
 func TestUnsupportedConditionPreflightAppliesToEveryCompilerEntryPoint(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "conditions.yml")
 	if err := os.WriteFile(workflowPath, []byte(`on: push

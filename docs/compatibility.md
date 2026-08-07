@@ -36,7 +36,7 @@ provide.
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
-| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting builds/jobs instead of replacing GitHub's previously pending entry. `cancel-in-progress` remains unsupported. |
+| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting builds/jobs instead of replacing GitHub's previously pending entry. Workflow-level literal `cancel-in-progress: true` retains the gate and emits a warning because cancellation must be configured in Buildkite pipeline settings; job-level literals and expressions remain unsupported. |
 | Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Declared outputs mapped directly from `jobs.<job>.outputs.<name>` are exposed through `needs.<call>.outputs`; nested calls are supported and undeclared callee outputs remain hidden. Matrix-selected declarations verify every exact producer and fail closed when values conflict or exceed 64 concrete projections. Literal or compound output mappings, call-level conditions, and remote or runtime-dependent reusable workflows are deferred. Caller prerequisites inherited by callee roots are status-only. |
 | Job and step conditions | Supported subset | Validation accepts literals, logical operators, `==`, `!=`, and the zero-argument `always`, `success`, `failure`, and `cancelled` status functions. Job conditions can use `github` identity fields, `needs`, `vars`, and `matrix`; step conditions additionally support `steps`, `env`, and service ports. Unsupported functions, operators, reference shapes, and unavailable contexts fail before pipeline upload. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
@@ -81,12 +81,13 @@ lines are consumed and their decoded messages remain visible in the job log.
 ### Concurrency groups queue instead of canceling
 
 Literal workflow and job `concurrency` shorthand is supported, as is the
-mapping form when `cancel-in-progress` is omitted or the literal `false`:
+mapping form when `cancel-in-progress` is omitted or the literal `false`.
+Workflow-level literal `true` is also accepted, but only the group is enforced:
 
 ```yaml
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -115,12 +116,20 @@ This is queue compatibility, not cancellation parity. Buildkite retains all
 waiting entries in FIFO order, while GitHub's default concurrency mode replaces
 an existing pending entry. The newer GitHub `queue` property is not yet accepted
 by the pinned syntax frontend; generated Buildkite groups always queue all
-entries. Literal `cancel-in-progress: true` and every expression-valued
-`cancel-in-progress` fail compilation because the bridge has no safely scoped
-cross-build cancellation mechanism. For a workflow-level gate, cancel the
-Buildkite build rather than one generated job: an individually canceled
-dependency does not execute the closing gate step, while whole-build
-cancellation removes that build's queued gate jobs.
+entries. Workflow-level literal `cancel-in-progress: true` retains the
+workflow gate and emits
+`W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED`; it does not cancel an
+older Buildkite build. Configure **Cancel Intermediate Builds** in the
+Buildkite pipeline's Builds settings for running builds and **Skip Intermediate
+Builds** for builds that have not started. Those pipeline-level, same-branch
+controls approximate GitHub cancellation only when that scope matches the
+workflow's concurrency group; arbitrary groups do not map exactly. Job-level
+literal `true` and every expression-valued `cancel-in-progress` still fail
+compilation.
+
+For a workflow-level gate, cancel the Buildkite build rather than one generated
+job: an individually canceled dependency does not execute the closing gate
+step, while whole-build cancellation removes that build's queued gate jobs.
 
 ### Concurrent steps stay inside the job
 
