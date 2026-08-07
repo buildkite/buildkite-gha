@@ -74,6 +74,15 @@ download modes, and unsupported artifact commits still fail admission. Job and
 service container fixtures have separate hosted runtime evidence but remain
 outside production admission.
 
+### Exact-source plugin smoke
+
+Every Buildkite build runs `.github/workflows/example-basic.yml` through the
+released plugin with `buildkite-gha-source-ref` set to the build's exact commit.
+This proves a pull request's unreleased CLI source through the public plugin
+before a CLI release exists. The released-plugin demos remain separate because
+they verify release archives, checksums, and the normal default installation
+path rather than source execution.
+
 ### Paired native UX runs
 
 After the example workflows exist on the default branch, launch the same
