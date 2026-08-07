@@ -2004,22 +2004,22 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)
 	}
-	if _, _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
-	workflow, event, queue, privateCheckout, err := uploadArgs([]string{"workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "" || queue != "" || privateCheckout {
-		t.Fatalf("uploadArgs() default = %q, %q, %q, %v, %v", workflow, event, queue, privateCheckout, err)
+	workflow, event, privateCheckout, err := uploadArgs([]string{"workflow.yml"})
+	if err != nil || workflow != "workflow.yml" || event != "" || privateCheckout {
+		t.Fatalf("uploadArgs() default = %q, %q, %v, %v", workflow, event, privateCheckout, err)
 	}
-	if _, _, _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
+	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)
 	}
-	if _, _, _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate private checkout error", err)
 	}
-	workflow, event, queue, privateCheckout, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "event.json" || queue != "hosted" || !privateCheckout {
-		t.Fatalf("uploadArgs() = %q, %q, %q, %v, %v", workflow, event, queue, privateCheckout, err)
+	workflow, event, privateCheckout, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
+	if err != nil || workflow != "workflow.yml" || event != "event.json" || !privateCheckout {
+		t.Fatalf("uploadArgs() = %q, %q, %v, %v", workflow, event, privateCheckout, err)
 	}
 }
 

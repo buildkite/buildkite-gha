@@ -1077,7 +1077,7 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, _, privateCheckout, err := uploadArgs(args)
+	workflowPath, eventPath, privateCheckout, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
@@ -1288,14 +1288,15 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 	return false
 }
 
-func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, privateCheckout bool, err error) {
+func uploadArgs(args []string) (workflowPath, eventPath string, privateCheckout bool, err error) {
 	filtered := make([]string, 0, len(args))
+	runtimeQueue := ""
 	runtimeQueueSeen := false
 	privateCheckoutSeen := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--private-checkout" {
 			if privateCheckoutSeen {
-				return "", "", "", false, fmt.Errorf("--private-checkout may only be specified once")
+				return "", "", false, fmt.Errorf("--private-checkout may only be specified once")
 			}
 			privateCheckoutSeen = true
 			privateCheckout = true
@@ -1306,23 +1307,23 @@ func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, pr
 			continue
 		}
 		if runtimeQueueSeen {
-			return "", "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
+			return "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
 		}
 		runtimeQueueSeen = true
 		i++
 		if i == len(args) {
-			return "", "", "", false, fmt.Errorf("--runtime-queue requires a queue")
+			return "", "", false, fmt.Errorf("--runtime-queue requires a queue")
 		}
 		runtimeQueue = args[i]
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
 	if err != nil {
-		return "", "", "", false, err
+		return "", "", false, err
 	}
 	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
-		return "", "", "", false, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
+		return "", "", false, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
 	}
-	return workflowPath, eventPath, runtimeQueue, privateCheckout, err
+	return workflowPath, eventPath, privateCheckout, err
 }
 
 func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {
