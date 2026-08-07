@@ -266,7 +266,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	var privateRuntime string
-	if jobUsesActions(job) {
+	if job.NeedsMise() {
 		runner.ResolveMise = func(ctx context.Context) (string, error) {
 			var err error
 			privateRuntime, err = os.MkdirTemp("", "buildkite-gha-runtime-")
@@ -328,18 +328,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
-}
-
-func jobUsesActions(job plan.Job) bool {
-	if len(job.Actions) != 0 {
-		return true
-	}
-	for _, step := range job.Steps {
-		if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
-			return true
-		}
-	}
-	return false
 }
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {

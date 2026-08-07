@@ -98,7 +98,9 @@ scripts/compare-example advanced
 ```
 
 This uses GitHub's native `workflow_dispatch` path and the dedicated
-`buildkite-gha-examples` pipeline. It prints both URLs for a side-by-side review
+`buildkite-gha-examples` pipeline. The Buildkite importer uses released plugin
+v0.4.4 to run the branch's exact unreleased CLI commit, so both providers
+exercise the same source. The script prints both URLs for a side-by-side review
 of the graph, logs, summaries, annotations, artifacts, retries, and cancellation
 experience. Use `--github-only` or `--buildkite-only` to exercise one native
 manual trigger at a time. These runs are qualitative UX comparisons; they do

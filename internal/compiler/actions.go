@@ -41,12 +41,13 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 }
 
 type actionLockBuilder struct {
-	workspace string
-	source    ActionSource
-	nodes     map[string]*actionNode
-	ids       map[string]string
-	active    map[string]bool
-	caps      map[string]bool
+	workspace    string
+	source       ActionSource
+	nodes        map[string]*actionNode
+	ids          map[string]string
+	active       map[string]bool
+	caps         map[string]bool
+	requiresMise bool
 }
 
 type actionNode struct {
@@ -55,20 +56,20 @@ type actionNode struct {
 
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
-func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, error) {
+func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
 	if workspace == "" {
-		return nil, nil, nil, fmt.Errorf("workflow path must identify a repository root")
+		return nil, nil, nil, true, fmt.Errorf("workflow path must identify a repository root")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("resolve workspace: %w", err)
+		return nil, nil, nil, true, fmt.Errorf("resolve workspace: %w", err)
 	}
 	b := &actionLockBuilder{workspace: abs, source: actionSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	selectors := make([]plan.ActionSelector, 0, len(refs))
 	for _, ref := range refs {
 		n, err := b.add(ctx, ref, 1)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, true, err
 		}
 		selectors = append(selectors, plan.ActionSelector{Lock: n.lock.ID})
 	}
@@ -82,7 +83,7 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 		caps = append(caps, c)
 	}
 	sort.Strings(caps)
-	return selectors, locks, caps, nil
+	return selectors, locks, caps, b.requiresMise, nil
 }
 
 func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*actionNode, error) {
@@ -122,6 +123,12 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	}
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
+	}
+	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
+		return n, nil
+	}
+	if runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
+		b.requiresMise = true
 	}
 	for _, capability := range runtime.RequiredCapabilities() {
 		b.caps[capability] = true

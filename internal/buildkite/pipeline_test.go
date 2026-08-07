@@ -229,7 +229,7 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), UsesActions: true}},
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true}},
 	}
 	output, err := Emit(pipeline)
 	if err != nil {
@@ -275,7 +275,8 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
-			{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("action-plan"), UsesActions: true},
+			{Key: "javascript", Label: "JavaScript", Queue: "hosted", PlanDigest: testDigest("javascript-plan"), RequiresMise: true},
+			{Key: "native", Label: "Native action", Queue: "hosted", PlanDigest: testDigest("native-plan")},
 			{Key: "shell", Label: "Shell", Queue: "hosted", PlanDigest: testDigest("shell-plan")},
 		},
 	})
@@ -294,11 +295,11 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range document.Steps {
-		if step.Key == "action" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
-			t.Fatalf("action job lacks runtime mise cache configuration: %#v", step)
+		if step.Key == "javascript" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("JavaScript job lacks runtime mise cache configuration: %#v", step)
 		}
-		if step.Key == "shell" && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
-			t.Fatalf("shell job gained managed mise: %#v", step)
+		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("no-mise job gained managed mise: %#v", step)
 		}
 	}
 }
@@ -639,7 +640,9 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`group: ":github: Run workflow"`,
 		`label: "Prepare workflow"`,
 		`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
-		`github-actions#v0.2.2`,
+		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
+		`github-actions#v0.4.4`,
+		`buildkite-gha-source-ref: "$$commit"`,
 	} {
 		if !strings.Contains(loader.Command, required) {
 			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
@@ -767,8 +770,10 @@ func TestUploadExamplesScript(t *testing.T) {
 			`key: "example-basic-workflow"`,
 			`label: "Prepare workflow"`,
 			`key: "example-basic-importer"`,
-			`github-actions#v0.2.2`,
+			`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
+			`github-actions#v0.4.4`,
 			`workflow: ".github/workflows/example-basic.yml"`,
+			`buildkite-gha-source-ref: "` + commit + `"`,
 			`queue: "hosted"`,
 			`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
 		} {
@@ -781,8 +786,8 @@ func TestUploadExamplesScript(t *testing.T) {
 				t.Fatalf("basic importer contains %q:\n%s", forbidden, pipeline)
 			}
 		}
-		if strings.Count(pipeline, "github-actions#v0.2.2") != 1 {
-			t.Fatalf("basic importer does not contain exactly one plugin:\n%s", pipeline)
+		if strings.Count(pipeline, "github-actions#v0.4.4") != 1 || strings.Count(pipeline, "mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2") != 1 {
+			t.Fatalf("basic importer does not contain exactly one of each plugin:\n%s", pipeline)
 		}
 	})
 

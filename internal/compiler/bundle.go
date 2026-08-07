@@ -92,7 +92,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 			Queue:        ir.Jobs[i].Queue,
 			PlanDigest:   digest,
 			Dependencies: append([]string(nil), ir.Jobs[i].Needs...),
-			UsesActions:  planUsesActions(job),
+			RequiresMise: job.NeedsMise(),
 		}
 		if ir.Jobs[i].ConcurrencyGroup != "" {
 			jobs[i].Concurrency = 1
@@ -126,13 +126,4 @@ func buildkiteConcurrencyGroup(repository Repository, group string) string {
 	scope := strings.ToLower(repository.Owner+"/"+repository.Name) + "\x00" + canonicalConcurrencyGroup(group)
 	digest := sha256.Sum256([]byte(scope))
 	return "buildkite-gha/concurrency/" + hex.EncodeToString(digest[:])
-}
-
-func planUsesActions(job plan.Job) bool {
-	for _, step := range job.Steps {
-		if step.Action != nil {
-			return true
-		}
-	}
-	return false
 }

@@ -758,6 +758,9 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return err
 	}
+	if usesNativeAdapter(lock) {
+		return nil
+	}
 	if runtime != metadata.RuntimeComposite {
 		return nil
 	}
@@ -822,6 +825,9 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 			}
 			byTarget[target] = m
 		}
+		if usesNativeAdapter(lock) {
+			continue
+		}
 		switch actionRuntime {
 		case metadata.RuntimeNode20:
 			requiredNode[20] = true
@@ -829,7 +835,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 			requiredNode[24] = true
 		}
 	}
-	if unknownWorkspaceRuntime {
+	if unknownWorkspaceRuntime && actions.job.NeedsMise() {
 		requiredNode[20], requiredNode[24] = true, true
 	}
 	for _, major := range []int{20, 24} {

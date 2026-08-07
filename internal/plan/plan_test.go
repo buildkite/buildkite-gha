@@ -252,6 +252,58 @@ func TestV3ActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	}
 }
 
+func TestV7RequiresMiseRoundTripAndSchema(t *testing.T) {
+	requiresMise := false
+	job := validJob()
+	job.Schema = SchemaV7
+	job.Steps = []Step{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
+	job.Actions = []ActionLock{{
+		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
+		Commit: strings.Repeat("a", 40), SourceDigest: "sha256:" + strings.Repeat("b", 64),
+	}}
+	job.RequiresMise = &requiresMise
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil || decoded.RequiresMise == nil || *decoded.RequiresMise {
+		t.Fatalf("Decode() requires_mise = %#v, error = %v", decoded.RequiresMise, err)
+	}
+	compiler := jsonschema.NewCompiler()
+	source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(source, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiler.AddResource(SchemaV7, document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planDocument any
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v7 plan does not validate against schema: %v", err)
+	}
+	job.RequiresMise = nil
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "explicit requires_mise") {
+		t.Fatalf("Validate() missing requires_mise error = %v", err)
+	}
+	job.RequiresMise = &requiresMise
+	job.Steps[0].Action = nil
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "immutable selector") {
+		t.Fatalf("Validate() unresolved false error = %v", err)
+	}
+}
+
 func TestV3RemoteNestedActionLocks(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	commit := strings.Repeat("c", 40)
@@ -704,9 +756,11 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 }
 
 func TestV7DefaultQueueContractAndSchema(t *testing.T) {
+	requiresMise := false
 	job := validJob()
 	job.Schema = SchemaV7
 	job.Target.Queue = ""
+	job.RequiresMise = &requiresMise
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)

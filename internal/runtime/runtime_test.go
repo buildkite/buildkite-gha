@@ -4135,7 +4135,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV3 || len(plans[0].Actions) != 2 {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV7 || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("portable setup plans = %#v", plans)
 	}
 	if got := plans[0].Steps[0].With["node-version"]; got != "24" {

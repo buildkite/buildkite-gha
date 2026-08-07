@@ -64,7 +64,7 @@ type Job struct {
 	Queue            string
 	PlanDigest       string
 	Dependencies     []string
-	UsesActions      bool
+	RequiresMise     bool
 	ConcurrencyGroup string
 	Concurrency      int
 }
@@ -137,7 +137,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
 		_, _ = fmt.Fprintf(&out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		if job.UsesActions {
+		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s    - \".buildkite-gha/cache-volume\"\n", attributeIndent)
@@ -147,7 +147,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
-		if job.UsesActions {
+		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
 		}
 		if job.Concurrency != 0 {

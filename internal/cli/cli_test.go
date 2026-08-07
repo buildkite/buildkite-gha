@@ -1198,7 +1198,9 @@ func runtimeMiseTestArchive(t *testing.T, binary []byte) []byte {
 
 func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.SchemaV7
+	requiresMise := true
+	job.RequiresMise = &requiresMise
 	job.Actions = []plan.ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
 		SourceDigest: "sha256:" + strings.Repeat("a", 64),
@@ -1217,6 +1219,38 @@ func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	}
 	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "failure" {
 		t.Fatalf("published result = %q, want failure", manifest.Result)
+	}
+}
+
+func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
+	no := false
+	yes := true
+	actionJob := func(requiresMise *bool) plan.Job {
+		return plan.Job{
+			Actions:      []plan.ActionLock{{ID: "a-0000000000000001"}},
+			Steps:        []plan.Step{{Kind: "uses", Action: &plan.ActionSelector{Lock: "a-0000000000000001"}}},
+			RequiresMise: requiresMise,
+		}
+	}
+	cacheJob := actionJob(&yes)
+	cacheJob.Actions[0].Source = "github"
+	cacheJob.Actions[0].Repository = "actions/cache"
+	for _, test := range []struct {
+		name string
+		job  plan.Job
+		want bool
+	}{
+		{name: "shell plan does not resolve mise", job: plan.Job{Steps: []plan.Step{{Kind: "run"}}}},
+		{name: "native plan does not resolve mise", job: actionJob(&no)},
+		{name: "JavaScript plan resolves mise", job: actionJob(&yes), want: true},
+		{name: "cache client plan resolves mise", job: cacheJob, want: true},
+		{name: "legacy or unknown action plan resolves mise", job: actionJob(nil), want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.job.NeedsMise(); got != test.want {
+				t.Fatalf("NeedsMise() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

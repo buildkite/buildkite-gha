@@ -192,17 +192,32 @@ type Job struct {
 	NeedOutputs          map[string][]NeedOutput `json:"need_outputs,omitempty"`
 	// Needs is populated only from verified producer-attributed manifests at
 	// runtime. It is never accepted from or encoded into an immutable plan.
-	Needs                   map[string]Need      `json:"-"`
-	Env                     map[string]string    `json:"env,omitempty"`
-	Condition               string               `json:"condition,omitempty"`
-	TimeoutMinutes          float64              `json:"timeout_minutes,omitempty"`
-	DefaultShell            string               `json:"default_shell,omitempty"`
-	DefaultWorkingDirectory string               `json:"default_working_directory,omitempty"`
-	Outputs                 map[string]string    `json:"outputs,omitempty"`
-	Steps                   []Step               `json:"steps"`
-	Actions                 []ActionLock         `json:"actions,omitempty"`
-	Container               *Container           `json:"container,omitempty"`
-	Services                map[string]Container `json:"services,omitempty"`
+	Needs                   map[string]Need   `json:"-"`
+	Env                     map[string]string `json:"env,omitempty"`
+	Condition               string            `json:"condition,omitempty"`
+	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
+	DefaultShell            string            `json:"default_shell,omitempty"`
+	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
+	Outputs                 map[string]string `json:"outputs,omitempty"`
+	Steps                   []Step            `json:"steps"`
+	Actions                 []ActionLock      `json:"actions,omitempty"`
+	// RequiresMise is compiler-resolved action runtime metadata. Nil preserves
+	// fail-closed behavior for older and unresolved action plans.
+	RequiresMise *bool                `json:"requires_mise,omitempty"`
+	Container    *Container           `json:"container,omitempty"`
+	Services     map[string]Container `json:"services,omitempty"`
+}
+
+// NeedsMise reports whether a generated job needs the managed action runtime.
+func (job Job) NeedsMise() bool {
+	usesActions := len(job.Actions) != 0
+	for _, step := range job.Steps {
+		usesActions = usesActions || step.Uses != "" || step.Action != nil || step.Kind == "uses"
+	}
+	if !usesActions {
+		return false
+	}
+	return job.RequiresMise == nil || *job.RequiresMise
 }
 
 // Decode rejects unknown fields and trailing JSON so schema drift fails closed.
@@ -345,6 +360,19 @@ func (job Job) Validate() error {
 	}
 	if job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.GitHubToken != nil {
 		return fmt.Errorf("job plan %s does not support GitHub workflow tokens", job.Schema)
+	}
+	if job.Schema == SchemaV7 && job.RequiresMise == nil {
+		return fmt.Errorf("job plan %s requires an explicit requires_mise decision", job.Schema)
+	}
+	if job.Schema != SchemaV7 && job.RequiresMise != nil {
+		return fmt.Errorf("job plan %s does not support requires_mise", job.Schema)
+	}
+	if job.RequiresMise != nil && !*job.RequiresMise {
+		for _, step := range job.Steps {
+			if (step.Kind == "uses" || step.Uses != "") && step.Action == nil {
+				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")
+			}
+		}
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
