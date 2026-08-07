@@ -7,11 +7,14 @@ promises unless they appear here.
 
 ## The current execution profile
 
-The plugin and `upload` command default to one fixed profile:
-`hosted-tokenless`. Despite the historical profile name, generated jobs do not
-select the `hosted` queue: they inherit Buildkite's configured agent defaults.
-It is designed for public code that can run without protected credentials on a
-compatible Linux x86-64 agent. Operators are responsible for configuring those
+The production plugin and its bundled `upload` command default to one fixed
+profile: `hosted-tokenless`. The currently pinned plugin bundles
+`buildkite-gha` v0.2.3, whose generated jobs select the `hosted` queue. Source
+builds containing the default-agent-targeting change instead omit agent
+selectors, and a plugin release that bundles that CLI behavior will inherit
+Buildkite's configured agent defaults. The profile is designed for public code
+that can run without protected credentials on a compatible Linux x86-64 agent.
+Operators using default targeting are responsible for configuring those
 defaults with suitable whole-job isolation. Unsupported or privileged requests
 fail before the generated jobs are uploaded. An explicit `upload
 --private-checkout` extension admits only the verified checkout adapter and only
@@ -35,7 +38,7 @@ provide.
 
 | Area | Production plugin | Notes |
 | --- | --- | --- |
-| Linux x86-64 host jobs | Supported | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. Generated jobs omit agent selectors and use Buildkite's configured defaults. |
+| Linux x86-64 host jobs | Supported | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. The currently pinned plugin targets the fixed `hosted` queue; a release containing the default-agent-targeting change will omit agent selectors and use Buildkite's configured defaults. |
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
@@ -459,13 +462,13 @@ not a complete execution path.
 `upload` is the in-build command used by the plugin:
 
 ```sh
-buildkite-gha upload .github/workflows/ci.yml
+buildkite-gha upload --runtime-queue hosted .github/workflows/ci.yml
 ```
 
 An installer may explicitly enable pipeline-repository private checkout:
 
 ```sh
-buildkite-gha upload --private-checkout \
+buildkite-gha upload --private-checkout --runtime-queue hosted \
   .github/workflows/ci.yml
 ```
 
@@ -478,10 +481,12 @@ repository-bound by the Agent service.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.
-Generated jobs do not set `agents`, so Buildkite's pipeline or organization
-defaults select the agents. The deprecated `--runtime-queue hosted` argument is
-still accepted for compatibility with older plugin releases, but it does not
-select a queue; other values are rejected rather than silently ignored.
+In source builds containing the default-agent-targeting change, generated jobs
+do not set `agents`, so Buildkite's pipeline or organization defaults select the
+agents. The deprecated `--runtime-queue hosted` argument remains accepted as a
+no-op for compatibility with plugin releases that still pass it; the current
+v0.2.3 release uses that argument to select `hosted`. Other values are rejected
+rather than silently ignored by the new implementation.
 
 `run-job` is an internal command emitted into generated jobs. Users should not
 need to invoke it directly.
