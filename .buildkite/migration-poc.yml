@@ -4,6 +4,8 @@ agents:
 steps:
   - label: ":test_tube: Basic migration POC importer"
     key: "migration-poc-basic-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 15
     retry:
       automatic: false
@@ -14,6 +16,8 @@ steps:
 
   - label: ":package: Artifact migration POC importer"
     key: "migration-poc-artifact-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 15
     retry:
       automatic: false
@@ -24,6 +28,8 @@ steps:
 
   - label: ":rocket: Advanced migration POC importer"
     key: "migration-poc-advanced-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 15
     retry:
       automatic: false

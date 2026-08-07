@@ -201,6 +201,21 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 	}
 }
 
+func TestEmitUsesDefaultAgentTargetingWhenQueueIsEmpty(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		ConcurrencyGate:    &ConcurrencyGate{Group: "buildkite-gha/concurrency/group"},
+		Jobs:               []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), "agents:") || strings.Contains(string(output), "queue:") {
+		t.Fatalf("default-targeted pipeline contains agent selectors:\n%s", output)
+	}
+}
+
 func TestConcurrencyGateKeysIncludeCompilerStep(t *testing.T) {
 	jobs := []Job{{Key: "job"}}
 	firstOpen, firstClose := concurrencyGateKeys("first-importer", "shared-group", jobs)
@@ -515,6 +530,51 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if strings.Contains(hosted.command, "--replace") {
 		t.Fatalf("hosted smoke loader uses replacement upload:\n%s", hosted.command)
+	}
+}
+
+func TestRepositoryHostedImportersSelectExplicitTargetQueue(t *testing.T) {
+	tests := map[string][]string{
+		"pipeline.yml":                   {"plugin-source-smoke-importer"},
+		"phase-2-upload.yml":             {"phase-2-upload-importer"},
+		"phase-3-upload.yml":             {"phase-3-upload-importer"},
+		"phase-4-upload.yml":             {"phase-4-upload-importer"},
+		"phase-5-docker-action.yml":      {"phase-5-docker-action-importer"},
+		"phase-6-summary.yml":            {"phase-6-summary-importer"},
+		"phase-6-annotations.yml":        {"phase-6-annotations-importer"},
+		"phase-6-upload-artifact.yml":    {"phase-6-upload-artifact-importer"},
+		"phase-6-artifact-roundtrip.yml": {"phase-6-artifact-roundtrip-importer"},
+		"migration-poc.yml": {
+			"migration-poc-basic-importer",
+			"migration-poc-artifact-importer",
+			"migration-poc-advanced-importer",
+		},
+	}
+	for path, importerKeys := range tests {
+		t.Run(path, func(t *testing.T) {
+			source, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document struct {
+				Steps []struct {
+					Key string            `yaml:"key"`
+					Env map[string]string `yaml:"env"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(source, &document); err != nil {
+				t.Fatal(err)
+			}
+			steps := make(map[string]map[string]string, len(document.Steps))
+			for _, step := range document.Steps {
+				steps[step.Key] = step.Env
+			}
+			for _, key := range importerKeys {
+				if got := steps[key]["BUILDKITE_GHA_TARGET_QUEUE"]; got != "hosted" {
+					t.Fatalf("importer %q target queue = %q, want hosted", key, got)
+				}
+			}
+		})
 	}
 }
 

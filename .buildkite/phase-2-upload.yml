@@ -4,6 +4,8 @@ agents:
 steps:
   - label: ":pipeline: Phase 2 unprivileged importer"
     key: "phase-2-upload-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"

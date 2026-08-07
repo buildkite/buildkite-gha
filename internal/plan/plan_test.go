@@ -755,6 +755,61 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	}
 }
 
+func TestV7DefaultQueueContractAndSchema(t *testing.T) {
+	requiresMise := false
+	job := validJob()
+	job.Schema = SchemaV7
+	job.Target.Queue = ""
+	job.RequiresMise = &requiresMise
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"queue"`) {
+		t.Fatalf("default-targeted plan contains a queue:\n%s", encoded)
+	}
+
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV7, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v7 default-targeted plan does not validate against schema: %v", err)
+	}
+
+	job.Target.Queue = "explicit"
+	if err := job.Validate(); err != nil {
+		t.Fatalf("v7 explicit queue validation error = %v", err)
+	}
+	job.Target.Queue = "invalid queue"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid target queue") {
+		t.Fatalf("v7 malformed queue error = %v", err)
+	}
+	for _, legacy := range []string{SchemaV1, SchemaV2, SchemaV3, SchemaV4, SchemaV5, SchemaV6} {
+		job := validJob()
+		job.Schema = legacy
+		job.Target.Queue = ""
+		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "requires a target queue") {
+			t.Fatalf("legacy schema %q empty queue error = %v", legacy, err)
+		}
+	}
+}
+
 func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
 	if err != nil {

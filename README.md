@@ -29,15 +29,19 @@ steps:
           workflow: .github/workflows/ci.yml
 ```
 
-The released plugin downloads and verifies `buildkite-gha` v0.2.3 by default,
-derives the event context from the Buildkite build, and uploads the generated
-jobs to the fixed `hosted` queue. Pin a released plugin version rather than a
-floating branch. For action jobs that can execute JavaScript, the runtime
-reuses mise 2026.5.12 or newer from `PATH` or the absolute path in
-`BUILDKITE_GHA_MISE`; when neither provides a compatible version, it downloads
-and verifies a managed 2026.5.12 copy in the hosted cache. Shell-only jobs and
-action jobs whose resolved trees contain only shell steps, native adapters, or
-Docker do not require or install mise.
+The pinned released plugin downloads and verifies `buildkite-gha` v0.2.3 by
+default, derives the event context from the Buildkite build, and uploads the
+generated jobs to the fixed `hosted` queue. Pin a released plugin version rather
+than a floating branch. Source builds containing the default-agent-targeting
+change omit agent selectors when invoked directly; the plugin path will inherit
+configured defaults only after a release bundles that CLI behavior. In those
+builds, jobs that can execute JavaScript reuse mise 2026.5.12 or newer from
+`PATH` or the absolute path in `BUILDKITE_GHA_MISE`; when neither provides a
+compatible version, the runtime downloads and verifies a managed 2026.5.12
+copy. Hosted Agents use their attached cache; other environments fall back to
+an ephemeral cache when that path is unavailable. Shell-only jobs and action
+jobs whose resolved trees contain only shell steps, native adapters, or Docker
+do not require or install mise.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -186,7 +190,7 @@ runtime behavior. JSON output is available with `--format json`.
 | Job | Command job |
 | Matrix entry | Command job with a stable key |
 | `needs` | `depends_on` plus verified result transport |
-| `runs-on` | Fail-closed queue policy |
+| `runs-on` | Linux compatibility validation; Buildkite default agent targeting |
 | `concurrency.group` | Repository-scoped Buildkite concurrency group or workflow gate |
 | Job output | Producer-attributed result artifact |
 | Step | Runs inside the job compatibility runtime |

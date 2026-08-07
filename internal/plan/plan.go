@@ -99,7 +99,7 @@ type Workflow struct {
 
 type Target struct {
 	StepKey string `json:"step_key"`
-	Queue   string `json:"queue"`
+	Queue   string `json:"queue,omitempty"`
 }
 
 type Need struct {
@@ -368,9 +368,6 @@ func (job Job) Validate() error {
 		return fmt.Errorf("job plan %s does not support requires_mise", job.Schema)
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
-		if len(job.Actions) == 0 {
-			return fmt.Errorf("job plan requires_mise may be false only for a resolved action graph")
-		}
 		for _, step := range job.Steps {
 			if (step.Kind == "uses" || step.Uses != "") && step.Action == nil {
 				return fmt.Errorf("job plan requires_mise may be false only when every action has an immutable selector")
@@ -389,8 +386,14 @@ func (job Job) Validate() error {
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
 	}
-	if !targetPattern.MatchString(job.Target.StepKey) || !targetPattern.MatchString(job.Target.Queue) {
-		return fmt.Errorf("job plan requires a target step key and queue")
+	if !targetPattern.MatchString(job.Target.StepKey) {
+		return fmt.Errorf("job plan requires a target step key")
+	}
+	if job.Schema != SchemaV7 && !targetPattern.MatchString(job.Target.Queue) {
+		return fmt.Errorf("job plan %s requires a target queue", job.Schema)
+	}
+	if job.Target.Queue != "" && !targetPattern.MatchString(job.Target.Queue) {
+		return fmt.Errorf("job plan has invalid target queue %q", job.Target.Queue)
 	}
 	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
 		return fmt.Errorf("job timeout_minutes must be between 0 and 360")

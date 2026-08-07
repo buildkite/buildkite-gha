@@ -49,13 +49,26 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] --runtime-queue hosted <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] [--runtime-queue hosted] <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
+}
+
+func writeCommandHelp(stdout io.Writer, command string) {
+	_, _ = fmt.Fprint(stdout, commandUsage[command])
+	switch command {
+	case "validate":
+		_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
+	case "compile":
+		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+	case "upload":
+		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n", targetQueueEnvironment)
+	}
 }
 
 const (
 	resultPublicationTimeout = 10 * time.Second
-	unprivilegedRuntimeQueue = "hosted"
+	legacyRuntimeQueue       = "hosted"
+	targetQueueEnvironment   = "BUILDKITE_GHA_TARGET_QUEUE"
 	hostedTokenlessProfile   = "hosted-tokenless"
 	runtimeMiseArchiveDigest = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest  = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
@@ -90,18 +103,9 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
 		return 0
 	default:
-		if commandHelp, ok := commandUsage[args[0]]; ok {
+		if _, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-				_, _ = fmt.Fprint(stdout, commandHelp)
-				if args[0] == "compile" {
-					_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
-				}
-				if args[0] == "validate" {
-					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
-				}
-				if args[0] == "upload" {
-					_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
-				}
+				writeCommandHelp(stdout, args[0])
 				return 0
 			}
 			switch args[0] {
@@ -132,21 +136,11 @@ func help(args []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, "help accepts at most one command")
 	}
 
-	commandHelp, ok := commandUsage[args[0]]
-	if !ok {
+	if _, ok := commandUsage[args[0]]; !ok {
 		return usageError(stderr, "unknown command %q", args[0])
 	}
 
-	_, _ = fmt.Fprint(stdout, commandHelp)
-	if args[0] == "validate" {
-		_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
-	}
-	if args[0] == "compile" {
-		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
-	}
-	if args[0] == "upload" {
-		_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
-	}
+	writeCommandHelp(stdout, args[0])
 	return 0
 }
 
@@ -845,13 +839,16 @@ func runJobArgs(args []string) (planPath, resultPath string, err error) {
 func verifyBuildkiteTarget(job plan.Job) error {
 	stepKey := os.Getenv("BUILDKITE_STEP_KEY")
 	queue := os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE")
-	if os.Getenv("BUILDKITE") != "" && (stepKey == "" || queue == "") {
-		return fmt.Errorf("buildkite execution requires BUILDKITE_STEP_KEY and BUILDKITE_AGENT_META_DATA_QUEUE")
+	if os.Getenv("BUILDKITE") != "" && stepKey == "" {
+		return fmt.Errorf("buildkite execution requires BUILDKITE_STEP_KEY")
+	}
+	if os.Getenv("BUILDKITE") != "" && job.Target.Queue != "" && queue == "" {
+		return fmt.Errorf("buildkite execution with an explicit target queue requires BUILDKITE_AGENT_META_DATA_QUEUE")
 	}
 	if stepKey != "" && stepKey != job.Target.StepKey {
 		return fmt.Errorf("plan targets step %q, executing step is %q", job.Target.StepKey, stepKey)
 	}
-	if queue != "" && queue != job.Target.Queue {
+	if job.Target.Queue != "" && queue != "" && queue != job.Target.Queue {
 		return fmt.Errorf("plan targets queue %q, executing queue is %q", job.Target.Queue, queue)
 	}
 	return nil
@@ -906,7 +903,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", false)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -1062,9 +1059,13 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, _, privateCheckout, err := uploadArgs(args)
+	workflowPath, eventPath, privateCheckout, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
+	}
+	targetQueue, targetQueueConfigured := os.LookupEnv(targetQueueEnvironment)
+	if targetQueueConfigured && targetQueue == "" {
+		return usageError(stderr, "upload: %s must name a non-empty queue when set", targetQueueEnvironment)
 	}
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
@@ -1092,7 +1093,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), privateCheckout)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, privateCheckout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1149,7 +1150,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, privateCheckout bool) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string, privateCheckout bool) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -1165,13 +1166,16 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		ResolveActions: privateCheckout,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
-				"ubuntu-latest": unprivilegedRuntimeQueue,
-				"ubuntu-24.04":  unprivilegedRuntimeQueue,
-				"ubuntu-22.04":  unprivilegedRuntimeQueue,
+				"ubuntu-latest": targetQueue,
+				"ubuntu-24.04":  targetQueue,
+				"ubuntu-22.04":  targetQueue,
 			},
-			UntrustedQueues: []string{unprivilegedRuntimeQueue},
+			AllowUntrustedDefaultQueue: targetQueue == "",
 		},
 		PrivateCheckout: privateCheckout,
+	}
+	if targetQueue != "" {
+		options.Runners.UntrustedQueues = []string{targetQueue}
 	}
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
@@ -1273,14 +1277,15 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 	return false
 }
 
-func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, privateCheckout bool, err error) {
+func uploadArgs(args []string) (workflowPath, eventPath string, privateCheckout bool, err error) {
 	filtered := make([]string, 0, len(args))
+	runtimeQueue := ""
 	runtimeQueueSeen := false
 	privateCheckoutSeen := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--private-checkout" {
 			if privateCheckoutSeen {
-				return "", "", "", false, fmt.Errorf("--private-checkout may only be specified once")
+				return "", "", false, fmt.Errorf("--private-checkout may only be specified once")
 			}
 			privateCheckoutSeen = true
 			privateCheckout = true
@@ -1291,26 +1296,23 @@ func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, pr
 			continue
 		}
 		if runtimeQueueSeen {
-			return "", "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
+			return "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
 		}
 		runtimeQueueSeen = true
 		i++
 		if i == len(args) {
-			return "", "", "", false, fmt.Errorf("--runtime-queue requires a queue")
+			return "", "", false, fmt.Errorf("--runtime-queue requires a queue")
 		}
 		runtimeQueue = args[i]
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
 	if err != nil {
-		return "", "", "", false, err
+		return "", "", false, err
 	}
-	if !runtimeQueueSeen {
-		return "", "", "", false, fmt.Errorf("--runtime-queue %s is required for unprivileged upload", unprivilegedRuntimeQueue)
+	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
+		return "", "", false, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
 	}
-	if runtimeQueue != unprivilegedRuntimeQueue {
-		return "", "", "", false, fmt.Errorf("--runtime-queue must be %q for unprivileged upload", unprivilegedRuntimeQueue)
-	}
-	return workflowPath, eventPath, runtimeQueue, privateCheckout, err
+	return workflowPath, eventPath, privateCheckout, err
 }
 
 func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {

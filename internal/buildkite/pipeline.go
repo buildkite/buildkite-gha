@@ -49,10 +49,10 @@ func DistributionPath(digest string) (string, error) {
 	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
 }
 
-// MiseDataDir returns the runtime-owned hosted cache path for the required
-// mise version. The generated cache path triggers Buildkite's documented
-// /cache/bkcache volume mount; cache contents are an accelerator, never an
-// authority.
+// MiseDataDir returns the runtime-owned managed cache path for the required
+// mise version. Hosted Agents mount this path automatically; other agent
+// environments fall back to an ephemeral cache when it is unavailable. Cache
+// contents are an accelerator, never an authority.
 func MiseDataDir() string {
 	return "/cache/bkcache/buildkite-gha/mise/" + MinimumMiseVersion
 }
@@ -132,8 +132,10 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		commands = append(commands, `"$distribution" run-job --plan "$plan"`)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(&out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
-		_, _ = fmt.Fprintf(&out, "%sagents:\n", attributeIndent)
-		_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+		if job.Queue != "" {
+			_, _ = fmt.Fprintf(&out, "%sagents:\n", attributeIndent)
+			_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+		}
 		_, _ = fmt.Fprintf(&out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
@@ -181,8 +183,10 @@ func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, lab
 	_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(label))
 	_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(key))
 	_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar("true"))
-	_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
-	_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(gate.Queue))
+	if gate.Queue != "" {
+		_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(gate.Queue))
+	}
 	_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 	_, _ = fmt.Fprintf(out, "%sconcurrency: 1\n", attributeIndent)
 	_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(gate.Group))
@@ -199,7 +203,7 @@ func validateConcurrencyGate(gate *ConcurrencyGate) error {
 	if gate.Group == "" || len(gate.Group) > maxConcurrencyGroupLength {
 		return fmt.Errorf("invalid workflow concurrency group")
 	}
-	if !identifierPattern.MatchString(gate.Queue) {
+	if gate.Queue != "" && !identifierPattern.MatchString(gate.Queue) {
 		return fmt.Errorf("workflow concurrency gate has invalid queue %q", gate.Queue)
 	}
 	return nil
@@ -305,7 +309,7 @@ func validateJob(compilerStep string, job Job) error {
 	if job.Label == "" {
 		return fmt.Errorf("job %q requires a label", job.Key)
 	}
-	if !identifierPattern.MatchString(job.Queue) {
+	if job.Queue != "" && !identifierPattern.MatchString(job.Queue) {
 		return fmt.Errorf("job %q has invalid queue %q", job.Key, job.Queue)
 	}
 	if _, err := PlanPath(job.PlanDigest); err != nil {

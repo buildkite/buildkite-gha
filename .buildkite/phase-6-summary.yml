@@ -4,6 +4,8 @@ agents:
 steps:
   - label: ":memo: Phase 6 summary annotation importer"
     key: "phase-6-summary-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 15
     retry:
       automatic: false

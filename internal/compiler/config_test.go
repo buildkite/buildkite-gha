@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 func TestCompileOptionsSnapshotVarsWithDeterministicPrecedence(t *testing.T) {
@@ -187,7 +189,7 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	}
 }
 
-func TestDefaultCompilePolicyIsUntrustedAndFixedToTokenlessQueue(t *testing.T) {
+func TestDefaultCompilePolicyIsUntrustedAndUsesBuildkiteDefault(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	compiled, err := Compile("default.yml", workflow, pushEvent(t))
 	if err != nil {
@@ -197,12 +199,42 @@ func TestDefaultCompilePolicyIsUntrustedAndFixedToTokenlessQueue(t *testing.T) {
 	if err := json.Unmarshal(compiled, &ir); err != nil {
 		t.Fatal(err)
 	}
-	if ir.Event.Trust != EventUntrusted || ir.Jobs[0].Queue != "gha-untrusted" {
+	if ir.Event.Trust != EventUntrusted || ir.Jobs[0].Queue != "" {
 		t.Fatalf("default compiler trust boundary = event %q, queue %q", ir.Event.Trust, ir.Jobs[0].Queue)
 	}
 	_, err = CompilePlans("default.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "privileged")
-	if err == nil || !strings.Contains(err.Error(), `unattested event snapshots may only target queue "gha-untrusted"`) {
+	if err == nil || !strings.Contains(err.Error(), "use CompilePlansWithOptions for explicit queue policy") {
 		t.Fatalf("CompilePlans() privileged default error = %v", err)
+	}
+	plans, err := CompilePlans("default.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.SchemaV2 {
+		t.Fatalf("CompilePlans() explicit legacy target = %#v", plans)
+	}
+}
+
+func TestUntrustedDefaultQueueRequiresExplicitPolicy(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: [ubuntu-latest, linux]\n    steps:\n      - run: true\n")
+	options := Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{Labels: map[string]string{
+			"ubuntu-latest": "",
+			"linux":         "",
+		}},
+	}
+	if _, err := CompileWithOptions("default.yml", workflow, pushEvent(t), options); err == nil || !strings.Contains(err.Error(), "cannot use Buildkite default agent targeting") {
+		t.Fatalf("CompileWithOptions() error = %v, want default-targeting policy rejection", err)
+	}
+	options.Runners.AllowUntrustedDefaultQueue = true
+	if _, err := CompileWithOptions("default.yml", workflow, pushEvent(t), options); err != nil {
+		t.Fatalf("CompileWithOptions() explicit default policy error = %v", err)
+	}
+	options.EventTrust = EventTrusted
+	options.Runners.Labels["linux"] = "explicit"
+	if _, err := CompileWithOptions("default.yml", workflow, pushEvent(t), options); err == nil || !strings.Contains(err.Error(), "conflicting queues") {
+		t.Fatalf("CompileWithOptions() mixed default/explicit error = %v", err)
 	}
 }
 

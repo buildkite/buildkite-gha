@@ -210,10 +210,17 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 
 // CompilePlans connects the owned compiler IR to one versioned plan per job instance.
 func CompilePlans(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, targetQueue string) ([]plan.Job, error) {
-	if targetQueue != "gha-untrusted" {
-		return nil, fmt.Errorf("unattested event snapshots may only target queue %q; use CompilePlansWithOptions for authenticated events", "gha-untrusted")
+	if targetQueue != "" && targetQueue != "gha-untrusted" {
+		return nil, fmt.Errorf("unsupported target queue %q for unattested event snapshot; use CompilePlansWithOptions for explicit queue policy", targetQueue)
 	}
 	options := defaultOptions()
+	if targetQueue != "" {
+		for label := range options.Runners.Labels {
+			options.Runners.Labels[label] = targetQueue
+		}
+		options.Runners.UntrustedQueues = []string{targetQueue}
+		options.Runners.AllowUntrustedDefaultQueue = false
+	}
 	return CompilePlansWithOptions(path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
 }
 
@@ -290,7 +297,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		}
 		jobSchema := plan.Schema
 		var actions []plan.ActionLock
-		var requiresMise bool
+		requiresMise := len(actionRefs) != 0
 		var capabilities []string
 		var authorization PlanAuthorization
 		lockActions := options.ResolveActions
@@ -434,6 +441,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			capabilities = append(capabilities, "provider-token-write")
 			authorization.ProviderTokenWriteCapabilitySources = []string{"workflow-permissions"}
 		}
+		if instance.Queue == "" {
+			jobSchema = plan.SchemaV7
+		}
 		if len(secrets) != 0 {
 			capabilities = append(capabilities, "secrets")
 		}
@@ -472,7 +482,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			Steps:                   steps,
 			Actions:                 actions,
 		}
-		if len(actions) != 0 {
+		if jobSchema == plan.SchemaV7 {
 			job.RequiresMise = &requiresMise
 		}
 		if instance.Container != nil {

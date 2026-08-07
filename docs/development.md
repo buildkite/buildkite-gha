@@ -79,9 +79,12 @@ outside production admission.
 Every Buildkite build runs `.github/workflows/example-basic.yml` through the
 released plugin with `buildkite-gha-source-ref` set to the build's exact commit.
 This proves a pull request's unreleased CLI source through the public plugin
-before a CLI release exists. The released-plugin demos remain separate because
-they verify release archives, checksums, and the normal default installation
-path rather than source execution.
+before a CLI release exists. The importer explicitly sets
+`BUILDKITE_GHA_TARGET_QUEUE=hosted`, so this repository's smoke continues to
+exercise its intended queue while default uploads omit agent targeting. The
+released-plugin demos remain separate because they verify release archives,
+checksums, and the normal default installation path rather than source
+execution.
 
 ### Paired native UX runs
 
@@ -116,7 +119,9 @@ bk build create --pipeline buildkite/buildkite-gha \
 ```
 
 The aggregate retains each phase's importer and continuation topology. Use a
-phase selector only for targeted diagnosis:
+phase selector only for targeted diagnosis. Importer steps that generate jobs
+set `BUILDKITE_GHA_TARGET_QUEUE=hosted`; this keeps these hosted-specific proofs
+explicit rather than relying on deployment defaults.
 
 | Coverage | Build environment |
 | --- | --- |
