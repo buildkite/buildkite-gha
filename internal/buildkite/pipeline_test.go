@@ -134,6 +134,82 @@ func TestEmitMergesIntoContainingGroup(t *testing.T) {
 	}
 }
 
+func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		ConcurrencyGate:    &ConcurrencyGate{Group: "buildkite-gha/concurrency/group", Queue: "hosted"},
+		Jobs: []Job{
+			{Key: "producer", Label: "Producer", Queue: "hosted", PlanDigest: testDigest("producer")},
+			{Key: "consumer", Label: "Consumer", Queue: "hosted", PlanDigest: testDigest("consumer"), Dependencies: []string{"producer"}},
+		},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Label            string `yaml:"label"`
+			Key              string `yaml:"key"`
+			Concurrency      int    `yaml:"concurrency"`
+			ConcurrencyGroup string `yaml:"concurrency_group"`
+			DependsOn        []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 4 {
+		t.Fatalf("steps = %#v\n%s", document.Steps, output)
+	}
+	openKey, closeKey := concurrencyGateKeys(pipeline.CompilerStep, pipeline.ConcurrencyGate.Group, pipeline.Jobs)
+	open, producer, consumer, close := document.Steps[0], document.Steps[1], document.Steps[2], document.Steps[3]
+	if open.Key != openKey || open.Concurrency != 1 || open.ConcurrencyGroup != pipeline.ConcurrencyGate.Group || len(open.DependsOn) != 1 || open.DependsOn[0].Step != "importer" || open.DependsOn[0].AllowFailure {
+		t.Fatalf("opening gate = %#v", open)
+	}
+	for _, job := range []struct {
+		step struct {
+			Label            string `yaml:"label"`
+			Key              string `yaml:"key"`
+			Concurrency      int    `yaml:"concurrency"`
+			ConcurrencyGroup string `yaml:"concurrency_group"`
+			DependsOn        []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		}
+		logicalDependency string
+	}{{producer, ""}, {consumer, "producer"}} {
+		if len(job.step.DependsOn) < 2 || job.step.DependsOn[1].Step != openKey || job.step.DependsOn[1].AllowFailure {
+			t.Fatalf("job %q does not strictly depend on opening gate: %#v", job.step.Key, job.step.DependsOn)
+		}
+		if job.logicalDependency != "" && (len(job.step.DependsOn) != 3 || job.step.DependsOn[2].Step != job.logicalDependency || !job.step.DependsOn[2].AllowFailure) {
+			t.Fatalf("job %q logical dependencies = %#v", job.step.Key, job.step.DependsOn)
+		}
+	}
+	if close.Key != closeKey || close.Concurrency != 1 || close.ConcurrencyGroup != pipeline.ConcurrencyGate.Group || len(close.DependsOn) != 3 {
+		t.Fatalf("closing gate = %#v", close)
+	}
+	for _, dependency := range close.DependsOn[1:] {
+		if !dependency.AllowFailure {
+			t.Fatalf("closing gate has strict generated dependency: %#v", close.DependsOn)
+		}
+	}
+}
+
+func TestConcurrencyGateKeysIncludeCompilerStep(t *testing.T) {
+	jobs := []Job{{Key: "job"}}
+	firstOpen, firstClose := concurrencyGateKeys("first-importer", "shared-group", jobs)
+	secondOpen, secondClose := concurrencyGateKeys("second-importer", "shared-group", jobs)
+	if firstOpen == secondOpen || firstClose == secondClose {
+		t.Fatalf("same-group imports have colliding gate keys: %q, %q and %q, %q", firstOpen, firstClose, secondOpen, secondClose)
+	}
+}
+
 func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
@@ -233,6 +309,8 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		{name: "UUID key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "123e4567-e89b-12d3-a456-426614174000", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "bad digest", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: "sha256:nope"}}}, want: "invalid plan digest"},
 		{name: "partial concurrency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Concurrency: 2}}}, want: "concurrency and concurrency group together"},
+		{name: "empty workflow concurrency group", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, ConcurrencyGate: &ConcurrencyGate{Queue: "queue"}, Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid workflow concurrency group"},
+		{name: "long job concurrency group", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Concurrency: 1, ConcurrencyGroup: strings.Repeat("x", maxConcurrencyGroupLength+1)}}}, want: "concurrency group exceeds"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

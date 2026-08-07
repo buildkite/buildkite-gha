@@ -105,6 +105,215 @@ func TestCompileBundleDoesNotExposeEventValues(t *testing.T) {
 	}
 }
 
+func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
+	source := []byte(`name: Deployment
+on: push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  static:
+    strategy:
+      max-parallel: 2
+      matrix:
+        target: [one, two]
+    runs-on: ubuntu-latest
+    concurrency: Deploy
+    steps: [{run: true}]
+  dynamic:
+    strategy:
+      matrix:
+        target: [alpha, beta]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ matrix.target }}
+    steps: [{run: true}]
+`)
+	bundle, err := CompileBundle("concurrency.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.IR.Workflow.ConcurrencyGroup != "Deployment-refs/heads/main" || len(bundle.IR.Jobs) != 4 {
+		t.Fatalf("concurrency IR = workflow %q jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
+	}
+	repository := bundle.IR.Event.Repository
+	wantJobGroups := make(map[string]string, len(bundle.IR.Jobs))
+	for _, job := range bundle.IR.Jobs {
+		want := "Deploy"
+		if job.LogicalJobID == "dynamic" {
+			want = "deploy-" + job.Matrix["target"].(string)
+		}
+		if job.ConcurrencyGroup != want {
+			t.Fatalf("job %q concurrency group = %q, want %q", job.Key, job.ConcurrencyGroup, want)
+		}
+		wantJobGroups[job.Key] = buildkiteConcurrencyGroup(repository, want)
+	}
+	if buildkiteConcurrencyGroup(repository, "Deploy") != buildkiteConcurrencyGroup(repository, "deploy") {
+		t.Fatal("Buildkite concurrency group did not preserve GitHub's case-insensitive grouping")
+	}
+
+	var document struct {
+		Steps []struct {
+			Key              string `yaml:"key"`
+			Concurrency      int    `yaml:"concurrency"`
+			ConcurrencyGroup string `yaml:"concurrency_group"`
+			DependsOn        []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 6 {
+		t.Fatalf("pipeline steps = %#v\n%s", document.Steps, bundle.Pipeline)
+	}
+	wantWorkflowGroup := buildkiteConcurrencyGroup(repository, bundle.IR.Workflow.ConcurrencyGroup)
+	if document.Steps[0].Concurrency != 1 || document.Steps[0].ConcurrencyGroup != wantWorkflowGroup || document.Steps[5].Concurrency != 1 || document.Steps[5].ConcurrencyGroup != wantWorkflowGroup {
+		t.Fatalf("workflow gate groups = %#v / %#v, want %q", document.Steps[0], document.Steps[5], wantWorkflowGroup)
+	}
+	openKey := document.Steps[0].Key
+	for _, step := range document.Steps[1:5] {
+		if step.Concurrency != 1 || step.ConcurrencyGroup != wantJobGroups[step.Key] {
+			t.Fatalf("generated job concurrency = %#v, want %q", step, wantJobGroups[step.Key])
+		}
+		if len(step.DependsOn) < 2 || step.DependsOn[1].Step != openKey || step.DependsOn[1].AllowFailure {
+			t.Fatalf("generated job gate dependency = %#v", step.DependsOn)
+		}
+	}
+	if len(document.Steps[5].DependsOn) != 5 {
+		t.Fatalf("closing gate dependencies = %#v", document.Steps[5].DependsOn)
+	}
+	for _, dependency := range document.Steps[5].DependsOn[1:] {
+		if !dependency.AllowFailure {
+			t.Fatalf("closing gate dependency is strict: %#v", document.Steps[5].DependsOn)
+		}
+	}
+}
+
+func TestCompileRejectsMatrixVaryingConcurrencyWithMaxParallel(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      max-parallel: 2
+      matrix:
+        target: [one, two]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ matrix.target }}
+    steps: [{run: true}]
+`)
+	_, err := CompileBundle("concurrency.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel") {
+		t.Fatalf("CompileBundle() error = %v, want matrix concurrency conflict", err)
+	}
+}
+
+func TestCompileAllowsCaseEquivalentMatrixConcurrencyWithMaxParallel(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      max-parallel: 2
+      matrix:
+        target: [Prod, prod]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ matrix.target }}
+    steps: [{run: true}]
+`)
+	bundle, err := CompileBundle("concurrency.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 2 || bundle.IR.Jobs[0].ConcurrencyGroup == bundle.IR.Jobs[1].ConcurrencyGroup {
+		t.Fatalf("resolved concurrency groups = %#v", bundle.IR.Jobs)
+	}
+	for _, group := range []string{bundle.IR.Jobs[0].ConcurrencyGroup, bundle.IR.Jobs[1].ConcurrencyGroup} {
+		if buildkiteConcurrencyGroup(bundle.IR.Event.Repository, group) != buildkiteConcurrencyGroup(bundle.IR.Event.Repository, "deploy-prod") {
+			t.Fatalf("group %q did not canonicalize case-insensitively", group)
+		}
+	}
+}
+
+func TestValidateDefersRequiredGitHubConcurrencyValues(t *testing.T) {
+	source := []byte(`on: push
+concurrency: validate-${{ github.ref }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    concurrency: test-${{ github.sha }}
+    steps: [{run: true}]
+`)
+	if _, err := Validate("concurrency.yml", source); err != nil {
+		t.Fatalf("Validate() rejected event-backed concurrency: %v", err)
+	}
+}
+
+func TestCanonicalWorkflowNameIsRepositoryRelative(t *testing.T) {
+	relative := smokePath(".github", "workflows", "shell.yml")
+	absolute, err := filepath.Abs(relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ".github/workflows/shell.yml"
+	if got := canonicalWorkflowName(relative); got != want {
+		t.Fatalf("canonicalWorkflowName(relative) = %q, want %q", got, want)
+	}
+	if got := canonicalWorkflowName(absolute); got != want {
+		t.Fatalf("canonicalWorkflowName(absolute) = %q, want %q", got, want)
+	}
+}
+
+func TestCompileResolvesReusableJobConcurrencyInputs(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ inputs.target }}
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: production
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].ConcurrencyGroup != "deploy-production" {
+		t.Fatalf("reusable job concurrency = %#v", bundle.IR.Jobs)
+	}
+}
+
+func TestCompileRejectsCalledWorkflowConcurrency(t *testing.T) {
+	repository := t.TempDir()
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+concurrency: reusable
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+`)
+	_, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "workflow concurrency in a called reusable workflow is unsupported") {
+		t.Fatalf("CompileBundle() error = %v, want called workflow concurrency rejection", err)
+	}
+}
+
 func TestCompileBundleDeclaresSecretCapabilityAndNames(t *testing.T) {
 	source := []byte("name: secrets\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets['deploy_token'] }}\n    steps:\n      - run: echo \\\"${{ secrets.CANARY }}\\\"\n")
 	event := readFile(t, smokePath("events", "push.json"))

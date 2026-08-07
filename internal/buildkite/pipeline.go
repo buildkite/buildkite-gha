@@ -4,6 +4,7 @@ package buildkite
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
+const maxConcurrencyGroupLength = 200
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
@@ -27,7 +29,15 @@ type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string
 	GroupLabel         string
+	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
+}
+
+// ConcurrencyGate serializes an entire generated workflow while allowing the
+// jobs between its opening and closing steps to run in parallel.
+type ConcurrencyGate struct {
+	Group string
+	Queue string
 }
 
 // DistributionPath returns the fixed local path for a content-addressed
@@ -79,6 +89,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateConcurrencyGate(pipeline.ConcurrencyGate); err != nil {
+		return nil, err
+	}
 	distributionPath, err := DistributionPath(pipeline.DistributionDigest)
 	if err != nil {
 		return nil, err
@@ -92,6 +105,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
+	var gateOpenKey, gateCloseKey string
+	if pipeline.ConcurrencyGate != nil {
+		gateOpenKey, gateCloseKey = concurrencyGateKeys(pipeline.CompilerStep, pipeline.ConcurrencyGate.Group, jobs)
+		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Start workflow concurrency", gateOpenKey, pipeline.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
+	}
 	for _, job := range jobs {
 		planPath, err := PlanPath(job.PlanDigest)
 		if err != nil {
@@ -136,11 +154,84 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		_, _ = fmt.Fprintf(&out, "%sdepends_on:\n", attributeIndent)
 		_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
+		if gateOpenKey != "" {
+			_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(gateOpenKey), attributeIndent)
+		}
 		for _, dependency := range job.Dependencies {
 			_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
 		}
 	}
+	if pipeline.ConcurrencyGate != nil {
+		dependencies := make([]dependency, 0, len(jobs)+1)
+		dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
+		for _, job := range jobs {
+			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
+		}
+		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", gateCloseKey, pipeline.ConcurrencyGate, dependencies)
+	}
 	return out.Bytes(), nil
+}
+
+type dependency struct {
+	Step         string
+	AllowFailure bool
+}
+
+func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, label, key string, gate *ConcurrencyGate, dependencies []dependency) {
+	_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(label))
+	_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(key))
+	_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar("true"))
+	_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
+	_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(gate.Queue))
+	_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
+	_, _ = fmt.Fprintf(out, "%sconcurrency: 1\n", attributeIndent)
+	_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(gate.Group))
+	_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
+	for _, dependency := range dependencies {
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: %t\n", attributeIndent, yamlScalar(dependency.Step), attributeIndent, dependency.AllowFailure)
+	}
+}
+
+func validateConcurrencyGate(gate *ConcurrencyGate) error {
+	if gate == nil {
+		return nil
+	}
+	if gate.Group == "" || len(gate.Group) > maxConcurrencyGroupLength {
+		return fmt.Errorf("invalid workflow concurrency group")
+	}
+	if !identifierPattern.MatchString(gate.Queue) {
+		return fmt.Errorf("workflow concurrency gate has invalid queue %q", gate.Queue)
+	}
+	return nil
+}
+
+func concurrencyGateKeys(compilerStep, group string, jobs []Job) (string, string) {
+	digest := sha256Sum(compilerStep + "\x00" + group)
+	used := map[string]struct{}{compilerStep: {}}
+	for _, job := range jobs {
+		used[job.Key] = struct{}{}
+	}
+	open := uniqueStepKey("gha-concurrency-start-"+digest, used)
+	used[open] = struct{}{}
+	close := uniqueStepKey("gha-concurrency-finish-"+digest, used)
+	return open, close
+}
+
+func sha256Sum(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", digest[:6])
+}
+
+func uniqueStepKey(base string, used map[string]struct{}) string {
+	if _, exists := used[base]; !exists {
+		return base
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s-%d", base, suffix)
+		if _, exists := used[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 func shellQuote(value string) string {
@@ -225,6 +316,9 @@ func validateJob(compilerStep string, job Job) error {
 	}
 	if job.Concurrency > 0 && job.ConcurrencyGroup == "" || job.Concurrency == 0 && job.ConcurrencyGroup != "" {
 		return fmt.Errorf("job %q requires concurrency and concurrency group together", job.Key)
+	}
+	if len(job.ConcurrencyGroup) > maxConcurrencyGroupLength {
+		return fmt.Errorf("job %q concurrency group exceeds %d characters", job.Key, maxConcurrencyGroupLength)
 	}
 	for _, dependency := range job.Dependencies {
 		if !validStepKey(dependency) || dependency == compilerStep || dependency == job.Key {

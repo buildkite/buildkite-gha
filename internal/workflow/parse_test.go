@@ -155,44 +155,115 @@ func TestContainerValidationIsScopedAndSourceLocated(t *testing.T) {
 	}
 }
 
-func TestParseRejectsWorkflowAndJobConcurrencyWithLocation(t *testing.T) {
+func TestParseOwnsWorkflowAndJobConcurrency(t *testing.T) {
+	source := []byte(`name: concurrency
+on: push
+concurrency:
+  group: workflow-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("concurrency.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Concurrency == nil || parsed.Concurrency.Group != "workflow-${{ github.ref }}" || parsed.Concurrency.Span.Start.Line != 4 {
+		t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
+	}
+	if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil || parsed.Jobs[0].Concurrency.Group != "deploy" || parsed.Jobs[0].Concurrency.Span.Start.Line != 9 {
+		t.Fatalf("job concurrency = %#v", parsed.Jobs)
+	}
+}
+
+func TestParseOwnsAliasedConcurrency(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		workflow     bool
+	}{
+		{
+			name:     "workflow-key",
+			source:   "on: push\nenv:\n  FIELD: &field concurrency\n*field: deploy\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+			workflow: true,
+		},
+		{
+			name:   "jobs-and-job-keys",
+			source: "on: push\nenv:\n  JOBS: &jobs jobs\n  FIELD: &field concurrency\n*jobs:\n  test:\n    runs-on: ubuntu-latest\n    *field: deploy\n    steps: [{run: true}]\n",
+		},
+		{
+			name:   "whole-job",
+			source: "on: push\njobs:\n  anchor-holder:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include:\n          - &shared-job\n            runs-on: ubuntu-latest\n            concurrency: deploy\n            steps:\n              - run: echo ok\n    steps:\n      - run: echo holder\n  test: *shared-job\n",
+		},
+		{
+			name:   "job-id",
+			source: "on: push\nenv:\n  ID: &job-id test\njobs:\n  *job-id:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := Parse("concurrency.yml", []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.workflow {
+				if parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy" {
+					t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
+				}
+				return
+			}
+			found := false
+			for _, job := range parsed.Jobs {
+				if job.ID == "test" && job.Concurrency != nil && job.Concurrency.Group == "deploy" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("jobs = %#v, want test concurrency group", parsed.Jobs)
+			}
+		})
+	}
+}
+
+func TestParseRejectsConcurrencyCancellationWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, source, want string
 	}{
 		{
 			name:   "workflow",
-			source: "on: push\nconcurrency:\n  group: build-${{ github.ref }}\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			want:   "concurrency.yml:2:1: workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite",
+			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: true\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+			want:   "concurrency.yml:4:23: workflow concurrency cancel-in-progress is unsupported",
+		},
+		{
+			name:   "workflow-uppercase",
+			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: TRUE\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+			want:   "concurrency.yml:4:23: workflow concurrency cancel-in-progress is unsupported",
 		},
 		{
 			name:   "job",
-			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
-			want:   "concurrency.yml:5:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: true}\n    steps: [{run: true}]\n",
+			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "workflow-alias",
-			source: "on: push\nenv:\n  FIELD: &field concurrency\n*field: deploy\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
-			want:   "concurrency.yml:4:1: workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite",
+			name:   "job-title-case",
+			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: True}\n    steps: [{run: true}]\n",
+			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "jobs-and-job-aliases",
-			source: "on: push\nenv:\n  JOBS: &jobs jobs\n  FIELD: &field concurrency\n*jobs:\n  test:\n    runs-on: ubuntu-latest\n    *field: deploy\n    steps: [{run: true}]\n",
-			want:   "concurrency.yml:8:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+			name:   "aliased-true",
+			source: "on: push\nenv:\n  CANCEL: &cancel TRUE\nconcurrency:\n  group: deploy\n  cancel-in-progress: *cancel\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+			want:   "workflow concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "aliased-job",
-			source: "on: push\njobs:\n  anchor-holder:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        include:\n          - &shared-job\n            runs-on: ubuntu-latest\n            concurrency: deploy\n            steps:\n              - run: echo ok\n    steps:\n      - run: echo holder\n  test: *shared-job\n",
-			want:   "concurrency.yml:10:13: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
-		},
-		{
-			name:   "aliased-job-id",
-			source: "on: push\nenv:\n  ID: &job-id test\njobs:\n  *job-id:\n    runs-on: ubuntu-latest\n    concurrency: deploy\n    steps: [{run: true}]\n",
-			want:   "concurrency.yml:7:5: job \"test\" concurrency is unsupported; only strategy.max-parallel is translated",
+			name:   "expression",
+			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
+			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := Parse("concurrency.yml", []byte(test.source))
-			if err == nil || err.Error() != test.want {
+			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
 			}
 		})

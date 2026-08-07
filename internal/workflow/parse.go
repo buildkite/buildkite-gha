@@ -41,7 +41,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := validateRawContainers(path, &document); err != nil {
 		return nil, err
 	}
-	if err := validateRawConcurrency(path, &document); err != nil {
+	if err := validateRawConcurrencyCancellation(path, &document); err != nil {
 		return nil, err
 	}
 	concurrency, err := parseConcurrencySyntax(path, &document)
@@ -60,6 +60,10 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	owned := &Workflow{}
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
+	}
+	owned.Concurrency, err = adaptConcurrency(path, "", parsed.Concurrency)
+	if err != nil {
+		return nil, err
 	}
 	owned.Permissions, err = adaptPermissions(path, parsed.Permissions)
 	if err != nil {
@@ -193,13 +197,20 @@ func validateRawContainers(path string, document *yaml.Node) error {
 	return nil
 }
 
-func validateRawConcurrency(path string, document *yaml.Node) error {
+func rawError(path string, node *yaml.Node, message string) error {
+	return fmt.Errorf("%s:%d:%d: %s", path, node.Line, node.Column, message)
+}
+
+// actionlint v1.7.12 compares YAML boolean text case-sensitively, even though
+// YAML accepts True and TRUE. Decode cancellation booleans from the raw tree so
+// no true spelling can be silently adapted as false.
+func validateRawConcurrencyCancellation(path string, document *yaml.Node) error {
 	root := document
 	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
 		root = root.Content[0]
 	}
-	if key := mappingKey(root, "concurrency"); key != nil {
-		return rawError(path, key, "workflow concurrency is unsupported; configure equivalent concurrency behavior in Buildkite")
+	if err := validateRawConcurrencyCancellationValue(path, "", mappingValue(root, "concurrency")); err != nil {
+		return err
 	}
 	jobs := mappingValue(root, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
@@ -207,15 +218,29 @@ func validateRawConcurrency(path string, document *yaml.Node) error {
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
 		name, job := resolveAlias(jobs.Content[i]), jobs.Content[i+1]
-		if key := mappingKey(job, "concurrency"); key != nil {
-			return rawError(path, key, fmt.Sprintf("job %q concurrency is unsupported; only strategy.max-parallel is translated", name.Value))
+		if err := validateRawConcurrencyCancellationValue(path, name.Value, mappingValue(job, "concurrency")); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-func rawError(path string, node *yaml.Node, message string) error {
-	return fmt.Errorf("%s:%d:%d: %s", path, node.Line, node.Column, message)
+func validateRawConcurrencyCancellationValue(path, jobID string, concurrency *yaml.Node) error {
+	if concurrency == nil || concurrency.Kind != yaml.MappingNode {
+		return nil
+	}
+	cancel := mappingValue(concurrency, "cancel-in-progress")
+	if cancel == nil || cancel.Kind != yaml.ScalarNode || cancel.ShortTag() != "!!bool" {
+		return nil
+	}
+	var enabled bool
+	if err := cancel.Decode(&enabled); err != nil || !enabled {
+		return nil
+	}
+	if jobID == "" {
+		return rawError(path, cancel, "workflow concurrency cancel-in-progress is unsupported")
+	}
+	return rawError(path, cancel, fmt.Sprintf("job %q: concurrency cancel-in-progress is unsupported", jobID))
 }
 
 func validateRawContainer(path string, node *yaml.Node) error {
@@ -272,6 +297,11 @@ func validateRawContainer(path string, node *yaml.Node) error {
 
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
+	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
+	if err != nil {
+		return Job{}, err
+	}
+	out.Concurrency = ownedConcurrency
 	permissions, err := adaptPermissions(path, in.Permissions)
 	if err != nil {
 		return Job{}, err
@@ -492,6 +522,30 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		return Job{}, err
 	}
 	return out, nil
+}
+
+func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurrency, error) {
+	if in == nil {
+		return nil, nil
+	}
+	if in.CancelInProgress != nil && (in.CancelInProgress.Expression != nil || in.CancelInProgress.Value) {
+		position := in.CancelInProgress.Pos
+		if in.CancelInProgress.Expression != nil {
+			position = in.CancelInProgress.Expression.Pos
+		}
+		if jobID == "" {
+			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress is unsupported", path, position.Line, position.Col)
+		}
+		return nil, locatedError(path, position, jobID, "concurrency cancel-in-progress is unsupported")
+	}
+	if in.Group == nil || strings.TrimSpace(in.Group.Value) == "" {
+		position := in.Pos
+		if jobID == "" {
+			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency group must not be empty", path, position.Line, position.Col)
+		}
+		return nil, locatedError(path, position, jobID, "concurrency group must not be empty")
+	}
+	return &Concurrency{Group: in.Group.Value, Span: spanFrom(in.Group.Pos, in.Group.Value)}, nil
 }
 
 func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {

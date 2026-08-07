@@ -20,6 +20,7 @@ type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
 	Permissions             *Permissions          `json:"permissions,omitempty"`
+	Concurrency             *Concurrency          `json:"concurrency,omitempty"`
 	DefaultShell            string                `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                `json:"default_working_directory,omitempty"`
 	CallInputs              map[string]CallInput  `json:"call_inputs,omitempty"`
@@ -27,6 +28,14 @@ type Workflow struct {
 	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
+}
+
+// Concurrency is the queue-only subset of a GitHub Actions concurrency group.
+// Cancellation is rejected while parsing because Buildkite concurrency groups
+// cannot cancel an already running job or workflow.
+type Concurrency struct {
+	Group string `json:"group"`
+	Span  Span   `json:"span"`
 }
 
 // Permissions is an explicitly declared GitHub token permission set. Omitted
@@ -60,6 +69,7 @@ type Job struct {
 	Matrix                  *Matrix                `json:"matrix,omitempty"`
 	FailFast                *bool                  `json:"fail_fast,omitempty"`
 	MaxParallel             *int                   `json:"max_parallel,omitempty"`
+	Concurrency             *Concurrency           `json:"concurrency,omitempty"`
 	Reusable                *ReusableWorkflowCall  `json:"reusable_workflow,omitempty"`
 	Env                     map[string]string      `json:"env,omitempty"`
 	Permissions             *Permissions           `json:"permissions,omitempty"`

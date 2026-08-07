@@ -103,6 +103,8 @@ The plugin path currently supports:
 - static matrices, ordinary `needs` and outputs, and local reusable workflows
   with statically resolved inputs, caller-visible results, and directly mapped
   declared outputs;
+- statically resolvable workflow and job `concurrency` groups, translated to
+  repository-scoped Buildkite queues and whole-workflow concurrency gates;
 - the documented job and step condition subset, with unsupported functions and
   unavailable runtime contexts rejected before pipeline upload;
 - background, wait, cancellation, and parallel step controls;
@@ -129,6 +131,8 @@ It does **not** currently support:
 - job containers or service containers through the production plugin path;
 - compound or literal local reusable-workflow output mappings and reusable-call
   conditions;
+- `concurrency.cancel-in-progress`, runtime-dependent concurrency groups, or
+  workflow-level concurrency declared by a called reusable workflow;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
 - Windows or macOS jobs.
 
@@ -178,6 +182,7 @@ runtime behavior. JSON output is available with `--format json`.
 | Matrix entry | Command job with a stable key |
 | `needs` | `depends_on` plus verified result transport |
 | `runs-on` | Fail-closed queue policy |
+| `concurrency.group` | Repository-scoped Buildkite concurrency group or workflow gate |
 | Job output | Producer-attributed result artifact |
 | Step | Runs inside the job compatibility runtime |
 
