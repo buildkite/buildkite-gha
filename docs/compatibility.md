@@ -8,11 +8,14 @@ promises unless they appear here.
 ## The current execution profile
 
 The plugin and `upload` command default to one fixed profile:
-`hosted-tokenless`. It is designed for public code that can run without
-protected credentials on a Linux x86-64 Buildkite Hosted Agent. Unsupported or
-privileged requests fail before the generated jobs are uploaded. An explicit
-`upload --private-checkout` extension admits only the verified checkout adapter
-and only when the organization has enabled Buildkite's job-bound GitHub scoped
+`hosted-tokenless`. Despite the historical profile name, generated jobs do not
+select the `hosted` queue: they inherit Buildkite's configured agent defaults.
+It is designed for public code that can run without protected credentials on a
+compatible Linux x86-64 agent. Operators are responsible for configuring those
+defaults with suitable whole-job isolation. Unsupported or privileged requests
+fail before the generated jobs are uploaded. An explicit `upload
+--private-checkout` extension admits only the verified checkout adapter and only
+when the organization has enabled Buildkite's job-bound GitHub scoped
 access-token service.
 
 There are three different compatibility claims:
@@ -32,7 +35,7 @@ provide.
 
 | Area | Production plugin | Notes |
 | --- | --- | --- |
-| Linux x86-64 host jobs | Supported | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` map to the fixed `hosted` queue. |
+| Linux x86-64 host jobs | Supported | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. Generated jobs omit agent selectors and use Buildkite's configured defaults. |
 | Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
 | Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
 | Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
@@ -366,14 +369,16 @@ archive checksum, and extract it to a stable location. The archive contains
 Generated jobs that execute actions support mise 2026.5.12 or newer. `run-job`
 first checks `BUILDKITE_GHA_MISE` when set, then `PATH`; if neither supplies a
 compatible version, it downloads the pinned 2026.5.12 official archive into
-the automatically attached hosted cache. Both the archive and extracted
-executable are verified by embedded SHA-256 digests before use. Verified cache
-bytes are copied into a job-private directory and reverified there before
-execution, so the shared cache remains an accelerator rather than executable
-authority. An explicit `BUILDKITE_GHA_MISE` must be absolute and compatible
-rather than silently falling back. The runtime resolves and validates the
-executable before workflow code can modify `PATH`, then uses it with repository
-configuration disabled to install exact Node 20.20.2 or 24.18.0 releases.
+the managed cache path. Hosted Agents attach that cache automatically; other
+agent environments use it when available and otherwise fall back to an
+ephemeral cache. Both the archive and extracted executable are verified by
+embedded SHA-256 digests before use. Verified cache bytes are copied into a
+job-private directory and reverified there before execution, so the shared
+cache remains an accelerator rather than executable authority. An explicit
+`BUILDKITE_GHA_MISE` must be absolute and compatible rather than silently
+falling back. The runtime resolves and validates the executable before workflow
+code can modify `PATH`, then uses it with repository configuration disabled to
+install exact Node 20.20.2 or 24.18.0 releases.
 Those Node binaries require glibc 2.28 or newer; the static Go CLI does not.
 Shell-only jobs, importers, `validate`, and `compile` do not require or install
 mise.
@@ -454,13 +459,13 @@ not a complete execution path.
 `upload` is the in-build command used by the plugin:
 
 ```sh
-buildkite-gha upload --runtime-queue hosted .github/workflows/ci.yml
+buildkite-gha upload .github/workflows/ci.yml
 ```
 
 An installer may explicitly enable pipeline-repository private checkout:
 
 ```sh
-buildkite-gha upload --private-checkout --runtime-queue hosted \
+buildkite-gha upload --private-checkout \
   .github/workflows/ci.yml
 ```
 
@@ -473,8 +478,10 @@ repository-bound by the Agent service.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.
-The queue argument is intentionally fixed to `hosted`; it cannot be used to
-select a more privileged queue.
+Generated jobs do not set `agents`, so Buildkite's pipeline or organization
+defaults select the agents. The deprecated `--runtime-queue hosted` argument is
+still accepted for compatibility with older plugin releases, but it does not
+select a queue; other values are rejected rather than silently ignored.
 
 `run-job` is an internal command emitted into generated jobs. Users should not
 need to invoke it directly.

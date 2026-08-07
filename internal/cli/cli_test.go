@@ -45,8 +45,8 @@ func TestRunHelpAndVersion(t *testing.T) {
 		{name: "help flag", args: []string{"--help"}, wantOutput: "validate"},
 		{name: "help command", args: []string{"help"}, wantOutput: "run-job"},
 		{name: "command help", args: []string{"help", "compile"}, wantOutput: "buildkite-gha compile --event-path"},
-		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "derives compatibility data from Buildkite"},
-		{name: "upload help flag", args: []string{"upload", "--help"}, wantOutput: "derives compatibility data from Buildkite"},
+		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "default agent targeting"},
+		{name: "upload help flag", args: []string{"upload", "--help"}, wantOutput: "default agent targeting"},
 		{name: "command help flag", args: []string{"run-job", "--help"}, wantOutput: "--plan <path>"},
 		{name: "version flag", args: []string{"--version"}, wantOutput: "buildkite-gha test-version\n"},
 	}
@@ -317,7 +317,11 @@ jobs:
 			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 		}
 		assertWarning(t, "upload", stderr.String())
-		if len(runner.commands) == 0 || strings.Count(string(runner.commands[len(runner.commands)-1].stdin), "concurrency_group:") != 2 {
+		if len(runner.commands) == 0 {
+			t.Fatalf("uploaded commands = %#v", runner.commands)
+		}
+		pipeline := string(runner.commands[len(runner.commands)-1].stdin)
+		if strings.Count(pipeline, "concurrency_group:") != 2 || strings.Contains(pipeline, "agents:") {
 			t.Fatalf("uploaded commands = %#v", runner.commands)
 		}
 	})
@@ -466,7 +470,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") || stderr.Len() != 0 {
@@ -491,12 +495,10 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Key     string `yaml:"key"`
-			Command string `yaml:"command"`
-			Cache   any    `yaml:"cache"`
-			Agents  struct {
-				Queue string `yaml:"queue"`
-			} `yaml:"agents"`
+			Key      string `yaml:"key"`
+			Command  string `yaml:"command"`
+			Cache    any    `yaml:"cache"`
+			Agents   any    `yaml:"agents"`
 			Checkout struct {
 				Skip bool `yaml:"skip"`
 			} `yaml:"checkout"`
@@ -516,7 +518,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if step.Cache != nil {
 			t.Fatalf("shell-only step %q unexpectedly configures a runtime cache: %#v", step.Key, step.Cache)
 		}
-		if !step.Checkout.Skip || step.Agents.Queue != "hosted" || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
+		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
 		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
@@ -610,10 +612,8 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 
 	var pipeline struct {
 		Steps []struct {
-			Key    string `yaml:"key"`
-			Agents struct {
-				Queue string `yaml:"queue"`
-			} `yaml:"agents"`
+			Key       string `yaml:"key"`
+			Agents    any    `yaml:"agents"`
 			DependsOn []struct {
 				Step         string `yaml:"step"`
 				AllowFailure bool   `yaml:"allow_failure"`
@@ -626,11 +626,11 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if len(pipeline.Steps) != 2 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	if pipeline.Steps[0].Key != "gha-concurrent" || pipeline.Steps[0].Agents.Queue != "hosted" || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "phase-3-upload-importer" || pipeline.Steps[0].DependsOn[0].AllowFailure {
+	if pipeline.Steps[0].Key != "gha-concurrent" || pipeline.Steps[0].Agents != nil || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "phase-3-upload-importer" || pipeline.Steps[0].DependsOn[0].AllowFailure {
 		t.Fatalf("concurrent step = %#v", pipeline.Steps[0])
 	}
 	observer := pipeline.Steps[1]
-	if observer.Key != "gha-observe" || observer.Agents.Queue != "hosted" || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "phase-3-upload-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
+	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "phase-3-upload-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
 		t.Fatalf("observer step = %#v", observer)
 	}
 }
@@ -1969,6 +1969,20 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 	if err := verifyBuildkiteTarget(job); err == nil || !strings.Contains(err.Error(), "requires BUILDKITE_STEP_KEY") {
 		t.Fatalf("verifyBuildkiteTarget() error = %v, want missing binding", err)
 	}
+	t.Setenv("BUILDKITE_STEP_KEY", "gha-expected")
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "gha-other")
+	if err := verifyBuildkiteTarget(job); err == nil || !strings.Contains(err.Error(), "executing queue") {
+		t.Fatalf("verifyBuildkiteTarget() error = %v, want explicit queue mismatch", err)
+	}
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "")
+	if err := verifyBuildkiteTarget(job); err == nil || !strings.Contains(err.Error(), "requires BUILDKITE_AGENT_META_DATA_QUEUE") {
+		t.Fatalf("verifyBuildkiteTarget() error = %v, want missing explicit queue binding", err)
+	}
+	job.Target.Queue = ""
+	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", "customer-default")
+	if err := verifyBuildkiteTarget(job); err != nil {
+		t.Fatalf("verifyBuildkiteTarget() default targeting error = %v", err)
+	}
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
@@ -1993,16 +2007,17 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
-	if _, _, _, _, err := uploadArgs([]string{"workflow.yml"}); err == nil || !strings.Contains(err.Error(), "is required") {
-		t.Fatalf("uploadArgs() error = %v, want required runtime queue error", err)
+	workflow, event, queue, privateCheckout, err := uploadArgs([]string{"workflow.yml"})
+	if err != nil || workflow != "workflow.yml" || event != "" || queue != "" || privateCheckout {
+		t.Fatalf("uploadArgs() default = %q, %q, %q, %v, %v", workflow, event, queue, privateCheckout, err)
 	}
 	if _, _, _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
-		t.Fatalf("uploadArgs() error = %v, want fixed runtime queue error", err)
+		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)
 	}
 	if _, _, _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate private checkout error", err)
 	}
-	workflow, event, queue, privateCheckout, err := uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
+	workflow, event, queue, privateCheckout, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
 	if err != nil || workflow != "workflow.yml" || event != "event.json" || queue != "hosted" || !privateCheckout {
 		t.Fatalf("uploadArgs() = %q, %q, %q, %v, %v", workflow, event, queue, privateCheckout, err)
 	}

@@ -1,6 +1,6 @@
 [
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -20,8 +20,7 @@
       "actor": "buildkite-gha-smoke"
     },
     "target": {
-      "step_key": "gha-producer",
-      "queue": "gha-untrusted"
+      "step_key": "gha-producer"
     },
     "required_capabilities": [],
     "outputs": {
@@ -68,7 +67,7 @@
     ]
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -88,8 +87,7 @@
       "actor": "buildkite-gha-smoke"
     },
     "target": {
-      "step_key": "gha-consumer-5ebbc197d87b",
-      "queue": "gha-untrusted"
+      "step_key": "gha-consumer-5ebbc197d87b"
     },
     "required_capabilities": [],
     "matrix": {
@@ -102,7 +100,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:d7286589fecd60e590f1e59cd975f7ad104fd0752cecd8a89ff025ce89c4eca2"
+          "plan_digest": "sha256:cdd9d2cb1dcbca4f46c643f89eec3134156dc7fccd3665c846a1d9a0a88428b7"
         }
       ]
     },
@@ -131,7 +129,7 @@
     ]
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -151,8 +149,7 @@
       "actor": "buildkite-gha-smoke"
     },
     "target": {
-      "step_key": "gha-consumer-91934b28b00f",
-      "queue": "gha-untrusted"
+      "step_key": "gha-consumer-91934b28b00f"
     },
     "required_capabilities": [],
     "matrix": {
@@ -165,7 +162,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:d7286589fecd60e590f1e59cd975f7ad104fd0752cecd8a89ff025ce89c4eca2"
+          "plan_digest": "sha256:cdd9d2cb1dcbca4f46c643f89eec3134156dc7fccd3665c846a1d9a0a88428b7"
         }
       ]
     },

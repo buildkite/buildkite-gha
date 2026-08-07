@@ -49,13 +49,13 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] --runtime-queue hosted <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] [--runtime-queue hosted] <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
 const (
 	resultPublicationTimeout = 10 * time.Second
-	unprivilegedRuntimeQueue = "hosted"
+	legacyRuntimeQueue       = "hosted"
 	hostedTokenlessProfile   = "hosted-tokenless"
 	runtimeMiseArchiveDigest = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest  = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
@@ -100,7 +100,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
 				}
 				if args[0] == "upload" {
-					_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
+					_, _ = fmt.Fprint(stdout, "\nGenerated jobs use Buildkite's default agent targeting. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
 				}
 				return 0
 			}
@@ -145,7 +145,7 @@ func help(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	}
 	if args[0] == "upload" {
-		_, _ = fmt.Fprint(stdout, "\nThe default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned and unprivileged. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
+		_, _ = fmt.Fprint(stdout, "\nGenerated jobs use Buildkite's default agent targeting. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
 	}
 	return 0
 }
@@ -201,7 +201,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -857,13 +857,16 @@ func runJobArgs(args []string) (planPath, resultPath string, err error) {
 func verifyBuildkiteTarget(job plan.Job) error {
 	stepKey := os.Getenv("BUILDKITE_STEP_KEY")
 	queue := os.Getenv("BUILDKITE_AGENT_META_DATA_QUEUE")
-	if os.Getenv("BUILDKITE") != "" && (stepKey == "" || queue == "") {
-		return fmt.Errorf("buildkite execution requires BUILDKITE_STEP_KEY and BUILDKITE_AGENT_META_DATA_QUEUE")
+	if os.Getenv("BUILDKITE") != "" && stepKey == "" {
+		return fmt.Errorf("buildkite execution requires BUILDKITE_STEP_KEY")
+	}
+	if os.Getenv("BUILDKITE") != "" && job.Target.Queue != "" && queue == "" {
+		return fmt.Errorf("buildkite execution with an explicit target queue requires BUILDKITE_AGENT_META_DATA_QUEUE")
 	}
 	if stepKey != "" && stepKey != job.Target.StepKey {
 		return fmt.Errorf("plan targets step %q, executing step is %q", job.Target.StepKey, stepKey)
 	}
-	if queue != "" && queue != job.Target.Queue {
+	if job.Target.Queue != "" && queue != "" && queue != job.Target.Queue {
 		return fmt.Errorf("plan targets queue %q, executing queue is %q", job.Target.Queue, queue)
 	}
 	return nil
@@ -1177,11 +1180,11 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		ResolveActions: privateCheckout,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
-				"ubuntu-latest": unprivilegedRuntimeQueue,
-				"ubuntu-24.04":  unprivilegedRuntimeQueue,
-				"ubuntu-22.04":  unprivilegedRuntimeQueue,
+				"ubuntu-latest": "",
+				"ubuntu-24.04":  "",
+				"ubuntu-22.04":  "",
 			},
-			UntrustedQueues: []string{unprivilegedRuntimeQueue},
+			AllowUntrustedDefaultQueue: true,
 		},
 		PrivateCheckout: privateCheckout,
 	}
@@ -1316,11 +1319,8 @@ func uploadArgs(args []string) (workflowPath, eventPath, runtimeQueue string, pr
 	if err != nil {
 		return "", "", "", false, err
 	}
-	if !runtimeQueueSeen {
-		return "", "", "", false, fmt.Errorf("--runtime-queue %s is required for unprivileged upload", unprivilegedRuntimeQueue)
-	}
-	if runtimeQueue != unprivilegedRuntimeQueue {
-		return "", "", "", false, fmt.Errorf("--runtime-queue must be %q for unprivileged upload", unprivilegedRuntimeQueue)
+	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
+		return "", "", "", false, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
 	}
 	return workflowPath, eventPath, runtimeQueue, privateCheckout, err
 }

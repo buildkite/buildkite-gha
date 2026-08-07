@@ -201,6 +201,21 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 	}
 }
 
+func TestEmitUsesDefaultAgentTargetingWhenQueueIsEmpty(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		ConcurrencyGate:    &ConcurrencyGate{Group: "buildkite-gha/concurrency/group"},
+		Jobs:               []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), "agents:") || strings.Contains(string(output), "queue:") {
+		t.Fatalf("default-targeted pipeline contains agent selectors:\n%s", output)
+	}
+}
+
 func TestConcurrencyGateKeysIncludeCompilerStep(t *testing.T) {
 	jobs := []Job{{Key: "job"}}
 	firstOpen, firstClose := concurrencyGateKeys("first-importer", "shared-group", jobs)

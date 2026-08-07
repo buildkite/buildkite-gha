@@ -27,11 +27,14 @@ type VariableSources struct {
 }
 
 // RunnerPolicy maps every accepted Linux runner label to a Buildkite queue.
-// Multi-label targets are accepted only when every label maps to the same
-// queue. Untrusted events are additionally restricted to UntrustedQueues.
+// An empty queue uses Buildkite's default agent targeting. Multi-label targets
+// are accepted only when every label maps to the same queue. Untrusted events
+// are additionally restricted to UntrustedQueues unless the default is
+// explicitly allowed.
 type RunnerPolicy struct {
-	Labels          map[string]string
-	UntrustedQueues []string
+	Labels                     map[string]string
+	UntrustedQueues            []string
+	AllowUntrustedDefaultQueue bool
 }
 
 // Options are the complete non-secret graph-construction inputs beyond the
@@ -57,13 +60,14 @@ type Options struct {
 func defaultOptions() Options {
 	return Options{
 		// The convenience wrappers accept a local event path with no attestation,
-		// so their fixed policy is tokenless and untrusted by construction.
+		// so their policy is tokenless and untrusted by construction. Agent
+		// targeting remains owned by the Buildkite pipeline configuration.
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{Labels: map[string]string{
-			"ubuntu-latest": "gha-untrusted",
-			"ubuntu-24.04":  "gha-untrusted",
-			"ubuntu-22.04":  "gha-untrusted",
-		}, UntrustedQueues: []string{"gha-untrusted"}},
+			"ubuntu-latest": "",
+			"ubuntu-24.04":  "",
+			"ubuntu-22.04":  "",
+		}, AllowUntrustedDefaultQueue: true},
 	}
 }
 
@@ -82,10 +86,10 @@ func (options Options) validate() error {
 	}
 	labels := make(map[string]string, len(options.Runners.Labels))
 	for label, queue := range options.Runners.Labels {
-		if strings.TrimSpace(label) == "" || strings.TrimSpace(queue) == "" {
-			return fmt.Errorf("runner policy labels and queues must be non-empty")
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("runner policy labels must be non-empty")
 		}
-		if !queuePattern.MatchString(queue) {
+		if queue != "" && !queuePattern.MatchString(queue) {
 			return fmt.Errorf("runner policy queue %q is invalid", queue)
 		}
 		normalized := strings.ToLower(strings.TrimSpace(label))
@@ -141,6 +145,7 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (string, e
 		return "", fmt.Errorf("runs-on must resolve to at least one label")
 	}
 	var queue string
+	resolved := false
 	for _, label := range labels {
 		normalized := strings.ToLower(strings.TrimSpace(label))
 		if unsupportedOS(normalized) {
@@ -158,12 +163,16 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (string, e
 		if !ok {
 			return "", fmt.Errorf("runner label %q is not mapped by policy", label)
 		}
-		if queue != "" && queue != mapped {
+		if resolved && queue != mapped {
 			return "", fmt.Errorf("runner labels resolve to conflicting queues %q and %q", queue, mapped)
 		}
 		queue = mapped
+		resolved = true
 	}
-	if trust == EventUntrusted && !contains(policy.UntrustedQueues, queue) {
+	if trust == EventUntrusted && queue == "" && !policy.AllowUntrustedDefaultQueue {
+		return "", fmt.Errorf("untrusted event cannot use Buildkite default agent targeting")
+	}
+	if trust == EventUntrusted && queue != "" && !contains(policy.UntrustedQueues, queue) {
 		allowlist := append([]string(nil), policy.UntrustedQueues...)
 		sort.Strings(allowlist)
 		return "", fmt.Errorf("untrusted event cannot target queue %q; allowed queues: %s", queue, strings.Join(allowlist, ", "))

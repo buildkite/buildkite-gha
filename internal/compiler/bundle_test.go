@@ -54,6 +54,26 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileBundlePreservesExplicitQueuePolicy(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "customer-untrusted"},
+			UntrustedQueues: []string{"customer-untrusted"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Target.Queue != "customer-untrusted" || bundle.Plans[0].Job.Schema != plan.SchemaV2 {
+		t.Fatalf("explicitly targeted plan = %#v", bundle.Plans)
+	}
+	if !bytes.Contains(bundle.Pipeline, []byte("agents:\n      queue: \"customer-untrusted\"")) {
+		t.Fatalf("explicit queue absent from pipeline:\n%s", bundle.Pipeline)
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {
@@ -358,7 +378,7 @@ jobs:
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact
 	}
 	token := jobs["token"]
-	if token.Job.Schema != plan.SchemaV6 || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
+	if token.Job.Schema != plan.SchemaV7 || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
 		t.Fatalf("GitHub workflow token plan = %#v", token.Job)
 	}
 	if !reflect.DeepEqual(token.Job.RequiredSecrets, []string{"OTHER"}) || !reflect.DeepEqual(token.Job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {

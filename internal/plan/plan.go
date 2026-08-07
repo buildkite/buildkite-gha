@@ -22,6 +22,7 @@ const (
 	SchemaV4 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v4.schema.json"
 	SchemaV5 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v5.schema.json"
 	SchemaV6 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v6.schema.json"
+	SchemaV7 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json"
 	Schema   = SchemaV2
 )
 
@@ -98,7 +99,7 @@ type Workflow struct {
 
 type Target struct {
 	StepKey string `json:"step_key"`
-	Queue   string `json:"queue"`
+	Queue   string `json:"queue,omitempty"`
 }
 
 type Need struct {
@@ -330,19 +331,19 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
 		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
 	}
-	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && (job.Container != nil || len(job.Services) != 0) {
+	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && (job.Container != nil || len(job.Services) != 0) {
 		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
 	}
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.NeedOutputs != nil {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.NeedOutputs != nil {
 		return fmt.Errorf("job plan %s does not support prerequisite output projections", job.Schema)
 	}
-	if job.Schema != SchemaV6 && job.GitHubToken != nil {
+	if job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.GitHubToken != nil {
 		return fmt.Errorf("job plan %s does not support GitHub workflow tokens", job.Schema)
 	}
 	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
@@ -357,8 +358,14 @@ func (job Job) Validate() error {
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {
 		return fmt.Errorf("job plan requires a workflow path, sha256 digest, and logical job id")
 	}
-	if !targetPattern.MatchString(job.Target.StepKey) || !targetPattern.MatchString(job.Target.Queue) {
-		return fmt.Errorf("job plan requires a target step key and queue")
+	if !targetPattern.MatchString(job.Target.StepKey) {
+		return fmt.Errorf("job plan requires a target step key")
+	}
+	if job.Schema != SchemaV7 && !targetPattern.MatchString(job.Target.Queue) {
+		return fmt.Errorf("job plan %s requires a target queue", job.Schema)
+	}
+	if job.Target.Queue != "" && !targetPattern.MatchString(job.Target.Queue) {
+		return fmt.Errorf("job plan has invalid target queue %q", job.Target.Queue)
 	}
 	if job.TimeoutMinutes < 0 || job.TimeoutMinutes > 360 {
 		return fmt.Errorf("job timeout_minutes must be between 0 and 360")
@@ -450,7 +457,7 @@ func (job Job) Validate() error {
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
 	maxNeedProducers := MaxNeedProducers
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 {
 		maxNeedProducers = maxLegacyNeedProducers
 	}
 	for name, sources := range job.NeedSources {
@@ -580,7 +587,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
+	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6 || job.Schema == SchemaV7) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}

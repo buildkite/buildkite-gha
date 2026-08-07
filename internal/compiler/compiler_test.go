@@ -1830,21 +1830,21 @@ func TestWorkflowRepositoryNormalizesInMemoryWorkflowPath(t *testing.T) {
 func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	source := readFile(t, path)
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v2.schema.json"))
+	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
 	var schemaDocument any
 	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
 		t.Fatal(err)
 	}
 	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(plan.Schema, schemaDocument); err != nil {
+	if err := compiler.AddResource(plan.SchemaV7, schemaDocument); err != nil {
 		t.Fatal(err)
 	}
-	jobSchema, err := compiler.Compile(plan.Schema)
+	jobSchema, err := compiler.Compile(plan.SchemaV7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1858,7 +1858,7 @@ func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := jobSchema.Validate(document); err != nil {
-			t.Fatalf("compiled plan does not validate against %s: %v\n%s", plan.Schema, err, encoded)
+			t.Fatalf("compiled plan does not validate against %s: %v\n%s", plan.SchemaV7, err, encoded)
 		}
 	}
 }

@@ -17,8 +17,9 @@ transport, but do not recreate GitHub Actions' meaningful security boundary.
 GitHub controls event identity and protected capability issuance; it does not
 isolate `run` and `uses` steps inside a job. Buildkite dynamic pipeline upload is
 ordinary pipeline authority. Therefore public, anonymous, tokenless actions on
-an ambient-clean fixed hosted queue do not require a privileged compiler, plan
-signer, or this envelope.
+suitably isolated agents do not require a privileged compiler, plan signer, or
+this envelope. Generated jobs inherit Buildkite's configured agent targeting;
+operators own the whole-job isolation policy.
 
 Protected capabilities will instead use a control-plane service that:
 
@@ -32,9 +33,10 @@ Protected capabilities will instead use a control-plane service that:
   tokens, environment grants, or explicitly supported compatible OIDC claims.
 
 Plans continue to use content digests and producer-attributed artifacts. The
-runtime continues to verify build, importer, job, step, queue, plan, and runtime
-bindings, but those checks do not authorize protected resources. Buildkite
-pipeline signing remains optional installation-specific defence in depth.
+runtime continues to verify build, importer, job, step, plan, runtime, and any
+explicit queue bindings, but those checks do not authorize protected resources.
+Buildkite pipeline signing remains optional installation-specific defence in
+depth.
 
 The original Phase 0 decision is retained below as an implementation and
 conformance record. Its statements that KMS-backed plan envelopes provide the

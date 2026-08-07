@@ -31,11 +31,13 @@ steps:
 
 The released plugin downloads and verifies `buildkite-gha` v0.2.3 by default,
 derives the event context from the Buildkite build, and uploads the generated
-jobs to the fixed `hosted` queue. Pin a released plugin version rather than a
-floating branch. For action jobs, the runtime reuses mise 2026.5.12 or newer
-from `PATH` or the absolute path in `BUILDKITE_GHA_MISE`; when neither provides
-a compatible version, it downloads and verifies a managed 2026.5.12 copy in
-the hosted cache. Shell-only jobs do not require or install mise.
+jobs without agent selectors, so the pipeline's configured defaults decide
+where they run. Pin a released plugin version rather than a floating branch.
+For action jobs, the runtime reuses mise 2026.5.12 or newer from `PATH` or the
+absolute path in `BUILDKITE_GHA_MISE`; when neither provides a compatible
+version, it downloads and verifies a managed 2026.5.12 copy. Hosted Agents use
+their attached cache; other environments fall back to an ephemeral cache when
+that path is unavailable. Shell-only jobs do not require or install mise.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -184,7 +186,7 @@ runtime behavior. JSON output is available with `--format json`.
 | Job | Command job |
 | Matrix entry | Command job with a stable key |
 | `needs` | `depends_on` plus verified result transport |
-| `runs-on` | Fail-closed queue policy |
+| `runs-on` | Linux compatibility validation; Buildkite default agent targeting |
 | `concurrency.group` | Repository-scoped Buildkite concurrency group or workflow gate |
 | Job output | Producer-attributed result artifact |
 | Step | Runs inside the job compatibility runtime |

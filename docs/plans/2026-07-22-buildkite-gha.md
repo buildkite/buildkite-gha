@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-07
 Target repository: `buildkite/buildkite-gha`
 
 > This is the active product and implementation plan. It records future UX,
@@ -46,7 +46,7 @@ The unit of translation is the Actions job:
 | Workflow run | Buildkite build |
 | Workflow job or matrix entry | Buildkite command job |
 | `needs` | `depends_on` plus producer-attributed result manifests |
-| `runs-on` | Buildkite queue/agent selectors |
+| `runs-on` | Linux compatibility validation and optional policy-selected agent selectors |
 | Static matrix | Expanded keyed Buildkite jobs |
 | Dynamic matrix | Deferred dynamic pipeline upload |
 | Job output | Namespaced Buildkite build metadata |
@@ -105,9 +105,11 @@ or Docker daemon across trust domains is outside this tokenless threat model.
 
 Buildkite dynamic pipeline upload is likewise ordinary pipeline authority, not
 a weaker class of job merely because the pipeline was generated. Public,
-anonymous, tokenless actions may run on an ambient-clean fixed hosted queue
-without a privileged compiler, plan signer, or supporting service. They have no
-more authority than a shell step that downloads and executes public code.
+anonymous, tokenless actions do not require a privileged compiler, plan signer,
+or supporting service. Generated jobs inherit Buildkite's configured agent
+targeting by default; operators remain responsible for ensuring those agents
+provide suitable job-level isolation. The actions have no more authority than a
+shell step that downloads and executes public code.
 
 Protected capabilities are different. A plan may request a GitHub token,
 private source, secret, environment grant, privileged queue, or compatible OIDC
@@ -228,8 +230,8 @@ buildkite-gha run-job --plan .buildkite-gha/plans/<digest>.json
 `--provider <name>` switches positional workflow paths to repository-relative
 provider paths resolved at the attested event SHA. Without `--provider`, paths
 are local files and the supplied event is unattested. An unattested event can
-drive tokenless execution on an allowed queue, but cannot authorize a protected
-capability.
+drive tokenless execution using deployment-configured agent defaults or an
+explicitly admitted runner policy, but cannot authorize a protected capability.
 
 `compile` must not mutate the current build. It is suitable for local review,
 golden tests, and:
@@ -253,21 +255,18 @@ inert local inputs:
 steps:
   - label: ":github: Load existing CI workflow"
     key: "gha-ci"
-    agents:
-      queue: "hosted"
     command: >-
       buildkite-gha upload
       --event-path .buildkite/events/current.json
-      --runtime-queue hosted
       .github/workflows/ci.yml
 ```
 
 This importer is authoritative in the same sense as any other Buildkite dynamic
-pipeline generator. It should use a pinned distribution, fixed queue policy,
-bounded inert inputs, and generated jobs without ambient protected credentials.
-It does not need a signer merely to upload tokenless jobs. If the workflow asks
-for a protected capability, `upload` fails unless the installation has a valid
-control-plane grant for that exact build and plan.
+pipeline generator. It should use a pinned distribution, deployment-configured
+agent defaults, bounded inert inputs, and generated jobs without ambient
+protected credentials. It does not need a signer merely to upload tokenless
+jobs. If the workflow asks for a protected capability, `upload` fails unless the
+installation has a valid control-plane grant for that exact build and plan.
 
 A future provider-backed mode may skip checkout and read the workflow through a
 data-only provider adapter at an authenticated event SHA. Private reads in that
@@ -280,12 +279,9 @@ An existing native step can depend on the importer:
 steps:
   - label: ":github: Load existing CI workflow"
     key: "gha-ci"
-    agents:
-      queue: "hosted"
     command: >-
       buildkite-gha upload
       --event-path .buildkite/events/current.json
-      --runtime-queue hosted
       .github/workflows/ci.yml
 
   - label: ":rocket: Native deployment"
@@ -550,7 +546,7 @@ contains no secret values and includes:
 - matrix values and strategy settings;
 - dependency IDs;
 - job condition, environment, defaults, timeout, and permissions;
-- requested runner labels and resolved Buildkite target;
+- requested runner labels and optional policy-selected Buildkite target;
 - job and service container definitions;
 - ordered action steps, including source locations;
 - action references and immutable resolved SHAs where available;
@@ -561,10 +557,10 @@ contains no secret values and includes:
 Plans are canonical JSON with content digests. The upload job publishes them as
 namespaced, producer-attributed Buildkite artifacts before generated jobs become
 eligible. Each generated job downloads its plan from the exact importer,
-verifies the digest, schema, build, job, step, queue, and compiler/runtime
-binding, then invokes `run-job`. These checks protect transport and prevent a
-job from accidentally consuming another job's plan; they do not grant protected
-authority.
+verifies the digest, schema, build, job, step, optional explicit queue, and
+compiler/runtime binding, then invokes `run-job`. These checks protect transport
+and prevent a job from accidentally consuming another job's plan; they do not
+grant protected authority.
 
 A plan lists requested capabilities. Before resolving any protected capability,
 the runtime must additionally present its own Buildkite Job OIDC identity and a
@@ -589,11 +585,12 @@ bootstrap contract is:
 - obtain workflow and action metadata as bounded inert input without executing
   repository hooks, plugins, generated scripts, or repository-provided
   binaries during data-only provider reads;
-- provide no ambient protected credentials to tokenless importer or runtime
-  queues;
-- emit fixed `run-job` commands whose queue, plugins, containers, and requested
-  capabilities are selected through fail-closed policy rather than copied
-  directly from workflow text;
+- provide no ambient protected credentials to the tokenless importer or
+  runtime jobs;
+- emit fixed `run-job` commands whose agent targeting is omitted by default or
+  selected by explicit embedding policy, and whose plugins, containers, and
+  requested capabilities are selected through fail-closed policy rather than
+  copied directly from workflow text;
 - bind every content-addressed plan to the generated job and exact importer;
   and
 - reject protected capability requests unless a matching control-plane grant
@@ -622,7 +619,7 @@ The emitter maps every expanded GHA job to an ordinary command step with:
 - logical GHA dependency edges expressed with per-dependency
   `allow_failure: true` so failed prerequisites still dispatch the compatibility
   runtime;
-- a queue mapping derived from `runs-on` and policy;
+- no agent selector by default, or a queue selected by explicit runner policy;
 - timeout and concurrency properties where semantics align;
 - `checkout.skip: true` so the agent does not populate the job workspace before
   the compatibility runtime starts;
@@ -1027,8 +1024,10 @@ authority.
 - The runtime verifies that the grant matches its own job, plan digest, queue,
   requested capability, audience, and expiry before resolving a value.
 - Fork pull requests receive no privileged secrets by default.
-- An untrusted event can target only queues explicitly configured for untrusted
-  code; workflow-controlled `runs-on` values cannot select a privileged queue.
+- Workflow-controlled `runs-on` values cannot name an arbitrary Buildkite queue.
+  The default upload path inherits deployment-configured agent targeting;
+  explicit embedding policies may map accepted labels only to separately
+  admitted queues for untrusted code.
 - Provider API tokens are short-lived and least-privilege.
 - Reusable workflows can only narrow inherited permissions.
 - Every secret is registered with the Agent redactor before use.
@@ -1072,14 +1071,15 @@ The v0.1 preview bootstrap is implemented as one reproducible Linux x86-64
 archive containing only the static CLI and LICENSE, plus the
 `github-actions#v0.1.0` installer plugin. The plugin downloads an exact public
 release, verifies its checksum and fixed archive layout, caches the verified
-distribution, and invokes the fixed hosted-tokenless upload path. For action
+distribution, and invokes the tokenless upload path. For action
 jobs, the static bridge reuses mise 2026.5.12 or newer when available or
 downloads and digest-verifies its pinned 2026.5.12 official archive in the
-automatically attached, integration-owned hosted cache volume. Node 20.20.2
-and 24.18.0 are installed by a reverified, job-private copy of that executable
-on demand into the same cache volume. Cached mise and Node executables are
-digest-verified before use, so cache sharing across builds is an optimization
-rather than a trust boundary.
+integration-owned managed cache path. Hosted Agents attach that cache
+automatically; other agent environments use it when available and otherwise
+fall back to ephemeral storage. Node 20.20.2 and 24.18.0 are installed by a
+reverified, job-private copy of that executable on demand into the same cache.
+Cached mise and Node executables are digest-verified before use, so cache
+sharing across builds is an optimization rather than a trust boundary.
 Official mise-installed Node binaries require glibc 2.28 or newer.
 The source repository must be public before the initial tag because plugin
 installation intentionally uses anonymous release downloads. Release
@@ -1255,6 +1255,13 @@ Cursor Origin public checkout remains a separate provider integration gate.
   plans, Buildkite pipeline YAML, and text/JSON compatibility reports.
   `compile` remains a read-only rendering command; `upload` materializes the
   executable and content-addressed plans used by generated jobs.
+- Generated workflow jobs and concurrency gates now omit Buildkite `agents` by
+  default, leaving scheduling to the pipeline or organization defaults. An
+  explicit `RunnerPolicy` queue remains supported for embedding API callers.
+  Job-plan schema v7 makes `target.queue` optional, and runtime queue binding is
+  checked only when a plan explicitly selects one. The deprecated
+  `--runtime-queue hosted` spelling remains a no-op compatibility path for
+  released plugin hooks; other values are rejected.
 - Phase 2 is complete. Its sequential shell runtime, producer-attributed result
   transport, and unprivileged `upload` bootstrap are implemented and proven on
   Buildkite. Generated plans
@@ -1282,9 +1289,10 @@ Cursor Origin public checkout remains a separate provider integration gate.
   executable bytes; generated agents reuse or install the pinned mise release
   before workflow code and resolve compatibility versions through `mise
   --no-config`.
-  This path remains `EventUntrusted`, fixed to the
-  ambient-clean, tokenless hosted queue, and accepts no capability, `network`,
-  or the Phase 5 compiler-proven Dockerfile-action provenance.
+  This path remains `EventUntrusted`, uses Buildkite's configured default agent
+  targeting, and accepts no capability, `network`, or the Phase 5
+  compiler-proven Dockerfile-action provenance. Operators remain responsible
+  for selecting suitably isolated agents for untrusted workflow code.
   Private remote action or repository source, provider tokens, secrets, job- or
   service-container provenance, privileged queues, and other protected
   capabilities fail closed.
@@ -1860,10 +1868,11 @@ Implemented order and fixed boundaries:
    fixed structured mounts and bridge-owned labels, and stop/remove containers
    and images under an independent bounded cleanup context.
 2. Admit only local and anonymously resolved public Dockerfile actions on the
-   fixed tokenless `hosted` queue. Continue rejecting `docker://` images,
-   Docker pre/post entrypoints, arbitrary Docker options, private registries,
-   credentials, provider tokens, host namespaces, devices, socket mounts, and
-   privileged capabilities.
+   tokenless path. Generated jobs use Buildkite's configured agent defaults;
+   operators must provide suitable whole-job Docker isolation. Continue
+   rejecting `docker://` images, Docker pre/post entrypoints, arbitrary Docker
+   options, private registries, credentials, provider tokens, host namespaces,
+   devices, socket mounts, and privileged capabilities.
 3. Persistent job containers and path translation landed after Docker action
    lifecycle, command-file processing, masking, cancellation, and cleanup
    passed conformance coverage.
@@ -2514,6 +2523,12 @@ unknown plan.
     imported job exits successfully after publishing its logical `skipped`
     result and emits a clear annotation. Downstream compatibility semantics use
     the logical result rather than the Buildkite job state.
+12. Generated jobs omit Buildkite agent targeting by default. Empty runner
+    policy mappings mean "use Buildkite defaults"; explicit queue mappings
+    remain available to embedding API callers. Schema v7 makes
+    `target.queue` optional, and only explicit targets are runtime-verified.
+    The deprecated `--runtime-queue hosted` CLI spelling is accepted but does
+    not alter scheduling.
 
 ## Decisions deferred after Phase 0
 
@@ -2531,10 +2546,11 @@ them in the phase that first needs the capability:
    hosted differential corpus.
 4. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
-5. The fixed Buildkite `hosted` queue's documented per-job disposable isolation
-   and the Phase 5 probe are sufficient for tokenless, non-privileged Dockerfile
-   actions built on the local driver. Phases 6 and 9 still own authorization and
-   queue policy for protected Docker capabilities and privileged workloads.
+5. The Phase 5 probe on Buildkite's `hosted` queue proves this repository's
+   Dockerfile-action evidence, not a product scheduling requirement. Deployments
+   using Buildkite defaults must independently provide suitable whole-job
+   isolation. Phases 6 and 9 still own authorization and queue policy for
+   protected Docker capabilities and privileged workloads.
 6. Phase 6 will define the GitHub App installation-token compatibility contract
    for `github.token` and `GITHUB_TOKEN`, including repository/permission
    narrowing and documented differences from native Actions tokens. The
