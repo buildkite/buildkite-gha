@@ -346,7 +346,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	var runErr error
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
 			if step.Kind != "uses" {
 				continue
@@ -758,6 +758,9 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 	if err := action.ValidateEntrypoints(runtime); err != nil {
 		return err
 	}
+	if usesNativeAdapter(lock) {
+		return nil
+	}
 	if runtime != metadata.RuntimeComposite {
 		return nil
 	}
@@ -821,6 +824,9 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 				return nil, fmt.Errorf("conflicting verified action roots for %q", target)
 			}
 			byTarget[target] = m
+		}
+		if usesNativeAdapter(lock) {
+			continue
 		}
 		switch actionRuntime {
 		case metadata.RuntimeNode20:
@@ -1057,7 +1063,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 	var action metadata.Metadata
 	var actionLock *plan.ActionLock
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && len(job.Actions) != 0) {
 		if step.Action == nil {
 			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
 		}

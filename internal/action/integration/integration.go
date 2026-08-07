@@ -63,6 +63,13 @@ type Descriptor struct {
 	Service Service
 }
 
+// UsesNativeAdapter reports whether the resolved identity replaces the
+// upstream action lifecycle with Buildkite-native execution.
+func UsesNativeAdapter(identity Identity) bool {
+	descriptor, _ := Lookup(identity)
+	return descriptor.Adapter != ""
+}
+
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
 	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache},

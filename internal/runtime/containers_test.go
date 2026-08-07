@@ -1094,6 +1094,39 @@ func TestRunJobContainerDoesNotProbeConfiguredNodeForCompositeOnlyActions(t *tes
 	}
 }
 
+func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
+	workspace := t.TempDir()
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	writeFixtureFile(t, remote, "index.js", "")
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := jobContainerPlan(t, workspace, []plan.Step{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: lockID}}})
+	job.Actions = []plan.ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
+		Commit: strings.Repeat("a", 40), SourceDigest: digest,
+	}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
+	actions := newActionLockResolver(job, workspace, materializer)
+	miseCalls := 0
+	runner := Runner{ResolveMise: func(context.Context) (string, error) {
+		miseCalls++
+		return "", errors.New("unexpected mise resolution")
+	}}
+	mounts, err := runner.actionContainerMounts(context.Background(), actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miseCalls != 0 {
+		t.Fatalf("ResolveMise calls = %d, want 0", miseCalls)
+	}
+	for _, mount := range mounts {
+		if strings.Contains(mount.target, "node24") || strings.Contains(mount.target, "/nodes") {
+			t.Fatalf("native adapter gained Node mount: %#v", mount)
+		}
+	}
+}
+
 func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing.T) {
 	f := newJobDocker(t, "fail-mount-probe")
 	w := t.TempDir()
@@ -1715,7 +1748,7 @@ func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
 	}
 	for _, artifact := range bundle.Plans {
 		job := artifact.Job
-		if job.Schema != plan.SchemaV4 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+		if job.Schema != plan.SchemaV7 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
 			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
 		}
 		wantSources := []string{"dockerfile-actions", "service-containers"}

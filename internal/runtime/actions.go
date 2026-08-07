@@ -86,6 +86,10 @@ func usesDownloadArtifactAdapter(lock plan.ActionLock) bool {
 	return descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite
 }
 
+func usesNativeAdapter(lock plan.ActionLock) bool {
+	return actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+}
+
 func usesCacheService(lock plan.ActionLock) bool {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 	return descriptor.Service == actionintegration.ServiceCache

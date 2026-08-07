@@ -214,7 +214,7 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), UsesActions: true}},
+		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true}},
 	}
 	output, err := Emit(pipeline)
 	if err != nil {
@@ -260,7 +260,8 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
-			{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("action-plan"), UsesActions: true},
+			{Key: "javascript", Label: "JavaScript", Queue: "hosted", PlanDigest: testDigest("javascript-plan"), RequiresMise: true},
+			{Key: "native", Label: "Native action", Queue: "hosted", PlanDigest: testDigest("native-plan")},
 			{Key: "shell", Label: "Shell", Queue: "hosted", PlanDigest: testDigest("shell-plan")},
 		},
 	})
@@ -279,11 +280,11 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range document.Steps {
-		if step.Key == "action" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
-			t.Fatalf("action job lacks runtime mise cache configuration: %#v", step)
+		if step.Key == "javascript" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("JavaScript job lacks runtime mise cache configuration: %#v", step)
 		}
-		if step.Key == "shell" && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
-			t.Fatalf("shell job gained managed mise: %#v", step)
+		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+			t.Fatalf("no-mise job gained managed mise: %#v", step)
 		}
 	}
 }

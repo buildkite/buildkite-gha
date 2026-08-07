@@ -3,6 +3,7 @@ package compiler
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -77,6 +78,53 @@ func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 				t.Fatalf("pipeline YAML: %v", err)
 			}
 		})
+	}
+}
+
+func TestCompileBundleCarriesResolvedMiseRequirementIntoPipeline(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "actions.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, workspace, "javascript", "runs:\n  using: node24\n  main: index.js\n")
+	workflow := []byte("on: push\njobs:\n  native:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./docker\n  javascript:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./javascript\n")
+	bundle, err := CompileBundle(workflowPath, workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	decisions := map[string]bool{}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.RequiresMise == nil {
+			t.Fatalf("job %q lacks requires_mise", artifact.Job.Target.StepKey)
+		}
+		decisions[artifact.Job.Workflow.LogicalJobID] = *artifact.Job.RequiresMise
+	}
+	if decisions["native"] || !decisions["javascript"] {
+		t.Fatalf("requires_mise decisions = %#v", decisions)
+	}
+	var document struct {
+		Steps []struct {
+			Key   string            `yaml:"key"`
+			Cache any               `yaml:"cache"`
+			Env   map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range document.Steps {
+		wantMise := strings.Contains(step.Key, "javascript")
+		if hasCache := step.Cache != nil; hasCache != wantMise {
+			t.Fatalf("step %q managed cache = %t, want %t", step.Key, hasCache, wantMise)
+		}
+		if hasEnv := step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != ""; hasEnv != wantMise {
+			t.Fatalf("step %q managed mise env = %t, want %t", step.Key, hasEnv, wantMise)
+		}
 	}
 }
 
