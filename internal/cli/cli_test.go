@@ -67,6 +67,20 @@ func TestRunHelpAndVersion(t *testing.T) {
 	}
 }
 
+func TestUploadHelpFormsMatch(t *testing.T) {
+	outputs := make([]string, 0, 2)
+	for _, args := range [][]string{{"help", "upload"}, {"upload", "--help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr, "test-version"); code != 0 {
+			t.Fatalf("Run(%q) code = %d, stderr = %q", args, code, stderr.String())
+		}
+		outputs = append(outputs, stdout.String())
+	}
+	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], targetQueueEnvironment) {
+		t.Fatalf("upload help outputs differ or omit target queue environment:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
+	}
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")

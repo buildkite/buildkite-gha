@@ -53,6 +53,18 @@ var commandUsage = map[string]string{
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
+func writeCommandHelp(stdout io.Writer, command string) {
+	_, _ = fmt.Fprint(stdout, commandUsage[command])
+	switch command {
+	case "validate":
+		_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
+	case "compile":
+		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
+	case "upload":
+		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n", targetQueueEnvironment)
+	}
+}
+
 const (
 	resultPublicationTimeout = 10 * time.Second
 	legacyRuntimeQueue       = "hosted"
@@ -91,18 +103,9 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
 		return 0
 	default:
-		if commandHelp, ok := commandUsage[args[0]]; ok {
+		if _, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-				_, _ = fmt.Fprint(stdout, commandHelp)
-				if args[0] == "compile" {
-					_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
-				}
-				if args[0] == "validate" {
-					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
-				}
-				if args[0] == "upload" {
-					_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n", targetQueueEnvironment)
-				}
+				writeCommandHelp(stdout, args[0])
 				return 0
 			}
 			switch args[0] {
@@ -133,21 +136,11 @@ func help(args []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, "help accepts at most one command")
 	}
 
-	commandHelp, ok := commandUsage[args[0]]
-	if !ok {
+	if _, ok := commandUsage[args[0]]; !ok {
 		return usageError(stderr, "unknown command %q", args[0])
 	}
 
-	_, _ = fmt.Fprint(stdout, commandHelp)
-	if args[0] == "validate" {
-		_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
-	}
-	if args[0] == "compile" {
-		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
-	}
-	if args[0] == "upload" {
-		_, _ = fmt.Fprint(stdout, "\nGenerated jobs use Buildkite's default agent targeting. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
-	}
+	writeCommandHelp(stdout, args[0])
 	return 0
 }
 

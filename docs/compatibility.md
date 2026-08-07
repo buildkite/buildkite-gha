@@ -459,18 +459,23 @@ not a complete execution path.
 
 ### Upload
 
-`upload` is the in-build command used by the plugin:
+`upload` is the in-build command used by the plugin. Source builds containing
+the default-agent-targeting change use:
 
 ```sh
-buildkite-gha upload --runtime-queue hosted .github/workflows/ci.yml
+buildkite-gha upload .github/workflows/ci.yml
 ```
 
 An installer may explicitly enable pipeline-repository private checkout:
 
 ```sh
-buildkite-gha upload --private-checkout --runtime-queue hosted \
+buildkite-gha upload --private-checkout \
   .github/workflows/ci.yml
 ```
+
+When invoking the current v0.2.3 release directly, add
+`--runtime-queue hosted`; that release requires the argument and uses it to
+select the `hosted` queue.
 
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
 it derives a bounded compatibility snapshot from the current Buildkite build.
