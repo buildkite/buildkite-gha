@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -389,13 +390,14 @@ func conditionMatrixValue(matrix map[string]any, target string) (any, bool) {
 }
 
 func conditionValueCategory(value any) string {
+	if _, ok := conditionNumber(value); ok {
+		return "number"
+	}
 	switch value.(type) {
 	case nil:
 		return "null"
 	case bool:
 		return "boolean"
-	case int, float64, json.Number:
-		return "number"
 	case string:
 		return "string"
 	default:
@@ -682,14 +684,20 @@ func conditionEqual(left, right any) (bool, error) {
 func conditionNumber(value any) (*big.Rat, bool) {
 	var source string
 	switch value := value.(type) {
-	case int:
-		return new(big.Rat).SetInt64(int64(value)), true
-	case float64:
-		source = strconv.FormatFloat(value, 'g', -1, 64)
 	case json.Number:
 		source = value.String()
 	default:
-		return nil, false
+		reflected := reflect.ValueOf(value)
+		switch reflected.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			source = strconv.FormatInt(reflected.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			source = strconv.FormatUint(reflected.Uint(), 10)
+		case reflect.Float32, reflect.Float64:
+			source = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
+		default:
+			return nil, false
+		}
 	}
 	number, ok := new(big.Rat).SetString(source)
 	return number, ok

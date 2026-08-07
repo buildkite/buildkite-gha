@@ -254,6 +254,21 @@ func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
 	}
 }
 
+func TestValidateConditionAcceptsCompilerNumericKinds(t *testing.T) {
+	values := []any{
+		int(-1), int8(-1), int16(-1), int32(-1), int64(-1),
+		uint(1), uint8(1), uint16(1), uint32(1), uint64(1), ^uint64(0),
+		float32(1.5), float64(1.5), json.Number("1e3"),
+	}
+	for _, value := range values {
+		t.Run(reflect.TypeOf(value).String(), func(t *testing.T) {
+			if err := ValidateConditionWithMatrix("matrix.value != 0", JobCondition, map[string]any{"value": value}); err != nil {
+				t.Fatalf("ValidateConditionWithMatrix(%T) error = %v", value, err)
+			}
+		})
+	}
+}
+
 func TestEvaluateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -413,6 +413,23 @@ jobs:
 	}
 }
 
+func TestCompileAllowsMaxUint64MatrixCondition(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        value: [18446744073709551615]
+    if: matrix.value != 0
+    steps:
+      - run: true
+`)
+	if _, err := Compile("conditions.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+}
+
 func TestCompilePreservesStaticMatrixScalarTypes(t *testing.T) {
 	source := []byte(`on: push
 jobs:
