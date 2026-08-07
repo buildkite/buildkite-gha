@@ -206,7 +206,7 @@ func validateConcurrencyGate(gate *ConcurrencyGate) error {
 }
 
 func concurrencyGateKeys(compilerStep, group string, jobs []Job) (string, string) {
-	digest := sha256Sum(group)
+	digest := sha256Sum(compilerStep + "\x00" + group)
 	used := map[string]struct{}{compilerStep: {}}
 	for _, job := range jobs {
 		used[job.Key] = struct{}{}

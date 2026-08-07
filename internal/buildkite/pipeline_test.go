@@ -201,6 +201,15 @@ func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 	}
 }
 
+func TestConcurrencyGateKeysIncludeCompilerStep(t *testing.T) {
+	jobs := []Job{{Key: "job"}}
+	firstOpen, firstClose := concurrencyGateKeys("first-importer", "shared-group", jobs)
+	secondOpen, secondClose := concurrencyGateKeys("second-importer", "shared-group", jobs)
+	if firstOpen == secondOpen || firstClose == secondClose {
+		t.Fatalf("same-group imports have colliding gate keys: %q, %q and %q, %q", firstOpen, firstClose, secondOpen, secondClose)
+	}
+}
+
 func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
