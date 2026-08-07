@@ -56,6 +56,7 @@ var commandUsage = map[string]string{
 const (
 	resultPublicationTimeout = 10 * time.Second
 	legacyRuntimeQueue       = "hosted"
+	targetQueueEnvironment   = "BUILDKITE_GHA_TARGET_QUEUE"
 	hostedTokenlessProfile   = "hosted-tokenless"
 	runtimeMiseArchiveDigest = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest  = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
@@ -100,7 +101,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 					_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
 				}
 				if args[0] == "upload" {
-					_, _ = fmt.Fprint(stdout, "\nGenerated jobs use Buildkite's default agent targeting. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n")
+					_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n", targetQueueEnvironment)
 				}
 				return 0
 			}
@@ -921,7 +922,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", false)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", false)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -1081,6 +1082,10 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
+	targetQueue, targetQueueConfigured := os.LookupEnv(targetQueueEnvironment)
+	if targetQueueConfigured && targetQueue == "" {
+		return usageError(stderr, "upload: %s must name a non-empty queue when set", targetQueueEnvironment)
+	}
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
@@ -1107,7 +1112,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), privateCheckout)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, privateCheckout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1164,7 +1169,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, privateCheckout bool) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string, privateCheckout bool) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -1180,13 +1185,16 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		ResolveActions: privateCheckout,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
-				"ubuntu-latest": "",
-				"ubuntu-24.04":  "",
-				"ubuntu-22.04":  "",
+				"ubuntu-latest": targetQueue,
+				"ubuntu-24.04":  targetQueue,
+				"ubuntu-22.04":  targetQueue,
 			},
-			AllowUntrustedDefaultQueue: true,
+			AllowUntrustedDefaultQueue: targetQueue == "",
 		},
 		PrivateCheckout: privateCheckout,
+	}
+	if targetQueue != "" {
+		options.Runners.UntrustedQueues = []string{targetQueue}
 	}
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")

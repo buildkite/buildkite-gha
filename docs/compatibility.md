@@ -488,5 +488,14 @@ no-op for compatibility with plugin releases that still pass it; the current
 v0.2.3 release uses that argument to select `hosted`. Other values are rejected
 rather than silently ignored by the new implementation.
 
+An importer that must select one queue can set `BUILDKITE_GHA_TARGET_QUEUE` on
+its step. The uploader maps every accepted Linux runner label to that queue,
+emits the corresponding `agents` selector, and binds the plan to the runtime
+queue. An empty, whitespace-containing, or otherwise invalid queue fails before
+pipeline upload. This setting is ordinary pipeline configuration, not an
+authenticated grant: it admits untrusted workflow code to the named queue, so
+that queue must provide suitable whole-job isolation and no ambient protected
+credentials.
+
 `run-job` is an internal command emitted into generated jobs. Users should not
 need to invoke it directly.

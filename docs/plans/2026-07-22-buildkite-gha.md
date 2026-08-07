@@ -1258,6 +1258,10 @@ Cursor Origin public checkout remains a separate provider integration gate.
 - Generated workflow jobs and concurrency gates now omit Buildkite `agents` by
   default, leaving scheduling to the pipeline or organization defaults. An
   explicit `RunnerPolicy` queue remains supported for embedding API callers.
+  Upload importers can opt into that policy through
+  `BUILDKITE_GHA_TARGET_QUEUE`; the value is ordinary pipeline configuration and
+  must name a queue suitable for untrusted workflow code. Repository-owned
+  hosted proof importers set it to `hosted` explicitly.
   Job-plan schema v7 makes `target.queue` optional, and runtime queue binding is
   checked only when a plan explicitly selects one. The deprecated
   `--runtime-queue hosted` spelling remains a no-op compatibility path for

@@ -431,6 +431,7 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	}
 
 	t.Setenv("BUILDKITE_GHA_NODE20", filepath.Join(root, "missing-node20"))
+	t.Setenv(targetQueueEnvironment, "not a queue")
 	stdout.Reset()
 	stderr.Reset()
 	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
@@ -527,6 +528,81 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
+	}
+}
+
+func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
+	t.Setenv(targetQueueEnvironment, "hosted")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	var pipeline struct {
+		Steps []struct {
+			Key    string            `yaml:"key"`
+			Agents map[string]string `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatalf("uploaded pipeline YAML: %v", err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
+	}
+	for _, step := range pipeline.Steps {
+		if step.Agents["queue"] != "hosted" {
+			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
+		}
+	}
+
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode plan %q: %v", path, err)
+		}
+		planCount++
+		if job.Schema == plan.SchemaV7 || job.Target.Queue != "hosted" {
+			t.Fatalf("explicitly targeted plan = schema %q, target %#v", job.Schema, job.Target)
+		}
+	}
+	if planCount != 3 {
+		t.Fatalf("uploaded plan count = %d, want 3", planCount)
+	}
+}
+
+func TestRunUploadRejectsInvalidTargetQueueEnvironment(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	for _, test := range []struct {
+		name  string
+		queue string
+	}{
+		{name: "empty", queue: ""},
+		{name: "malformed", queue: "not a queue"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "invalid-queue-importer")
+			t.Setenv(targetQueueEnvironment, test.queue)
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code == 0 {
+				t.Fatalf("run() code = 0, want invalid target queue failure")
+			}
+			if len(runner.commands) != 0 || (!strings.Contains(stderr.String(), targetQueueEnvironment) && !strings.Contains(stderr.String(), "runner policy queue")) {
+				t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+			}
+		})
 	}
 }
 
