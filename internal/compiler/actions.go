@@ -56,12 +56,7 @@ type actionNode struct {
 
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
-func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, error) {
-	selectors, locks, capabilities, _, err := compileActionLocksWithMise(ctx, workspace, actionSource, refs)
-	return selectors, locks, capabilities, err
-}
-
-func compileActionLocksWithMise(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
+func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
 	if workspace == "" {
 		return nil, nil, nil, true, fmt.Errorf("workflow path must identify a repository root")
 	}

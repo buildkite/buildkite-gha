@@ -134,7 +134,7 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, _, _, got, err := compileActionLocksWithMise(context.Background(), workspace, source, test.refs)
+			_, _, _, got, err := compileActionLocks(context.Background(), workspace, source, test.refs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -148,7 +148,7 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "js", "name: js\nruns:\n  using: node20\n  main: index.js\n")
-	selectors, locks, caps, err := compileActionLocks(context.Background(), w, nil, []string{"./js", "./js"})
+	selectors, locks, caps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js", "./js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	_, locks, caps, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
+	_, locks, caps, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,14 +183,14 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 func TestCompileActionLocksRecursion(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "loop", "name: loop\nruns:\n  using: composite\n  steps:\n    - uses: ./loop\n")
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./loop"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./loop"})
 	if err == nil || !strings.Contains(err.Error(), "recursion") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestCompileActionLocksRequiresRepositoryRoot(t *testing.T) {
-	_, _, _, err := compileActionLocks(context.Background(), "", nil, []string{"./local"})
+	_, _, _, _, err := compileActionLocks(context.Background(), "", nil, []string{"./local"})
 	if err == nil || !strings.Contains(err.Error(), "workflow path must identify a repository root") {
 		t.Fatalf("compileActionLocks() error = %v, want repository-root rejection", err)
 	}
@@ -205,7 +205,7 @@ func TestCompileActionLocksRejectsExcessiveDepthBeforeResolvingLeaf(t *testing.T
 		}
 		writeAction(t, w, "depth-"+strconv.Itoa(i), "name: depth\nruns:\n  using: composite\n"+steps)
 	}
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./depth-0"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./depth-0"})
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum depth") {
 		t.Fatalf("compileActionLocks() error = %v, want depth rejection", err)
 	}
@@ -217,7 +217,7 @@ func TestCompileActionLocksRejectsEscapedJavaScriptEntrypoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w, "outside.js"), []byte("// outside\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js"})
 	if err == nil || !strings.Contains(err.Error(), "escapes action source") {
 		t.Fatalf("compileActionLocks() error = %v, want entry-point confinement rejection", err)
 	}
@@ -228,7 +228,7 @@ func TestCompileActionLocksExplicitRemoteAndDistinctRefs(t *testing.T) {
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: Other/Child/sub@v2\n")
 	writeAction(t, remote, "sub", "name: child\nruns:\n  using: node24\n  main: index.js\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	selectors, locks, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
+	selectors, locks, _, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,11 +246,11 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	writeAction(t, w, "child", "name: child\nruns:\n  using: node20\n  main: index.js\n")
-	aSelectors, aLocks, aCaps, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	aSelectors, aLocks, aCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bSelectors, bLocks, bCaps, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	bSelectors, bLocks, bCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 				uses += "/" + path
 			}
 			uses += "@" + actionintegration.CacheCommit
-			_, locks, capabilities, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
+			_, locks, capabilities, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -285,7 +285,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 		})
 	}
 
-	_, locks, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
+	_, locks, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 	}
 
 	resolved := strings.Repeat("a", 40)
-	_, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
+	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
 	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "supported: actions/cache@v6.1.0 (commit "+actionintegration.CacheCommit+")") {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}

@@ -304,7 +304,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 		}
 		if lockActions && len(actionRefs) != 0 {
-			selectors, locks, actionCapabilities, actionRequiresMise, err := compileActionLocksWithMise(ctx, instance.RepositoryRoot, actionSource, actionRefs)
+			selectors, locks, actionCapabilities, actionRequiresMise, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
 			if err != nil {
 				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
