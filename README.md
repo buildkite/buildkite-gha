@@ -32,10 +32,12 @@ steps:
 The released plugin downloads and verifies `buildkite-gha` v0.2.3 by default,
 derives the event context from the Buildkite build, and uploads the generated
 jobs to the fixed `hosted` queue. Pin a released plugin version rather than a
-floating branch. For action jobs, the runtime reuses mise 2026.5.12 or newer
-from `PATH` or the absolute path in `BUILDKITE_GHA_MISE`; when neither provides
-a compatible version, it downloads and verifies a managed 2026.5.12 copy in
-the hosted cache. Shell-only jobs do not require or install mise.
+floating branch. For action jobs that can execute JavaScript, the runtime
+reuses mise 2026.5.12 or newer from `PATH` or the absolute path in
+`BUILDKITE_GHA_MISE`; when neither provides a compatible version, it downloads
+and verifies a managed 2026.5.12 copy in the hosted cache. Shell-only jobs and
+action jobs whose resolved trees contain only shell steps, native adapters, or
+Docker do not require or install mise.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context

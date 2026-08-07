@@ -32,6 +32,21 @@ func (contextActionSource) Fetch(ctx context.Context, _ source.Reference) (sourc
 	return source.Resolved{}, source.Materialized{}, ctx.Err()
 }
 
+type classifiedActionSource struct {
+	roots   map[string]string
+	commits map[string]string
+}
+
+func (s classifiedActionSource) Fetch(_ context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
+	repository := strings.ToLower(ref.Owner + "/" + ref.Repository)
+	root := s.roots[repository]
+	return source.Resolved{Reference: ref, Commit: s.commits[repository]}, source.Materialized{
+		RepositoryRoot: root,
+		ActionRoot:     filepath.Join(root, ref.Path),
+		SourceDigest:   "sha256:" + strings.Repeat("a", 64),
+	}, nil
+}
+
 func (f *fakeActionSource) Fetch(_ context.Context, r source.Reference) (source.Resolved, source.Materialized, error) {
 	f.calls[r.Raw]++
 	d, err := source.DigestTree(filepath.Join(f.root, r.Path))
@@ -67,10 +82,73 @@ func writeAction(t *testing.T, root, name, body string) {
 	}
 }
 
+func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, workspace, "native-docker-composite", "runs:\n  using: composite\n  steps:\n    - run: echo native\n      shell: sh\n    - uses: actions/checkout@v4\n    - uses: ./docker\n")
+	writeAction(t, workspace, "js", "runs:\n  using: node24\n  main: index.js\n")
+	writeAction(t, workspace, "js-composite", "runs:\n  using: composite\n  steps:\n    - uses: ./js\n")
+
+	remote := func(repository, using string) string {
+		root := t.TempDir()
+		writeAction(t, root, "", "runs:\n  using: "+using+"\n  main: index.js\n")
+		return root
+	}
+	remoteComposite := t.TempDir()
+	writeAction(t, remoteComposite, "", "runs:\n  using: composite\n  steps:\n    - uses: owner/javascript@v1\n")
+	source := classifiedActionSource{
+		roots: map[string]string{
+			"actions/checkout":          remote("actions/checkout", "node24"),
+			"actions/upload-artifact":   remote("actions/upload-artifact", "node24"),
+			"actions/download-artifact": remote("actions/download-artifact", "node24"),
+			"actions/cache":             remote("actions/cache", "node24"),
+			"owner/composite":           remoteComposite,
+			"owner/javascript":          remote("owner/javascript", "node24"),
+		},
+		commits: map[string]string{
+			"actions/checkout":          strings.Repeat("b", 40),
+			"actions/upload-artifact":   actionintegration.UploadArtifactCommit,
+			"actions/download-artifact": actionintegration.DownloadArtifactCommit,
+			"actions/cache":             actionintegration.CacheCommit,
+			"owner/composite":           strings.Repeat("c", 40),
+			"owner/javascript":          strings.Repeat("d", 40),
+		},
+	}
+
+	tests := []struct {
+		name string
+		refs []string
+		want bool
+	}{
+		{name: "shell only"},
+		{name: "native checkout only", refs: []string{"actions/checkout@v4"}},
+		{name: "native upload only", refs: []string{"actions/upload-artifact@v4"}},
+		{name: "native download only", refs: []string{"actions/download-artifact@v4"}},
+		{name: "Docker only", refs: []string{"./docker"}},
+		{name: "native and Docker composite", refs: []string{"./native-docker-composite"}},
+		{name: "JavaScript", refs: []string{"./js"}, want: true},
+		{name: "JavaScript through composite", refs: []string{"./js-composite"}, want: true},
+		{name: "JavaScript through remote composite", refs: []string{"owner/composite@v1"}, want: true},
+		{name: "cache v2 client", refs: []string{"actions/cache@v6.1.0"}, want: true},
+		{name: "mixed Docker and JavaScript", refs: []string{"./docker", "./js"}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, _, got, err := compileActionLocks(context.Background(), workspace, source, test.refs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("requires mise = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "js", "name: js\nruns:\n  using: node20\n  main: index.js\n")
-	selectors, locks, caps, err := compileActionLocks(context.Background(), w, nil, []string{"./js", "./js"})
+	selectors, locks, caps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js", "./js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +162,7 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	_, locks, caps, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
+	_, locks, caps, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,14 +183,14 @@ func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 func TestCompileActionLocksRecursion(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "loop", "name: loop\nruns:\n  using: composite\n  steps:\n    - uses: ./loop\n")
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./loop"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./loop"})
 	if err == nil || !strings.Contains(err.Error(), "recursion") {
 		t.Fatalf("got %v", err)
 	}
 }
 
 func TestCompileActionLocksRequiresRepositoryRoot(t *testing.T) {
-	_, _, _, err := compileActionLocks(context.Background(), "", nil, []string{"./local"})
+	_, _, _, _, err := compileActionLocks(context.Background(), "", nil, []string{"./local"})
 	if err == nil || !strings.Contains(err.Error(), "workflow path must identify a repository root") {
 		t.Fatalf("compileActionLocks() error = %v, want repository-root rejection", err)
 	}
@@ -127,7 +205,7 @@ func TestCompileActionLocksRejectsExcessiveDepthBeforeResolvingLeaf(t *testing.T
 		}
 		writeAction(t, w, "depth-"+strconv.Itoa(i), "name: depth\nruns:\n  using: composite\n"+steps)
 	}
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./depth-0"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./depth-0"})
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum depth") {
 		t.Fatalf("compileActionLocks() error = %v, want depth rejection", err)
 	}
@@ -139,7 +217,7 @@ func TestCompileActionLocksRejectsEscapedJavaScriptEntrypoint(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w, "outside.js"), []byte("// outside\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js"})
+	_, _, _, _, err := compileActionLocks(context.Background(), w, nil, []string{"./js"})
 	if err == nil || !strings.Contains(err.Error(), "escapes action source") {
 		t.Fatalf("compileActionLocks() error = %v, want entry-point confinement rejection", err)
 	}
@@ -150,7 +228,7 @@ func TestCompileActionLocksExplicitRemoteAndDistinctRefs(t *testing.T) {
 	writeAction(t, remote, "", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: Other/Child/sub@v2\n")
 	writeAction(t, remote, "sub", "name: child\nruns:\n  using: node24\n  main: index.js\n")
 	f := &fakeActionSource{root: remote, calls: map[string]int{}}
-	selectors, locks, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
+	selectors, locks, _, _, err := compileActionLocks(context.Background(), w, f, []string{"Owner/Repo@v1", "Owner/Repo@main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,11 +246,11 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: ./child\n")
 	writeAction(t, w, "child", "name: child\nruns:\n  using: node20\n  main: index.js\n")
-	aSelectors, aLocks, aCaps, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	aSelectors, aLocks, aCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bSelectors, bLocks, bCaps, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
+	bSelectors, bLocks, bCaps, _, err := compileActionLocks(context.Background(), w, nil, []string{"./parent"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +275,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 				uses += "/" + path
 			}
 			uses += "@" + actionintegration.CacheCommit
-			_, locks, capabilities, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
+			_, locks, capabilities, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +285,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 		})
 	}
 
-	_, locks, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
+	_, locks, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +294,7 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 	}
 
 	resolved := strings.Repeat("a", 40)
-	_, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
+	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
 	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "supported: actions/cache@v6.1.0 (commit "+actionintegration.CacheCommit+")") {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}
@@ -276,8 +354,8 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("tokenless action plans are not deterministic")
 	}
-	if len(first) != 3 || first[0].Schema != plan.SchemaV3 || first[1].Schema != plan.SchemaV3 || first[2].Schema != plan.SchemaV2 {
-		t.Fatalf("plan schemas = %#v, want two action v3 plans and one shell v2 plan", []string{first[0].Schema, first[1].Schema, first[2].Schema})
+	if len(first) != 3 || first[0].Schema != plan.SchemaV7 || first[1].Schema != plan.SchemaV7 || first[2].Schema != plan.SchemaV2 {
+		t.Fatalf("plan schemas = %#v, want two action v7 plans and one shell v2 plan", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
 	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
@@ -340,7 +418,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.SchemaV4 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.SchemaV7 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -750,7 +828,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV3 || len(plans[0].Actions) != 3 {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV7 || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("public action plan = %#v", plans)
 	}
 	wantCommits := map[string]string{

@@ -290,6 +290,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		}
 		jobSchema := plan.Schema
 		var actions []plan.ActionLock
+		var requiresMise bool
 		var capabilities []string
 		var authorization PlanAuthorization
 		lockActions := options.ResolveActions
@@ -303,10 +304,11 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 		}
 		if lockActions && len(actionRefs) != 0 {
-			selectors, locks, actionCapabilities, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
+			selectors, locks, actionCapabilities, actionRequiresMise, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
 			if err != nil {
 				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
+			requiresMise = actionRequiresMise
 			locksByID := make(map[string]plan.ActionLock, len(locks))
 			for _, lock := range locks {
 				locksByID[lock.ID] = lock
@@ -346,7 +348,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 					}
 				}
 			}
-			jobSchema = plan.SchemaV3
+			jobSchema = plan.SchemaV7
 			actions = locks
 			capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
 			sort.Strings(capabilities)
@@ -367,7 +369,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			if len(actionRefs) != 0 && !lockActions {
 				return nil, nil, fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
 			}
-			jobSchema = plan.SchemaV4
+			if jobSchema != plan.SchemaV7 {
+				jobSchema = plan.SchemaV4
+			}
 			capabilities = append(capabilities, "docker", "network")
 			sort.Strings(capabilities)
 			capabilities = slices.Compact(capabilities)
@@ -405,7 +409,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			}
 		}
 		if len(needOutputs) != 0 {
-			jobSchema = plan.SchemaV5
+			if jobSchema != plan.SchemaV7 {
+				jobSchema = plan.SchemaV5
+			}
 		}
 		secrets, err := requiredSecrets(instance)
 		if err != nil {
@@ -422,7 +428,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				permissions[strings.ReplaceAll(name, "-", "_")] = access
 			}
 			githubToken = &plan.GitHubToken{Permissions: permissions}
-			jobSchema = plan.SchemaV6
+			if jobSchema != plan.SchemaV7 {
+				jobSchema = plan.SchemaV6
+			}
 			capabilities = append(capabilities, "provider-token-write")
 			authorization.ProviderTokenWriteCapabilitySources = []string{"workflow-permissions"}
 		}
@@ -463,6 +471,9 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			Outputs:                 instance.Outputs,
 			Steps:                   steps,
 			Actions:                 actions,
+		}
+		if len(actions) != 0 {
+			job.RequiresMise = &requiresMise
 		}
 		if instance.Container != nil {
 			job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}

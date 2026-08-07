@@ -201,7 +201,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6) && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -272,7 +272,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	var privateRuntime string
-	if jobUsesActions(job) {
+	if job.NeedsMise() {
 		runner.ResolveMise = func(ctx context.Context) (string, error) {
 			var err error
 			privateRuntime, err = os.MkdirTemp("", "buildkite-gha-runtime-")
@@ -334,18 +334,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
-}
-
-func jobUsesActions(job plan.Job) bool {
-	if len(job.Actions) != 0 {
-		return true
-	}
-	for _, step := range job.Steps {
-		if step.Uses != "" || step.Action != nil || step.Kind == "uses" {
-			return true
-		}
-	}
-	return false
 }
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
