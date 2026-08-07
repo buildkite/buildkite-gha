@@ -162,6 +162,53 @@ jobs:
 `,
 			want: `conditions.yml:7:18: job "test": step "__parallel_6_9_1" condition: condition equality compares incompatible string and boolean operands`,
 		},
+		{
+			name: "concrete matrix type",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    if: matrix.version == 12
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:8:9: job "test": job condition: condition equality compares incompatible string and number operands`,
+		},
+		{
+			name: "concrete matrix step type",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    steps:
+      - if: matrix.version == 12
+        run: true
+`,
+			want: `conditions.yml:9:13: job "test": step 1 condition: condition equality compares incompatible string and number operands`,
+		},
+		{
+			name: "missing concrete matrix value",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: 12
+          - os: ubuntu-latest
+    if: matrix.version == 12
+    steps:
+      - run: true
+`,
+			want: `conditions.yml:10:9: job "test": job condition: condition reference "matrix.version" is unavailable in this matrix instance`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for name, compile := range map[string]func() error{
@@ -344,6 +391,25 @@ jobs:
 		if !reflect.DeepEqual(ir.Jobs[i].Matrix, want[i]) {
 			t.Fatalf("matrix instance %d = %#v, want %#v", i, ir.Jobs[i].Matrix, want[i])
 		}
+	}
+}
+
+func TestCompileAllowsCompatibleConcreteMatrixConditionTypes(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, 14.0]
+        experimental: [true, false]
+    if: matrix.version == 12
+    steps:
+      - if: matrix.experimental == true
+        run: true
+`)
+	if _, err := Compile("conditions.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatalf("Compile() error = %v", err)
 	}
 }
 

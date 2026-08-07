@@ -205,14 +205,17 @@ func TestUnsupportedConditionPreflightAppliesToEveryCompilerEntryPoint(t *testin
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [12, "14"]
+    if: matrix.version == 12
     steps:
-      - if: vars.ENABLED == true
-        run: true
+      - run: true
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	want := `step 1 condition: condition equality compares incompatible string and boolean operands`
+	want := `job condition: condition equality compares incompatible string and number operands`
 
 	t.Run("validate json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer

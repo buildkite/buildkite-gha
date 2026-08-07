@@ -265,11 +265,21 @@ func ConditionUsesContext(source, contextName string) (bool, error) {
 // syntax, functions, and contexts implemented by the corresponding runtime
 // phase. Runtime-dependent values are not evaluated.
 func ValidateCondition(source string, scope ConditionScope) error {
+	return validateCondition(source, scope, nil, false)
+}
+
+// ValidateConditionWithMatrix additionally verifies references and operand
+// types against one concrete, statically expanded matrix instance.
+func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
+	return validateCondition(source, scope, matrix, true)
+}
+
+func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
 		return err
 	}
-	return validateConditionNode(node, scope)
+	return validateConditionNode(node, scope, matrix, matrixKnown)
 }
 
 func parseCondition(source string) (actionlint.ExprNode, bool, error) {
@@ -287,7 +297,7 @@ func parseCondition(source string) (actionlint.ExprNode, bool, error) {
 	return node, false, nil
 }
 
-func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error {
+func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
 	switch node := node.(type) {
 	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
 		return nil
@@ -296,25 +306,33 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 		if err != nil {
 			return err
 		}
+		if matrixKnown && strings.EqualFold(root, "matrix") && len(path) == 1 {
+			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
+				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
+			}
+		}
 		return validateConditionReference(root, path, scope)
 	case *actionlint.NotOpNode:
-		return validateConditionNode(node.Operand, scope)
+		return validateConditionNode(node.Operand, scope, matrix, matrixKnown)
 	case *actionlint.LogicalOpNode:
-		if err := validateConditionNode(node.Left, scope); err != nil {
+		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
 			return err
 		}
-		return validateConditionNode(node.Right, scope)
+		return validateConditionNode(node.Right, scope, matrix, matrixKnown)
 	case *actionlint.CompareOpNode:
 		if !node.Kind.IsEqualityOp() {
 			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
 		}
-		if err := validateConditionNode(node.Left, scope); err != nil {
+		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
 			return err
 		}
-		if err := validateConditionNode(node.Right, scope); err != nil {
+		if err := validateConditionNode(node.Right, scope, matrix, matrixKnown); err != nil {
 			return err
 		}
-		left, right := conditionOperandCategory(node.Left), conditionOperandCategory(node.Right)
+		left, right := conditionOperandCategory(node.Left, matrix), conditionOperandCategory(node.Right, matrix)
+		if left == "unsupported" || right == "unsupported" {
+			return fmt.Errorf("condition equality uses an unsupported matrix value type")
+		}
 		if left != "unknown" && right != "unknown" && left != right {
 			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
 		}
@@ -334,7 +352,7 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope) error
 	}
 }
 
-func conditionOperandCategory(node actionlint.ExprNode) string {
+func conditionOperandCategory(node actionlint.ExprNode, matrix map[string]any) string {
 	switch node := node.(type) {
 	case *actionlint.NullNode:
 		return "null"
@@ -345,12 +363,44 @@ func conditionOperandCategory(node actionlint.ExprNode) string {
 	case *actionlint.StringNode:
 		return "string"
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, _, err := referencePath(node)
-		if err == nil && !strings.EqualFold(root, "matrix") {
+		root, path, err := referencePath(node)
+		if err != nil {
+			return "unknown"
+		}
+		if !strings.EqualFold(root, "matrix") {
 			return "string"
+		}
+		if len(path) == 1 {
+			if value, ok := conditionMatrixValue(matrix, path[0]); ok {
+				return conditionValueCategory(value)
+			}
 		}
 	}
 	return "unknown"
+}
+
+func conditionMatrixValue(matrix map[string]any, target string) (any, bool) {
+	for name, value := range matrix {
+		if strings.EqualFold(name, target) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func conditionValueCategory(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return "boolean"
+	case int, float64, json.Number:
+		return "number"
+	case string:
+		return "string"
+	default:
+		return "unsupported"
+	}
 }
 
 func validateConditionReference(root string, path []string, scope ConditionScope) error {
@@ -609,7 +659,10 @@ func conditionEqual(left, right any) (bool, error) {
 	}
 	switch left := left.(type) {
 	case nil:
-		return right == nil, nil
+		if right != nil {
+			return false, fmt.Errorf("mixed-type condition equality is unsupported")
+		}
+		return true, nil
 	case string:
 		right, ok := right.(string)
 		if !ok {

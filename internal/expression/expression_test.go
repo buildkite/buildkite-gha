@@ -225,6 +225,35 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 	}
 }
 
+func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		matrix map[string]any
+		want   string
+	}{
+		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
+		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
+		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
+		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}, want: "condition equality compares incompatible string and number operands"},
+		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}, want: "condition equality compares incompatible null and number operands"},
+		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}, want: `condition reference "matrix.version" is unavailable in this matrix instance`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
+			if test.want == "" && err != nil {
+				t.Fatalf("ValidateCondition() error = %v", err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+	if err := ValidateCondition("matrix.version == 12", JobCondition); err != nil {
+		t.Fatalf("ValidateCondition() rejected unknown matrix type: %v", err)
+	}
+}
+
 func TestEvaluateFailsClosed(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -319,6 +348,9 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 	}
 	if _, err := EvaluateCondition("true == 'true'", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() silently coerced mixed equality operands")
+	}
+	if _, err := EvaluateCondition("null == true", ConditionContext{}); err == nil {
+		t.Fatal("EvaluateCondition() accepted mixed null equality operands")
 	}
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
