@@ -105,6 +105,8 @@ The plugin path currently supports:
   declared outputs;
 - statically resolvable workflow and job `concurrency` groups, translated to
   repository-scoped Buildkite queues and whole-workflow concurrency gates;
+  workflow-level literal `cancel-in-progress: true` is accepted with a warning
+  because cancellation must be configured in Buildkite pipeline settings;
 - the documented job and step condition subset, with unsupported functions and
   unavailable runtime contexts rejected before pipeline upload;
 - background, wait, cancellation, and parallel step controls;
@@ -131,8 +133,9 @@ It does **not** currently support:
 - job containers or service containers through the production plugin path;
 - compound or literal local reusable-workflow output mappings and reusable-call
   conditions;
-- `concurrency.cancel-in-progress`, runtime-dependent concurrency groups, or
-  workflow-level concurrency declared by a called reusable workflow;
+- job-level or expression-valued `concurrency.cancel-in-progress`,
+  runtime-dependent concurrency groups, or workflow-level concurrency declared
+  by a called reusable workflow;
 - privileged containers, arbitrary Docker options, or `docker://` actions; or
 - Windows or macOS jobs.
 

@@ -910,7 +910,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if profile != "" {
 		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
-			if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)); writeErr != nil {
+			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)
+			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
@@ -925,7 +926,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			}
 			var failure *hostedTokenlessFailure
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
-				if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileBlocked(workflowPath, profile, report.LogicalJobs, report.Instances, profileErr)); writeErr != nil {
+				profileReport := compatibility.ProfileBlocked(workflowPath, profile, report.LogicalJobs, report.Instances, profileErr)
+				if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 					_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 				}
 				return 1
@@ -934,22 +936,43 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
 				code = "E_ENVIRONMENT"
 			}
-			if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, code, profileErr)); writeErr != nil {
+			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, code, profileErr)
+			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
 		}
-		if writeErr := compatibility.WriteProfile(stdout, format, compatibility.Admitted(workflowPath, profile, report.LogicalJobs, report.Instances, preflight.HasActions)); writeErr != nil {
+		profileReport := compatibility.Admitted(workflowPath, profile, report.LogicalJobs, report.Instances, preflight.HasActions)
+		if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			return 1
 		}
 		return 0
 	}
-	if err := compatibility.Write(stdout, format, compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)); err != nil {
+	compatibilityReport := compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)
+	compatibilityReport.Diagnostics = append(compatibilityReport.Diagnostics, compilerWarningDiagnostics(workflowPath, report.Warnings)...)
+	if err := compatibility.Write(stdout, format, compatibilityReport); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func withCompilerWarnings(report compatibility.ProfileReport, path string, warnings []compiler.Warning) compatibility.ProfileReport {
+	report.Diagnostics = append(compilerWarningDiagnostics(path, warnings), report.Diagnostics...)
+	return report
+}
+
+func compilerWarningDiagnostics(path string, warnings []compiler.Warning) []compatibility.Diagnostic {
+	diagnostics := make([]compatibility.Diagnostic, len(warnings))
+	for i, warning := range warnings {
+		diagnostics[i] = compatibility.Diagnostic{
+			Level:   "warning",
+			Code:    warning.Code,
+			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message),
+		}
+	}
+	return diagnostics
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, format, profile string, err error) {
@@ -1010,8 +1033,17 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		return 1
 	}
 	var result []byte
+	var warnings []compiler.Warning
 	if format == "ir-json" {
 		result, err = compiler.Compile(workflowPath, source, event)
+		if err == nil {
+			var ir compiler.IR
+			if decodeErr := json.Unmarshal(result, &ir); decodeErr != nil {
+				err = fmt.Errorf("decode compiler IR: %w", decodeErr)
+			} else {
+				warnings = ir.Warnings
+			}
+		}
 	} else {
 		digest, digestErr := executableDigest()
 		if digestErr != nil {
@@ -1021,16 +1053,24 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
 		err = compileErr
 		result = bundle.Pipeline
+		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
+	writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
 	if _, err := stdout.Write(result); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []compiler.Warning) {
+	for _, warning := range warnings {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: warning: %s:%d:%d: [%s] %s\n", command, path, warning.Line, warning.Column, warning.Code, warning.Message)
+	}
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
@@ -1070,6 +1110,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		return 1
 	}
 	bundle := preflight.Bundle
+	writeCompilerWarnings(stderr, "upload", workflowPath, bundle.IR.Warnings)
 	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {

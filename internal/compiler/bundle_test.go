@@ -110,7 +110,7 @@ func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
 on: push
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   static:
     strategy:
@@ -134,6 +134,9 @@ jobs:
 	}
 	if bundle.IR.Workflow.ConcurrencyGroup != "Deployment-refs/heads/main" || len(bundle.IR.Jobs) != 4 {
 		t.Fatalf("concurrency IR = workflow %q jobs %#v", bundle.IR.Workflow.ConcurrencyGroup, bundle.IR.Jobs)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || bundle.IR.Warnings[0].Line != 5 || bundle.IR.Warnings[0].Column != 23 {
+		t.Fatalf("concurrency warnings = %#v", bundle.IR.Warnings)
 	}
 	repository := bundle.IR.Event.Repository
 	wantJobGroups := make(map[string]string, len(bundle.IR.Jobs))

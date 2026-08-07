@@ -171,11 +171,43 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Concurrency == nil || parsed.Concurrency.Group != "workflow-${{ github.ref }}" || parsed.Concurrency.Span.Start.Line != 4 {
+	if parsed.Concurrency == nil || parsed.Concurrency.Group != "workflow-${{ github.ref }}" || parsed.Concurrency.CancelInProgress || parsed.Concurrency.Span.Start.Line != 4 {
 		t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
 	}
 	if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil || parsed.Jobs[0].Concurrency.Group != "deploy" || parsed.Jobs[0].Concurrency.Span.Start.Line != 9 {
 		t.Fatalf("job concurrency = %#v", parsed.Jobs)
+	}
+}
+
+func TestParseOwnsWorkflowLiteralCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+	}{
+		{
+			name:   "lowercase",
+			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: true\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+		},
+		{
+			name:   "uppercase",
+			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: TRUE\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+		},
+		{
+			name:   "alias",
+			source: "on: push\nenv:\n  CANCEL: &cancel TRUE\nconcurrency:\n  group: deploy\n  cancel-in-progress: *cancel\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := Parse("concurrency.yml", []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Concurrency == nil || parsed.Concurrency.Group != "deploy" || !parsed.Concurrency.CancelInProgress {
+				t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
+			}
+			if position := parsed.Concurrency.CancelInProgressPosition; position.Line == 0 || position.Column == 0 {
+				t.Fatalf("cancellation position = %#v", position)
+			}
+		})
 	}
 }
 
@@ -231,16 +263,6 @@ func TestParseRejectsConcurrencyCancellationWithLocation(t *testing.T) {
 		name, source, want string
 	}{
 		{
-			name:   "workflow",
-			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: true\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-			want:   "concurrency.yml:4:23: workflow concurrency cancel-in-progress is unsupported",
-		},
-		{
-			name:   "workflow-uppercase",
-			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: TRUE\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-			want:   "concurrency.yml:4:23: workflow concurrency cancel-in-progress is unsupported",
-		},
-		{
 			name:   "job",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: true}\n    steps: [{run: true}]\n",
 			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
@@ -251,14 +273,14 @@ func TestParseRejectsConcurrencyCancellationWithLocation(t *testing.T) {
 			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "aliased-true",
-			source: "on: push\nenv:\n  CANCEL: &cancel TRUE\nconcurrency:\n  group: deploy\n  cancel-in-progress: *cancel\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-			want:   "workflow concurrency cancel-in-progress is unsupported",
-		},
-		{
-			name:   "expression",
+			name:   "job-expression",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
 			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
+		},
+		{
+			name:   "workflow-expression",
+			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
+			want:   "workflow concurrency cancel-in-progress is unsupported",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

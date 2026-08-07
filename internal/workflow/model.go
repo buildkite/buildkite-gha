@@ -30,12 +30,14 @@ type Workflow struct {
 	Jobs                    []Job                 `json:"jobs"`
 }
 
-// Concurrency is the queue-only subset of a GitHub Actions concurrency group.
-// Cancellation is rejected while parsing because Buildkite concurrency groups
-// cannot cancel an already running job or workflow.
+// Concurrency is the supported subset of a GitHub Actions concurrency group.
+// Workflow cancellation is retained for a compatibility warning; generated
+// Buildkite concurrency groups still provide queue semantics only.
 type Concurrency struct {
-	Group string `json:"group"`
-	Span  Span   `json:"span"`
+	Group                    string   `json:"group"`
+	CancelInProgress         bool     `json:"cancel_in_progress,omitempty"`
+	CancelInProgressPosition Position `json:"-"`
+	Span                     Span     `json:"span"`
 }
 
 // Permissions is an explicitly declared GitHub token permission set. Omitted
