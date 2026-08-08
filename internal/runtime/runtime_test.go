@@ -2375,6 +2375,33 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 	}
 }
 
+func TestUbuntuImageOS(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "Ubuntu 24", source: "ID=ubuntu\nVERSION_ID=\"24.04\"\n", want: "ubuntu24"},
+		{name: "Ubuntu 22", source: "VERSION_ID='22.04'\nID=ubuntu\n", want: "ubuntu22"},
+		{name: "other distribution", source: "ID=debian\nVERSION_ID=12\n"},
+		{name: "missing version", source: "ID=ubuntu\n"},
+		{name: "non-LTS version", source: "ID=ubuntu\nVERSION_ID=24.10\n"},
+		{name: "invalid version", source: "ID=ubuntu\nVERSION_ID=current\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ubuntuImageOS([]byte(test.source)); got != test.want {
+				t.Fatalf("ubuntuImageOS() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestImageOSUsesNormalEnvironmentPrecedence(t *testing.T) {
+	if got := mergeStepEnvironment(map[string]string{"ImageOS": "ubuntu24"}, map[string]string{"ImageOS": "workflow-controlled"}); got["ImageOS"] != "workflow-controlled" {
+		t.Fatalf("ImageOS did not use normal workflow environment precedence: %#v", got)
+	}
+}
+
 func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
 	env := actionInputEnv(map[string]string{"node-version": "24", "two words": "value"})
 	if env["INPUT_NODE-VERSION"] != "24" || env["INPUT_TWO_WORDS"] != "value" {

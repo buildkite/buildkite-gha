@@ -724,7 +724,7 @@ func githubContext(job plan.Job) map[string]any {
 }
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]string {
-	return map[string]string{
+	env := map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
 		"GITHUB_ACTOR":      job.Event.Actor,
@@ -738,6 +738,40 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 		"RUNNER_OS":         "Linux",
 		"RUNNER_TEMP":       runnerTemp,
 		"RUNNER_TOOL_CACHE": filepath.Join(runnerTemp, "tool-cache"),
+	}
+	if imageOS := runnerImageOS(); imageOS != "" {
+		env["ImageOS"] = imageOS
+	}
+	return env
+}
+
+func runnerImageOS() string {
+	osRelease, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	return ubuntuImageOS(osRelease)
+}
+
+func ubuntuImageOS(osRelease []byte) string {
+	values := make(map[string]string, 2)
+	for line := range strings.SplitSeq(string(osRelease), "\n") {
+		name, value, ok := strings.Cut(line, "=")
+		if !ok || (name != "ID" && name != "VERSION_ID") {
+			continue
+		}
+		values[name] = strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	if values["ID"] != "ubuntu" {
+		return ""
+	}
+	switch values["VERSION_ID"] {
+	case "22.04":
+		return "ubuntu22"
+	case "24.04":
+		return "ubuntu24"
+	default:
+		return ""
 	}
 }
 
