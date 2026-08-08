@@ -64,6 +64,8 @@ func TestContainerProcessHelperTerminatesProcessGroup(t *testing.T) {
 }
 
 func TestContainerProcessHelperTerminateToleratesMissingPIDFile(t *testing.T) {
+	t.Parallel()
+
 	start := time.Now()
 	if got := RunContainerProcessHelper([]string{"terminate", filepath.Join(t.TempDir(), "missing"), "1ms", "1ms"}); got != 0 {
 		t.Fatalf("status = %d", got)
@@ -74,6 +76,8 @@ func TestContainerProcessHelperTerminateToleratesMissingPIDFile(t *testing.T) {
 }
 
 func TestContainerProcessHelperCancelBeforePIDPreventsLateCommandStart(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	pidfile := filepath.Join(dir, "late.pid")
 	started := filepath.Join(dir, "started")
