@@ -11,6 +11,7 @@ import (
 )
 
 func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
+	const statelessToken = "ghs_header.payload-with-hyphen.signature"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -19,7 +20,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","permissions":{"contents":"read","pull_requests":"write"}}` {
 			t.Errorf("request body = %s", body)
 		}
-		_, _ = io.WriteString(w, `{"token":"ghs_workflow_token"}`)
+		_, _ = io.WriteString(w, `{"token":"`+statelessToken+`"}`)
 	}))
 	defer server.Close()
 	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
@@ -27,7 +28,7 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"pull_requests": "write", "contents": "read"})
-	if err != nil || token != "ghs_workflow_token" {
+	if err != nil || token != statelessToken {
 		t.Fatalf("WorkflowToken() = %q, %v", token, err)
 	}
 	for _, permissions := range []map[string]string{nil, {}, {"contents": "admin"}, {"administration": "write"}, {"models": "write"}} {

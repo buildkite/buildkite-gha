@@ -16,7 +16,7 @@ import (
 
 const githubTokenResponseLimit = 64 << 10
 
-var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
