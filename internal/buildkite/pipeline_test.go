@@ -257,7 +257,7 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 		t.Fatalf("generated action job still transports mise:\n%s", command)
 	}
 	step := document.Steps[0]
-	if step.Cache.Name != pipeline.RuntimeCacheName || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != ".buildkite-gha/cache-volume" {
+	if step.Cache.Name != pipeline.RuntimeCacheName || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != runtimeCachePath {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() {
