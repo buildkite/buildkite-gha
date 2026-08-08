@@ -781,13 +781,13 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
 	step := pipeline.Steps[0]
-	if step.Cache.Name != buildkitepipeline.RuntimeCacheName("buildkite/buildkite-gha", "refs/heads/main") || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha" {
+	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != buildkitepipeline.MiseDataDir() {
 		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
 	}
-	if step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != buildkitepipeline.RunnerToolCacheDir() {
+	if step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != buildkitepipeline.RunnerToolCacheDir(buildkitepipeline.RuntimeCacheScope("buildkite/buildkite-gha", "refs/heads/main")) {
 		t.Fatalf("generated runner tool cache = %q", step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"])
 	}
 }

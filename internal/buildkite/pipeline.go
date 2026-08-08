@@ -15,7 +15,7 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 const maxConcurrencyGroupLength = 200
-const runtimeCacheNamePrefix = "buildkite-gha-ref-v1-"
+const runtimeCacheName = "buildkite-gha"
 const runtimeCachePath = "/cache/bkcache/buildkite-gha"
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
@@ -25,14 +25,14 @@ const MinimumMiseVersion = "2026.5.12"
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-var cacheNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$`)
+var cacheScopePattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string
 	GroupLabel         string
-	RuntimeCacheName   string
+	RuntimeCacheScope  string
 	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
 }
@@ -61,18 +61,18 @@ func MiseDataDir() string {
 	return runtimeCachePath + "/mise/" + MinimumMiseVersion
 }
 
-// RunnerToolCacheDir returns the path used by Actions toolkit setup actions to
-// cache installed tools on an attached Hosted Agent cache volume.
-func RunnerToolCacheDir() string {
-	return runtimeCachePath + "/runner-tool-cache/v1"
+// RunnerToolCacheDir returns the ref-scoped path used by Actions toolkit setup
+// actions to cache installed tools on an attached Hosted Agent cache volume.
+func RunnerToolCacheDir(scope string) string {
+	return runtimeCachePath + "/runner-tool-cache/v1/" + scope
 }
 
-// RuntimeCacheName returns a bounded cache-volume name scoped to one GitHub
-// repository and ref. Hashing keeps untrusted ref text out of generated YAML
-// and keeps generated pull request, branch, and tag jobs on distinct caches.
-func RuntimeCacheName(repository, ref string) string {
+// RuntimeCacheScope returns a bounded directory scope for one GitHub repository
+// and ref. Hashing keeps untrusted ref text out of generated YAML and keeps
+// generated pull request, branch, and tag jobs in distinct tool-cache paths.
+func RuntimeCacheScope(repository, ref string) string {
 	digest := sha256.Sum256([]byte(strings.ToLower(repository) + "\x00" + ref))
-	return runtimeCacheNamePrefix + fmt.Sprintf("%x", digest[:16])
+	return fmt.Sprintf("%x", digest[:16])
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -111,8 +111,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		return nil, err
 	}
 	for _, job := range jobs {
-		if job.RequiresMise && !cacheNamePattern.MatchString(pipeline.RuntimeCacheName) {
-			return nil, fmt.Errorf("invalid runtime cache name %q", pipeline.RuntimeCacheName)
+		if job.RequiresMise && !cacheScopePattern.MatchString(pipeline.RuntimeCacheScope) {
+			return nil, fmt.Errorf("invalid runtime cache scope %q", pipeline.RuntimeCacheScope)
 		}
 	}
 	distributionPath, err := DistributionPath(pipeline.DistributionDigest)
@@ -164,7 +164,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
-			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(pipeline.RuntimeCacheName))
+			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
 		}
 		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
@@ -172,7 +172,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
 		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
-			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_RUNNER_TOOL_CACHE: %s\n", attributeIndent, yamlScalar(RunnerToolCacheDir()))
+			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_RUNNER_TOOL_CACHE: %s\n", attributeIndent, yamlScalar(RunnerToolCacheDir(pipeline.RuntimeCacheScope)))
 		}
 		if job.Concurrency != 0 {
 			_, _ = fmt.Fprintf(&out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
