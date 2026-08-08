@@ -1359,14 +1359,19 @@ func resolveActionInputs(action metadata.Metadata, supplied map[string]string, c
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	defaultContext := context
+	if token, ok := context.Secrets["GITHUB_TOKEN"]; ok {
+		defaultContext.GitHub = cloneAnyMap(context.GitHub)
+		defaultContext.GitHub["token"] = token
+	}
 	for _, name := range names {
 		definition := action.Inputs[name]
 		if _, ok := inputs[name]; ok {
 			continue
 		}
 		if definition.Default != nil {
-			context.Inputs = inputs
-			value, err := expression.Evaluate(*definition.Default, context)
+			defaultContext.Inputs = inputs
+			value, err := expression.Evaluate(*definition.Default, defaultContext)
 			if err != nil {
 				return nil, fmt.Errorf("action input %q default: %w", name, err)
 			}

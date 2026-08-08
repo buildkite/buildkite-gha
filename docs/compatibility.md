@@ -85,7 +85,7 @@ service.
 | Timeouts and `continue-on-error` | Supported subset | Literal step/job timeouts up to 360 minutes and step-level `continue-on-error` are supported. Expression-valued settings and job-level `continue-on-error` are not supported. |
 | Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting entries instead of replacing GitHub's pending entry. Workflow-level literal `cancel-in-progress: true` emits a warning but does not cancel; job-level true and expression-valued cancellation are not supported. |
 | Local reusable workflows | Supported subset | Statically resolvable `./.github/workflows/...` calls, typed static inputs, nesting, caller-visible aggregate results, and declared outputs mapped directly from `jobs.<job>.outputs.<name>` are supported. Literal/compound output mappings, call-level conditions, call secrets, remote source, dynamic paths/inputs/matrices, and called-workflow top-level concurrency are not supported. |
-| `permissions` | Supported subset | Explicit canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN`; job permissions replace workflow permissions and local reusable workflows may narrow them. Implicit defaults, `{}`, `read-all`, `write-all`, and `id-token` do not grant authority. |
+| `permissions` | Supported subset | Explicit canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN` or an effective action metadata input default that statically references `github.token`; job permissions replace workflow permissions and local reusable workflows may narrow them. Implicit defaults, `{}`, `read-all`, `write-all`, and `id-token` do not grant authority. |
 | Job and service containers | Not admitted | Literal Linux container images, environment, ports, persistent job containers, and services are implemented and runtime-proven. Production `hosted-tokenless` upload rejects job/service-container provenance. Credentials, volumes, arbitrary options, private images, and privileged containers are not supported. |
 | Dynamic graph expansion | Not supported | Matrices or `needs` derived from runtime outputs and other runtime-created jobs are rejected. |
 | Deployment environments and approvals | Not supported | Environment secrets, protection rules, reviewers, and deployment approval/state parity are not implemented. |
@@ -119,7 +119,7 @@ service.
 | Private repositories | Supported subset | Direct upload can opt into read-only checkout of the pipeline's exact GitHub repository. Alternate repositories, private actions, and private reusable workflows are not supported. |
 | `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. It is not injected as an ambient environment variable. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
-| `github.token` and ambient `GITHUB_TOKEN` | Not supported | Only the explicit `secrets.GITHUB_TOKEN` contract above is populated. |
+| `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and ambient `GITHUB_TOKEN` remain unavailable. An explicitly supplied action input, including an empty value, suppresses its metadata default. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
 | Windows and macOS | Not supported | Runner labels fail validation. Linux arm64 is also outside the current Linux x86-64 distribution/runtime contract. |
 | GitHub-hosted image parity | Not supported | Accepted Ubuntu labels do not promise GitHub's installed tools, image updates, filesystem layout, or service configuration. The selected Buildkite agents must provide the workflow's external tools. |
@@ -266,9 +266,11 @@ repositories or refs and credential persistence remain unsupported.
 
 ### Explicit permissions provide a scoped workflow token
 
-A job that statically references `${{ secrets.GITHUB_TOKEN }}` receives one
-short-lived GitHub installation token for the exact event repository when it
-also has a non-empty, explicit `permissions` mapping:
+A job that statically references `${{ secrets.GITHUB_TOKEN }}`, or uses an
+action with an effective metadata input default that statically references
+`${{ github.token }}`, receives one short-lived GitHub installation token for
+the exact event repository when it also has a non-empty, explicit `permissions`
+mapping:
 
 ```yaml
 permissions:
@@ -288,8 +290,7 @@ mapping replaces the workflow-level mapping rather than merging with it. Local
 reusable workflows inherit the caller's effective permissions and can only
 narrow them. `none` removes a permission. Omitted permissions, `{}`,
 `read-all`, `write-all`, and `id-token` do not produce a token; a static
-`GITHUB_TOKEN` reference without a non-empty effective mapping fails
-compilation.
+token reference without a non-empty effective mapping fails compilation.
 
 The compiler normalizes names such as `pull-requests` to the Agent API's
 `pull_requests`, emits the exact map into a v6 plan, and records same-process
@@ -300,10 +301,13 @@ its own permission allowlist and organization enablement. The token is
 registered with runtime and Agent redaction before expressions or steps can use
 it, and result values containing it are scrubbed.
 
-Only the explicit `secrets.GITHUB_TOKEN` context value is populated. The token
-is not an ambient `GITHUB_TOKEN` environment variable and `github.token`
-remains unsupported. Other secrets still use the existing explicit
-`BUILDKITE_GHA_SECRET_<NAME>` boundary and are not enabled by this feature.
+An explicit `secrets.GITHUB_TOKEN` reference continues to resolve through the
+scoped-token contract. For compatible actions, `github.token` is additionally
+populated only while evaluating an effective metadata input default; it remains
+unavailable to workflow-authored expressions. The token is not an ambient
+`GITHUB_TOKEN` environment variable. Other secrets still use the existing
+explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary and are not enabled by this
+feature.
 
 This job-bound service does not independently establish fork or actor trust.
 Pipelines that permit workflow changes from untrusted sources must apply the
@@ -546,8 +550,8 @@ select the `hosted` queue.
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
 it derives a bounded compatibility snapshot from the current Buildkite build.
 With `--event-path`, it uses that explicit snapshot. Both paths remain
-unattested. Apart from the documented scoped `secrets.GITHUB_TOKEN` contract,
-they remain tokenless unless `--private-checkout` is explicitly selected; that
+unattested. Apart from the documented scoped workflow-token contract, they
+remain tokenless unless `--private-checkout` is explicitly selected; that
 checkout exception is confined to the adapter and independently
 repository-bound by the Agent service.
 
