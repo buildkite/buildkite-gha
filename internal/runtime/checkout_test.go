@@ -179,6 +179,15 @@ func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)
 	repositoryToken := "ghs_repository_token"
+	proxyEnvironment := map[string]string{
+		"HTTP_PROXY": "http://upper-http.example:8080", "HTTPS_PROXY": "http://upper-https.example:8080",
+		"ALL_PROXY": "socks5://upper-all.example:1080", "NO_PROXY": "upper-no-proxy.example",
+		"http_proxy": "http://lower-http.example:8080", "https_proxy": "http://lower-https.example:8080",
+		"all_proxy": "socks5://lower-all.example:1080", "no_proxy": "lower-no-proxy.example",
+	}
+	for name, value := range proxyEnvironment {
+		t.Setenv(name, value)
+	}
 	gitLog := filepath.Join(t.TempDir(), "git.log")
 	agentLog := filepath.Join(t.TempDir(), "agent.log")
 	agent := filepath.Join(t.TempDir(), "buildkite-agent")
@@ -190,6 +199,14 @@ test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3
 test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
 test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
 test "$BUILDKITE_NO_HTTP2" = true
+test "$HTTP_PROXY" = http://upper-http.example:8080
+test "$HTTPS_PROXY" = http://upper-https.example:8080
+test "$ALL_PROXY" = socks5://upper-all.example:1080
+test "$NO_PROXY" = upper-no-proxy.example
+test "$http_proxy" = http://lower-http.example:8080
+test "$https_proxy" = http://lower-https.example:8080
+test "$all_proxy" = socks5://lower-all.example:1080
+test "$no_proxy" = lower-no-proxy.example
 input="$(cat)"
 case "$input" in
   *"protocol=https"*"host=github.com"*"path=buildkite/buildkite-gha.git"*) ;;
@@ -204,6 +221,16 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	git := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
+assert_no_proxy_environment() {
+  test -z "${HTTP_PROXY+x}"
+  test -z "${HTTPS_PROXY+x}"
+  test -z "${ALL_PROXY+x}"
+  test -z "${NO_PROXY+x}"
+  test -z "${http_proxy+x}"
+  test -z "${https_proxy+x}"
+  test -z "${all_proxy+x}"
+  test -z "${no_proxy+x}"
+}
 operation=
 for argument in "$@"; do
   case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
@@ -214,6 +241,7 @@ case "$operation" in
     test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
     test -z "${BUILDKITE_JOB_ID+x}"
     test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     mkdir -p .git
     ;;
   remote)
@@ -221,12 +249,21 @@ case "$operation" in
     test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
     test -z "${BUILDKITE_JOB_ID+x}"
     test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     ;;
   fetch)
     test -z "$GIT_ASKPASS"
     test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3
     test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
     test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+    test "$HTTP_PROXY" = http://upper-http.example:8080
+    test "$HTTPS_PROXY" = http://upper-https.example:8080
+    test "$ALL_PROXY" = socks5://upper-all.example:1080
+    test "$NO_PROXY" = upper-no-proxy.example
+    test "$http_proxy" = http://lower-http.example:8080
+    test "$https_proxy" = http://lower-https.example:8080
+    test "$all_proxy" = socks5://lower-all.example:1080
+    test "$no_proxy" = lower-no-proxy.example
     helper=
     use_http_path=
     for argument in "$@"; do
@@ -248,6 +285,7 @@ case "$operation" in
     test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
     test -z "${BUILDKITE_JOB_ID+x}"
     test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     ;;
 esac
@@ -264,6 +302,13 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	}
 	credentials := &AgentRepositoryCredentials{
 		Agent: agent, Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-secret", NoHTTP2: "true",
+	}
+	credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range proxyEnvironment {
+		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
 	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil)
 	if err != nil {

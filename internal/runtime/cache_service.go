@@ -35,8 +35,8 @@ type CacheCredentialProvider interface {
 }
 
 // AgentCacheConfig identifies the exact current Buildkite job and cache-v2
-// service. Endpoint and JobToken are runtime authority and are never forwarded
-// to action code.
+// service. Endpoint and JobToken are runtime connection and authentication
+// material; this provider does not add them to action subprocess environments.
 type AgentCacheConfig struct {
 	Endpoint   string
 	JobID      string

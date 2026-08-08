@@ -20,14 +20,14 @@ var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
-// compiler-owned permissions carried by a verified job plan.
+// plan-declared permissions accepted by the Buildkite backend.
 type WorkflowTokenProvider interface {
 	WorkflowToken(context.Context, string, map[string]string) (string, error)
 }
 
-// AgentGitHubTokenConfig identifies the exact current Buildkite job. Endpoint
-// and JobToken are runtime authority and are never forwarded to Git or action
-// code.
+// AgentGitHubTokenConfig carries the current Buildkite job's Agent connection
+// and authentication material. This client does not add it to Git or action
+// subprocess environments.
 type AgentGitHubTokenConfig struct {
 	Endpoint string
 	JobID    string

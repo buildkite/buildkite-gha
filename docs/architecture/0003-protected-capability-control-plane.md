@@ -243,10 +243,14 @@ are enabled. Otherwise it performs the same checkout anonymously.
 The event repository and exact SHA remain the only checkout targets. The
 credential helper is configured as a command-scoped Git option only for the
 fetch, uses HTTP-path matching, receives the current job's Agent API identity,
-and is not persisted. The Buildkite backend independently authorizes the
-concrete repository URL received through Git's credential protocol. No workflow
-input can select another credential target or access level, and the job's Agent
-credential is not placed in plans or workflow environments.
+and is not persisted. The runtime forwards proxy variables captured from the job
+process before workflow execution to that credentialed fetch but does not add
+the job credential to ordinary workflow subprocess environments. This is
+inheritance control, not OS-level isolation between hostile processes in the
+same job. The Buildkite backend independently authorizes the concrete repository
+URL received through Git's credential protocol. Through the supported adapter
+no workflow input can select another credential target or access level, and the
+job's Agent credential is not placed in plans.
 
 A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
@@ -272,9 +276,12 @@ These exceptions do not establish authenticated provider event, fork, or actor
 provenance. The server's independent pipeline-repository comparison,
 organization enablement, and permission allowlist are authoritative, but
 pipelines remain responsible for whether untrusted workflow changes may request
-an allowed write permission. Private actions, arbitrary reusable-workflow
-source, selected non-provider secrets, environments, and OIDC still require the
-general control-plane decision in this ADR.
+an allowed write permission. The compiled permission map constrains the supported
+client path; it is not an independent authorization ceiling against same-job
+code that obtains the Agent access token and calls the endpoint directly.
+Private actions, arbitrary reusable-workflow source, selected non-provider
+secrets, environments, and OIDC still require the general control-plane decision
+in this ADR.
 
 ### Runtime verification and capability use
 
@@ -349,8 +356,9 @@ exposed only to the audited cache action lifecycle. A capability grant neither
 contains nor replaces them.
 
 The job-bound provider credential exchanges are likewise separate. Their
-server-side repository authorization and either a Git-selected checkout URL or
-compiler-owned explicit workflow permission map are not a substitute for the
+server-side repository authorization and permission allowlists are the
+authoritative ceilings. A Git-selected checkout URL and the explicit workflow
+permission map carried by the supported client path are not substitutes for the
 event, policy, signing, and audit contract required by a general capability
 grant.
 

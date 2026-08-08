@@ -260,8 +260,14 @@ requested by Git. If neither signal is enabled, checkout is anonymous; the CLI
 does not try to infer repository visibility.
 
 The helper is configured only on the verified fetch command, with HTTP-path
-matching enabled. It is not persisted in Git config, and its job credential is
-not exposed to workflow steps. This checkout path does not populate
+matching enabled. It is not persisted in Git config. The runtime passes the
+upper- and lower-case HTTP proxy variables captured from the job process before
+workflow execution to that credentialed fetch, but does not add its job
+credential to ordinary workflow subprocess environments. This command scoping
+limits accidental inheritance; it is not an OS-level isolation boundary between
+hostile processes in the same job. The Buildkite repository-provider backend
+remains authoritative for whether it issues credentials for the concrete URL.
+This checkout path does not populate
 `GITHUB_TOKEN` or `github.token`, use workflow `permissions`, enable private
 actions, or add support for alternate repositories or refs. The deprecated
 `--private-checkout` option is temporarily accepted as a no-op for compatibility.
@@ -299,9 +305,12 @@ The compiler normalizes names such as `pull-requests` to the Agent API's
 provenance for upload admission. The runtime requests the token once from the
 current-job Agent endpoint. The service independently requires the requested
 repository to match the pipeline's configured GitHub repository and applies
-its own permission allowlist and organization enablement. The token is
-registered with runtime and Agent redaction before expressions or steps can use
-it, and result values containing it are scrubbed.
+its own permission allowlist and organization enablement. Those server-side
+checks are the authorization ceiling; the compiled map constrains the supported
+client path but is not a separate security boundary against code that obtains
+the current job's Agent access token. The token is registered with runtime and
+Agent redaction before expressions or steps can use it, and result values
+containing it are scrubbed.
 
 An explicit `secrets.GITHUB_TOKEN` reference continues to resolve through the
 scoped-token contract. For compatible actions, `github.token` is additionally

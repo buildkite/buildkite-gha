@@ -1967,9 +1967,9 @@ the narrowest available boundary:
 - exact event-repository checkout under GitHub, using Buildkite's native
   repository-provider Git helper when the job enables it and anonymous Git
   otherwise, plus future Cursor Origin provider adapters;
-- compiler-authorized workflow token requests for the pipeline's exact GitHub
-  repository and explicit permission map through the current-job scoped token
-  endpoint;
+- compiler-admitted workflow token requests for the pipeline's exact GitHub
+  repository and explicit permission map, authorized and bounded by the
+  current-job endpoint's server-side repository and permission policy;
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -1977,6 +1977,14 @@ requires an HTTP protocol, use the official compatible service by default with
 an explicit operator override, or provide a well-defined adapter rather than
 proxying GitHub's private service. Cache credentials authorize storage access
 only; they are distinct from the provider-feature grants below.
+
+For the native repository and scoped-token exceptions, the Buildkite backend's
+repository checks and permission allowlists are the authorization ceiling. The
+runtime omits the Agent access token from ordinary workflow subprocess
+environments, but that inheritance control is not OS-level isolation between
+hostile processes in one job. Exact checkout inputs and compiled workflow
+permissions constrain the supported client path rather than replacing the
+backend policy.
 
 Protected provider features use the supporting control-plane service:
 

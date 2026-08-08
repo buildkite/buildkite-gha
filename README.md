@@ -33,8 +33,11 @@ neither create nor filter Buildkite builds.
 Buildkite configuration also remains authoritative for agent targeting and
 protected capabilities. Workflow settings such as `runs-on`, `permissions`,
 environments, and concurrency are honored only within the explicitly supported
-and admitted boundaries in the [support matrix](docs/compatibility.md#support-matrix);
-they cannot change Buildkite pipeline settings or grant themselves authority.
+and admitted boundaries in the [support matrix](docs/compatibility.md#support-matrix).
+They are requests constrained by Buildkite configuration, admission policy, and
+the supported runtime. Repository credential and token requests are additionally
+bounded by Buildkite's server-side repository and permission policy; none can
+change Buildkite pipeline settings.
 
 ## Try an existing workflow
 
@@ -142,9 +145,10 @@ workflows built from:
 - checkout of the event repository at its exact commit, using Buildkite's
   repository-provider Git credentials when available and anonymous Git
   otherwise;
-- short-lived GitHub tokens scoped to explicit workflow or job `permissions`
-  for the event repository, consumed through `secrets.GITHUB_TOKEN` or an
-  effective action metadata input default that references `github.token`;
+- short-lived GitHub tokens requested with explicit workflow or job
+  `permissions` for the event repository and bounded by Buildkite's server-side
+  policy, consumed through `secrets.GITHUB_TOKEN` or an effective action
+  metadata input default that references `github.token`;
 - bounded native upload and exact-name download for the audited artifact v4
   commits; and
 - the audited `actions/cache` v6.1.0 commit through the official Buildkite

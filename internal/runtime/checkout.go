@@ -15,15 +15,20 @@ import (
 
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var checkoutSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var agentProxyEnvironmentNames = [...]string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+}
 
 // AgentRepositoryCredentials configure Buildkite's native, job-bound Git
 // credential helper for one verified checkout fetch.
 type AgentRepositoryCredentials struct {
-	Agent    string
-	Endpoint string
-	JobID    string
-	JobToken string
-	NoHTTP2  string
+	Agent            string
+	Endpoint         string
+	JobID            string
+	JobToken         string
+	NoHTTP2          string
+	proxyEnvironment map[string]string
 }
 
 func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositoryCredentials) (*AgentRepositoryCredentials, error) {
@@ -42,6 +47,12 @@ func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositor
 	}
 	resolved := *credentials
 	resolved.Agent = agent
+	resolved.proxyEnvironment = make(map[string]string, len(agentProxyEnvironmentNames))
+	for _, name := range agentProxyEnvironmentNames {
+		if value, ok := os.LookupEnv(name); ok {
+			resolved.proxyEnvironment[name] = value
+		}
+	}
 	return &resolved, nil
 }
 
@@ -141,6 +152,9 @@ func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processo
 	}
 	if credentials.NoHTTP2 != "" {
 		credentialEnv["BUILDKITE_NO_HTTP2"] = credentials.NoHTTP2
+	}
+	for name, value := range credentials.proxyEnvironment {
+		credentialEnv[name] = value
 	}
 	credentialArgs := append(append([]string(nil), base...),
 		"-c", "credential.useHttpPath=true",
