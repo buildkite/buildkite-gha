@@ -54,6 +54,7 @@ type Runner struct {
 	Mise              string
 	ResolveMise       func(context.Context) (string, error)
 	MiseDataDir       string
+	ToolCacheDir      string
 	Docker            string
 	RuntimeExecutable string
 	Git               string

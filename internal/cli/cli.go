@@ -250,6 +250,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		Stdout:        stdout,
 		Stderr:        stderr,
 		MiseDataDir:   prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		ToolCacheDir:  prepareRunnerToolCacheDir(os.Getenv("BUILDKITE_GHA_RUNNER_TOOL_CACHE"), stderr),
 		Docker:        os.Getenv("BUILDKITE_GHA_DOCKER"),
 		Git:           os.Getenv("BUILDKITE_GHA_GIT"),
 		Secrets:       gharuntime.EnvironmentSecrets{},
@@ -709,22 +710,34 @@ func fileSHA256(ctx context.Context, path string, limit int64) (string, error) {
 }
 
 func prepareMiseDataDir(path string, stderr io.Writer) string {
+	return prepareManagedCacheDir(path, "mise cache", "the ephemeral agent cache", stderr)
+}
+
+func prepareRunnerToolCacheDir(path string, stderr io.Writer) string {
+	if path != "" && os.Getenv("BUILDKITE_COMPUTE_TYPE") != "hosted" {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: runner tool cache %q requires a Buildkite Hosted Agent; using the ephemeral runner tool cache\n", path)
+		return ""
+	}
+	return prepareManagedCacheDir(path, "runner tool cache", "the ephemeral runner tool cache", stderr)
+}
+
+func prepareManagedCacheDir(path, label, fallback string, stderr io.Writer) string {
 	if path == "" {
 		return ""
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is invalid; using the ephemeral agent cache: %v\n", path, err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %s %q is invalid; using %s: %v\n", label, path, fallback, err)
 		return ""
 	}
 	if err := os.MkdirAll(absolute, 0o755); err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is unavailable; using the ephemeral agent cache: %v\n", path, err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %s %q is unavailable; using %s: %v\n", label, path, fallback, err)
 		return ""
 	}
 	resolved, resolveErr := filepath.EvalSymlinks(absolute)
 	info, statErr := os.Lstat(absolute)
 	if resolveErr != nil || resolved != absolute || statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is not a real directory; using the ephemeral agent cache\n", path)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: %s %q is not a real directory; using %s\n", label, path, fallback)
 		return ""
 	}
 	return absolute

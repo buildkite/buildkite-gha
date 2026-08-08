@@ -62,7 +62,11 @@ downloads and verifies a managed 2026.5.12 copy. Hosted Agents use their
 attached cache; other environments fall back to an ephemeral cache when that
 path is unavailable. Shell-only jobs and action jobs whose resolved trees
 contain only shell steps, native adapters, or Docker do not require or install
-mise.
+mise. On Hosted Agents, those action-capable jobs also persist the Actions
+toolkit's `RUNNER_TOOL_CACHE` on the same best-effort cache volume. Cache-volume
+names are scoped to the GitHub repository and exact ref, so pull requests,
+branches, and tags do not normally reuse each other's executable tool caches;
+`RUNNER_TEMP` and all other runner state remain job-local.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
