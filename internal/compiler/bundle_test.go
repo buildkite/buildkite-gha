@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"go.yaml.in/yaml/v4"
 )
@@ -150,7 +151,7 @@ func TestCompileBundleCarriesResolvedMiseRequirementIntoPipeline(t *testing.T) {
 		if hasToolCache := step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != ""; hasToolCache != wantMise {
 			t.Fatalf("step %q runner tool cache env = %t, want %t", step.Key, hasToolCache, wantMise)
 		}
-		if wantMise && step.Cache.Name != "buildkite-gha" {
+		if wantMise && step.Cache.Name != buildkitepipeline.RuntimeCacheName("buildkite/buildkite-gha", "refs/heads/main") {
 			t.Fatalf("step %q cache scope = %q", step.Key, step.Cache.Name)
 		}
 	}

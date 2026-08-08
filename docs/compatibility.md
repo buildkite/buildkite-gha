@@ -452,7 +452,7 @@ Go CLI does not. Shell-only jobs and action jobs whose resolved trees contain
 only shell steps, native adapters, or Docker do not require or install mise.
 On Hosted Agents, action-capable jobs also place `RUNNER_TOOL_CACHE` on that
 best-effort volume so toolkit setup actions can reuse installed tools. The
-tool-cache path is scoped to the compiled GitHub repository and exact ref;
+volume name is scoped to the compiled GitHub repository and exact ref;
 normal generated pull request, branch, and tag jobs do not reuse each other's
 tool caches. If the volume is unavailable or the job runs on a self-hosted
 agent, the runtime uses its existing job-local tool cache. `RUNNER_TEMP` always

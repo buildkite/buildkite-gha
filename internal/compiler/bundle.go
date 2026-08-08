@@ -113,7 +113,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
 		GroupLabel:         options.GroupLabel,
-		RuntimeCacheScope:  buildkitepipeline.RuntimeCacheScope(ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.Ref),
+		RuntimeCacheName:   buildkitepipeline.RuntimeCacheName(ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.Ref),
 		ConcurrencyGate:    concurrencyGate,
 		Jobs:               jobs,
 	})

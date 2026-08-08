@@ -64,7 +64,7 @@ path is unavailable. Shell-only jobs and action jobs whose resolved trees
 contain only shell steps, native adapters, or Docker do not require or install
 mise. On Hosted Agents, those action-capable jobs also persist the Actions
 toolkit's `RUNNER_TOOL_CACHE` on the same best-effort cache volume. Cache-volume
-paths are scoped to the GitHub repository and exact ref, so pull requests,
+names are scoped to the GitHub repository and exact ref, so pull requests,
 branches, and tags do not normally reuse each other's executable tool caches;
 `RUNNER_TEMP` and all other runner state remain job-local.
 
