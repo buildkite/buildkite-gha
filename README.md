@@ -153,8 +153,8 @@ It is not currently a fit for workflows that require:
   explicit pipeline-repository checkout described in the compatibility guide;
 - ordinary workflow secrets—the scoped `secrets.GITHUB_TOKEN` contract is the
   only workflow-visible secret exception;
-- workflow-authored `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible
-  OIDC, or protected queues;
+- workflow-authored `github.token`, automatic ambient `GITHUB_TOKEN` injection,
+  GitHub-compatible OIDC, or protected queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload, or condition

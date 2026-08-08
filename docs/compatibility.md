@@ -95,7 +95,7 @@ service.
 | GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
 | `run` steps | Supported subset | Linux `bash` and `sh`, environment/working-directory precedence, process-tree cancellation, and workspace confinement are supported. PowerShell, Python-as-shell, Windows command shells, and custom shell templates are not supported. |
-| Environment files | Supported | `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`, including multiline values, are supported with bounded files and entries. Writes to `NODE_OPTIONS` and `GITHUB_*`/`RUNNER_*` variables are blocked. |
+| Environment files | Supported | `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`, including multiline values, are supported with bounded files and entries. `NODE_OPTIONS` remains blocked. Matching GitHub Runner behavior, actions may propagate `GITHUB_*` and `RUNNER_*` values to later `env` expressions; runtime-owned context values are overlaid with their canonical values when each step process launches. |
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups flatten to linear Buildkite log sections. Debug and matcher commands are consumed without presentation behavior. `::notice`, command echo control, and other legacy commands are not supported. |
 | Step summaries | Supported | Summaries publish as bounded job-scoped Buildkite annotations. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped; the aggregate job summary is limited to 1 MiB. |
 | Local actions | Supported subset | Workspace actions are digest-locked and reverified. JavaScript, composite, and compiler-verified Dockerfile runtimes are supported; other action runtimes are not. |
@@ -117,9 +117,9 @@ service.
 | --- | --- | --- |
 | Public GitHub repositories | Supported subset | Public event-repository checkout and anonymous public GitHub actions are supported. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
 | Private repositories | Supported subset | Direct upload can opt into read-only checkout of the pipeline's exact GitHub repository. Alternate repositories, private actions, and private reusable workflows are not supported. |
-| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. It is not injected as an ambient environment variable. |
+| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. The runtime does not inject it into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
-| `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and ambient `GITHUB_TOKEN` remain unavailable. An explicitly supplied action input, including an empty value, suppresses its metadata default. |
+| `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` remain unavailable. An action may explicitly export its input as `GITHUB_TOKEN` for later steps through `GITHUB_ENV`; an explicitly supplied action input, including an empty value, suppresses its metadata default. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
 | Windows and macOS | Not supported | Runner labels fail validation. Linux arm64 is also outside the current Linux x86-64 distribution/runtime contract. |
 | GitHub-hosted image parity | Not supported | Accepted Ubuntu labels do not promise GitHub's installed tools, image updates, filesystem layout, or service configuration. The selected Buildkite agents must provide the workflow's external tools. |
@@ -304,10 +304,11 @@ it, and result values containing it are scrubbed.
 An explicit `secrets.GITHUB_TOKEN` reference continues to resolve through the
 scoped-token contract. For compatible actions, `github.token` is additionally
 populated only while evaluating an effective metadata input default; it remains
-unavailable to workflow-authored expressions. The token is not an ambient
-`GITHUB_TOKEN` environment variable. Other secrets still use the existing
-explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary and are not enabled by this
-feature.
+unavailable to workflow-authored expressions. The runtime does not inject an
+ambient `GITHUB_TOKEN`, but an action can explicitly export the token to later
+steps through `GITHUB_ENV`, matching GitHub Runner file-command behavior. Other
+secrets still use the existing explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary
+and are not enabled by this feature.
 
 This job-bound service does not independently establish fork or actor trust.
 Pipelines that permit workflow changes from untrusted sources must apply the

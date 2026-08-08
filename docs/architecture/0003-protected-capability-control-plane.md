@@ -267,8 +267,10 @@ available to expression evaluation. Job-level permissions replace workflow
 defaults; flattened local reusable workflows can only narrow caller authority.
 Permission aliases, implicit defaults, empty grants, and `id-token` fail
 closed. `github.token` is exposed only while evaluating effective action
-metadata input defaults; workflow-authored references and ambient
-`GITHUB_TOKEN` environment injection remain unsupported.
+metadata input defaults; workflow-authored references and automatic ambient
+`GITHUB_TOKEN` environment injection remain unsupported. As on GitHub Runner,
+an action that receives the token may explicitly propagate it to later steps
+through `GITHUB_ENV`; redaction remains registered for the job lifetime.
 
 These exceptions do not establish authenticated provider event, fork, or actor
 provenance. The server's independent pipeline-repository comparison,

@@ -1082,11 +1082,13 @@ permission-scoped GitHub App installation token brokered for the authenticated
 job. The current narrow exception populates an explicit
 `secrets.GITHUB_TOKEN` reference and effective action metadata input defaults
 that reference `github.token`; workflow-authored `github.token` and ambient
-environment injection remain unsupported. This approximates but does not
-duplicate native `GITHUB_TOKEN`: app identity, endpoint support, expiration,
-and event-recursion behavior can differ and must be documented. Do not invent a
-token or silently grant write access. Validation must identify actions and
-expressions requiring a provider token when no compatible grant can be issued.
+environment injection remain unsupported. Actions may still explicitly export
+the scoped token to later steps through `GITHUB_ENV`, matching GitHub Runner
+file-command behavior. This approximates but does not duplicate native
+`GITHUB_TOKEN`: app identity, endpoint support, expiration, and event-recursion
+behavior can differ and must be documented. Do not invent a token or silently
+grant write access. Validation must identify actions and expressions requiring
+a provider token when no compatible grant can be issued.
 
 ### Installation and release model
 
