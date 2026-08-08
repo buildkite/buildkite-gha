@@ -21,7 +21,6 @@ import (
 
 const jobContainerWorkspace = "/__w/repo/repo"
 const jobContainerTemp = "/__w/_temp"
-const jobContainerToolCache = "/__w/_tool"
 const jobContainerRuntime = "/__buildkite-gha/runtime"
 
 const serviceReadinessAttempts = 30

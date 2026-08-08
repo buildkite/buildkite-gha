@@ -229,7 +229,6 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		RuntimeCacheName:   RuntimeCacheName("buildkite/example", "refs/heads/main"),
 		Jobs:               []Job{{Key: "action", Label: "Action", Queue: "hosted", PlanDigest: testDigest("plan"), RequiresMise: true}},
 	}
 	output, err := Emit(pipeline)
@@ -257,14 +256,11 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 		t.Fatalf("generated action job still transports mise:\n%s", command)
 	}
 	step := document.Steps[0]
-	if step.Cache.Name != pipeline.RuntimeCacheName || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != runtimeCachePath {
+	if step.Cache.Name != runtimeCacheName || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != runtimeCachePath {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() {
 		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
-	}
-	if step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != RunnerToolCacheDir() {
-		t.Fatalf("runner tool cache = %q", step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"])
 	}
 }
 
@@ -274,27 +270,10 @@ func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
 	}
 }
 
-func TestRuntimeCacheScopeIsDeterministicAndDoesNotExposeRef(t *testing.T) {
-	main := RuntimeCacheName("buildkite/example", "refs/heads/main")
-	if main != RuntimeCacheName("BUILDKITE/EXAMPLE", "refs/heads/main") {
-		t.Fatalf("repository casing changed cache name: %q", main)
-	}
-	if main == RuntimeCacheName("buildkite/example", "refs/heads/feature/sensitive-name") {
-		t.Fatal("different refs share a runtime cache")
-	}
-	if main == RuntimeCacheName("buildkite/example", "refs/pull/42/merge") {
-		t.Fatal("branch and pull request share a runtime cache")
-	}
-	if strings.Contains(main, "main") || !cacheNamePattern.MatchString(main) {
-		t.Fatalf("runtime cache name exposes ref or violates Buildkite syntax: %q", main)
-	}
-}
-
 func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
-		RuntimeCacheName:   RuntimeCacheName("buildkite/example", "refs/heads/main"),
 		Jobs: []Job{
 			{Key: "javascript", Label: "JavaScript", Queue: "hosted", PlanDigest: testDigest("javascript-plan"), RequiresMise: true},
 			{Key: "native", Label: "Native action", Queue: "hosted", PlanDigest: testDigest("native-plan")},
@@ -319,10 +298,7 @@ func TestEmitMiseCacheOnlyForActionJobs(t *testing.T) {
 		if step.Key == "javascript" && (step.Cache == nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() || strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("JavaScript job lacks runtime mise cache configuration: %#v", step)
 		}
-		if step.Key == "javascript" && step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != RunnerToolCacheDir() {
-			t.Fatalf("JavaScript job lacks runner tool cache configuration: %#v", step)
-		}
-		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
+		if (step.Key == "native" || step.Key == "shell") && (step.Cache != nil || step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != "" || strings.Contains(step.Command, "/tools/mise/")) {
 			t.Fatalf("no-mise job gained managed mise: %#v", step)
 		}
 	}

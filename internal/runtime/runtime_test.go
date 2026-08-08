@@ -2193,23 +2193,6 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 	}
 }
 
-func TestRunnerToolCacheUsesConfiguredDirectoryAndKeepsTempEphemeral(t *testing.T) {
-	workspace := t.TempDir()
-	toolCache := t.TempDir()
-	workflowPath := ".github/workflows/test.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-		ID:      "tool-cache",
-		Kind:    "run",
-		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"; case "$RUNNER_TEMP" in "$RUNNER_TOOL_CACHE"/*) exit 9 ;; esac`,
-	}})
-	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
-	result, err := (Runner{ToolCacheDir: toolCache}).RunJob(context.Background(), job, workspace)
-	if err != nil || result.Conclusion != "success" {
-		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
-	}
-}
-
 func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
 	env := actionInputEnv(map[string]string{"node-version": "24", "two words": "value"})
 	if env["INPUT_NODE-VERSION"] != "24" || env["INPUT_TWO_WORDS"] != "value" {

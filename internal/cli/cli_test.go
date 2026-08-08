@@ -781,14 +781,11 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
 	step := pipeline.Steps[0]
-	if step.Cache.Name != buildkitepipeline.RuntimeCacheName("buildkite/buildkite-gha", "refs/heads/main") || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha" {
+	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != buildkitepipeline.MiseDataDir() {
 		t.Fatalf("generated mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
-	}
-	if step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"] != buildkitepipeline.RunnerToolCacheDir() {
-		t.Fatalf("generated runner tool cache = %q", step.Env["BUILDKITE_GHA_RUNNER_TOOL_CACHE"])
 	}
 }
 
@@ -827,41 +824,6 @@ func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
 	stderr.Reset()
 	if got := prepareMiseDataDir(filepath.Join(link, "mise"), &stderr); got != "" || !strings.Contains(stderr.String(), "not a real directory") {
 		t.Fatalf("prepareMiseDataDir(symlink) = %q, stderr = %q", got, stderr.String())
-	}
-}
-
-func TestPrepareRunnerToolCacheDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
-	var stderr bytes.Buffer
-	t.Setenv("BUILDKITE_COMPUTE_TYPE", "hosted")
-	dir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := prepareRunnerToolCacheDir(dir, &stderr); got != dir || stderr.Len() != 0 {
-		t.Fatalf("prepareRunnerToolCacheDir() = %q, stderr = %q", got, stderr.String())
-	}
-
-	parent, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	target, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(parent, "linked-cache")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	stderr.Reset()
-	if got := prepareRunnerToolCacheDir(filepath.Join(link, "tools"), &stderr); got != "" || !strings.Contains(stderr.String(), "using the ephemeral runner tool cache") {
-		t.Fatalf("prepareRunnerToolCacheDir(symlink) = %q, stderr = %q", got, stderr.String())
-	}
-
-	t.Setenv("BUILDKITE_COMPUTE_TYPE", "self-hosted")
-	stderr.Reset()
-	if got := prepareRunnerToolCacheDir(dir, &stderr); got != "" || !strings.Contains(stderr.String(), "requires a Buildkite Hosted Agent") {
-		t.Fatalf("prepareRunnerToolCacheDir(self-hosted) = %q, stderr = %q", got, stderr.String())
 	}
 }
 

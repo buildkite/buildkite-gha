@@ -450,13 +450,6 @@ with repository configuration disabled to install exact Node 20.20.2 or
 24.18.0 releases. Those Node binaries require glibc 2.28 or newer; the static
 Go CLI does not. Shell-only jobs and action jobs whose resolved trees contain
 only shell steps, native adapters, or Docker do not require or install mise.
-On Hosted Agents, action-capable jobs also place `RUNNER_TOOL_CACHE` on that
-best-effort volume so toolkit setup actions can reuse installed tools. The
-volume name is scoped to the compiled GitHub repository and exact ref;
-normal generated pull request, branch, and tag jobs do not reuse each other's
-tool caches. If the volume is unavailable or the job runs on a self-hosted
-agent, the runtime uses its existing job-local tool cache. `RUNNER_TEMP` always
-remains job-local.
 Importers, `validate`, and `compile` do not require or install mise either.
 
 ### Validate

@@ -258,16 +258,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, fmt.Errorf("make Docker runner temp writable: %w", err)
 		}
 	}
-	toolCache := r.ToolCacheDir
-	if toolCache == "" {
-		toolCache = filepath.Join(runnerTemp, "tool-cache")
-		if err := os.Mkdir(toolCache, 0o755); err != nil {
-			return jobResult, fmt.Errorf("create runner tool cache: %w", err)
-		}
-	} else if job.Container != nil {
-		if err := os.Chmod(toolCache, 0o777); err != nil {
-			return jobResult, fmt.Errorf("make job container runner tool cache writable: %w", err)
-		}
+	if err := os.Mkdir(filepath.Join(runnerTemp, "tool-cache"), 0o755); err != nil {
+		return jobResult, fmt.Errorf("create runner tool cache: %w", err)
 	}
 	if job.HasCapability("docker") {
 		r.runnerTemp = runnerTemp
@@ -314,9 +306,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return jobResult, mountErr
 			}
 		}
-		if r.ToolCacheDir != "" {
-			containerMounts = append(containerMounts, containerMount{host: toolCache, target: jobContainerToolCache})
-		}
 		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)
 		if setupErr != nil {
 			return jobResult, setupErr
@@ -334,7 +323,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		eval.Services = backend.servicePorts
 		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
 	}
-	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp, toolCache), jobEnv)
+	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
 	}
@@ -709,7 +698,7 @@ func githubContext(job plan.Job) map[string]any {
 	}
 }
 
-func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
+func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]string {
 	return map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
@@ -723,7 +712,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         "Linux",
 		"RUNNER_TEMP":       runnerTemp,
-		"RUNNER_TOOL_CACHE": toolCache,
+		"RUNNER_TOOL_CACHE": filepath.Join(runnerTemp, "tool-cache"),
 	}
 }
 
