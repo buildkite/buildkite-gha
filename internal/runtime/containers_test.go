@@ -48,13 +48,13 @@ func newJobDocker(t *testing.T, scenario string) fakeJobDocker {
 		t.Fatal(err)
 	}
 	wrapper := filepath.Join(root, "docker")
-	// Avoid the race runtime's one-second exit sleep on every fake Docker call.
+	// Scope fake state to this subprocess rather than the parent test process so
+	// independent container tests can run in parallel. Avoid the race runtime's
+	// one-second exit sleep on every fake Docker call.
 	text := "#!/bin/sh\nGORACE=atexit_sleep_ms=0 JOB_DOCKER_ROOT=" + strconv.Quote(root) + " JOB_DOCKER_SCENARIO=" + strconv.Quote(scenario) + " exec " + strconv.Quote(exe) + " -test.run=^TestJobContainerFakeDockerProcess$ -- \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(text), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("JOB_DOCKER_ROOT", root)
-	t.Setenv("JOB_DOCKER_SCENARIO", scenario)
 	return fakeJobDocker{wrapper, root}
 }
 
@@ -553,6 +553,8 @@ func TestRunJobContainerDefaultsRunStepsToSh(t *testing.T) {
 }
 
 func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, nil)
@@ -654,6 +656,8 @@ func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing
 }
 
 func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "fail-later-service-create")
 	w, tmp := t.TempDir(), t.TempDir()
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{Image: "alpine"}, map[string]plan.Container{"a": {Image: "one"}, "b": {Image: "two"}})
@@ -676,6 +680,8 @@ func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.
 }
 
 func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "service-starting")
 	w, tmp := t.TempDir(), t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -797,6 +803,8 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 }
 
 func TestRunJobContainerSetupFailuresCleanOwnedResources(t *testing.T) {
+	t.Parallel()
+
 	for _, stage := range []string{"pull", "network-create", "create", "start", "probe", "step"} {
 		t.Run(stage, func(t *testing.T) {
 			f := newJobDocker(t, "fail-"+stage)
@@ -851,6 +859,8 @@ func TestRunJobContainerCleanupQueryFailureStillRemovesExactResources(t *testing
 }
 
 func TestRunJobContainerReportsLeftoverAndVerificationFailure(t *testing.T) {
+	t.Parallel()
+
 	for _, s := range []string{"leftover", "verify-fail"} {
 		t.Run(s, func(t *testing.T) {
 			f := newJobDocker(t, s)
@@ -875,6 +885,8 @@ func startTestBackend(t *testing.T, f fakeJobDocker) (*jobContainerBackend, stri
 }
 
 func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	b, w := startTestBackend(t, f)
 	marker := filepath.Join(w, "alive")
@@ -911,6 +923,8 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 }
 
 func TestRunJobContainerConcurrentExecUsesUniquePIDFiles(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	b, w := startTestBackend(t, f)
 	c1, x := context.WithCancel(context.Background())
@@ -948,6 +962,8 @@ func TestRunJobContainerConcurrentExecUsesUniquePIDFiles(t *testing.T) {
 }
 
 func TestRunJobContainerBarrierVisibility(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	w := t.TempDir()
 	j := jobContainerPlan(t, w, []plan.Step{{ID: "bg", Kind: "run", Shell: "sh", Background: true, Command: `/bin/sleep .15; echo LATE=yes >> "$GITHUB_ENV"; echo value=x >> "$GITHUB_OUTPUT"; echo /late >> "$GITHUB_PATH"`}, {ID: "before", Kind: "run", Shell: "sh", Command: `test -z "${LATE-}"`}, {ID: "wait", Kind: "wait", Targets: []string{"bg"}}, {ID: "after", Kind: "run", Shell: "sh", Command: `test "$LATE" = yes; case "$PATH" in /late:*) ;; *) exit 9;; esac`}})
@@ -1027,6 +1043,8 @@ func TestContainerPathUsesLongestReadOnlyMount(t *testing.T) {
 }
 
 func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
+	t.Parallel()
+
 	for _, scenario := range []string{"wrong-node-major", "incompatible-node"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newJobDocker(t, scenario)
@@ -1317,6 +1335,8 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 }
 
 func TestRunJobContainerCompositeAndNestedJavaScript(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: nested container actions\n")
@@ -1375,6 +1395,8 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 }
 
 func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action\n")
@@ -1476,6 +1498,8 @@ echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
 }
 
 func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: lazy container action\n")
@@ -1636,6 +1660,8 @@ func TestRunDockerRejectsMismatchedJobContainerPaths(t *testing.T) {
 }
 
 func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {
+	t.Parallel()
+
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: cancelled container action\n")

@@ -533,6 +533,8 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 }
 
 func TestRunDockerPreservesExplicitPath(t *testing.T) {
+	t.Parallel()
+
 	for _, test := range []struct {
 		name       string
 		jobPATH    string
@@ -655,6 +657,8 @@ func TestRunDockerRejectsUntrustedBuilderBeforeExecution(t *testing.T) {
 }
 
 func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
+	t.Parallel()
+
 	for _, scenario := range []string{"build-fail", "run-fail", "leftover", "query-fail"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake := newFakeDocker(t, scenario)
@@ -702,6 +706,8 @@ func TestRunDockerJoinsRunAndFileCommandFailures(t *testing.T) {
 }
 
 func TestRunDockerReadsOnlyOriginalCommandFiles(t *testing.T) {
+	t.Parallel()
+
 	fake := newFakeDocker(t, "replace-files")
 	result, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
 	if err != nil {
@@ -713,6 +719,8 @@ func TestRunDockerReadsOnlyOriginalCommandFiles(t *testing.T) {
 }
 
 func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
+	t.Parallel()
+
 	fake := newFakeDocker(t, "cancel")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -1018,6 +1026,8 @@ func TestFailureConditionsAndCancellation(t *testing.T) {
 }
 
 func TestExplicitCancelCommitsEffectsWithoutFailingJob(t *testing.T) {
+	t.Parallel()
+
 	for range 20 {
 		testExplicitCancelCommitsEffectsWithoutFailingJob(t)
 	}
@@ -1492,6 +1502,8 @@ func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 }
 
 func TestImplicitWaitAllPrecedesPostCleanup(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -1670,6 +1682,8 @@ func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
 }
 
 func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
@@ -1699,6 +1713,8 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 }
 
 func TestCancellationEscalatesFromInterruptToTermination(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
@@ -1740,6 +1756,8 @@ while :; do sleep 1; done`)
 }
 
 func TestCancellationPreservesInterruptGraceForDescendants(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
@@ -1780,6 +1798,8 @@ wait`)
 }
 
 func TestCancellationWaitsForProcessGroupCleanupAfterOutputCloses(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
@@ -1832,6 +1852,8 @@ while :; do sleep 1; done`)
 }
 
 func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
+	t.Parallel()
+
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("process groups are implemented for the initial Linux runtime and Darwin development hosts")
 	}
@@ -2203,6 +2225,8 @@ printf 'retained summary\n' >> "$GITHUB_STEP_SUMMARY"`},
 }
 
 func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	var logs bytes.Buffer
 	workspace := fixturePath(t)
@@ -2298,6 +2322,8 @@ func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
 }
 
 func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -2330,6 +2356,8 @@ func TestConcurrentPostActionsRunLIFOByRegistration(t *testing.T) {
 }
 
 func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
@@ -2349,6 +2377,8 @@ func TestPostActionsUseBoundedCleanupContext(t *testing.T) {
 }
 
 func TestJobTimeoutLimitsPostActionsToCleanupGrace(t *testing.T) {
+	t.Parallel()
+
 	workspace := canonicalTempDir(t)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
 	writeFixtureFile(t, workspace, ".github/actions/slow/action.yml", "name: Job timeout post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n")
@@ -2388,6 +2418,8 @@ sleep 30
 }
 
 func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
@@ -2405,6 +2437,8 @@ func TestCancellationStillRunsRegisteredPostAction(t *testing.T) {
 }
 
 func TestExplicitBackgroundCancelStillRunsRegisteredPostAction(t *testing.T) {
+	t.Parallel()
+
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: runtime test\n")
