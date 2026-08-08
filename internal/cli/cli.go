@@ -49,7 +49,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--private-checkout] [--runtime-queue hosted] <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runtime-queue hosted] <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>]\n",
 }
 
@@ -61,20 +61,26 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. --private-checkout opts only verified checkout jobs into current-job, read-only pipeline-repository authority.\n", targetQueueEnvironment)
+		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment)
 	}
 }
 
 const (
-	resultPublicationTimeout = 10 * time.Second
-	legacyRuntimeQueue       = "hosted"
-	targetQueueEnvironment   = "BUILDKITE_GHA_TARGET_QUEUE"
-	hostedTokenlessProfile   = "hosted-tokenless"
-	runtimeMiseArchiveDigest = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
-	runtimeMiseBinaryDigest  = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
-	runtimeMiseArchiveLimit  = 64 << 20
-	runtimeMiseBinaryLimit   = 128 << 20
+	resultPublicationTimeout                    = 10 * time.Second
+	legacyRuntimeQueue                          = "hosted"
+	targetQueueEnvironment                      = "BUILDKITE_GHA_TARGET_QUEUE"
+	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
+	legacyGitHubAppGitCredentialsEnvironment    = "BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS"
+	hostedTokenlessProfile                      = "hosted-tokenless"
+	runtimeMiseArchiveDigest                    = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
+	runtimeMiseBinaryDigest                     = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
+	runtimeMiseArchiveLimit                     = 64 << 20
+	runtimeMiseBinaryLimit                      = 128 << 20
 )
+
+func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
+	return getenv(repositoryProviderGitCredentialsEnvironment) == "true" || getenv(legacyGitHubAppGitCredentialsEnvironment) == "true"
+}
 
 // Run executes the command and returns its process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
@@ -230,9 +236,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			cacheCredentials = nil
 		}
 	}
-	var checkoutTokens gharuntime.CheckoutTokenProvider
 	var workflowTokens gharuntime.WorkflowTokenProvider
-	if job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write") {
+	if job.HasCapability("provider-token-write") {
 		githubTokens, tokenErr := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
 			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
@@ -242,26 +247,31 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)
 			return 1
 		}
-		if job.HasCapability("provider-token-read") {
-			checkoutTokens = githubTokens
-		}
-		if job.HasCapability("provider-token-write") {
-			workflowTokens = githubTokens
+		workflowTokens = githubTokens
+	}
+	var repositoryCredentials *gharuntime.AgentRepositoryCredentials
+	if repositoryProviderGitCredentialsEnabled(os.Getenv) {
+		repositoryCredentials = &gharuntime.AgentRepositoryCredentials{
+			Agent:    os.Getenv("BUILDKITE_GHA_AGENT"),
+			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			NoHTTP2:  os.Getenv("BUILDKITE_NO_HTTP2"),
 		}
 	}
 	runner := gharuntime.Runner{
-		Stdout:        stdout,
-		Stderr:        stderr,
-		MiseDataDir:   prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
-		Docker:        os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:           os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:       gharuntime.EnvironmentSecrets{},
-		Redactor:      gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-		Actions:       actionMaterializer,
-		Artifacts:     agent,
-		Cache:         cacheCredentials,
-		Checkout:      checkoutTokens,
-		WorkflowToken: workflowTokens,
+		Stdout:                stdout,
+		Stderr:                stderr,
+		MiseDataDir:           prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		Docker:                os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:                   os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets:               gharuntime.EnvironmentSecrets{},
+		Redactor:              gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		Actions:               actionMaterializer,
+		Artifacts:             agent,
+		Cache:                 cacheCredentials,
+		RepositoryCredentials: repositoryCredentials,
+		WorkflowToken:         workflowTokens,
 	}
 	runner.RuntimeExecutable, err = os.Executable()
 	if err != nil {
@@ -906,7 +916,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", false)
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "")
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -1062,7 +1072,7 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, privateCheckout, err := uploadArgs(args)
+	workflowPath, eventPath, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
@@ -1096,7 +1106,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, privateCheckout)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1153,7 +1163,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string, privateCheckout bool) (hostedTokenlessCompilation, error) {
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -1164,9 +1174,8 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	}
 	hasActions := irUsesActions(ir)
 	options := compiler.Options{
-		EventTrust:     compiler.EventUntrusted,
-		GroupLabel:     groupLabel,
-		ResolveActions: privateCheckout,
+		EventTrust: compiler.EventUntrusted,
+		GroupLabel: groupLabel,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
 				"ubuntu-latest": targetQueue,
@@ -1175,7 +1184,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 			},
 			AllowUntrustedDefaultQueue: targetQueue == "",
 		},
-		PrivateCheckout: privateCheckout,
 	}
 	if targetQueue != "" {
 		options.Runners.UntrustedQueues = []string{targetQueue}
@@ -1201,7 +1209,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
-	if err := validateUnprivilegedBundleWithPrivateCheckout(bundle, privateCheckout); err != nil {
+	if err := validateUnprivilegedBundle(bundle); err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
 	}
 	if !hasActions && bundleUsesActions(bundle) {
@@ -1211,10 +1219,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
-	return validateUnprivilegedBundleWithPrivateCheckout(bundle, false)
-}
-
-func validateUnprivilegedBundleWithPrivateCheckout(bundle compiler.Bundle, privateCheckout bool) error {
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
@@ -1224,8 +1228,8 @@ func validateUnprivilegedBundleWithPrivateCheckout(bundle compiler.Bundle, priva
 				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
 			}
 			if capability == "provider-token-read" {
-				if !privateCheckout || !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
-					return fmt.Errorf("job %q requires provider-token-read without compiler-verified private checkout provenance", artifact.Job.Workflow.LogicalJobID)
+				if !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
+					return fmt.Errorf("job %q requires provider-token-read without compiler-verified checkout provenance", artifact.Job.Workflow.LogicalJobID)
 				}
 				continue
 			}
@@ -1280,18 +1284,17 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 	return false
 }
 
-func uploadArgs(args []string) (workflowPath, eventPath string, privateCheckout bool, err error) {
+func uploadArgs(args []string) (workflowPath, eventPath string, err error) {
 	filtered := make([]string, 0, len(args))
 	runtimeQueue := ""
 	runtimeQueueSeen := false
-	privateCheckoutSeen := false
+	deprecatedPrivateCheckoutSeen := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--private-checkout" {
-			if privateCheckoutSeen {
-				return "", "", false, fmt.Errorf("--private-checkout may only be specified once")
+			if deprecatedPrivateCheckoutSeen {
+				return "", "", fmt.Errorf("--private-checkout may only be specified once")
 			}
-			privateCheckoutSeen = true
-			privateCheckout = true
+			deprecatedPrivateCheckoutSeen = true
 			continue
 		}
 		if args[i] != "--runtime-queue" {
@@ -1299,23 +1302,23 @@ func uploadArgs(args []string) (workflowPath, eventPath string, privateCheckout 
 			continue
 		}
 		if runtimeQueueSeen {
-			return "", "", false, fmt.Errorf("--runtime-queue may only be specified once")
+			return "", "", fmt.Errorf("--runtime-queue may only be specified once")
 		}
 		runtimeQueueSeen = true
 		i++
 		if i == len(args) {
-			return "", "", false, fmt.Errorf("--runtime-queue requires a queue")
+			return "", "", fmt.Errorf("--runtime-queue requires a queue")
 		}
 		runtimeQueue = args[i]
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
 	if err != nil {
-		return "", "", false, err
+		return "", "", err
 	}
 	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
-		return "", "", false, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
+		return "", "", fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
 	}
-	return workflowPath, eventPath, privateCheckout, err
+	return workflowPath, eventPath, err
 }
 
 func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {

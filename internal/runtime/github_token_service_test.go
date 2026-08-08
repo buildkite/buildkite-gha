@@ -10,42 +10,6 @@ import (
 	"testing"
 )
 
-func TestAgentGitHubTokensMintsFixedReadOnlyRepositoryCredential(t *testing.T) {
-	var calls int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Error(err)
-		}
-		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/v3/jobs/"+testCacheJobID+"/github_scoped_access_token" || r.URL.RawQuery != "" {
-			t.Errorf("request = %s %s", r.Method, r.URL.String())
-		}
-		if r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("request headers = %#v", r.Header)
-		}
-		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","permissions":{"contents":"read"}}` {
-			t.Errorf("request body = %s", body)
-		}
-		_, _ = io.WriteString(w, `{"token":"ghs_scoped_token"}`)
-	}))
-	defer server.Close()
-
-	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
-		Endpoint: server.URL + "/v3/", JobID: testCacheJobID, JobToken: "job-secret",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	token, err := provider.Token(context.Background(), "buildkite/buildkite-gha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 || token != "ghs_scoped_token" {
-		t.Fatalf("calls/token = %d / %q", calls, token)
-	}
-}
-
 func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -115,8 +79,8 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
-		if _, err := provider.Token(context.Background(), repository); err == nil {
-			t.Fatalf("Token(%q) succeeded", repository)
+		if _, err := provider.WorkflowToken(context.Background(), repository, map[string]string{"contents": "read"}); err == nil {
+			t.Fatalf("WorkflowToken(%q) succeeded", repository)
 		}
 	}
 }
@@ -156,9 +120,9 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.Token(context.Background(), "buildkite/buildkite-gha")
+			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"contents": "read"})
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("Token() error = %v, want %q without response data", err, test.want)
+				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
 			}
 		})
 	}
@@ -177,8 +141,8 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Token(context.Background(), "buildkite/buildkite-gha"); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
-		t.Fatalf("redirect Token() error/redirected = %v / %v", err, redirected)
+	if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
 	}
 }
 
@@ -189,7 +153,7 @@ func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.Token(ctx, "buildkite/buildkite-gha"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Token() error = %v, want cancellation", err)
+	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WorkflowToken() error = %v, want cancellation", err)
 	}
 }

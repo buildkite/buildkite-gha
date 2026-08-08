@@ -19,22 +19,15 @@ const githubTokenResponseLimit = 64 << 10
 var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 
-// CheckoutTokenProvider mints one repository-scoped credential for the
-// verified checkout adapter. The provider fixes permissions independently of
-// workflow inputs.
-type CheckoutTokenProvider interface {
-	Token(context.Context, string) (string, error)
-}
-
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
-// compiler-owned permissions carried by a verified job plan.
+// plan-declared permissions accepted by the Buildkite backend.
 type WorkflowTokenProvider interface {
 	WorkflowToken(context.Context, string, map[string]string) (string, error)
 }
 
-// AgentGitHubTokenConfig identifies the exact current Buildkite job. Endpoint
-// and JobToken are runtime authority and are never forwarded to Git or action
-// code.
+// AgentGitHubTokenConfig carries the current Buildkite job's Agent connection
+// and authentication material. This client does not add it to Git or action
+// subprocess environments.
 type AgentGitHubTokenConfig struct {
 	Endpoint string
 	JobID    string
@@ -69,10 +62,6 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 		bounded.Timeout = 15 * time.Second
 	}
 	return &AgentGitHubTokens{mintURL: mintURL, jobToken: config.JobToken, client: &bounded}, nil
-}
-
-func (c *AgentGitHubTokens) Token(ctx context.Context, repository string) (string, error) {
-	return c.mint(ctx, repository, map[string]string{"contents": "read"}, "checkout")
 }
 
 func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository string, permissions map[string]string) (string, error) {

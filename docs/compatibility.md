@@ -35,9 +35,10 @@ one queue. Operators using default or explicit targeting are responsible for
 providing suitable whole-job isolation. The profile is designed for public code
 that can run without general protected credentials on a compatible Linux
 x86-64 agent. Unsupported or privileged requests fail before the generated jobs
-are uploaded. An explicit `upload --private-checkout` extension admits only the
-verified checkout adapter and only when the organization has enabled
-Buildkite's job-bound GitHub scoped access-token service.
+are uploaded. A compiler-verified checkout automatically declares bounded
+repository-provider read capability. At runtime it uses Buildkite's native Git
+credential helper only when the job environment indicates repository-provider
+credentials are available; otherwise the same checkout runs anonymously.
 
 There are three different compatibility claims:
 
@@ -105,7 +106,7 @@ service.
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
-| `actions/checkout` | Supported subset | Public `github.com` event repository, exact event SHA, workspace root, and shallow credential-free fetch are supported by default. Explicit private-checkout upload can authenticate that same fetch with fixed `contents:read` authority for the pipeline repository. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
+| `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and shallow fetch are supported. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
 | `actions/upload-artifact` | Supported subset | Only the audited v4 commit is adapted. It supports bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
@@ -117,7 +118,7 @@ service.
 | GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
 | Public GitHub repositories | Supported subset | Public event-repository checkout and anonymous public GitHub actions are supported. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
-| Private repositories | Supported subset | Direct upload can opt into read-only checkout of the pipeline's exact GitHub repository. Alternate repositories, private actions, and private reusable workflows are not supported. |
+| Private repositories | Supported subset | The event repository can be checked out when Buildkite supplies repository-provider Git credentials to the job and its backend authorizes the concrete repository URL. Alternate repositories, private actions, and private reusable workflows are not supported. |
 | `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. The runtime does not inject it into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
 | `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` remain unavailable. An action may explicitly export its input as `GITHUB_TOKEN` for later steps through `GITHUB_ENV`; an explicitly supplied action input, including an empty value, suppresses its metadata default. |
@@ -245,25 +246,32 @@ semantics when Buildkite has not supplied them.
 ### Checkout starts clean
 
 Generated jobs skip Buildkite's default checkout and allocate a fresh Actions
-workspace. A supported `actions/checkout` step performs a credential-free,
-shallow checkout of the public event repository at the exact event SHA by
-default.
+workspace. A supported `actions/checkout` step performs a shallow checkout of
+the event repository at the exact event SHA. Compilation automatically adds
+`provider-token-read` only to a job containing the compiler-verified checkout
+adapter with its bounded inputs.
 
-With explicit installer configuration, direct upload may add
-`--private-checkout`. Compilation then adds `provider-token-read` only to a job
-containing the compiler-verified checkout adapter with its bounded inputs. At
-runtime, the CLI requests fixed `contents:read` authority from Buildkite's
-current-job Agent endpoint for `https://github.com/<event repository>`. The
-service independently requires that repository to be the pipeline's exact
-GitHub repository. The credential is registered with both runtime and Agent
-redaction before use, supplied to only the Git fetch through a one-shot askpass
-pipe, and never placed in the clone URL, arguments, Git config, plan, workflow
-environment, result, output, state, summary, or artifact.
+At runtime, the fetch uses Buildkite's native
+`buildkite-agent git-credentials-helper` when
+`BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS=true`, or when the legacy
+`BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS=true` signal is present. The helper
+receives the current job identity and Agent access token, and the Buildkite
+backend decides whether to issue credentials for the concrete repository URL
+requested by Git. If neither signal is enabled, checkout is anonymous; the CLI
+does not try to infer repository visibility.
 
-The option fails closed when scoped token minting is unavailable or disabled.
-It does not populate `GITHUB_TOKEN` or `github.token`, accept workflow-selected
-permissions, support write access, or enable private actions. Alternate
-repositories or refs and credential persistence remain unsupported.
+The helper is configured only on the verified fetch command, with HTTP-path
+matching enabled. It is not persisted in Git config. The runtime passes the
+upper- and lower-case HTTP proxy variables captured from the job process before
+workflow execution to that credentialed fetch, but does not add its job
+credential to ordinary workflow subprocess environments. This command scoping
+limits accidental inheritance; it is not an OS-level isolation boundary between
+hostile processes in the same job. The Buildkite repository-provider backend
+remains authoritative for whether it issues credentials for the concrete URL.
+This checkout path does not populate
+`GITHUB_TOKEN` or `github.token`, use workflow `permissions`, enable private
+actions, or add support for alternate repositories or refs. The deprecated
+`--private-checkout` option is temporarily accepted as a no-op for compatibility.
 
 ### Explicit permissions provide a scoped workflow token
 
@@ -298,9 +306,12 @@ The compiler normalizes names such as `pull-requests` to the Agent API's
 provenance for upload admission. The runtime requests the token once from the
 current-job Agent endpoint. The service independently requires the requested
 repository to match the pipeline's configured GitHub repository and applies
-its own permission allowlist and organization enablement. The token is
-registered with runtime and Agent redaction before expressions or steps can use
-it, and result values containing it are scrubbed.
+its own permission allowlist and organization enablement. Those server-side
+checks are the authorization ceiling; the compiled map constrains the supported
+client path but is not a separate security boundary against code that obtains
+the current job's Agent access token. The token is registered with runtime and
+Agent redaction before expressions or steps can use it, and result values
+containing it are scrubbed.
 
 An explicit `secrets.GITHUB_TOKEN` reference continues to resolve through the
 scoped-token contract. For compatible actions, `github.token` is additionally
@@ -548,13 +559,6 @@ uses:
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-An installer may explicitly enable pipeline-repository private checkout:
-
-```sh
-buildkite-gha upload --private-checkout \
-  .github/workflows/ci.yml
-```
-
 When invoking the v0.4.2 release directly, add `--runtime-queue hosted`; that
 release requires the argument and uses it to
 select the `hosted` queue.
@@ -562,10 +566,9 @@ select the `hosted` queue.
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
 it derives a bounded compatibility snapshot from the current Buildkite build.
 With `--event-path`, it uses that explicit snapshot. Both paths remain
-unattested. Apart from the documented scoped workflow-token contract, they
-remain tokenless unless `--private-checkout` is explicitly selected; that
-checkout exception is confined to the adapter and independently
-repository-bound by the Agent service.
+unattested. Apart from the documented scoped workflow-token contract and
+Buildkite's native, job-bound repository-provider credentials for verified
+checkout, they remain free of provider credentials.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.
@@ -573,7 +576,8 @@ In the current source CLI, generated jobs do not set `agents`, so Buildkite's
 pipeline or organization defaults select the agents. The deprecated
 `--runtime-queue hosted` argument remains accepted as a no-op for compatibility
 with plugin releases that pass it to v0.4.2; other values are rejected rather
-than silently ignored.
+than silently ignored. The deprecated `--private-checkout` argument is also
+accepted as a no-op for one-release migration compatibility.
 
 An importer that must select one queue can set `BUILDKITE_GHA_TARGET_QUEUE` on
 its step. The uploader maps every accepted Linux runner label to that queue,

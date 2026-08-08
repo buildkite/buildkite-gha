@@ -1267,8 +1267,8 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - GitHub Enterprise Server;
 - all repository event types;
 - remote private reusable workflows;
-- private checkout beyond the explicit read-only pipeline-repository exception,
-  and all private actions;
+- private checkout beyond the event repository authorized by Buildkite's
+  native repository-provider credentials, and all private actions;
 - protected secrets and GitHub authority beyond the scoped token exception for
   `secrets.GITHUB_TOKEN` and effective action metadata input defaults;
 - dynamic matrices and other runtime graph generation;
@@ -1339,12 +1339,13 @@ public checkout remains a separate provider integration gate.
   --no-config`.
   This path remains `EventUntrusted`, uses Buildkite's configured default agent
   targeting, and admits only `network`, compiler-proven Dockerfile-action
-  provenance, the scoped workflow-token contract, and the explicitly enabled
-  private-checkout exception. Operators remain responsible for selecting
-  suitably isolated agents for untrusted workflow code. Private remote action
-  source, alternate repository source, ordinary secrets, job- or
-  service-container provenance, privileged queues, and other protected
-  capabilities fail closed.
+  provenance, the scoped workflow-token contract, and compiler-verified
+  checkout. Verified checkout uses Buildkite's native repository-provider Git
+  credentials when enabled for the job and otherwise runs anonymously.
+  Operators remain responsible for selecting suitably isolated agents for
+  untrusted workflow code. Private remote action source, alternate repository
+  source, ordinary secrets, job- or service-container provenance, privileged
+  queues, and other protected capabilities fail closed.
   Because this repository is private, the historical live evidence is split:
   the former proof importer used a synthetic public event to prove anonymous
   checkout and portable setup actions on Buildkite, while the GitHub-hosted
@@ -1965,11 +1966,12 @@ the narrowest available boundary:
 - cache restore/save through the stock audited cache-v2 client, a compatible
   Results service, and short-lived job-bound GHAC credentials;
 - artifact upload/download through bounded native adapters;
-- public checkout under GitHub and Cursor Origin provider adapters;
-- explicitly enabled private checkout of the pipeline's exact GitHub
-  repository through the current job's scoped Agent token endpoint; and
-- compiler-authorized workflow token requests for the pipeline's exact GitHub
-  repository and explicit permission map through that same job endpoint;
+- exact event-repository checkout under GitHub, using Buildkite's native
+  repository-provider Git helper when the job enables it and anonymous Git
+  otherwise, plus future Cursor Origin provider adapters;
+- compiler-admitted workflow token requests for the pipeline's exact GitHub
+  repository and explicit permission map, authorized and bounded by the
+  current-job endpoint's server-side repository and permission policy;
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -1977,6 +1979,14 @@ requires an HTTP protocol, use the official compatible service by default with
 an explicit operator override, or provide a well-defined adapter rather than
 proxying GitHub's private service. Cache credentials authorize storage access
 only; they are distinct from the provider-feature grants below.
+
+For the native repository and scoped-token exceptions, the Buildkite backend's
+repository checks and permission allowlists are the authorization ceiling. The
+runtime omits the Agent access token from ordinary workflow subprocess
+environments, but that inheritance control is not OS-level isolation between
+hostile processes in one job. Exact checkout inputs and compiled workflow
+permissions constrain the supported client path rather than replacing the
+backend policy.
 
 Protected provider features use the supporting control-plane service:
 
@@ -1987,7 +1997,7 @@ Protected provider features use the supporting control-plane service:
 - evaluate organization, event, environment, queue, and requested-permission
   policy;
 - issue signed, expiring grants bound to exact plan digests and jobs;
-- broker private checkout and action access, selected secrets, and scoped
+- broker broader private source and action access, selected secrets, and scoped
   GitHub App installation tokens; and
 - maintain audit records, expiry, revocation, key rotation, and fail-closed
   behavior.
@@ -2002,9 +2012,9 @@ Delivery slices:
 3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
    policy evaluation, and signed no-op grants before returning credentials.
 4. Add private source through the narrowest practical credential or download
-   interface. The first sub-slice is fixed `contents:read` checkout of the
-   pipeline's exact repository through the current job's scoped Agent endpoint;
-   private actions and private reusable-workflow source remain separate work.
+   interface. Exact event-repository checkout uses the existing Buildkite Agent
+   Git credential helper; private actions and private reusable-workflow source
+   remain separate work.
 5. Add scoped GitHub tokens, selected secrets, and environment grants. The
    job-bound Agent endpoint now covers explicit workflow tokens; selected
    secrets and general provenance-aware grants remain.
@@ -2044,7 +2054,8 @@ Definition of done:
 - A forged event, wrong build/job/queue, expired grant, broadened permission,
   and fork-to-privileged transition all fail before a protected value is
   returned.
-- Public tokenless workflows still run when the control-plane service is absent.
+- Public checkout still runs anonymously when repository-provider credentials
+  and the control-plane service are absent.
 - The validator distinguishes portable and provider-dependent actions and names
   any unavailable protected capability.
 
@@ -2330,9 +2341,10 @@ interfaces required by [ADR 0003](../architecture/0003-protected-capability-cont
 Private actions and reusable workflows, workflow-visible provider tokens and
 secrets beyond the scoped `secrets.GITHUB_TOKEN` and action-metadata-default
 exceptions, environments, and compatible OIDC remain fail-closed during that
-work. The explicit private-checkout exception is limited to fixed read-only Git
-use for the pipeline repository. Neither narrow exception relaxes the other
-deferrals.
+work. Compiler-verified checkout can use only Buildkite's native
+repository-provider credentials for the exact event repository and is
+anonymous when those credentials are unavailable.
+Neither narrow exception relaxes the other deferrals.
 
 The complete published installation experience is now proven. The initial CLI
 and companion plugin `v0.2.0` releases remain the subject of the repository's

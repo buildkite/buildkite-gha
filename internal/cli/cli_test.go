@@ -1298,7 +1298,7 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-read", "provider-token-write", "privileged-container", "future-capability"} {
+	for _, capability := range []string{"secrets", "provider-token-write", "privileged-container", "future-capability"} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
@@ -1309,26 +1309,24 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedPrivateCheckout(t *testing.T) {
+func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedCheckoutCredentials(t *testing.T) {
 	job := plan.Job{
-		Workflow:             plan.Workflow{LogicalJobID: "private-checkout"},
+		Workflow:             plan.Workflow{LogicalJobID: "checkout"},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 	}
 	for _, test := range []struct {
 		name          string
-		enabled       bool
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "explicit verified adapter", enabled: true, authorization: compiler.PlanAuthorization{ProviderTokenReadCapabilitySources: []string{"checkout-adapter"}}},
-		{name: "default profile", authorization: compiler.PlanAuthorization{ProviderTokenReadCapabilitySources: []string{"checkout-adapter"}}, wantError: true},
-		{name: "missing provenance", enabled: true, wantError: true},
-		{name: "broadened provenance", enabled: true, authorization: compiler.PlanAuthorization{ProviderTokenReadCapabilitySources: []string{"checkout-adapter", "javascript-action"}}, wantError: true},
+		{name: "verified adapter", authorization: compiler.PlanAuthorization{ProviderTokenReadCapabilitySources: []string{"checkout-adapter"}}},
+		{name: "missing provenance", wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenReadCapabilitySources: []string{"checkout-adapter", "javascript-action"}}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
-			err := validateUnprivilegedBundleWithPrivateCheckout(bundle, test.enabled)
-			if test.wantError && (err == nil || !strings.Contains(err.Error(), "private checkout provenance")) {
+			err := validateUnprivilegedBundle(bundle)
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "checkout provenance")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 			if !test.wantError && err != nil {
@@ -2128,22 +2126,43 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)
 	}
-	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
-	workflow, event, privateCheckout, err := uploadArgs([]string{"workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "" || privateCheckout {
-		t.Fatalf("uploadArgs() default = %q, %q, %v, %v", workflow, event, privateCheckout, err)
+	workflow, event, err := uploadArgs([]string{"workflow.yml"})
+	if err != nil || workflow != "workflow.yml" || event != "" {
+		t.Fatalf("uploadArgs() default = %q, %q, %v", workflow, event, err)
 	}
-	if _, _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
+	if _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)
 	}
-	if _, _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate private checkout error", err)
 	}
-	workflow, event, privateCheckout, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "event.json" || !privateCheckout {
-		t.Fatalf("uploadArgs() = %q, %q, %v, %v", workflow, event, privateCheckout, err)
+	workflow, event, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
+	if err != nil || workflow != "workflow.yml" || event != "event.json" {
+		t.Fatalf("uploadArgs() deprecated private checkout = %q, %q, %v", workflow, event, err)
+	}
+}
+
+func TestRepositoryProviderGitCredentialsUseServerEnvironment(t *testing.T) {
+	values := map[string]string{}
+	getenv := func(name string) string { return values[name] }
+	if repositoryProviderGitCredentialsEnabled(getenv) {
+		t.Fatal("repository provider credentials enabled without a server setting")
+	}
+	values[repositoryProviderGitCredentialsEnvironment] = "true"
+	if !repositoryProviderGitCredentialsEnabled(getenv) {
+		t.Fatal("repository provider credentials setting was ignored")
+	}
+	delete(values, repositoryProviderGitCredentialsEnvironment)
+	values[legacyGitHubAppGitCredentialsEnvironment] = "true"
+	if !repositoryProviderGitCredentialsEnabled(getenv) {
+		t.Fatal("legacy GitHub App credentials setting was ignored")
+	}
+	values[legacyGitHubAppGitCredentialsEnvironment] = "TRUE"
+	if repositoryProviderGitCredentialsEnabled(getenv) {
+		t.Fatal("non-canonical server setting enabled repository credentials")
 	}
 }
 

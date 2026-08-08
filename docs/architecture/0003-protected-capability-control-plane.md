@@ -203,14 +203,18 @@ plan. Rotation overlaps old and new public keys for the maximum grant lifetime;
 emergency revocation takes precedence over a still-published key. Private keys
 remain in the platform signing boundary.
 
-### Narrow job-bound GitHub token exceptions
+### Narrow job-bound provider credential exceptions
 
-Buildkite's Agent API can mint a GitHub installation token for the exact current
-job, exact pipeline repository, and caller-requested permission set. The server
-authenticates the request with the same job's Agent access token, independently
-requires the requested repository to equal the pipeline's configured GitHub
-repository, and validates permissions against its own allowlist. This supports
-one narrower integration without waiting for the general grant protocol:
+Buildkite has two native, job-bound credential paths that support narrower
+integrations without waiting for the general grant protocol. Repository
+checkout uses the Agent's Git credential helper and delegates authorization for
+the concrete URL supplied by Git to Buildkite's repository-provider backend.
+Workflow `GITHUB_TOKEN` support uses the Agent API below to mint a GitHub
+installation token for the exact current job, exact pipeline repository, and
+caller-requested permission set. The server authenticates the request with the
+same job's Agent access token, independently requires the requested repository
+to equal the pipeline's configured GitHub repository, and validates permissions
+against its own allowlist:
 
 ```http
 POST /v3/jobs/<current-job-id>/github_scoped_access_token
@@ -227,30 +231,28 @@ Content-Type: application/json
 }
 ```
 
-The uploader must opt in explicitly. The compiler adds
-`provider-token-read` only after resolving the exact `actions/checkout`
-adapter and validating its repository, ref, depth, path, submodule, and
-credential-persistence inputs. Fresh same-process compiler provenance permits
-that one capability through upload admission; the default `hosted-tokenless`
-profile continues to reject it.
+The compiler adds `provider-token-read` after resolving the exact
+`actions/checkout` adapter and validating its repository, ref, depth, path,
+submodule, and credential-persistence inputs. Fresh same-process compiler
+provenance permits that one capability through upload admission. The runtime
+uses `buildkite-agent git-credentials-helper` only when the immutable plan has
+that capability, a root checkout selector names the verified adapter, and the
+server-provided job environment indicates repository-provider Git credentials
+are enabled. Otherwise it performs the same checkout anonymously.
 
-The runtime configures the endpoint only when the immutable plan contains that
-capability and a root checkout selector names the verified adapter. The event
-repository and exact SHA remain the only checkout targets, and the server's
-independent pipeline-repository comparison is the authoritative repository
-restriction. The client fixes `contents:read`; no workflow input can choose a
-repository, permission, or access level for minting.
+The event repository and exact SHA remain the only checkout targets. The
+credential helper is configured as a command-scoped Git option only for the
+fetch, uses HTTP-path matching, receives the current job's Agent API identity,
+and is not persisted. The runtime forwards proxy variables captured from the job
+process before workflow execution to that credentialed fetch but does not add
+the job credential to ordinary workflow subprocess environments. This is
+inheritance control, not OS-level isolation between hostile processes in the
+same job. The Buildkite backend independently authorizes the concrete repository
+URL received through Git's credential protocol. Through the supported adapter
+no workflow input can select another credential target or access level, and the
+job's Agent credential is not placed in plans.
 
-The returned token is masked before Agent redaction registration. Failure to
-register redaction aborts before Git fetch. A one-shot askpass helper reads the
-token from an inherited pipe and is present only for the fetch process. The
-token is not placed in arguments, the clone URL, Git config, plans, ordinary
-step environments, workflow contexts, results, outputs, state, summaries, or
-artifacts. Redirects, unknown response fields, trailing data, oversized bodies,
-invalid tokens, disabled service responses, and unavailable/rate-limited
-responses fail closed with bounded diagnostics.
-
-A second bounded integration uses the same endpoint for a synthetic
+A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
 `github.token`. A workflow must declare an explicit, non-empty permission
 mapping and either statically reference that exact secret or invoke an action
@@ -276,9 +278,12 @@ These exceptions do not establish authenticated provider event, fork, or actor
 provenance. The server's independent pipeline-repository comparison,
 organization enablement, and permission allowlist are authoritative, but
 pipelines remain responsible for whether untrusted workflow changes may request
-an allowed write permission. Private actions, arbitrary reusable-workflow
-source, selected non-provider secrets, environments, and OIDC still require the
-general control-plane decision in this ADR.
+an allowed write permission. The compiled permission map constrains the supported
+client path; it is not an independent authorization ceiling against same-job
+code that obtains the Agent access token and calls the endpoint directly.
+Private actions, arbitrary reusable-workflow source, selected non-provider
+secrets, environments, and OIDC still require the general control-plane decision
+in this ADR.
 
 ### Runtime verification and capability use
 
@@ -338,31 +343,33 @@ record; a successful job alone does not prove policy or audit behavior.
 
 ## Deferred decisions
 
-Apart from the fixed read-only pipeline-repository checkout and scoped token
-exceptions above, this ADR does not authorize or choose storage for private
-actions, reusable workflow source, selected non-provider secrets, general
-workflow access to `github.token`, environment grants, or compatibility OIDC
-claims. It does not choose a secret manager, broader cross-repository GitHub
-App authority, customer policy language, administrative UI, or production
-service hostname. Those decisions require separate reviewed slices after the
-no-op boundary is proven.
+Apart from native repository-provider checkout and scoped token exceptions
+above, this ADR does not authorize or choose storage for private actions,
+reusable workflow source, selected non-provider secrets, general workflow
+access to `github.token`, environment grants, or compatibility OIDC claims. It
+does not choose a secret manager, broader cross-repository GitHub App authority,
+customer policy language, administrative UI, or production service hostname.
+Those decisions require separate reviewed slices after the no-op boundary is
+proven.
 
 The existing cache-v2 GHAC token exchange remains separate. Cache tokens are
 minted through the current Buildkite job, scoped by the cache service, and
 exposed only to the audited cache action lifecycle. A capability grant neither
 contains nor replaces them.
 
-The job-bound GitHub token exchanges are likewise separate. Their server-side
-pipeline-repository binding and either client-fixed `contents:read` checkout
-permission or compiler-owned explicit workflow permission map are not a
-substitute for the event, policy, signing, and audit contract required by a
-general capability grant.
+The job-bound provider credential exchanges are likewise separate. Their
+server-side repository authorization and permission allowlists are the
+authoritative ceilings. A Git-selected checkout URL and the explicit workflow
+permission map carried by the supported client path are not substitutes for the
+event, policy, signing, and audit contract required by a general capability
+grant.
 
 ## Consequences
 
-- Public tokenless workflows retain no new service dependency.
-- Explicit private checkout can use the pipeline's own repository without
-  exposing a reusable workflow credential or broadening the default profile.
+- Public checkout retains no new service dependency when repository-provider
+  credentials are not enabled for the job.
+- Private checkout uses Buildkite's existing repository-provider policy without
+  exposing a reusable workflow credential or requiring a separate user option.
 - The first protected-path milestone can prove the security boundary without
   risking a real credential.
 - Provider provenance and policy must exist in a Buildkite-owned service before

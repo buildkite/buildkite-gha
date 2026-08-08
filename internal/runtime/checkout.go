@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +15,50 @@ import (
 
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var checkoutSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+var agentProxyEnvironmentNames = [...]string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+}
+
+// AgentRepositoryCredentials configure Buildkite's native, job-bound Git
+// credential helper for one verified checkout fetch.
+type AgentRepositoryCredentials struct {
+	Agent            string
+	Endpoint         string
+	JobID            string
+	JobToken         string
+	NoHTTP2          string
+	proxyEnvironment map[string]string
+}
+
+func resolveAgentRepositoryCredentialsBeforeWorkflow(credentials *AgentRepositoryCredentials) (*AgentRepositoryCredentials, error) {
+	if credentials == nil {
+		return nil, nil
+	}
+	if !validBuildkiteJobID(credentials.JobID) {
+		return nil, fmt.Errorf("repository-provider credentials require the current Buildkite job ID")
+	}
+	if credentials.JobToken == "" || strings.ContainsAny(credentials.JobToken, "\r\n") {
+		return nil, fmt.Errorf("repository-provider credentials require the current Buildkite Agent access token")
+	}
+	agent, err := resolveHostExecutableBeforeWorkflow(credentials.Agent, "buildkite-agent", "Buildkite Agent Git credential helper")
+	if err != nil {
+		return nil, err
+	}
+	resolved := *credentials
+	resolved.Agent = agent
+	resolved.proxyEnvironment = make(map[string]string, len(agentProxyEnvironmentNames))
+	for _, name := range agentProxyEnvironmentNames {
+		if value, ok := os.LookupEnv(name); ok {
+			resolved.proxyEnvironment[name] = value
+		}
+	}
+	return &resolved, nil
+}
+
+func agentGitCredentialHelperCommand(agent string) string {
+	return "!'" + strings.ReplaceAll(agent, "'", `'\''`) + "' git-credentials-helper"
+}
 
 func validCheckoutRepository(repository string) bool {
 	if len(repository) > 140 || !checkoutRepositoryPattern.MatchString(repository) {
@@ -27,16 +70,9 @@ func validCheckoutRepository(repository string) bool {
 
 func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, inputs map[string]string) (Result, error) {
 	result := newResult()
-	private := job.HasCapability("provider-token-read")
-	adapter := "tokenless checkout adapter"
-	if private {
-		adapter = "private checkout adapter"
-	}
-	validRepository := checkoutRepositoryPattern.MatchString(job.Event.Repository)
-	if private {
-		validRepository = validCheckoutRepository(job.Event.Repository)
-	}
-	if job.Event.Provider != "github" || !validRepository || !checkoutSHAPattern.MatchString(job.Event.SHA) {
+	const adapter = "checkout adapter"
+	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
+	if job.Event.Provider != "github" || !validCheckoutRepository(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid github.com event repository and exact SHA; Phase 6 is required for other events", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
@@ -44,20 +80,20 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	entries, err := os.ReadDir(workspace)
 	if err != nil {
-		return result, fmt.Errorf("tokenless checkout adapter inspect workspace: %w", err)
+		return result, fmt.Errorf("%s inspect workspace: %w", adapter, err)
 	}
 	if len(entries) != 0 {
-		return result, fmt.Errorf("tokenless checkout adapter requires an empty workspace; Phase 6 is required for clean behavior")
+		return result, fmt.Errorf("%s requires an empty workspace; Phase 6 is required for clean behavior", adapter)
 	}
 	git := r.Git
-	if private && (git == "" || !filepath.IsAbs(git)) {
-		return result, fmt.Errorf("private checkout adapter requires Git to be resolved before workflow execution")
+	if credentialed && (git == "" || !filepath.IsAbs(git)) {
+		return result, fmt.Errorf("repository-provider checkout requires Git to be resolved before workflow execution")
 	}
-	if !private && git == "" {
+	if !credentialed && git == "" {
 		git, err = exec.LookPath("git")
 	}
 	if err != nil {
-		return result, fmt.Errorf("tokenless checkout adapter discover Git: %w", err)
+		return result, fmt.Errorf("%s discover Git: %w", adapter, err)
 	}
 	env := map[string]string{
 		"HOME":                filepath.Join(workspace, ".no-home"),
@@ -83,8 +119,8 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		return result, err
 	}
 	fetchArgs := []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", job.Event.SHA}
-	if private {
-		if err := r.runPrivateCheckoutFetch(ctx, processor, workspace, env, git, base, job.Event.Repository, fetchArgs); err != nil {
+	if credentialed {
+		if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, workspace, env, git, base, fetchArgs); err != nil {
 			return result, fmt.Errorf("%s git fetch: %w", adapter, err)
 		}
 	} else if err := run(env, fetchArgs...); err != nil {
@@ -95,69 +131,37 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	head, err := os.ReadFile(filepath.Join(workspace, ".git", "HEAD"))
 	if err != nil || strings.TrimSpace(string(head)) != job.Event.SHA {
-		return result, fmt.Errorf("tokenless checkout adapter did not produce exact detached SHA %s", job.Event.SHA)
+		return result, fmt.Errorf("%s did not produce exact detached SHA %s", adapter, job.Event.SHA)
 	}
 	result.Outputs["ref"] = job.Event.Ref
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
 }
 
-func (r Runner) runPrivateCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base []string, repository string, fetchArgs []string) error {
-	if r.Checkout == nil {
-		return fmt.Errorf("private checkout token provider is not configured")
+func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, fetchArgs []string) error {
+	credentials := r.RepositoryCredentials
+	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
+		return fmt.Errorf("repository-provider credentials were not resolved before workflow execution")
 	}
-	token, err := r.Checkout.Token(ctx, repository)
-	if err != nil {
-		return err
+	processor.addMask(credentials.JobToken)
+	credentialEnv := cloneStrings(env)
+	credentialEnv["BUILDKITE_AGENT_ACCESS_TOKEN"] = credentials.JobToken
+	credentialEnv["BUILDKITE_JOB_ID"] = credentials.JobID
+	if credentials.Endpoint != "" {
+		credentialEnv["BUILDKITE_AGENT_ENDPOINT"] = credentials.Endpoint
 	}
-	if len(token) > 16<<10 || !githubInstallationTokenPattern.MatchString(token) {
-		return fmt.Errorf("private checkout token provider returned an invalid token")
+	if credentials.NoHTTP2 != "" {
+		credentialEnv["BUILDKITE_NO_HTTP2"] = credentials.NoHTTP2
 	}
-	if r.Redactor == nil {
-		return fmt.Errorf("private checkout token provider requires a redactor")
+	for name, value := range credentials.proxyEnvironment {
+		credentialEnv[name] = value
 	}
-	processor.addMask(token)
-	if err := r.Redactor.AddRedaction(ctx, token); err != nil {
-		return processor.scrubError(err)
-	}
-
-	helperDir, err := os.MkdirTemp("", "buildkite-gha-askpass-")
-	if err != nil {
-		return fmt.Errorf("create private checkout askpass directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(helperDir) }()
-	helper := filepath.Join(helperDir, "askpass")
-	const script = `#!/bin/sh
-case "$1" in
-  *sername*) printf '%s\n' x-access-token ;;
-  *assword*) IFS= read -r token <&3 || exit 1; printf '%s\n' "$token" ;;
-  *) exit 1 ;;
-esac
-`
-	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
-		return fmt.Errorf("create private checkout askpass helper: %w", err)
-	}
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		return fmt.Errorf("create private checkout credential pipe: %w", err)
-	}
-	if _, err := io.WriteString(writer, token+"\n"); err != nil {
-		_ = reader.Close()
-		_ = writer.Close()
-		return fmt.Errorf("write private checkout credential pipe: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		_ = reader.Close()
-		return fmt.Errorf("close private checkout credential pipe: %w", err)
-	}
-	defer func() { _ = reader.Close() }()
-
-	privateEnv := cloneStrings(env)
-	privateEnv["GIT_ASKPASS"] = helper
-	privateEnv["LC_ALL"] = "C"
-	cmd := exec.Command(git, append(base, fetchArgs...)...)
+	credentialArgs := append(append([]string(nil), base...),
+		"-c", "credential.useHttpPath=true",
+		"-c", "credential.helper="+agentGitCredentialHelperCommand(credentials.Agent),
+	)
+	cmd := exec.Command(git, append(credentialArgs, fetchArgs...)...)
 	cmd.Dir = workspace
-	cmd.Env = processEnv(privateEnv)
-	cmd.ExtraFiles = []*os.File{reader}
+	cmd.Env = processEnv(credentialEnv)
 	return processor.scrubError(r.runStreamingCommand(ctx, processor, cmd))
 }

@@ -638,7 +638,7 @@ func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) 
 	}
 }
 
-func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
+func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -669,10 +669,10 @@ func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	for _, with := range accepted {
 		plans, err := compile(with)
 		if err != nil {
-			t.Fatalf("tokenless checkout with %q: %v", with, err)
+			t.Fatalf("checkout with %q: %v", with, err)
 		}
-		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
-			t.Fatalf("tokenless checkout plans = %#v", plans)
+		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+			t.Fatalf("checkout plans = %#v", plans)
 		}
 	}
 
@@ -689,21 +689,21 @@ func TestTokenlessCheckoutAdapterInputBoundary(t *testing.T) {
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile("        with:\n" + input)
-			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "tokenless checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
 				t.Fatalf("CompilePlansWithOptions() error = %v", err)
 			}
 		})
 	}
 }
 
-func TestPrivateCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
+func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
-	compile := func(uses, with string, private bool) (Bundle, error) {
+	compile := func(uses, with string) (Bundle, error) {
 		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: " + uses + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
@@ -714,30 +714,21 @@ func TestPrivateCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
 				UntrustedQueues: []string{"hosted"},
 			},
-			ResolveActions:  true,
-			ActionSource:    &fakeActionSource{root: remote, calls: map[string]int{}},
-			PrivateCheckout: private,
+			ResolveActions: true,
+			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		})
 	}
 
-	bundle, err := compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "", true)
+	bundle, err := compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) ||
 		!reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
-		t.Fatalf("private checkout plan = %#v", bundle.Plans)
+		t.Fatalf("checkout plan = %#v", bundle.Plans)
 	}
 
-	bundle, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network"}) || len(bundle.Plans[0].Authorization.ProviderTokenReadCapabilitySources) != 0 {
-		t.Fatalf("default checkout authority changed = %#v", bundle.Plans[0])
-	}
-
-	bundle, err = compile("owner/action@v1", "", true)
+	bundle, err = compile("owner/action@v1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,8 +736,8 @@ func TestPrivateCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 		t.Fatalf("ordinary action received checkout authority = %#v", bundle.Plans[0])
 	}
 
-	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n", true)
-	if err == nil || !strings.Contains(err.Error(), "tokenless checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n")
+	if err == nil || !strings.Contains(err.Error(), "checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
 		t.Fatalf("workflow token input error = %v", err)
 	}
 }

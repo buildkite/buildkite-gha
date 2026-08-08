@@ -16,13 +16,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
-type checkoutTokenProviderFunc func(context.Context, string) (string, error)
-
-func (f checkoutTokenProviderFunc) Token(ctx context.Context, repository string) (string, error) {
-	return f(ctx, repository)
-}
-
-func TestTokenlessCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
+func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	workflowSource := []byte("name: checked out\n")
 	localSource := []byte("name: local\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo 'CHECKOUT_CHAIN=ok' >> \"$GITHUB_ENV\"\n")
@@ -95,7 +89,7 @@ esac
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64), Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha,
 		},
 		Target:               plan.Target{StepKey: "gha-checkout", Queue: "trusted"},
-		RequiredCapabilities: []string{"network"},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Steps: []plan.Step{
 			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
@@ -128,7 +122,7 @@ esac
 			t.Fatalf("Git log lacks %q:\n%s", required, log)
 		}
 	}
-	if strings.Contains(strings.ToLower(log), "authorization") || strings.Contains(strings.ToLower(log), "token") {
+	if strings.Contains(strings.ToLower(log), "authorization") || strings.Contains(strings.ToLower(log), "token") || strings.Contains(log, "git-credentials-helper") {
 		t.Fatalf("Git log contains credential material: %s", log)
 	}
 	if got, err := os.ReadFile(filepath.Join(workspace, ".git", "HEAD")); err != nil || strings.TrimSpace(string(got)) != sha {
@@ -149,7 +143,7 @@ esac
 	}
 }
 
-func TestTokenlessCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
+func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
@@ -169,32 +163,74 @@ func TestTokenlessCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) 
 	}
 }
 
-func TestTokenlessCheckoutPreservesPublicRepositoryValidation(t *testing.T) {
+func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
-		t.Fatalf("tokenless checkout repository validation error = %v", err)
-	}
-	job.RequiredCapabilities = []string{"provider-token-read"}
 	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid github.com event repository") {
-		t.Fatalf("private checkout repository validation error = %v", err)
+		t.Fatalf("checkout repository validation error = %v", err)
 	}
 }
 
-func TestPrivateCheckoutAdapterUsesOneShotAskpassCredential(t *testing.T) {
+func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)
-	token := "ghs_private_checkout_secret"
+	repositoryToken := "ghs_repository_token"
+	proxyEnvironment := map[string]string{
+		"HTTP_PROXY": "http://upper-http.example:8080", "HTTPS_PROXY": "http://upper-https.example:8080",
+		"ALL_PROXY": "socks5://upper-all.example:1080", "NO_PROXY": "upper-no-proxy.example",
+		"http_proxy": "http://lower-http.example:8080", "https_proxy": "http://lower-https.example:8080",
+		"all_proxy": "socks5://lower-all.example:1080", "no_proxy": "lower-no-proxy.example",
+	}
+	for name, value := range proxyEnvironment {
+		t.Setenv(name, value)
+	}
 	gitLog := filepath.Join(t.TempDir(), "git.log")
-	askpassLog := filepath.Join(t.TempDir(), "askpass.log")
+	agentLog := filepath.Join(t.TempDir(), "agent.log")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	agentScript := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3
+test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+test "$BUILDKITE_NO_HTTP2" = true
+test "$HTTP_PROXY" = http://upper-http.example:8080
+test "$HTTPS_PROXY" = http://upper-https.example:8080
+test "$ALL_PROXY" = socks5://upper-all.example:1080
+test "$NO_PROXY" = upper-no-proxy.example
+test "$http_proxy" = http://lower-http.example:8080
+test "$https_proxy" = http://lower-https.example:8080
+test "$all_proxy" = socks5://lower-all.example:1080
+test "$no_proxy" = lower-no-proxy.example
+input="$(cat)"
+case "$input" in
+  *"protocol=https"*"host=github.com"*"path=buildkite/buildkite-gha.git"*) ;;
+  *) exit 40 ;;
+esac
+printf '%s\n' "$*" > ` + shellTestQuote(agentLog) + `
+printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
+`
+	if err := os.WriteFile(agent, []byte(agentScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	git := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
-case "$*" in *` + token + `*) exit 30 ;; esac
+assert_no_proxy_environment() {
+  test -z "${HTTP_PROXY+x}"
+  test -z "${HTTPS_PROXY+x}"
+  test -z "${ALL_PROXY+x}"
+  test -z "${NO_PROXY+x}"
+  test -z "${http_proxy+x}"
+  test -z "${https_proxy+x}"
+  test -z "${all_proxy+x}"
+  test -z "${no_proxy+x}"
+}
 operation=
 for argument in "$@"; do
   case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
@@ -202,21 +238,54 @@ done
 case "$operation" in
   init)
     test -z "$GIT_ASKPASS"
+    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+    test -z "${BUILDKITE_JOB_ID+x}"
+    test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     mkdir -p .git
     ;;
   remote)
     test -z "$GIT_ASKPASS"
+    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+    test -z "${BUILDKITE_JOB_ID+x}"
+    test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     ;;
   fetch)
-    test -n "$GIT_ASKPASS"
-    if env | grep -F ` + shellTestQuote(token) + ` >/dev/null; then exit 31; fi
-    printf '%s' "$GIT_ASKPASS" > ` + shellTestQuote(askpassLog) + `
-    test "$("$GIT_ASKPASS" 'Username for https://github.com')" = x-access-token
-    test "$("$GIT_ASKPASS" 'Password for https://github.com')" = ` + shellTestQuote(token) + `
-    test -z "$("$GIT_ASKPASS" 'Password for https://github.com')"
+    test -z "$GIT_ASKPASS"
+    test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3
+    test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+    test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+    test "$HTTP_PROXY" = http://upper-http.example:8080
+    test "$HTTPS_PROXY" = http://upper-https.example:8080
+    test "$ALL_PROXY" = socks5://upper-all.example:1080
+    test "$NO_PROXY" = upper-no-proxy.example
+    test "$http_proxy" = http://lower-http.example:8080
+    test "$https_proxy" = http://lower-https.example:8080
+    test "$all_proxy" = socks5://lower-all.example:1080
+    test "$no_proxy" = lower-no-proxy.example
+    helper=
+    use_http_path=
+    for argument in "$@"; do
+      case "$argument" in
+        credential.helper=!*) helper="${argument#credential.helper=!}" ;;
+        credential.useHttpPath=true) use_http_path=true ;;
+      esac
+    done
+    test -n "$helper"
+    test "$use_http_path" = true
+    credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"
+    case "$credentials" in
+      *"username=token"*"password=` + repositoryToken + `"*) ;;
+      *) exit 41 ;;
+    esac
     ;;
   checkout)
     test -z "$GIT_ASKPASS"
+    test -z "${BUILDKITE_AGENT_ACCESS_TOKEN+x}"
+    test -z "${BUILDKITE_JOB_ID+x}"
+    test -z "${BUILDKITE_NO_HTTP2+x}"
+    assert_no_proxy_environment
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     ;;
 esac
@@ -225,53 +294,105 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var repositories []string
-	provider := checkoutTokenProviderFunc(func(_ context.Context, repository string) (string, error) {
-		repositories = append(repositories, repository)
-		return token, nil
-	})
-	redactor := &testRedactor{}
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
 	job := plan.Job{
 		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", Ref: "refs/heads/main", SHA: sha},
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 	}
-	result, err := (Runner{Git: git, Checkout: provider, Redactor: redactor, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil)
+	credentials := &AgentRepositoryCredentials{
+		Agent: agent, Endpoint: "https://agent.example/v3", JobID: testCacheJobID, JobToken: "job-secret", NoHTTP2: "true",
+	}
+	credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range proxyEnvironment {
+		t.Setenv(name, "http://late-workflow-value.invalid")
+	}
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil)
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
 	if result.Outputs["commit"] != sha || result.Outputs["ref"] != job.Event.Ref {
 		t.Fatalf("checkout outputs = %#v", result.Outputs)
 	}
-	if len(repositories) != 1 || repositories[0] != job.Event.Repository || len(redactor.values) != 1 || redactor.values[0] != token {
-		t.Fatalf("repositories/redactions = %#v / %#v", repositories, redactor.values)
+	if _, err := os.Stat(agentLog); err != nil {
+		t.Fatalf("Buildkite Agent credential helper did not run: %v", err)
 	}
 	gitBytes, err := os.ReadFile(gitLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(gitBytes), token) || strings.Contains(logs.String(), token) {
-		t.Fatalf("checkout exposed token in Git arguments or logs: %q / %q", gitBytes, logs.String())
+	if strings.Contains(string(gitBytes), repositoryToken) || strings.Contains(logs.String(), repositoryToken) {
+		t.Fatalf("checkout exposed repository token in Git arguments or logs: %q / %q", gitBytes, logs.String())
 	}
-	helperBytes, err := os.ReadFile(askpassLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(string(helperBytes)); !os.IsNotExist(err) {
-		t.Fatalf("askpass helper survived checkout: %v", err)
-	}
-	configBytes, err := os.ReadFile(filepath.Join(workspace, ".git", "config"))
-	if err == nil && strings.Contains(string(configBytes), token) {
-		t.Fatalf("Git config contains checkout token: %q", configBytes)
+	if strings.Count(string(gitBytes), "git-credentials-helper") != 1 {
+		t.Fatalf("credential helper was not confined to one Git command: %q", gitBytes)
 	}
 }
 
-func TestPrivateCheckoutPinsGitBeforeActionPreHooks(t *testing.T) {
+func TestAgentGitCredentialHelperCommandQuotesExecutable(t *testing.T) {
+	got := agentGitCredentialHelperCommand("/tmp/agent's path")
+	want := `!'/tmp/agent'\''s path' git-credentials-helper`
+	if got != want {
+		t.Fatalf("agentGitCredentialHelperCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestRepositoryProviderCheckoutFailsClosedWhenHelperDeniesAccess(t *testing.T) {
 	workspace := t.TempDir()
-	workflowSource := []byte("name: private checkout executable confinement\n")
+	checkoutMarker := filepath.Join(t.TempDir(), "checkout-ran")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\necho job-secret >&2\nexit 37\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git := filepath.Join(t.TempDir(), "git")
+	gitScript := `#!/bin/sh
+set -eu
+operation=
+helper=
+for argument in "$@"; do
+  case "$argument" in
+    init|remote|fetch|checkout) operation="$argument" ;;
+    credential.helper=!*) helper="${argument#credential.helper=!}" ;;
+  esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  fetch)
+    test -n "$helper"
+    printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get"
+    ;;
+  checkout) : > ` + shellTestQuote(checkoutMarker) + ` ;;
+esac
+`
+	if err := os.WriteFile(git, []byte(gitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{
+		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	credentials := &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	if _, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil {
+		t.Fatal("runCheckout() succeeded after repository-provider helper denial")
+	}
+	if strings.Contains(logs.String(), "job-secret") || !strings.Contains(logs.String(), "***") {
+		t.Fatalf("helper denial logs did not scrub the job credential: %q", logs.String())
+	}
+	if _, err := os.Stat(checkoutMarker); !os.IsNotExist(err) {
+		t.Fatalf("checkout ran after credential helper denial: %v", err)
+	}
+}
+
+func TestRepositoryProviderCheckoutPinsGitAndAgentBeforeActionPreHooks(t *testing.T) {
+	workspace := t.TempDir()
+	workflowSource := []byte("name: repository provider checkout executable confinement\n")
 	sha := strings.Repeat("a", 40)
-	token := "ghs_private_checkout_secret"
+	repositoryToken := "ghs_repository_token"
 
 	trustedLog := filepath.Join(t.TempDir(), "trusted-git.log")
 	trustedDir := t.TempDir()
@@ -285,8 +406,13 @@ done
 case "$operation" in
   init) mkdir -p .git ;;
   fetch)
-    test "$("$GIT_ASKPASS" 'Username for https://github.com')" = x-access-token
-    test "$("$GIT_ASKPASS" 'Password for https://github.com')" = ` + shellTestQuote(token) + `
+    helper=
+    for argument in "$@"; do
+      case "$argument" in credential.helper=!*) helper="${argument#credential.helper=!}" ;; esac
+    done
+    test -n "$helper"
+    credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"
+    case "$credentials" in *"password=` + repositoryToken + `"*) ;; *) exit 41 ;; esac
     ;;
   checkout)
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
@@ -301,7 +427,17 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	}
 	trustedAgentMarker := filepath.Join(t.TempDir(), "trusted-agent-ran")
 	trustedAgent := filepath.Join(trustedDir, "buildkite-agent")
-	trustedAgentScript := "#!/bin/sh\nIFS= read -r value\ntest \"$value\" = " + shellTestQuote(token) + "\n: > " + shellTestQuote(trustedAgentMarker) + "\n"
+	trustedAgentScript := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+test "$BUILDKITE_JOB_ID" = 11111111-1111-4111-8111-111111111111
+input="$(cat)"
+case "$input" in *"path=buildkite/buildkite-gha.git"*) ;; *) exit 42 ;; esac
+: > ` + shellTestQuote(trustedAgentMarker) + `
+printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
+`
 	if err := os.WriteFile(trustedAgent, []byte(trustedAgentScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -319,11 +455,6 @@ printf '%s\n' "$*" >> ` + shellTestQuote(trustedLog) + `
 	poisonGitMarker := filepath.Join(t.TempDir(), "poison-git-ran")
 	poisonGit := filepath.Join(poisonDir, "git")
 	if err := os.WriteFile(poisonGit, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonGitMarker)+"\nexit 97\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	poisonCatMarker := filepath.Join(t.TempDir(), "poison-cat-ran")
-	poisonCat := filepath.Join(poisonDir, "cat")
-	if err := os.WriteFile(poisonCat, []byte("#!/bin/sh\ntouch "+shellTestQuote(poisonCatMarker)+"\nexit 98\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	poisonAgentMarker := filepath.Join(t.TempDir(), "poison-agent-ran")
@@ -351,9 +482,8 @@ fi
 if [ "${1##*/}" = pre.js ]; then
   rm -f "$LOOKUP_GIT"
   ln -s "$POISON_GIT" "$LOOKUP_GIT"
-  ln -s "$POISON_CAT" "$LOOKUP_CAT"
-	  rm -f "$LOOKUP_AGENT"
-	  ln -s "$POISON_AGENT" "$LOOKUP_AGENT"
+  rm -f "$LOOKUP_AGENT"
+  ln -s "$POISON_AGENT" "$LOOKUP_AGENT"
 fi
 `
 	if err := os.WriteFile(node, []byte(nodeScript), 0o700); err != nil {
@@ -379,8 +509,6 @@ fi
 			"LOOKUP_AGENT": lookupAgent,
 			"LOOKUP_GIT":   lookupGit,
 			"POISON_AGENT": poisonAgent,
-			"LOOKUP_CAT":   filepath.Join(lookupDir, "cat"),
-			"POISON_CAT":   poisonCat,
 			"POISON_GIT":   poisonGit,
 		},
 		Steps: []plan.Step{
@@ -392,10 +520,10 @@ fi
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: strings.Repeat("c", 40), SourceDigest: remoteDigest},
 		},
 	}
-	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return token, nil })
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
-	result, err := (Runner{Node24: node, Checkout: provider, Redactor: AgentRedactor{}, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	credentials := &AgentRepositoryCredentials{JobID: testCacheJobID, JobToken: "job-secret"}
+	result, err := (Runner{Node24: node, RepositoryCredentials: credentials, Actions: materializer, Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
 	}
@@ -405,55 +533,44 @@ fi
 	if target, err := filepath.EvalSymlinks(lookupGit); err != nil || target != poisonGit {
 		t.Fatalf("pre-hook Git replacement = %q, %v; want %q", target, err, poisonGit)
 	}
-	if target, err := filepath.EvalSymlinks(filepath.Join(lookupDir, "cat")); err != nil || target != poisonCat {
-		t.Fatalf("pre-hook cat replacement = %q, %v; want %q", target, err, poisonCat)
-	}
 	if target, err := filepath.EvalSymlinks(lookupAgent); err != nil || target != poisonAgent {
 		t.Fatalf("pre-hook Agent replacement = %q, %v; want %q", target, err, poisonAgent)
 	}
 	if _, err := os.Stat(trustedAgentMarker); err != nil {
-		t.Fatalf("trusted Agent redactor did not run: %v", err)
+		t.Fatalf("trusted Agent credential helper did not run: %v", err)
 	}
-	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "askpass reader selected through poisoned PATH": poisonCatMarker, "Agent redactor selected through poisoned PATH": poisonAgentMarker} {
+	for name, marker := range map[string]string{"Git selected through poisoned PATH": poisonGitMarker, "Agent helper selected through poisoned PATH": poisonAgentMarker} {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%s: %v", name, err)
 		}
 	}
-	if strings.Contains(logs.String(), token) {
-		t.Fatalf("checkout exposed token in logs: %q", logs.String())
+	if strings.Contains(logs.String(), repositoryToken) {
+		t.Fatalf("checkout exposed repository token in logs: %q", logs.String())
 	}
 }
 
-func TestPrivateCheckoutRequiresPreResolvedGit(t *testing.T) {
+func TestRepositoryProviderCheckoutRequiresPreResolvedGit(t *testing.T) {
 	job := plan.Job{
 		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
 		RequiredCapabilities: []string{"provider-token-read"},
 	}
-	if _, err := (Runner{Git: "git"}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
+	credentials := &AgentRepositoryCredentials{Agent: "/usr/bin/buildkite-agent", JobID: testCacheJobID, JobToken: "job-secret"}
+	if _, err := (Runner{Git: "git", RepositoryCredentials: credentials}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
 		t.Fatalf("runCheckout() unresolved Git error = %v", err)
 	}
 }
 
-func TestPrivateCheckoutRedactorFailureAbortsBeforeFetchAndScrubsToken(t *testing.T) {
-	token := "ghs_private_checkout_secret"
-	marker := filepath.Join(t.TempDir(), "fetch-ran")
-	git := filepath.Join(t.TempDir(), "git")
-	script := "#!/bin/sh\ncase \"$*\" in *fetch*) touch " + shellTestQuote(marker) + " ;; init*) mkdir -p .git ;; esac\n"
-	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	job := plan.Job{
-		Event:                plan.Event{Provider: "github", Repository: "buildkite/buildkite-gha", SHA: strings.Repeat("a", 40)},
-		RequiredCapabilities: []string{"network", "provider-token-read"},
-	}
-	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return token, nil })
-	err := error(nil)
-	_, err = (Runner{Git: git, Checkout: provider, Redactor: failingCacheRedactor{token: token}}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil)
-	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
-		t.Fatalf("runCheckout() error = %v", err)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("Git fetch ran before redactor registration succeeded: %v", err)
+func TestRepositoryProviderCredentialsRejectInvalidJobIdentity(t *testing.T) {
+	for name, credentials := range map[string]*AgentRepositoryCredentials{
+		"missing job ID": {JobToken: "job-secret"},
+		"missing token":  {JobID: testCacheJobID},
+		"unsafe token":   {JobID: testCacheJobID, JobToken: "secret\nheader"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := resolveAgentRepositoryCredentialsBeforeWorkflow(credentials); err == nil {
+				t.Fatalf("resolveAgentRepositoryCredentialsBeforeWorkflow(%#v) succeeded", credentials)
+			}
+		})
 	}
 }
 
@@ -463,11 +580,7 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: authority\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "ordinary", Kind: "run", Command: "true"}})
 	job.RequiredCapabilities = []string{"provider-token-read"}
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "requires the private checkout token provider") {
-		t.Fatalf("missing provider error = %v", err)
-	}
-	provider := checkoutTokenProviderFunc(func(context.Context, string) (string, error) { return "ghs_unused", nil })
-	if _, err := (Runner{Checkout: provider}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
 		t.Fatalf("ordinary provider-token-read error = %v", err)
 	}
 }
