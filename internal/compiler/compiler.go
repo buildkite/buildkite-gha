@@ -265,6 +265,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		steps := make([]plan.Step, len(instance.Steps))
 		var actionIndexes []int
 		var actionRefs []string
+		var actionInputs []map[string]string
 		usedIDs := make(map[string]struct{}, len(instance.Steps))
 		for _, step := range instance.Steps {
 			if step.ID != "" {
@@ -293,6 +294,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			if step.Kind == "uses" {
 				actionIndexes = append(actionIndexes, i)
 				actionRefs = append(actionRefs, step.Uses)
+				actionInputs = append(actionInputs, step.With)
 			}
 		}
 		jobSchema := plan.Schema
@@ -310,12 +312,17 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				}
 			}
 		}
+		actionRequiresGitHubToken := false
 		if lockActions && len(actionRefs) != 0 {
-			selectors, locks, actionCapabilities, actionRequiresMise, err := compileActionLocks(ctx, instance.RepositoryRoot, actionSource, actionRefs)
+			compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, actionRefs, actionInputs)
 			if err != nil {
 				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
-			requiresMise = actionRequiresMise
+			selectors := compiledActions.selectors
+			locks := compiledActions.locks
+			actionCapabilities := compiledActions.capabilities
+			requiresMise = compiledActions.requiresMise
+			actionRequiresGitHubToken = compiledActions.requiresGitHubToken
 			locksByID := make(map[string]plan.ActionLock, len(locks))
 			for _, lock := range locks {
 				locksByID[lock.ID] = lock
@@ -425,10 +432,17 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 		}
 		var githubToken *plan.GitHubToken
-		if slices.Contains(secrets, "GITHUB_TOKEN") {
+		referencesGitHubTokenSecret := slices.Contains(secrets, "GITHUB_TOKEN")
+		if referencesGitHubTokenSecret {
 			secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
+		}
+		if referencesGitHubTokenSecret || actionRequiresGitHubToken {
 			if len(instance.Permissions) == 0 {
-				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references secrets.GITHUB_TOKEN but has no explicit effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+				reference := "an action input default that references github.token"
+				if referencesGitHubTokenSecret {
+					reference = "secrets.GITHUB_TOKEN"
+				}
+				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references %s but has no explicit effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 			}
 			permissions := make(map[string]string, len(instance.Permissions))
 			for name, access := range instance.Permissions {

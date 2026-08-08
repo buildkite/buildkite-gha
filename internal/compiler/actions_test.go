@@ -157,6 +157,208 @@ func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	}
 }
 
+func TestCompileActionInvocationsDetectsEffectiveGitHubTokenDefaults(t *testing.T) {
+	w := t.TempDir()
+	writeAction(t, w, "token", `name: token default
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, w, "actor", `name: actor default
+inputs:
+  actor:
+    default: ${{ github.actor }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, w, "dynamic", `name: dynamic default
+inputs:
+  value:
+    default: ${{ github[env.NAME] }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, w, "mixed", `name: mixed defaults
+inputs:
+  a_token:
+    default: ${{ github.token }}
+  z_dynamic:
+    default: ${{ github[env.NAME] }}
+runs:
+  using: node24
+  main: index.js
+`)
+
+	for _, test := range []struct {
+		name     string
+		ref      string
+		supplied map[string]string
+		want     bool
+		wantErr  string
+	}{
+		{name: "effective default", ref: "./token", want: true},
+		{name: "explicit empty input", ref: "./token", supplied: map[string]string{"github_token": ""}},
+		{name: "case-insensitive explicit input", ref: "./token", supplied: map[string]string{"GITHUB_TOKEN": "explicit"}},
+		{name: "unrelated GitHub default", ref: "./actor"},
+		{name: "dynamic GitHub index", ref: "./dynamic", wantErr: "index must be a string literal"},
+		{name: "token before dynamic GitHub index", ref: "./mixed", wantErr: "index must be a string literal"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, err := compileActionInvocations(context.Background(), w, nil, []string{test.ref}, []map[string]string{test.supplied})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("compileActionInvocations() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compiled.requiresGitHubToken != test.want {
+				t.Fatalf("requires GitHub token = %t, want %t", compiled.requiresGitHubToken, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileActionInvocationsDetectsOnlyEffectiveNestedGitHubTokenDefaults(t *testing.T) {
+	w := t.TempDir()
+	writeAction(t, w, "child", `name: child
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, w, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+`)
+	writeAction(t, w, "overridden", `name: overridden parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        github_token: ''
+`)
+	writeAction(t, w, "dynamic-child", `name: dynamic child
+inputs:
+  value:
+    default: ${{ github[env.NAME] }}
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, w, "mixed-parent", `name: mixed parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+    - uses: ./dynamic-child
+`)
+
+	for _, test := range []struct {
+		ref  string
+		want bool
+	}{
+		{ref: "./parent", want: true},
+		{ref: "./overridden"},
+	} {
+		compiled, err := compileActionInvocations(context.Background(), w, nil, []string{test.ref}, []map[string]string{nil})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.requiresGitHubToken != test.want {
+			t.Fatalf("%s requires GitHub token = %t, want %t", test.ref, compiled.requiresGitHubToken, test.want)
+		}
+	}
+	if _, err := compileActionInvocations(context.Background(), w, nil, []string{"./mixed-parent"}, []map[string]string{nil}); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("mixed child traversal error = %v, want dynamic index rejection", err)
+	}
+}
+
+func TestCompilePlansScopesGitHubTokenForEffectiveActionDefaults(t *testing.T) {
+	w := t.TempDir()
+	workflowPath := filepath.Join(w, ".github", "workflows", "token.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, w, ".github/actions/token", `name: token default
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.js
+`)
+	compile := func(workflow string) ([]plan.Job, error) {
+		if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return CompilePlansWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+	}
+
+	effectiveWorkflow := `on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`
+	plans, err := compile(effectiveWorkflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) || !plans[0].HasCapability("provider-token-write") {
+		t.Fatalf("effective action default token plan = %#v", plans)
+	}
+	bundle, err := CompileBundleWithOptions(workflowPath, []byte(effectiveWorkflow), pushEvent(t), "0.0.0-test", testDistributionDigest, "importer", defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenWriteCapabilitySources, []string{"workflow-permissions"}) {
+		t.Fatalf("effective action default token authorization = %#v", bundle.Plans)
+	}
+
+	plans, err = compile(`on: push
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+        with:
+          GITHUB_TOKEN: ''
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken != nil || plans[0].HasCapability("provider-token-write") {
+		t.Fatalf("overridden action default minted a token: %#v", plans)
+	}
+
+	_, err = compile(`on: push
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no explicit effective permissions") {
+		t.Fatalf("CompilePlansWithOptions() error = %v, want explicit permission rejection", err)
+	}
+}
+
 func TestCompileActionLocksRemoteCompositeUsesWorkspaceRoot(t *testing.T) {
 	w, remote := t.TempDir(), t.TempDir()
 	writeAction(t, w, "child", "name: child\nruns:\n  using: docker\n  image: Dockerfile\n")

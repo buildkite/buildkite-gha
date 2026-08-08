@@ -1972,6 +1972,100 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	}
 }
 
+func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.T) {
+	tokenDefault := "${{ github.token }}"
+	actorDefault := "${{ github.actor }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{
+		"github_token": {Default: &tokenDefault},
+		"actor":        {Default: &actorDefault},
+	}}
+	eval := expression.Context{
+		GitHub:  map[string]any{"actor": "octocat"},
+		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_action_default"},
+	}
+
+	inputs, err := resolveActionInputs(action, nil, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inputs, map[string]string{"github_token": "ghs_scoped_action_default", "actor": "octocat"}) {
+		t.Fatalf("resolved action inputs = %#v", inputs)
+	}
+	if _, leaked := eval.GitHub["token"]; leaked {
+		t.Fatalf("metadata default evaluation mutated the shared GitHub context: %#v", eval.GitHub)
+	}
+	if _, err := expression.Evaluate("${{ github.token }}", eval); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("workflow github.token evaluation error = %v, want unavailable value", err)
+	}
+
+	inputs, err = resolveActionInputs(action, map[string]string{"GITHUB_TOKEN": ""}, eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputs["github_token"] != "" {
+		t.Fatalf("explicit empty input did not suppress metadata default: %#v", inputs)
+	}
+
+	withoutToken := eval
+	withoutToken.Secrets = nil
+	if _, err := resolveActionInputs(action, nil, withoutToken); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("unplanned metadata github.token evaluation error = %v, want unavailable value", err)
+	}
+}
+
+func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
+inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: |
+        test "${{ inputs.github_token }}" = "ghs_scoped_action_default"
+        test "${GITHUB_TOKEN+x}" = ""
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compiler.CompilePlansWithOptions(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+		EventTrust: compiler.EventUntrusted,
+		Runners: compiler.RunnerPolicy{
+			Labels:                     map[string]string{"ubuntu-latest": ""},
+			AllowUntrustedDefaultQueue: true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil {
+		t.Fatalf("compiled scoped token plan = %#v", plans)
+	}
+	provider := &testWorkflowTokenProvider{token: "ghs_scoped_action_default"}
+	redactor := &testRedactor{}
+	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
+		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+}
+
 func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

@@ -236,6 +236,54 @@ func SecretReferences(template string) ([]string, error) {
 	return names, nil
 }
 
+// ReferencesGitHubToken reports whether a template statically references
+// github.token. Dynamic GitHub indexes fail closed so compiler-owned token
+// authority cannot depend on a runtime-selected property.
+func ReferencesGitHubToken(template string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
+		var referenceErr error
+		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+			if !entering || referenceErr != nil {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, err := referencePath(node)
+			if !strings.EqualFold(root, "github") {
+				return
+			}
+			if err != nil {
+				referenceErr = fmt.Errorf("github reference: %w", err)
+				return
+			}
+			if len(path) == 0 || !strings.EqualFold(path[0], "token") {
+				return
+			}
+			if len(path) != 1 {
+				referenceErr = fmt.Errorf("github.token reference must name exactly github.token")
+				return
+			}
+			switch parent := parent.(type) {
+			case *actionlint.ObjectDerefNode:
+				if parent.Receiver == node {
+					return
+				}
+			case *actionlint.IndexAccessNode:
+				if parent.Operand == node {
+					return
+				}
+			}
+			found = true
+		})
+		return referenceErr
+	})
+	return found, err
+}
+
 // ConditionUsesContext reports whether a condition references a named context.
 // Conditions may omit the normal ${{ ... }} delimiters.
 func ConditionUsesContext(source, contextName string) (bool, error) {

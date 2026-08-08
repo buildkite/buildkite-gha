@@ -31,8 +31,8 @@ Phase 6 therefore starts the protected path with a signed **no-op grant**. It
 proves authentication, provenance, policy, signing, verification, expiry, and
 audit boundaries while carrying an empty capability set and returning no
 credential. General private source, non-provider secrets, GitHub authority
-beyond the fixed checkout and scoped `secrets.GITHUB_TOKEN` exceptions,
-environments, and compatibility OIDC remain deferred.
+beyond the fixed checkout and scoped workflow-token exceptions, environments,
+and compatibility OIDC remain deferred.
 
 ## Decision
 
@@ -251,12 +251,14 @@ invalid tokens, disabled service responses, and unavailable/rate-limited
 responses fail closed with bounded diagnostics.
 
 A second bounded integration uses the same endpoint for a synthetic
-`secrets.GITHUB_TOKEN`. A workflow must declare an explicit, non-empty
-permission mapping and statically reference that exact secret. The compiler
-emits the API-normalized permission map into a v6 plan, adds
-`provider-token-write`, and records same-process `workflow-permissions`
-provenance. Upload admission accepts only that exact compiler provenance. A
-serialized plan cannot self-authorize the capability.
+`secrets.GITHUB_TOKEN` or an action metadata input default that references
+`github.token`. A workflow must declare an explicit, non-empty permission
+mapping and either statically reference that exact secret or invoke an action
+whose effective default statically references the token. The compiler emits the
+API-normalized permission map into a v6 plan, adds `provider-token-write`, and
+records same-process `workflow-permissions` provenance. Upload admission accepts
+only that exact compiler provenance. A serialized plan cannot self-authorize
+the capability.
 
 The runtime requests one token for the plan's exact event repository and exact
 permission map. It validates both independently, masks the returned token, and
@@ -264,8 +266,9 @@ requires Agent redaction registration before making the synthetic secret
 available to expression evaluation. Job-level permissions replace workflow
 defaults; flattened local reusable workflows can only narrow caller authority.
 Permission aliases, implicit defaults, empty grants, and `id-token` fail
-closed. `github.token` and ambient `GITHUB_TOKEN` environment injection remain
-unsupported.
+closed. `github.token` is exposed only while evaluating effective action
+metadata input defaults; workflow-authored references and ambient
+`GITHUB_TOKEN` environment injection remain unsupported.
 
 These exceptions do not establish authenticated provider event, fork, or actor
 provenance. The server's independent pipeline-repository comparison,
@@ -333,14 +336,14 @@ record; a successful job alone does not prove policy or audit behavior.
 
 ## Deferred decisions
 
-Apart from the fixed read-only pipeline-repository checkout and explicit scoped
-`secrets.GITHUB_TOKEN` exceptions above, this ADR does not authorize or choose
-storage for private actions, reusable workflow source, selected non-provider
-secrets, `github.token`, environment grants, or compatibility OIDC claims. It
-does not choose a secret manager, broader cross-repository GitHub App authority,
-customer policy language, administrative UI, or production service hostname.
-Those decisions require separate reviewed slices after the no-op boundary is
-proven.
+Apart from the fixed read-only pipeline-repository checkout and scoped token
+exceptions above, this ADR does not authorize or choose storage for private
+actions, reusable workflow source, selected non-provider secrets, general
+workflow access to `github.token`, environment grants, or compatibility OIDC
+claims. It does not choose a secret manager, broader cross-repository GitHub
+App authority, customer policy language, administrative UI, or production
+service hostname. Those decisions require separate reviewed slices after the
+no-op boundary is proven.
 
 The existing cache-v2 GHAC token exchange remains separate. Cache tokens are
 minted through the current Buildkite job, scoped by the cache service, and

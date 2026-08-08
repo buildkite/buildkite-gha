@@ -1076,15 +1076,17 @@ again at credential exchange. Runtime enforcement must never treat a plan's
 self-declared event, trust classification, signature, or capability list as
 sufficient authority.
 
-For the future general capability path, populate `github.token` or ambient
-`GITHUB_TOKEN` only from a repository- and permission-scoped GitHub App
-installation token brokered for the authenticated job. The current narrow
-exception populates only an explicit `secrets.GITHUB_TOKEN` reference; the other
-two forms remain unsupported. This approximates but does not duplicate native
-`GITHUB_TOKEN`: app identity, endpoint support, expiration, and event-recursion
-behavior can differ and must be documented. Do not invent a token or silently
-grant write access. Validation must identify actions and expressions requiring
-a provider token when no compatible grant can be issued.
+For the future general capability path, populate workflow-authored
+`github.token` or ambient `GITHUB_TOKEN` only from a repository- and
+permission-scoped GitHub App installation token brokered for the authenticated
+job. The current narrow exception populates an explicit
+`secrets.GITHUB_TOKEN` reference and effective action metadata input defaults
+that reference `github.token`; workflow-authored `github.token` and ambient
+environment injection remain unsupported. This approximates but does not
+duplicate native `GITHUB_TOKEN`: app identity, endpoint support, expiration,
+and event-recursion behavior can differ and must be documented. Do not invent a
+token or silently grant write access. Validation must identify actions and
+expressions requiring a provider token when no compatible grant can be issued.
 
 ### Installation and release model
 
@@ -1265,8 +1267,8 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - remote private reusable workflows;
 - private checkout beyond the explicit read-only pipeline-repository exception,
   and all private actions;
-- protected secrets and GitHub authority beyond the scoped
-  `secrets.GITHUB_TOKEN` exception;
+- protected secrets and GitHub authority beyond the scoped token exception for
+  `secrets.GITHUB_TOKEN` and effective action metadata input defaults;
 - dynamic matrices and other runtime graph generation;
 - job-level replacement;
 - deployment environments and approval parity;
@@ -1964,8 +1966,8 @@ the narrowest available boundary:
 - public checkout under GitHub and Cursor Origin provider adapters;
 - explicitly enabled private checkout of the pipeline's exact GitHub
   repository through the current job's scoped Agent token endpoint; and
-- compiler-authorized workflow `GITHUB_TOKEN` requests for the pipeline's exact
-  GitHub repository and explicit permission map through that same job endpoint;
+- compiler-authorized workflow token requests for the pipeline's exact GitHub
+  repository and explicit permission map through that same job endpoint;
 - step summaries and annotations.
 
 Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
@@ -2014,11 +2016,12 @@ repository. Its local request, admission, redaction, askpass, and leakage
 boundaries are tested; hosted proof remains pending endpoint deployment,
 organization enablement, installer wiring, and a private-repository canary.
 The job-bound portion of slice 5 now compiles explicit workflow and job
-permissions into a v6 plan and provides a synthetic `secrets.GITHUB_TOKEN`
-through the current-job endpoint, with independent runtime validation,
-redaction, and compiler-proven upload admission. Hosted proof remains pending.
-Private actions and reusable workflows remain deferred. Cursor Origin public
-checkout remains pending on its provider context/source contract. Slice 3's
+permissions into a v6 plan and provides a synthetic `secrets.GITHUB_TOKEN` or
+an action-default-only `github.token` value through the current-job endpoint,
+with independent runtime validation, redaction, and compiler-proven upload
+admission. Hosted proof remains pending. Private actions and reusable workflows
+remain deferred. Cursor Origin public checkout remains pending on its provider
+context/source contract. Slice 3's
 proposed
 [control-plane contract](../architecture/0003-protected-capability-control-plane.md)
 must establish ownership, exact OIDC audience, independent GitHub provenance,
@@ -2323,10 +2326,11 @@ The public, tokenless product path is substantial enough to harden and demo
 while the signed no-op grant proof waits for a named platform owner and the
 interfaces required by [ADR 0003](../architecture/0003-protected-capability-control-plane.md).
 Private actions and reusable workflows, workflow-visible provider tokens and
-secrets beyond the scoped `secrets.GITHUB_TOKEN` exception, environments, and
-compatible OIDC remain fail-closed during that work. The explicit
-private-checkout exception is limited to fixed read-only Git use for the
-pipeline repository. Neither narrow exception relaxes the other deferrals.
+secrets beyond the scoped `secrets.GITHUB_TOKEN` and action-metadata-default
+exceptions, environments, and compatible OIDC remain fail-closed during that
+work. The explicit private-checkout exception is limited to fixed read-only Git
+use for the pipeline repository. Neither narrow exception relaxes the other
+deferrals.
 
 The complete published installation experience is now proven. The initial CLI
 and companion plugin `v0.2.0` releases remain the subject of the repository's
@@ -2604,12 +2608,13 @@ them in the phase that first needs the capability:
    using Buildkite defaults must independently provide suitable whole-job
    isolation. Phases 6 and 9 still own authorization and queue policy for
    protected Docker capabilities and privileged workloads.
-6. The narrow workflow-visible token contract is now defined for explicit
-   `secrets.GITHUB_TOKEN` references with non-empty permission maps and exact
-   event-repository binding. `github.token`, ambient `GITHUB_TOKEN`, broader
-   provider authority, and event-provenance policy remain Phase 6 work. The
-   runtime-internal `contents:read` checkout credential remains separate;
-   tokenless workflows remain the default.
+6. The narrow token contract is now defined for explicit
+   `secrets.GITHUB_TOKEN` references and effective action metadata input
+   defaults that reference `github.token`, with non-empty permission maps and
+   exact event-repository binding. Workflow-authored `github.token`, ambient
+   `GITHUB_TOKEN`, broader provider authority, and event-provenance policy remain
+   Phase 6 work. The runtime-internal `contents:read` checkout credential
+   remains separate; tokenless workflows remain the default.
 
 ## Historical first product milestone (landed)
 

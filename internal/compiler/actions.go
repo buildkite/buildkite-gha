@@ -14,6 +14,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -51,26 +52,51 @@ type actionLockBuilder struct {
 }
 
 type actionNode struct {
-	lock plan.ActionLock
+	lock     plan.ActionLock
+	metadata metadata.Metadata
+	children map[string]*actionNode
+	runtime  metadata.Runtime
+	native   bool
+}
+
+type actionCompilation struct {
+	selectors           []plan.ActionSelector
+	locks               []plan.ActionLock
+	capabilities        []string
+	requiresMise        bool
+	requiresGitHubToken bool
 }
 
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
 func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
+	compiled, err := compileActionInvocations(ctx, workspace, actionSource, refs, nil)
+	if err != nil {
+		return nil, nil, nil, true, err
+	}
+	return compiled.selectors, compiled.locks, compiled.capabilities, compiled.requiresMise, nil
+}
+
+func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
 	if workspace == "" {
-		return nil, nil, nil, true, fmt.Errorf("workflow path must identify a repository root")
+		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
+	}
+	if suppliedInputs != nil && len(suppliedInputs) != len(refs) {
+		return actionCompilation{}, fmt.Errorf("action references and supplied inputs have different lengths")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
-		return nil, nil, nil, true, fmt.Errorf("resolve workspace: %w", err)
+		return actionCompilation{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	b := &actionLockBuilder{workspace: abs, source: actionSource, nodes: map[string]*actionNode{}, ids: map[string]string{}, active: map[string]bool{}, caps: map[string]bool{}}
 	selectors := make([]plan.ActionSelector, 0, len(refs))
+	roots := make([]*actionNode, 0, len(refs))
 	for _, ref := range refs {
 		n, err := b.add(ctx, ref, 1)
 		if err != nil {
-			return nil, nil, nil, true, err
+			return actionCompilation{}, err
 		}
+		roots = append(roots, n)
 		selectors = append(selectors, plan.ActionSelector{Lock: n.lock.ID})
 	}
 	locks := make([]plan.ActionLock, 0, len(b.nodes))
@@ -83,7 +109,23 @@ func compileActionLocks(ctx context.Context, workspace string, actionSource Acti
 		caps = append(caps, c)
 	}
 	sort.Strings(caps)
-	return selectors, locks, caps, b.requiresMise, nil
+	requiresGitHubToken := false
+	if suppliedInputs != nil {
+		for i, root := range roots {
+			required, err := root.requiresGitHubToken(suppliedInputs[i])
+			if err != nil {
+				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
+			}
+			requiresGitHubToken = requiresGitHubToken || required
+		}
+	}
+	return actionCompilation{
+		selectors:           selectors,
+		locks:               locks,
+		capabilities:        caps,
+		requiresMise:        b.requiresMise,
+		requiresGitHubToken: requiresGitHubToken,
+	}, nil
 }
 
 func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*actionNode, error) {
@@ -117,14 +159,17 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	if err != nil {
 		return nil, err
 	}
+	n.metadata = m
 	runtime, err := m.Runtime()
 	if err != nil {
 		return nil, err
 	}
+	n.runtime = runtime
 	if err := m.ValidateEntrypoints(runtime); err != nil {
 		return nil, err
 	}
 	if actionintegration.UsesNativeAdapter(actionintegration.Identity{Source: n.lock.Source, Repository: n.lock.Repository, Path: n.lock.Path}) {
+		n.native = true
 		return n, nil
 	}
 	if runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
@@ -144,11 +189,58 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 			}
 			if n.lock.Children == nil {
 				n.lock.Children = map[string]plan.ActionSelector{}
+				n.children = map[string]*actionNode{}
 			}
 			n.lock.Children[step.Uses] = plan.ActionSelector{Lock: child.lock.ID}
+			n.children[step.Uses] = child
 		}
 	}
 	return n, nil
+}
+
+func (n *actionNode) requiresGitHubToken(supplied map[string]string) (bool, error) {
+	if n.native {
+		return false, nil
+	}
+	required := false
+	for _, name := range sortedKeys(n.metadata.Inputs) {
+		input := n.metadata.Inputs[name]
+		if input.Default == nil || hasActionInput(supplied, name) {
+			continue
+		}
+		referencesToken, err := expression.ReferencesGitHubToken(*input.Default)
+		if err != nil {
+			return false, fmt.Errorf("action input %q default: %w", name, err)
+		}
+		required = required || referencesToken
+	}
+	if n.runtime != metadata.RuntimeComposite {
+		return required, nil
+	}
+	for i, step := range n.metadata.Runs.Steps {
+		if step.Uses == "" {
+			continue
+		}
+		child := n.children[step.Uses]
+		if child == nil {
+			return false, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
+		}
+		childRequired, err := child.requiresGitHubToken(step.With)
+		if err != nil {
+			return false, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
+		}
+		required = required || childRequired
+	}
+	return required, nil
+}
+
+func hasActionInput(inputs map[string]string, name string) bool {
+	for candidate := range inputs {
+		if strings.EqualFold(candidate, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, plan.ActionLock, string, string, error) {

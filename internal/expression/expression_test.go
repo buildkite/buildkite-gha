@@ -153,6 +153,33 @@ func TestSecretReferencesUsesExpressionAST(t *testing.T) {
 	}
 }
 
+func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		template string
+		want     bool
+	}{
+		{name: "dot", template: "${{ github.token }}", want: true},
+		{name: "bracket", template: "prefix-${{ github['TOKEN'] }}", want: true},
+		{name: "compound", template: "${{ github.token || '' }}", want: true},
+		{name: "other GitHub value", template: "${{ github.actor }}"},
+		{name: "plain", template: "github.token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ReferencesGitHubToken(test.template)
+			if err != nil || got != test.want {
+				t.Fatalf("ReferencesGitHubToken(%q) = %v, %v, want %v", test.template, got, err, test.want)
+			}
+		})
+	}
+	if _, err := ReferencesGitHubToken("${{ github[env.NAME] }}"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("ReferencesGitHubToken() dynamic index error = %v", err)
+	}
+	if _, err := ReferencesGitHubToken("${{ github.token.extra }}"); err == nil || !strings.Contains(err.Error(), "must name exactly github.token") {
+		t.Fatalf("ReferencesGitHubToken() token dereference error = %v", err)
+	}
+}
+
 func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
 	for _, condition := range []string{"inputs.enabled", "${{ inputs.enabled }}", "inputs.enabled && github.ref"} {
 		usesInputs, err := ConditionUsesContext(condition, "inputs")

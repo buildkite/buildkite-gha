@@ -139,8 +139,9 @@ workflows built from:
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
 - public, credential-free checkout of the event repository at its exact commit;
-- short-lived `secrets.GITHUB_TOKEN` values scoped to explicit workflow or job
-  `permissions` for the event repository;
+- short-lived GitHub tokens scoped to explicit workflow or job `permissions`
+  for the event repository, consumed through `secrets.GITHUB_TOKEN` or an
+  effective action metadata input default that references `github.token`;
 - bounded native upload and exact-name download for the audited artifact v4
   commits; and
 - the audited `actions/cache` v6.1.0 commit through the official Buildkite
@@ -152,8 +153,8 @@ It is not currently a fit for workflows that require:
   explicit pipeline-repository checkout described in the compatibility guide;
 - ordinary workflow secrets—the scoped `secrets.GITHUB_TOKEN` contract is the
   only workflow-visible secret exception;
-- `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected
-  queues;
+- workflow-authored `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible
+  OIDC, or protected queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload, or condition
