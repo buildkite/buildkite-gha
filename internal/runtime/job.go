@@ -479,7 +479,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
 		postErr := r.runJavaScriptPhase(postCtx, processor, workspace, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
-		mergeInto(jobResult.Env, postResult.Env)
+		commitResultEnvironment(jobResult.Env, postResult)
 		mergeInto(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
 		if postErr != nil {
@@ -719,12 +719,32 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 func mergeStepEnvironment(base map[string]string, overlays ...map[string]string) map[string]string {
 	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
 	for name, value := range base {
-		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
+		if isRuntimeContextEnvironment(name) {
 			out[name] = value
 		}
 	}
 	return out
+}
+
+func isRuntimeContextEnvironment(name string) bool {
+	switch name {
+	case "GITHUB_ACTION_PATH",
+		"GITHUB_ACTIONS",
+		"GITHUB_ACTOR",
+		"GITHUB_EVENT_NAME",
+		"GITHUB_JOB",
+		"GITHUB_REF",
+		"GITHUB_REPOSITORY",
+		"GITHUB_SERVER_URL",
+		"GITHUB_SHA",
+		"GITHUB_WORKSPACE",
+		"RUNNER_OS",
+		"RUNNER_TEMP",
+		"RUNNER_TOOL_CACHE":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {

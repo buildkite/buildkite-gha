@@ -220,7 +220,13 @@ func commitResultEnvironment(env map[string]string, result Result) {
 			delete(effects, "PATH")
 		}
 	}
-	mergeInto(env, effects)
+	for name, value := range effects {
+		// File commands update the global environment, but GitHub Runner
+		// overlays its runtime context values again for every step.
+		if !isRuntimeContextEnvironment(name) {
+			env[name] = value
+		}
+	}
 	applyPaths(env, result.Paths)
 }
 

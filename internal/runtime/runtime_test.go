@@ -2028,7 +2028,18 @@ jobs:
 
       - run: |
           test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+          test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+          test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
           printf 'exported token: %s\n' "$GITHUB_TOKEN"
+
+      - env:
+          GITHUB_TOKEN: step-token
+          GITHUB_SHA: step-sha
+          RUNNER_TEMP: /step-temp
+        run: |
+          test "$GITHUB_TOKEN" = "step-token"
+          test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+          test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
 `)
 	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
 inputs:
@@ -2041,7 +2052,11 @@ runs:
 	writeFixtureFile(t, workspace, ".github/actions/token/dist/index.js", `const fs = require("node:fs");
 if (process.env.GITHUB_TOKEN !== undefined) throw new Error("GITHUB_TOKEN was injected before the action exported it");
 if (process.env.INPUT_GITHUB_TOKEN !== "ghs_scoped_action_default") throw new Error("scoped token input was not provided");
-fs.appendFileSync(process.env.GITHUB_ENV, "GITHUB_TOKEN=" + process.env.INPUT_GITHUB_TOKEN + "\n");
+fs.appendFileSync(process.env.GITHUB_ENV,
+  "GITHUB_TOKEN=" + process.env.INPUT_GITHUB_TOKEN + "\n" +
+  "GITHUB_SHA=action-sha\n" +
+  "RUNNER_TEMP=/action-temp\n" +
+  "EXPECTED_RUNNER_TEMP=" + process.env.RUNNER_TEMP + "\n");
 `)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
@@ -2071,7 +2086,7 @@ fs.appendFileSync(process.env.GITHUB_ENV, "GITHUB_TOKEN=" + process.env.INPUT_GI
 	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
 		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
 	}
-	if result.Env["GITHUB_TOKEN"] != "***" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
+	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "1111111111111111111111111111111111111111" || result.Env["RUNNER_TEMP"] != result.Env["EXPECTED_RUNNER_TEMP"] || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
 		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())
 	}
 }
