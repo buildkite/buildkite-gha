@@ -211,6 +211,15 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
+Public action resolution is anonymous by default. Importers may set
+`BUILDKITE_GHA_GITHUB_TOKEN` to use an explicit credential solely for public
+remote action-source metadata, ref, commit, and tarball requests to the GitHub
+API. This does not enable private action repositories or workflow
+`GITHUB_TOKEN`, and the credential is stripped before action archive redirects.
+Configure it only in the importer process environment, never at Buildkite
+pipeline or build scope: buildkite-gha cannot undo Buildkite-level environment
+propagation to generated jobs.
+
 An `admitted` result means the plans satisfy upload policy. It does not execute
 the workflow or prove that arbitrary action code is independent of GitHub-only
 services. Condition preflight validates the supported syntax, functions,

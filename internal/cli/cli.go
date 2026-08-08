@@ -72,6 +72,7 @@ const (
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
 	legacyGitHubAppGitCredentialsEnvironment    = "BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS"
 	hostedTokenlessProfile                      = "hosted-tokenless"
+	actionSourceCredentialEnvironment           = "BUILDKITE_GHA_GITHUB_TOKEN"
 	runtimeMiseArchiveDigest                    = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest                     = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
 	runtimeMiseArchiveLimit                     = 64 << 20
@@ -1163,6 +1164,13 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
+func importerActionSourceOptions(getenv func(string) string) []actionsource.Option {
+	if token := getenv(actionSourceCredentialEnvironment); token != "" {
+		return []actionsource.Option{actionsource.WithGitHubToken(token)}
+	}
+	return nil
+}
+
 func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
@@ -1194,11 +1202,12 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
 		}
 		defer func() { _ = os.RemoveAll(actionRoot) }()
-		resolver, err := actionsource.NewResolver(nil)
+		sourceOptions := importerActionSourceOptions(os.Getenv)
+		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
 		}
-		store, err := actionsource.NewStore(actionRoot, nil)
+		store, err := actionsource.NewStore(actionRoot, nil, sourceOptions...)
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
 		}

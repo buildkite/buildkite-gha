@@ -61,8 +61,15 @@ and the precise meaning of each expectation.
 mise run smoke:profile
 ```
 
-This opt-in networked lane anonymously resolves selected public actions and
-applies the same `hosted-tokenless` admission policy as production `upload`.
+This opt-in networked lane resolves selected public actions and applies the
+same `hosted-tokenless` admission policy as production `upload`. Resolution is
+anonymous unless the importer-only `BUILDKITE_GHA_GITHUB_TOKEN` is set. The
+optional credential is used solely for public remote action-source metadata,
+ref, commit, and tarball requests to the GitHub API; it does not enable private
+action sources, and `GH_TOKEN` and `GITHUB_TOKEN` are not fallbacks. Configure
+it only in the importer process environment, never at Buildkite pipeline or
+build scope, because buildkite-gha cannot undo Buildkite-level environment
+propagation to generated jobs.
 It does not install Node or run action code. An `admitted` result is policy
 evidence, not runtime evidence.
 

@@ -67,6 +67,56 @@ func TestResolverTagPeelingAndHeaders(t *testing.T) {
 	}
 }
 
+func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		token    string
+		private  bool
+		wantAuth string
+	}{
+		{name: "anonymous"},
+		{name: "authenticated public", token: "test-token", wantAuth: "Bearer test-token"},
+		{name: "authenticated private", token: "test-token", wantAuth: "Bearer test-token", private: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var commitRequests int
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); got != tt.wantAuth {
+					t.Errorf("Authorization = %q, want %q", got, tt.wantAuth)
+				}
+				switch r.URL.Path {
+				case "/repos/o/r":
+					_, _ = fmt.Fprintf(w, `{"private":%t}`, tt.private)
+				case "/repos/o/r/commits/" + testSHA:
+					commitRequests++
+					_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, testSHA)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+			opts := []Option{WithTestEndpoints(ts.URL)}
+			if tt.token != "" {
+				opts = append(opts, WithGitHubToken(tt.token))
+			}
+			resolver, err := NewResolver(ts.Client(), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("o/r@" + testSHA)
+			_, err = resolver.Resolve(context.Background(), ref)
+			if tt.private {
+				var notPublic *NotPublicError
+				if !errors.As(err, &notPublic) || commitRequests != 0 {
+					t.Fatalf("Resolve() error = %v, commit requests = %d", err, commitRequests)
+				}
+			} else if err != nil || commitRequests != 1 {
+				t.Fatalf("Resolve() error = %v, commit requests = %d", err, commitRequests)
+			}
+		})
+	}
+}
+
 func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 	tests := []struct {
 		ref   string
@@ -450,6 +500,60 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStoreAuthenticatedDownloadChecksVisibilityAndStripsRedirectCredentials(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	const token = "test-token"
+	var private bool
+	var archiveRequests int
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/o/r":
+			if r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Cookie") != "" {
+				t.Errorf("visibility request credentials = Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+			}
+			_, _ = fmt.Fprintf(w, `{"private":%t}`, private)
+		case "/repos/o/r/tarball/" + testSHA:
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				t.Errorf("tarball Authorization = %q", r.Header.Get("Authorization"))
+			}
+			http.Redirect(w, r, "/archive", http.StatusFound)
+		case "/archive":
+			archiveRequests++
+			if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+				t.Errorf("redirect leaked credentials: Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+			}
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+	host := strings.TrimPrefix(ts.URL, "https://")
+	ref, _ := Parse("o/r@v1")
+	resolved := Resolved{Reference: ref, Commit: testSHA}
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, host), WithGitHubToken(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Materialize(context.Background(), resolved); err != nil {
+		t.Fatal(err)
+	}
+	if archiveRequests != 1 {
+		t.Fatalf("archive requests = %d, want 1", archiveRequests)
+	}
+
+	private = true
+	privateStore, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, host), WithGitHubToken(token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = privateStore.Materialize(context.Background(), resolved)
+	var notPublic *NotPublicError
+	if !errors.As(err, &notPublic) || archiveRequests != 1 {
+		t.Fatalf("private Materialize() error = %v, archive requests = %d", err, archiveRequests)
 	}
 }
 

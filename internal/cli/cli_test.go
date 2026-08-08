@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -456,6 +457,42 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	}
 	if report.Result != "admitted" {
 		t.Fatalf("environment profile report = %#v", report)
+	}
+}
+
+func TestImporterActionSourceOptionsUsesOnlyDedicatedCredential(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		env      map[string]string
+		wantAuth string
+	}{
+		{name: "missing is anonymous", env: map[string]string{"GH_TOKEN": "ignored", "GITHUB_TOKEN": "ignored"}},
+		{name: "empty is anonymous", env: map[string]string{actionSourceCredentialEnvironment: "", "GH_TOKEN": "ignored", "GITHUB_TOKEN": "ignored"}},
+		{name: "dedicated credential authenticates", env: map[string]string{actionSourceCredentialEnvironment: "test-token"}, wantAuth: "Bearer test-token"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.Header.Get("Authorization"); got != tt.wantAuth {
+					t.Errorf("Authorization = %q, want %q", got, tt.wantAuth)
+				}
+				if r.URL.Path == "/repos/o/r" {
+					_, _ = w.Write([]byte(`{"private":false}`))
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, strings.Repeat("a", 40))
+			}))
+			defer ts.Close()
+			getenv := func(name string) string { return tt.env[name] }
+			opts := append(importerActionSourceOptions(getenv), actionsource.WithTestEndpoints(ts.URL))
+			resolver, err := actionsource.NewResolver(ts.Client(), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := actionsource.Parse("o/r@" + strings.Repeat("a", 40))
+			if _, err := resolver.Resolve(context.Background(), ref); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

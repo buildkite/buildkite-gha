@@ -107,6 +107,7 @@ func (*NotPublicError) Error() string { return "GitHub action was not found or i
 type config struct {
 	api                                 *url.URL
 	finalHosts                          map[string]bool
+	token                               string
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -114,12 +115,21 @@ type config struct {
 
 func defaults() config {
 	u, _ := url.Parse(defaultAPI)
-	return config{u, map[string]bool{"codeload.github.com": true}, 100 << 20, 512 << 20, 100 << 20, 50000, 4096, 255}
+	return config{api: u, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
+
+// WithGitHubToken authenticates requests to the configured GitHub API origin.
+// The token is never sent to an archive redirect target.
+func WithGitHubToken(token string) Option {
+	return func(c *config) error {
+		c.token = token
+		return nil
+	}
+}
 
 // WithTestEndpoints replaces the API base and permitted archive final hosts.
 // It exists for hermetic tests; production callers should use defaults.
@@ -151,9 +161,8 @@ func WithLimits(compressed, expanded, perFile int64, entries int) Option {
 	}
 }
 
-// Resolver resolves public GitHub references without credentials. An injected
-// client must be credential-free; production callers should pass nil. Requests
-// also discard the client's cookie jar and strip credential headers.
+// Resolver resolves public GitHub references, optionally using a credential
+// only for GitHub API requests. Requests discard the client's cookie jar.
 type Resolver struct {
 	client *http.Client
 	cfg    config
@@ -186,6 +195,11 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 		return Resolved{}, err
 	}
 	ref = parsed
+	if r.cfg.token != "" {
+		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
+			return Resolved{}, err
+		}
+	}
 	if shaRE.MatchString(ref.Ref) {
 		return r.resolveCommit(ctx, ref)
 	}
@@ -265,13 +279,16 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
-	u := apiURL(r.cfg.api, parts...)
+	return githubAPIGet(ctx, r.client, r.cfg, parts, out)
+}
+func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []string, out any) error {
+	u := apiURL(cfg.api, parts...)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
 	}
-	setHeaders(req)
-	c := *r.client
+	setAPIHeaders(req, cfg.token)
+	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := c.Do(req)
@@ -301,6 +318,21 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 	}
 	return nil
 }
+func ensurePublic(ctx context.Context, client *http.Client, cfg config, ref Reference) error {
+	var repository struct {
+		Private *bool `json:"private"`
+	}
+	if err := githubAPIGet(ctx, client, cfg, repoParts(ref), &repository); err != nil {
+		return err
+	}
+	if repository.Private == nil {
+		return fmt.Errorf("malformed GitHub API response: repository visibility is missing")
+	}
+	if *repository.Private {
+		return &NotPublicError{}
+	}
+	return nil
+}
 func rateLimitError(resp *http.Response, body []byte) error {
 	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
@@ -315,17 +347,19 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setHeaders(r *http.Request) {
+func setAPIHeaders(r *http.Request, token string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
 
-// Store downloads and atomically caches repositories. A Store must not be
-// shared by mutually untrusted processes writing the same cache root. An
-// injected client must be credential-free; production callers should pass nil.
+// Store downloads and atomically caches public repositories. A Store must not
+// be shared by mutually untrusted processes writing the same cache root.
 type Store struct {
 	root   string
 	client *http.Client
@@ -356,6 +390,11 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		return Materialized{}, err
 	}
 	resolved.Reference = parsed
+	if s.cfg.token != "" {
+		if err := ensurePublic(ctx, s.client, s.cfg, parsed); err != nil {
+			return Materialized{}, err
+		}
+	}
 	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
 	m, verifyErr := s.verify(base, resolved)
@@ -439,7 +478,7 @@ func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) err
 	if e != nil {
 		return e
 	}
-	setHeaders(req)
+	setAPIHeaders(req, s.cfg.token)
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
