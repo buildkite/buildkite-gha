@@ -46,36 +46,36 @@ const (
 
 // Runner executes verified actions using explicitly configured host tools.
 type Runner struct {
-	Stdout            io.Writer
-	Stderr            io.Writer
-	Node20            string
-	Node24            string
-	ManagedNodeRoot   string
-	Mise              string
-	ResolveMise       func(context.Context) (string, error)
-	MiseDataDir       string
-	Docker            string
-	RuntimeExecutable string
-	Git               string
-	CleanupTimeout    time.Duration
-	PostActionTimeout time.Duration
-	InterruptGrace    time.Duration
-	TerminateGrace    time.Duration
-	Secrets           SecretResolver
-	Redactor          Redactor
-	Actions           ActionMaterializer
-	Artifacts         ArtifactStore
-	Cache             CacheCredentialProvider
-	Checkout          CheckoutTokenProvider
-	WorkflowToken     WorkflowTokenProvider
-	runnerTemp        string
-	implicitJobPATH   string
-	explicitJobPATH   bool
-	jobContainer      *jobContainerBackend
-	jobDocker         *jobContainerBackend
-	nodeVerification  *managedNodeVerification
-	nodeDigests       map[int]string
-	artifactRegistry  *artifactRegistry
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Node20                string
+	Node24                string
+	ManagedNodeRoot       string
+	Mise                  string
+	ResolveMise           func(context.Context) (string, error)
+	MiseDataDir           string
+	Docker                string
+	RuntimeExecutable     string
+	Git                   string
+	CleanupTimeout        time.Duration
+	PostActionTimeout     time.Duration
+	InterruptGrace        time.Duration
+	TerminateGrace        time.Duration
+	Secrets               SecretResolver
+	Redactor              Redactor
+	Actions               ActionMaterializer
+	Artifacts             ArtifactStore
+	Cache                 CacheCredentialProvider
+	RepositoryCredentials *AgentRepositoryCredentials
+	WorkflowToken         WorkflowTokenProvider
+	runnerTemp            string
+	implicitJobPATH       string
+	explicitJobPATH       bool
+	jobContainer          *jobContainerBackend
+	jobDocker             *jobContainerBackend
+	nodeVerification      *managedNodeVerification
+	nodeDigests           map[int]string
+	artifactRegistry      *artifactRegistry
 }
 
 func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {

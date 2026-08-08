@@ -10,10 +10,11 @@ cancellation, and the build UI.
 
 > [!IMPORTANT]
 > This is an experimental pre-1.0 preview for **Linux x86-64 workflows**. The
-> default remains public and tokenless. Direct upload has an explicit,
-> fail-closed private-checkout preview for the pipeline's exact repository;
-> private actions and workflow secrets other than the explicitly scoped
-> `secrets.GITHUB_TOKEN` contract remain rejected.
+> default remains limited to public actions and no general workflow secrets.
+> Verified checkout automatically uses Buildkite's repository-provider Git
+> credentials when the job is configured for them, and otherwise checks out
+> anonymously. Private actions and workflow secrets other than the explicitly
+> scoped `secrets.GITHUB_TOKEN` contract remain rejected.
 
 ## Buildkite controls the pipeline; the workflow describes the workload
 
@@ -138,7 +139,9 @@ workflows built from:
 - GitHub Actions background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
-- public, credential-free checkout of the event repository at its exact commit;
+- checkout of the event repository at its exact commit, using Buildkite's
+  repository-provider Git credentials when available and anonymous Git
+  otherwise;
 - short-lived GitHub tokens scoped to explicit workflow or job `permissions`
   for the event repository, consumed through `secrets.GITHUB_TOKEN` or an
   effective action metadata input default that references `github.token`;
@@ -149,8 +152,9 @@ workflows built from:
 
 It is not currently a fit for workflows that require:
 
-- private actions or general private-source access; direct upload has only the
-  explicit pipeline-repository checkout described in the compatibility guide;
+- private actions or general private-source access; checkout can use only the
+  job's native Buildkite repository-provider credentials as described in the
+  compatibility guide;
 - ordinary workflow secrets—the scoped `secrets.GITHUB_TOKEN` contract is the
   only workflow-visible secret exception;
 - workflow-authored `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible

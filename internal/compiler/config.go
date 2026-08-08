@@ -48,10 +48,6 @@ type Options struct {
 	// access. ActionSource is required only when a workflow uses remote actions.
 	ResolveActions bool
 	ActionSource   ActionSource
-	// PrivateCheckout adds provider-token-read only to compiler-verified
-	// actions/checkout adapter steps. It does not expose a workflow token or
-	// alter the permissions fixed by the runtime credential provider.
-	PrivateCheckout bool
 	// GroupLabel merges generated jobs into the Buildkite group containing the
 	// importer. It affects pipeline presentation only, not compiler IR or plans.
 	GroupLabel string
@@ -77,9 +73,6 @@ func (options Options) validate() error {
 	}
 	if !options.ResolveActions && options.ActionSource != nil {
 		return fmt.Errorf("action source configuration requires ResolveActions")
-	}
-	if options.PrivateCheckout && !options.ResolveActions {
-		return fmt.Errorf("private checkout requires ResolveActions")
 	}
 	if len(options.Runners.Labels) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")

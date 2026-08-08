@@ -116,22 +116,26 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 	if job.HasCapability("provider-token-read") {
-		if r.Checkout == nil {
-			return JobResult{}, fmt.Errorf("provider-token-read capability requires the private checkout token provider")
-		}
 		if !jobUsesCheckoutAdapter(job) {
 			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
 		}
-		git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "private checkout Git")
-		if err != nil {
-			return JobResult{}, err
+		if r.RepositoryCredentials != nil {
+			credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(r.RepositoryCredentials)
+			if err != nil {
+				return JobResult{}, err
+			}
+			r.RepositoryCredentials = credentials
+			git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "repository-provider checkout Git")
+			if err != nil {
+				return JobResult{}, err
+			}
+			r.Git = git
 		}
-		r.Git = git
 	}
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
-	if job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write") {
+	if job.HasCapability("provider-token-write") {
 		if r.Redactor == nil {
 			return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
 		}

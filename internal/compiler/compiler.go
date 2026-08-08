@@ -338,12 +338,10 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
 					if err := actionintegration.ValidateCheckoutInputs(instance.Steps[stepIndex].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: tokenless checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						return nil, nil, fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
-					if options.PrivateCheckout {
-						capabilities = append(capabilities, "provider-token-read")
-						authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
-					}
+					capabilities = append(capabilities, "provider-token-read")
+					authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
 				}
 				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 					if err := actionintegration.ValidateUploadArtifactInputs(instance.Steps[stepIndex].With); err != nil {
