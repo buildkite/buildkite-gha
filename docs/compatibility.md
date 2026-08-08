@@ -5,6 +5,25 @@ This guide describes the behavior available to users today. The
 internals, future product ideas, and deferred decisions; those are not support
 promises unless they appear here.
 
+## Pipeline configuration and workload are separate
+
+GitHub Actions puts run creation and workload definition in one workflow file.
+Buildkite separates them, and `buildkite-gha` preserves that boundary:
+
+| Concern | Authoritative configuration |
+| --- | --- |
+| Build creation, repository events, branch/tag/PR filters, schedules, and manual builds | Buildkite pipeline integrations, settings, schedules, or manual/API build requests. Workflow run triggers and event filters are not imported. |
+| Steps in an existing build | The initial Buildkite pipeline definition plus dynamic pipeline uploads. The plugin adds admitted workflow jobs here. |
+| Job graph and step behavior | The supported `jobs`, matrices, `needs`, conditions, and `steps` subset in the selected Actions workflow. |
+| Agents and protected capabilities | Buildkite pipeline/organization configuration and admission policy. Workflow runner, permission, environment, and credential declarations are requests, not grants. |
+
+The imported workflow therefore cannot create, suppress, or reconfigure a
+Buildkite build. Some workflow-level execution controls, such as the documented
+concurrency subset, are translated into steps within the existing build; that
+does not make the workflow a source of Buildkite pipeline settings. The
+supported local `on.workflow_call` interface composes imported workloads and is
+documented separately in the support matrix; it is not Buildkite trigger setup.
+
 ## The current execution profile
 
 The production plugin and its bundled `upload` command default to one fixed
@@ -55,7 +74,7 @@ service.
 
 | GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
-| `on:` and event filters | Not supported | Buildkite owns triggers. The plugin derives `pull_request` for pull-request builds and `push` for every other build; it does not create `schedule` or `workflow_dispatch` events or inputs. Direct CLI event snapshots can provide another event name, but the workflow's `on:` block is not matched. |
+| Run triggers and event filters under `on:` | Not supported | Buildkite owns build creation and triggers. The plugin derives `pull_request` for pull-request builds and `push` for every other build; it does not create `schedule` or `workflow_dispatch` events or inputs. Direct CLI event snapshots can provide another event name, but workflow trigger entries are not matched and cannot create or suppress a Buildkite build. `on.workflow_call` is covered by the local reusable-workflows row below. |
 | Linux x86-64 host jobs and `runs-on` | Supported subset | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. The released plugin configuration targets `hosted`; the current source CLI uses Buildkite defaults unless `BUILDKITE_GHA_TARGET_QUEUE` selects a queue. This is label validation, not Ubuntu image parity. |
 | Static job graphs and `needs` | Supported | Dependencies, matrix fan-out/fan-in, logical results, and bounded outputs are transported between generated jobs. Retrying one producer can make result selection ambiguous; retry the whole build. |
 | Static matrices | Supported subset | Typed rows, `include`, `exclude`, compile-time `github`/event/`vars` values and `fromJSON`, exact dependency fan-out, and literal `max-parallel` are supported, with at most 256 expanded instances per job. Runtime matrices from `needs` or `steps` are not supported. `strategy.fail-fast` is accepted but not enforced: every expanded Buildkite job is uploaded and siblings are not canceled after a failure. |
@@ -202,12 +221,14 @@ final `wait-all` before post-action cleanup. Use `cancel: <step-id>` for targete
 cancellation or `parallel:` for a fixed inline group. These controls preserve
 one job workspace and lifecycle.
 
-### Buildkite owns triggers
+### Buildkite owns build creation and triggers
 
 Select the workflow explicitly in the plugin and configure pipeline triggers in
 Buildkite. `buildkite-gha` uses the event snapshot to populate Actions contexts;
 it does not subscribe to GitHub events or turn workflow `on:` entries into
-Buildkite triggers.
+Buildkite triggers. The initial Buildkite pipeline invokes the importer after a
+build exists, and the importer can only add steps to that build through dynamic
+pipeline upload.
 
 The plugin derives `pull_request` for Buildkite pull request builds and `push`
 for branch, tag, scheduled, and manual builds. It does not currently provide

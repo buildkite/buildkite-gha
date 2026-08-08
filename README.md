@@ -15,6 +15,26 @@ cancellation, and the build UI.
 > private actions and workflow secrets other than the explicitly scoped
 > `secrets.GITHUB_TOKEN` contract remain rejected.
 
+## Buildkite controls the pipeline; the workflow describes the workload
+
+A GitHub Actions workflow combines two concerns: run triggers and event filters
+under `on:` control when GitHub creates a workflow run, while `jobs` and `steps`
+describe the work in that run. `buildkite-gha` imports only the supported
+workload portion into a Buildkite build that already exists. The supported
+local `on.workflow_call` interface is workload composition, not trigger setup.
+
+Buildkite pipeline integrations, settings, schedules, and manual or API build
+requests decide when to create a build. The initial Buildkite pipeline
+definition then invokes the plugin, which dynamically uploads the supported
+workflow jobs into that build. The workflow's run triggers and event filters
+neither create nor filter Buildkite builds.
+
+Buildkite configuration also remains authoritative for agent targeting and
+protected capabilities. Workflow settings such as `runs-on`, `permissions`,
+environments, and concurrency are honored only within the explicitly supported
+and admitted boundaries in the [support matrix](docs/compatibility.md#support-matrix);
+they cannot change Buildkite pipeline settings or grant themselves authority.
+
 ## Try an existing workflow
 
 Add the [GitHub Actions Buildkite
@@ -190,7 +210,8 @@ runtime behavior. JSON output is available with `--format json`.
 
 | GitHub Actions | Buildkite |
 | --- | --- |
-| Workflow run | Build |
+| Run triggers and event filters under `on:` | Not translated; Buildkite configuration creates the build |
+| Workflow run | Existing Buildkite build |
 | Job | Command job |
 | Matrix entry | Command job with a stable key |
 | `needs` | `depends_on` plus verified result transport |
@@ -206,12 +227,18 @@ too.
 
 ```diagram
 ┌──────────────────────────┐
-│ Actions workflow + event │
+│ Buildkite configuration  │
+│ creates the build        │
 └────────────┬─────────────┘
              ▼
+┌──────────────────────────┐    ┌──────────────────────────┐
+│ Existing Buildkite build │◀───│ Actions workflow + event │
+│ invokes the importer     │    │ snapshot (workload input)│
+└────────────┬─────────────┘    └──────────────────────────┘
+             ▼
 ┌──────────────────────────┐
-│ Validate and compile     │
-│ jobs, matrices, policy   │
+│ Validate, compile, and   │
+│ dynamically upload jobs │
 └────────────┬─────────────┘
              ▼
 ┌──────────────────────────┐

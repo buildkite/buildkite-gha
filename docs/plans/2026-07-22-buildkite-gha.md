@@ -2,7 +2,7 @@
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-08-07
+Last reviewed: 2026-08-08
 Target repository: `buildkite/buildkite-gha`
 
 > This is the active product and implementation plan. It records future UX,
@@ -40,11 +40,20 @@ migration, but it is not part of the workflow execution control plane. This
 also permits a repository to move to Cursor Origin without replacing the
 execution architecture.
 
+GitHub Actions normally combines pipeline control and workload declaration in
+one workflow file. This project deliberately imports only the workload side.
+Buildkite pipeline integrations, settings, schedules, and manual or API build
+requests create the build and establish build-level policy. The initial
+Buildkite pipeline definition invokes `buildkite-gha`; dynamic upload then adds
+admitted workflow jobs to that existing build. Workflow run triggers and event
+filters are not a source of Buildkite trigger or pipeline configuration.
+
 The unit of translation is the Actions job:
 
 | GitHub Actions concept | Buildkite representation |
 | --- | --- |
-| Workflow run | Buildkite build |
+| Run triggers and event filters under `on:` | Not translated; Buildkite configuration creates the build |
+| Workflow run | Existing Buildkite build |
 | Workflow job or matrix entry | Buildkite command job |
 | `needs` | `depends_on` plus producer-attributed result manifests |
 | `runs-on` | Linux compatibility validation and optional policy-selected agent selectors |
@@ -80,11 +89,22 @@ of record.
 
 ## Product principles
 
-### Buildkite is authoritative
+### Buildkite controls the pipeline; the workflow describes the workload
 
-Every imported workflow is a normal Buildkite build. Buildkite owns the job
-graph and displays the live job logs. There is no shadow GitHub workflow run to
-reconcile and no requirement to visit GitHub to understand progress.
+Every imported workflow runs inside a Buildkite build that already exists.
+Buildkite owns build creation, trigger policy, build-level cancellation and
+skip policy, agent targeting, the job graph, and the live job logs. The initial
+pipeline definition and subsequent dynamic uploads add steps to that build;
+workflow run-trigger configuration does not create or reconfigure the pipeline.
+
+The selected workflow controls only its admitted workload: generated jobs,
+dependencies, matrices, and runtime steps. Runner labels, permissions,
+environments, credentials, and other protected capabilities are untrusted
+requests checked against Buildkite configuration and admission policy, not
+authority granted by the workflow. Supported workflow concurrency may affect
+generated jobs, but cross-build policy remains a Buildkite pipeline concern.
+There is no shadow GitHub workflow run to reconcile and no requirement to visit
+GitHub to understand progress.
 
 ### Event identity and capability issuance are the security boundary
 
@@ -991,22 +1011,33 @@ without exposing GitHub's private service credentials.
 ### Triggers and workflow `on`
 
 `buildkite-gha` does not itself listen for repository events. A Buildkite
-pipeline, API caller, or future Origin integration creates the build.
+pipeline integration, schedule, manual or API build request, or future Origin
+integration creates the build according to Buildkite configuration. The
+initial pipeline definition then invokes the importer; `upload` only adds steps
+within that existing build.
 
-The compiler uses `on` to validate that the supplied event should run the
-workflow and to reproduce branch/path/input filtering. Event adapters must
-cover, in phases:
+Run-trigger entries and event filters under workflow `on:` are parsed as source
+syntax but are not matched during compilation and must not be treated as
+Buildkite trigger policy. In particular, `compile` and `upload` do not create or
+update webhooks, branch/path filters, schedules, manual-build forms, or other
+pipeline settings, and workflow triggers cannot suppress a Buildkite build that
+has already started. The supported local `on.workflow_call` interface is
+different: it composes imported workloads and does not configure Buildkite
+triggers.
 
-- `push`;
-- `pull_request`;
-- `workflow_dispatch`-style manual input;
-- `schedule` mapped to a Buildkite schedule;
-- `workflow_call`; and
-- additional repository events as provider integrations mature.
+An event adapter may provide a bounded Actions-compatible context for an
+already-created build. The current plugin maps pull-request builds to
+`pull_request` and all other builds to `push`; richer schedule, manual-input,
+or provider event contexts remain future work. The plan must not invent event
+fields from incomplete environment variables. If required context is
+unavailable, the affected compatibility feature fails with the missing adapter
+capability rather than claiming provider parity.
 
-The plan must not invent a GitHub event payload from incomplete environment
-variables. If required event fields are unavailable, validation fails with the
-missing fields and the required adapter capability.
+A future migration tool may inspect run-trigger entries under `on:` and propose
+equivalent Buildkite pipeline settings, schedules, or manual inputs. That must
+be an explicit, reviewable setup operation applied outside workflow
+compilation, not a hidden side effect of importing workload into a running
+build.
 
 ### Secrets, permissions, tokens, and untrusted changes
 
@@ -2471,6 +2502,10 @@ unknown plan.
 
 ## Key learnings from pressure-testing
 
+- GitHub Actions combines run-trigger configuration and workload in one file;
+  Buildkite does not. Importing `jobs` must not make workflow trigger entries a
+  hidden source of Buildkite pipeline settings. Any future trigger migration
+  belongs in explicit, reviewable setup tooling outside `compile` and `upload`.
 - A content digest establishes plan integrity, not authority. Protected
   capabilities require authenticated Buildkite job identity, independently
   verified provider provenance, and a narrow control-plane grant.
