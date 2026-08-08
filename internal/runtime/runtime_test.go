@@ -2038,6 +2038,8 @@ jobs:
           test "$ENV_RUNNER_TEMP" = "/action-temp"
           printf 'exported token: %s\n' "$GITHUB_TOKEN"
 
+      - uses: ./.github/actions/observer
+
       - env:
           GITHUB_TOKEN: step-token
           GITHUB_SHA: step-sha
@@ -2067,6 +2069,21 @@ fs.appendFileSync(process.env.GITHUB_ENV,
   "GITHUB_SHA=action-sha\n" +
   "RUNNER_TEMP=/action-temp\n" +
   "EXPECTED_RUNNER_TEMP=" + process.env.RUNNER_TEMP + "\n");
+`)
+	writeFixtureFile(t, workspace, ".github/actions/observer/action.yml", `name: context observer
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      env:
+        ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+        ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
+      run: |
+        test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+        test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+        test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+        test "$ENV_GITHUB_SHA" = "action-sha"
+        test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))

@@ -1003,7 +1003,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			stepEnv, compositeEvalErr = evaluateMap(step.Env, eval)
 		}
 		eval.Inputs = inputs
-		compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 		for i, childStep := range action.Runs.Steps {
 			if childStep.Uses == "" {
 				continue
@@ -1013,9 +1014,9 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				return result, fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses)
 			}
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
-			childEnv := mergeStepEnvironment(compositeEnv, result.Env)
-			eval.Env = childEnv
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childEnv, eval, posts, actions, prepared, status, compositeEvalErr)
+			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
+			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, compositeEvalErr)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
@@ -1259,14 +1260,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	eval.Steps = make(map[string]map[string]string)
 	eval.StepStatuses = make(map[string]expression.StepStatus)
 	statuses := eval.StepStatuses
-	compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
-	compositeEnv["GITHUB_ACTION_PATH"] = actionPath
+	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
+	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
+	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv, map[string]string{"GITHUB_ACTION_PATH": actionPath})
 	var runErr error
 	for i, step := range action.Runs.Steps {
 		// GITHUB_ENV effects are visible to subsequent children. Keep this
 		// composite's invocation environment in expression contexts, while
 		// rebuilding the map so a child's declared env cannot leak to siblings.
-		eval.Env = mergeStringMaps(compositeEnv, result.Env)
+		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
 		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.If, condition)
@@ -1283,7 +1285,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		}
 		stepResult := newResult()
 		childErr := error(nil)
-		childJobEnv := mergeStepEnvironment(compositeEnv, result.Env)
+		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
 		if step.Uses != "" {
 			// runActionStep owns template evaluation for an action invocation.
