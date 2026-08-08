@@ -323,7 +323,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		eval.Services = backend.servicePorts
 		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
 	}
-	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
+	runtimeEnv := standardEnvironment(job, workspace, runnerTemp)
+	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
 	}
@@ -370,7 +371,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			if entry := actions.locks[step.Action.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
-			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
+			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
+			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -430,7 +432,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		jobEnv := cloneStrings(jobResult.Env)
+		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 		evalSnapshot := cloneExpressionContext(eval)
 		if step.Background {
 			step := step
@@ -479,7 +481,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
 		postErr := r.runJavaScriptPhase(postCtx, processor, workspace, post.node, post.action, post.action.Post, post.state, post.state, &postResult)
-		commitResultEnvironment(jobResult.Env, postResult)
+		mergeInto(jobResult.Env, postResult.Env)
 		mergeInto(jobResult.State, postResult.State)
 		appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, postResult.Summary, postResult.summaryTruncated)
 		if postErr != nil {

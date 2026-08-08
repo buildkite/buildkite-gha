@@ -2026,20 +2026,30 @@ jobs:
     steps:
       - uses: ./.github/actions/token
 
-      - run: |
+      - if: env.GITHUB_SHA == 'action-sha' && env.RUNNER_TEMP == '/action-temp'
+        env:
+          ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+          ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
+        run: |
           test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
           test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
           test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+          test "$ENV_GITHUB_SHA" = "action-sha"
+          test "$ENV_RUNNER_TEMP" = "/action-temp"
           printf 'exported token: %s\n' "$GITHUB_TOKEN"
 
       - env:
           GITHUB_TOKEN: step-token
           GITHUB_SHA: step-sha
           RUNNER_TEMP: /step-temp
+          ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+          ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
         run: |
           test "$GITHUB_TOKEN" = "step-token"
           test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
           test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+          test "$ENV_GITHUB_SHA" = "action-sha"
+          test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)
 	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
 inputs:
@@ -2086,7 +2096,7 @@ fs.appendFileSync(process.env.GITHUB_ENV,
 	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
 		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
 	}
-	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "1111111111111111111111111111111111111111" || result.Env["RUNNER_TEMP"] != result.Env["EXPECTED_RUNNER_TEMP"] || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
+	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "action-sha" || result.Env["RUNNER_TEMP"] != "/action-temp" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
 		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())
 	}
 }
