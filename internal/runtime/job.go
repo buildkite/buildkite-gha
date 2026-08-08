@@ -1262,7 +1262,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	statuses := eval.StepStatuses
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
-	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv, map[string]string{"GITHUB_ACTION_PATH": actionPath})
+	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 	var runErr error
 	for i, step := range action.Runs.Steps {
 		// GITHUB_ENV effects are visible to subsequent children. Keep this

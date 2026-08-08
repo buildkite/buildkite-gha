@@ -2066,6 +2066,7 @@ if (process.env.GITHUB_TOKEN !== undefined) throw new Error("GITHUB_TOKEN was in
 if (process.env.INPUT_GITHUB_TOKEN !== "ghs_scoped_action_default") throw new Error("scoped token input was not provided");
 fs.appendFileSync(process.env.GITHUB_ENV,
   "GITHUB_TOKEN=" + process.env.INPUT_GITHUB_TOKEN + "\n" +
+  "GITHUB_ACTION_PATH=file-action-path\n" +
   "GITHUB_SHA=action-sha\n" +
   "RUNNER_TEMP=/action-temp\n" +
   "EXPECTED_RUNNER_TEMP=" + process.env.RUNNER_TEMP + "\n");
@@ -2076,12 +2077,16 @@ runs:
   steps:
     - shell: sh
       env:
+        ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
         ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
         ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
       run: |
         test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+        test "$GITHUB_ACTION_PATH" != "file-action-path"
+        test -f "$GITHUB_ACTION_PATH/action.yml"
         test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
         test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+        test "$ENV_GITHUB_ACTION_PATH" = "file-action-path"
         test "$ENV_GITHUB_SHA" = "action-sha"
         test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)
