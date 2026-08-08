@@ -145,7 +145,9 @@ workflows built from:
 - bounded native upload and exact-name download for the audited artifact v4
   commits; and
 - the audited `actions/cache` v6.1.0 commit through the official Buildkite
-  cache-v2 Results service, with an optional operator override.
+  cache-v2 Results service, plus compatible cache clients bundled into
+  JavaScript and Docker actions such as `actions/setup-go`, with an optional
+  operator override.
 
 It is not currently a fit for workflows that require:
 

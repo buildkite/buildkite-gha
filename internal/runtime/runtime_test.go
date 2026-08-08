@@ -230,6 +230,9 @@ if [[ "$1" == buildx && "$2" == build ]]; then
 fi
 
 if [[ "$1" == run ]]; then
+	if [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+		printf '%s|%s|%s' "$ACTIONS_RUNTIME_TOKEN" "${ACTIONS_RESULTS_URL:-}" "${ACTIONS_CACHE_SERVICE_V2:-}" > "$state/cache-runtime"
+	fi
   files=''
   workspace=''
   runner_temp=''
