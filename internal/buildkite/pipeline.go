@@ -15,6 +15,8 @@ import (
 const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 const maxConcurrencyGroupLength = 200
+const runtimeCacheName = "buildkite-gha"
+const runtimeCachePath = "/cache/bkcache/buildkite-gha"
 
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
@@ -54,7 +56,7 @@ func DistributionPath(digest string) (string, error) {
 // environments fall back to an ephemeral cache when it is unavailable. Cache
 // contents are an accelerator, never an authority.
 func MiseDataDir() string {
-	return "/cache/bkcache/buildkite-gha/mise/" + MinimumMiseVersion
+	return runtimeCachePath + "/mise/" + MinimumMiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -140,8 +142,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s    - \".buildkite-gha/cache-volume\"\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s  name: \"buildkite-gha\"\n", attributeIndent)
+			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
+			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
 		}
 		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
