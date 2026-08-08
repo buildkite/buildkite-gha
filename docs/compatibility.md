@@ -8,18 +8,17 @@ promises unless they appear here.
 ## The current execution profile
 
 The production plugin and its bundled `upload` command default to one fixed
-profile: `hosted-tokenless`. The currently pinned plugin bundles
-`buildkite-gha` v0.2.3, whose generated jobs select the `hosted` queue. Source
-builds containing the default-agent-targeting change instead omit agent
-selectors, and a plugin release that bundles that CLI behavior will inherit
-Buildkite's configured agent defaults. The profile is designed for public code
-that can run without protected credentials on a compatible Linux x86-64 agent.
-Operators using default targeting are responsible for configuring those
-defaults with suitable whole-job isolation. Unsupported or privileged requests
-fail before the generated jobs are uploaded. An explicit `upload
---private-checkout` extension admits only the verified checkout adapter and only
-when the organization has enabled Buildkite's job-bound GitHub scoped
-access-token service.
+profile: `hosted-tokenless`. The README's pinned plugin v0.4.4 installs
+`buildkite-gha` v0.4.2 and explicitly selects the `hosted` queue. The current
+source CLI instead omits agent selectors by default and inherits Buildkite's
+configured agent targeting; `BUILDKITE_GHA_TARGET_QUEUE` can explicitly select
+one queue. Operators using default or explicit targeting are responsible for
+providing suitable whole-job isolation. The profile is designed for public code
+that can run without general protected credentials on a compatible Linux
+x86-64 agent. Unsupported or privileged requests fail before the generated jobs
+are uploaded. An explicit `upload --private-checkout` extension admits only the
+verified checkout adapter and only when the organization has enabled
+Buildkite's job-bound GitHub scoped access-token service.
 
 There are three different compatibility claims:
 
@@ -36,33 +35,75 @@ provide.
 
 ## Support matrix
 
-| Area | Production plugin | Notes |
+This is the canonical current support contract. Statuses mean:
+
+- **Supported** — implemented, admitted by normal `hosted-tokenless` upload,
+  and covered by runtime evidence.
+- **Supported subset** — only the boundary in the notes is supported.
+- **Not admitted** — compiler/runtime support exists, but production upload
+  policy rejects it.
+- **Not supported** — there is no current compatibility contract; validation or
+  admission rejects it where it can identify it.
+- **Buildkite extension** — implemented by `buildkite-gha`, but not part of
+  standard GitHub Actions syntax.
+
+An action being admitted means its source and declared runtime fit the profile;
+it does not guarantee that arbitrary action code avoids an unsupported GitHub
+service.
+
+### Workflow syntax and job graph
+
+| GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
-| Linux x86-64 host jobs | Supported | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. The currently pinned plugin targets the fixed `hosted` queue; a release containing the default-agent-targeting change will omit agent selectors and use Buildkite's configured defaults. |
-| Bash and `sh` steps | Supported | Includes environment and working-directory precedence. |
-| Static job graphs and `needs` | Supported | Dependencies and logical results are preserved. |
-| Static matrices | Supported | Includes typed values, `include`, `exclude`, and exact dependency fan-out. |
-| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting builds/jobs instead of replacing GitHub's previously pending entry. Workflow-level literal `cancel-in-progress: true` retains the gate and emits a warning because cancellation must be configured in Buildkite pipeline settings; job-level literals and expressions remain unsupported. |
-| Local reusable workflows | Supported subset | Statically resolvable local calls preserve source-level `needs` names and expose an aggregate `needs.<call>.result` from every callee job. Declared outputs mapped directly from `jobs.<job>.outputs.<name>` are exposed through `needs.<call>.outputs`; nested calls are supported and undeclared callee outputs remain hidden. Matrix-selected declarations verify every exact producer and fail closed when values conflict or exceed 64 concrete projections. Literal or compound output mappings, call-level conditions, and remote or runtime-dependent reusable workflows are deferred. Caller prerequisites inherited by callee roots are status-only. |
-| Job and step conditions | Supported subset | Validation accepts literals, logical operators, `==`, `!=`, and the zero-argument `always`, `success`, `failure`, and `cancelled` status functions. Job conditions can use `github` identity fields, `needs`, `vars`, and `matrix`; step conditions additionally support `steps`, `env`, and service ports. Unsupported functions, operators, reference shapes, and unavailable contexts fail before pipeline upload. |
-| Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
-| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes are used. |
-| Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
-| Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
-| `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, and shallow credential-free fetch by default. Explicit private-checkout upload can authenticate that same fetch with fixed `contents:read` authority for the pipeline repository. |
-| Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. |
-| Step summaries | Supported | Published as job-scoped Buildkite annotations with a stable context. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped without failing the job; aggregate job summaries are bounded to 1 MiB. |
-| Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups become collapsed Buildkite log sections; because Buildkite sections are linear, nested or overlapping Actions groups flatten into successive sections. Warnings and errors retain title/file/range metadata and publish under separate, stable job-scoped contexts without changing step or job conclusions. Each aggregate is bounded to 1 MiB and requires Buildkite Agent v3.112 or newer for publication. Debug and matcher presentation commands are consumed without runner debug or matcher behavior. `::notice`, command echo control, and other legacy commands are not supported. |
-| `actions/upload-artifact` | Narrow support | The audited v4 commit supports bounded literal files/directories, ZIP compression levels, hidden-file selection, exact no-file behavior, and native Buildkite publication. See the explicit limits below. |
-| `actions/download-artifact` | Narrow support | The audited v4.3.0 commit supports one exact literal name from verified direct `needs`, extracting directly to a clean workspace-relative path. |
-| `actions/cache` | Narrow v6 support | Only the audited v6.1.0 commit is admitted. It runs the stock ESM cache-v2 client with job-bound Buildkite credentials and defaults to the official Buildkite Results service, with an optional operator override. The predecessor fixture's exact miss/save/dependent-hit lifecycle passed in Buildkite build 303. |
-| Job and service containers | Not admitted | Implemented and runtime-proven, but still outside production `hosted-tokenless` policy. |
-| `docker://` actions | Not supported | Private images, credentials, arbitrary options, volumes, and privileged containers are also rejected. |
-| Other cache clients and broad artifact modes | Not supported | `actions/cache` v4/v5 and unrecognized v6 commits, artifact merge, IDs, patterns, all-artifact, cross-repository, and cross-run modes fail admission or input validation. |
-| Private repositories or actions | Narrow checkout only | The direct uploader can opt into private checkout of the pipeline's exact GitHub repository. Private actions, alternate repositories, and reusable-workflow source remain unsupported. |
-| Secrets and provider tokens | Narrow `GITHUB_TOKEN` support | An explicit `secrets.GITHUB_TOKEN` reference can receive a short-lived token for the event repository and a non-empty explicit permission map. `github.token`, other workflow secrets, and environment grants remain unsupported. The separate private-checkout credential is runtime-internal and available only to Git. |
-| OIDC | Not supported | GitHub-compatible and migration OIDC flows are deferred. |
-| Windows and macOS | Not supported | Unmapped runner labels fail validation. |
+| `on:` and event filters | Not supported | Buildkite owns triggers. The plugin derives `pull_request` for pull-request builds and `push` for every other build; it does not create `schedule` or `workflow_dispatch` events or inputs. Direct CLI event snapshots can provide another event name, but the workflow's `on:` block is not matched. |
+| Linux x86-64 host jobs and `runs-on` | Supported subset | `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04` are accepted. The released plugin configuration targets `hosted`; the current source CLI uses Buildkite defaults unless `BUILDKITE_GHA_TARGET_QUEUE` selects a queue. This is label validation, not Ubuntu image parity. |
+| Static job graphs and `needs` | Supported | Dependencies, matrix fan-out/fan-in, logical results, and bounded outputs are transported between generated jobs. Retrying one producer can make result selection ambiguous; retry the whole build. |
+| Static matrices | Supported subset | Typed rows, `include`, `exclude`, compile-time `github`/event/`vars` values and `fromJSON`, exact dependency fan-out, and literal `max-parallel` are supported, with at most 256 expanded instances per job. Runtime matrices from `needs` or `steps` are not supported. `strategy.fail-fast` is accepted but not enforced: every expanded Buildkite job is uploaded and siblings are not canceled after a failure. |
+| `env` and `defaults.run` | Supported subset | Workflow/job/step environment precedence, shell, and workspace-confined working directories are supported. A whole environment map cannot be expression-valued. Only `bash` and `sh` shells are supported; the host default is `bash` and a job-container default is `sh`. |
+| Job and step conditions | Supported subset | Literals, `!`, `&&`, `||`, `==`, `!=`, and zero-argument `always`, `success`, `failure`, and `cancelled` are supported. Job conditions can use retained `github` identity fields, `needs`, `vars`, and `matrix`; step conditions additionally support `steps`, `env`, and service ports. Reusable-workflow inputs are substituted statically before this phase. Ordered comparisons, `hashFiles`, arguments to status functions, `github.event`, secrets in conditions, and unavailable contexts are not supported. |
+| Runtime expression interpolation | Supported subset | Direct references to retained `github` identity fields, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports are supported where that context is available. General expression operators and functions are not supported in interpolated values. Production upload rejects ordinary secret requirements. |
+| Step and job outputs | Supported subset | Step outputs, job outputs, and `needs` consumption are supported. A job may publish at most 64 outputs and each value is limited to 1 KiB; ambiguous matrix output values fail closed. |
+| Timeouts and `continue-on-error` | Supported subset | Literal step/job timeouts up to 360 minutes and step-level `continue-on-error` are supported. Expression-valued settings and job-level `continue-on-error` are not supported. |
+| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting entries instead of replacing GitHub's pending entry. Workflow-level literal `cancel-in-progress: true` emits a warning but does not cancel; job-level true and expression-valued cancellation are not supported. |
+| Local reusable workflows | Supported subset | Statically resolvable `./.github/workflows/...` calls, typed static inputs, nesting, caller-visible aggregate results, and declared outputs mapped directly from `jobs.<job>.outputs.<name>` are supported. Literal/compound output mappings, call-level conditions, call secrets, remote source, dynamic paths/inputs/matrices, and called-workflow top-level concurrency are not supported. |
+| `permissions` | Supported subset | Explicit canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN`; job permissions replace workflow permissions and local reusable workflows may narrow them. Implicit defaults, `{}`, `read-all`, `write-all`, and `id-token` do not grant authority. |
+| Job and service containers | Not admitted | Literal Linux container images, environment, ports, persistent job containers, and services are implemented and runtime-proven. Production `hosted-tokenless` upload rejects job/service-container provenance. Credentials, volumes, arbitrary options, private images, and privileged containers are not supported. |
+| Dynamic graph expansion | Not supported | Matrices or `needs` derived from runtime outputs and other runtime-created jobs are rejected. |
+| Deployment environments and approvals | Not supported | Environment secrets, protection rules, reviewers, and deployment approval/state parity are not implemented. |
+
+### Steps, actions, and runtime behavior
+
+| GitHub Actions area | Status | Current boundary |
+| --- | --- | --- |
+| `run` steps | Supported subset | Linux `bash` and `sh`, environment/working-directory precedence, process-tree cancellation, and workspace confinement are supported. PowerShell, Python-as-shell, Windows command shells, and custom shell templates are not supported. |
+| Environment files | Supported | `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`, including multiline values, are supported with bounded files and entries. Writes to `NODE_OPTIONS` and `GITHUB_*`/`RUNNER_*` variables are blocked. |
+| Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups flatten to linear Buildkite log sections. Debug and matcher commands are consumed without presentation behavior. `::notice`, command echo control, and other legacy commands are not supported. |
+| Step summaries | Supported | Summaries publish as bounded job-scoped Buildkite annotations. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped; the aggregate job summary is limited to 1 MiB. |
+| Local actions | Supported subset | Workspace actions are digest-locked and reverified. JavaScript, composite, and compiler-verified Dockerfile runtimes are supported; other action runtimes are not. |
+| Anonymous public GitHub actions | Supported subset | Sources are anonymously resolved to exact commits, complete trees are digest-verified, and JavaScript/composite/Dockerfile runtime rules still apply. Private actions and actions that require unavailable GitHub services are not supported merely because source resolution succeeds. |
+| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes, pre/main/post lifecycle, inputs, outputs, state, and LIFO post ordering are supported. Other Node action runtime declarations are not. |
+| Composite actions | Supported subset | Nested shell/action steps, outputs, and global pre/main/post ordering are supported. Composite `run` steps must select `bash` or `sh`. |
+| Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. Lifecycle overrides, arbitrary Docker options, credentials, volumes, private images, and privileged execution are not supported. |
+| `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
+| Concurrent step controls | Buildkite extension | `background`, `wait`, `wait-all`, `cancel`, and `parallel` run inside one job with at most ten active background steps. These are `buildkite-gha` extensions, not standard GitHub Actions syntax. |
+| `actions/checkout` | Supported subset | Public `github.com` event repository, exact event SHA, workspace root, and shallow credential-free fetch are supported by default. Explicit private-checkout upload can authenticate that same fetch with fixed `contents:read` authority for the pipeline repository. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
+| `actions/upload-artifact` | Supported subset | Only the audited v4 commit is adapted. It supports bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, raw uploads, merge, and GitHub URLs are not supported. |
+| `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
+| `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
+| Other GitHub service-backed actions | Not supported | Except for the integrations listed above, no general GitHub artifact, cache, OIDC, Packages, Releases, Checks, or deployment service emulation is provided. An otherwise supported action runtime may still fail if its code requires one of those services. |
+
+### Repositories, credentials, and platforms
+
+| GitHub Actions area | Status | Current boundary |
+| --- | --- | --- |
+| Public GitHub repositories | Supported subset | Public event-repository checkout and anonymous public GitHub actions are supported. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
+| Private repositories | Supported subset | Direct upload can opt into read-only checkout of the pipeline's exact GitHub repository. Alternate repositories, private actions, and private reusable workflows are not supported. |
+| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. It is not injected as an ambient environment variable. |
+| Other workflow secrets | Not supported by production upload | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
+| `github.token` and ambient `GITHUB_TOKEN` | Not supported | Only the explicit `secrets.GITHUB_TOKEN` contract above is populated. |
+| OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
+| Windows and macOS | Not supported | Runner labels fail validation. Linux arm64 is also outside the current Linux x86-64 distribution/runtime contract. |
+| GitHub-hosted image parity | Not supported | Accepted Ubuntu labels do not promise GitHub's installed tools, image updates, filesystem layout, or service configuration. The selected Buildkite agents must provide the workflow's external tools. |
 
 ## User-visible behavior
 
@@ -344,7 +385,10 @@ unmodified workflows or every Hosted image are compatible.
 ### Failures stay explicit
 
 Unsupported syntax, runner labels, action types, and protected capabilities
-fail closed. The bridge does not silently choose a nearby behavior.
+normally fail closed. Accepted behavior differences are called out in the
+support matrix instead of being claimed as parity. In particular,
+`strategy.fail-fast` is currently retained during compilation but not enforced;
+all expanded matrix jobs are uploaded.
 
 A runtime-skipped Actions job currently appears successful to Buildkite while
 publishing its logical `skipped` result. Downstream imported jobs use that
@@ -460,8 +504,8 @@ not a complete execution path.
 
 ### Upload
 
-`upload` is the in-build command used by the plugin. Source builds containing
-the default-agent-targeting change use:
+`upload` is the in-build command used by the plugin. The current source CLI
+uses:
 
 ```sh
 buildkite-gha upload .github/workflows/ci.yml
@@ -474,25 +518,25 @@ buildkite-gha upload --private-checkout \
   .github/workflows/ci.yml
 ```
 
-When invoking the current v0.2.3 release directly, add
-`--runtime-queue hosted`; that release requires the argument and uses it to
+When invoking the v0.4.2 release directly, add `--runtime-queue hosted`; that
+release requires the argument and uses it to
 select the `hosted` queue.
 
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
 it derives a bounded compatibility snapshot from the current Buildkite build.
 With `--event-path`, it uses that explicit snapshot. Both paths remain
-unattested. They remain tokenless unless `--private-checkout` is explicitly
-selected; that exception is confined to the checkout adapter and independently
+unattested. Apart from the documented scoped `secrets.GITHUB_TOKEN` contract,
+they remain tokenless unless `--private-checkout` is explicitly selected; that
+checkout exception is confined to the adapter and independently
 repository-bound by the Agent service.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.
-In source builds containing the default-agent-targeting change, generated jobs
-do not set `agents`, so Buildkite's pipeline or organization defaults select the
-agents. The deprecated `--runtime-queue hosted` argument remains accepted as a
-no-op for compatibility with plugin releases that still pass it; the current
-v0.2.3 release uses that argument to select `hosted`. Other values are rejected
-rather than silently ignored by the new implementation.
+In the current source CLI, generated jobs do not set `agents`, so Buildkite's
+pipeline or organization defaults select the agents. The deprecated
+`--runtime-queue hosted` argument remains accepted as a no-op for compatibility
+with plugin releases that pass it to v0.4.2; other values are rejected rather
+than silently ignored.
 
 An importer that must select one queue can set `BUILDKITE_GHA_TARGET_QUEUE` on
 its step. The uploader maps every accepted Linux runner label to that queue,

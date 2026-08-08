@@ -27,7 +27,8 @@ Keeping those actions under the actual event repository root allows the runtime
 to rehash the same workspace source that the compiler locked.
 
 The suite stays within the `hosted-tokenless` admission profile. It does not
-imply support for secrets, job or service containers, remote reusable
+exercise or imply support for ordinary workflow secrets, the narrow scoped
+`secrets.GITHUB_TOKEN` contract, job or service containers, remote reusable
 workflows, moving action refs, broad artifact modes, or cache versions other
 than the audited actions/cache v6.1.0 commit.
 

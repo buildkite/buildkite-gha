@@ -31,7 +31,7 @@ Expectations have these precise meanings:
 - `runtime-pass`: runtime evidence exists outside this compile-only harness;
   local validation and deterministic compilation remain required.
 - `runtime-unsupported`: compilation is required, but a runtime dependency is
-  intentionally unsupported (currently the cache service).
+  intentionally unsupported. No current fixture uses this expectation.
 - `future`: the fixture is inventoried but not yet required to compile.
 
 Run `mise run smoke:local` to strictly validate the manifest, JSON-validate

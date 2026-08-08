@@ -10,9 +10,9 @@ The service-free compatibility path can execute public, anonymous workflow code
 without giving it authority beyond its Buildkite job. Summaries, annotations,
 native artifact adapters, public exact-SHA checkout, and the audited
 `actions/cache` v6 client all use public Agent or explicitly configured
-cache-v2 interfaces. With one narrow exception described below, they do not
-establish authority for private source, secrets, provider tokens, environments,
-privileged queues, or compatible OIDC claims.
+cache-v2 interfaces. With two narrow exceptions described below, they do not
+establish general authority for private source, secrets, provider tokens,
+environments, privileged queues, or compatible OIDC claims.
 
 A plan cannot authorize those protected values. Workflow and event files are
 compiler inputs, dynamic pipeline upload is ordinary pipeline authority, and
@@ -30,8 +30,9 @@ issuing any grant.
 Phase 6 therefore starts the protected path with a signed **no-op grant**. It
 proves authentication, provenance, policy, signing, verification, expiry, and
 audit boundaries while carrying an empty capability set and returning no
-credential. Private source, secrets, GitHub tokens, environments, and
-compatibility OIDC remain deferred.
+credential. General private source, non-provider secrets, GitHub authority
+beyond the fixed checkout and scoped `secrets.GITHUB_TOKEN` exceptions,
+environments, and compatibility OIDC remain deferred.
 
 ## Decision
 
