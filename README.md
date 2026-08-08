@@ -115,6 +115,7 @@ workflows built from:
   declared outputs;
 - the documented job and step condition subset, with unsupported functions and
   unavailable runtime contexts rejected before pipeline upload;
+- GitHub Actions background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
 - public, credential-free checkout of the event repository at its exact commit;
