@@ -404,10 +404,13 @@ must have GHAC token minting enabled, and jobs must be able to reach both the
 Results service and the Agent API.
 The service-issued token scopes cache access to the current organization and
 pipeline, grants writes only for an authorized ref, and limits cross-repository
-pull requests to the read-only default-branch scope. For the explicit audited
-cache action, disabled minting, malformed responses, redirects, unsafe override
-configuration, or failed redaction stop the action before its JavaScript
-executes.
+pull requests to the read-only default-branch scope. An ordinary branch can
+read and write its own ref and read the pipeline's default branch; the default
+branch cannot read caches written by child or sibling branches. These scopes
+come from the job-bound token: the stock cache-v2 client sends keys and versions,
+not a workflow-controlled ref. For the explicit audited cache action, disabled
+minting, malformed responses, redirects, unsafe override configuration, or
+failed redaction stop the action before its JavaScript executes.
 
 This implemented and admitted contract has hosted runtime evidence. The
 then-combined advanced migration POC in [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
@@ -418,6 +421,18 @@ miss, post-save, and direct-dependent exact primary-key hit in [Buildkite build
 337](https://buildkite.com/buildkite/buildkite-gha/builds/337). The minimal
 Phase 6 cache fixture remains compile-only conformance coverage; it is not the
 fixture that carries the runtime claim.
+
+The setup-go cache proof at merge commit
+`7e9205ab9484efe0c89724f3f16af814e753e68a` also demonstrates ref isolation.
+Feature-branch [build 485](https://buildkite.com/buildkite/buildkite-gha/builds/485)
+missed and saved the `ubuntu22` key, then feature-branch
+[build 486](https://buildkite.com/buildkite/buildkite-gha/builds/486) restored
+it. Automatic `main` [build 487](https://buildkite.com/buildkite/buildkite-gha/builds/487)
+missed and saved despite using the same action key and version; subsequent
+`main` [build 488](https://buildkite.com/buildkite/buildkite-gha/builds/488) and
+[build 489](https://buildkite.com/buildkite/buildkite-gha/builds/489) restored
+the default-branch entry. The cache service, not an action-key branch suffix,
+enforces that visibility boundary.
 
 An independent migrated-repository E2E adds customer-shaped evidence. At exact
 `mcncl/gotyper` commit
