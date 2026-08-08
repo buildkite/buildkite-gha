@@ -45,14 +45,14 @@ one workflow file. This project deliberately imports only the workload side.
 Buildkite pipeline integrations, settings, schedules, and manual or API build
 requests create the build and establish build-level policy. The initial
 Buildkite pipeline definition invokes `buildkite-gha`; dynamic upload then adds
-admitted workflow jobs to that existing build. Workflow `on:` configuration is
-not a source of Buildkite trigger or pipeline configuration.
+admitted workflow jobs to that existing build. Workflow run triggers and event
+filters are not a source of Buildkite trigger or pipeline configuration.
 
 The unit of translation is the Actions job:
 
 | GitHub Actions concept | Buildkite representation |
 | --- | --- |
-| `on:` and event filters | Not translated; Buildkite configuration creates the build |
+| Run triggers and event filters under `on:` | Not translated; Buildkite configuration creates the build |
 | Workflow run | Existing Buildkite build |
 | Workflow job or matrix entry | Buildkite command job |
 | `needs` | `depends_on` plus producer-attributed result manifests |
@@ -95,7 +95,7 @@ Every imported workflow runs inside a Buildkite build that already exists.
 Buildkite owns build creation, trigger policy, build-level cancellation and
 skip policy, agent targeting, the job graph, and the live job logs. The initial
 pipeline definition and subsequent dynamic uploads add steps to that build;
-workflow `on:` configuration does not create or reconfigure the pipeline.
+workflow run-trigger configuration does not create or reconfigure the pipeline.
 
 The selected workflow controls only its admitted workload: generated jobs,
 dependencies, matrices, and runtime steps. Runner labels, permissions,
@@ -1016,11 +1016,14 @@ integration creates the build according to Buildkite configuration. The
 initial pipeline definition then invokes the importer; `upload` only adds steps
 within that existing build.
 
-Workflow `on:` is parsed as source syntax but is not matched during compilation
-and must not be treated as Buildkite trigger policy. In particular, `compile`
-and `upload` do not create or update webhooks, branch/path filters, schedules,
-manual-build forms, or other pipeline settings, and `on:` cannot suppress a
-Buildkite build that has already started.
+Run-trigger entries and event filters under workflow `on:` are parsed as source
+syntax but are not matched during compilation and must not be treated as
+Buildkite trigger policy. In particular, `compile` and `upload` do not create or
+update webhooks, branch/path filters, schedules, manual-build forms, or other
+pipeline settings, and workflow triggers cannot suppress a Buildkite build that
+has already started. The supported local `on.workflow_call` interface is
+different: it composes imported workloads and does not configure Buildkite
+triggers.
 
 An event adapter may provide a bounded Actions-compatible context for an
 already-created build. The current plugin maps pull-request builds to
@@ -1030,10 +1033,11 @@ fields from incomplete environment variables. If required context is
 unavailable, the affected compatibility feature fails with the missing adapter
 capability rather than claiming provider parity.
 
-A future migration tool may inspect `on:` and propose equivalent Buildkite
-pipeline settings, schedules, or manual inputs. That must be an explicit,
-reviewable setup operation applied outside workflow compilation, not a hidden
-side effect of importing workload into a running build.
+A future migration tool may inspect run-trigger entries under `on:` and propose
+equivalent Buildkite pipeline settings, schedules, or manual inputs. That must
+be an explicit, reviewable setup operation applied outside workflow
+compilation, not a hidden side effect of importing workload into a running
+build.
 
 ### Secrets, permissions, tokens, and untrusted changes
 
@@ -2499,9 +2503,9 @@ unknown plan.
 ## Key learnings from pressure-testing
 
 - GitHub Actions combines run-trigger configuration and workload in one file;
-  Buildkite does not. Importing `jobs` must not make workflow `on:` a hidden
-  source of Buildkite pipeline settings. Any future trigger migration belongs
-  in explicit, reviewable setup tooling outside `compile` and `upload`.
+  Buildkite does not. Importing `jobs` must not make workflow trigger entries a
+  hidden source of Buildkite pipeline settings. Any future trigger migration
+  belongs in explicit, reviewable setup tooling outside `compile` and `upload`.
 - A content digest establishes plan integrity, not authority. Protected
   capabilities require authenticated Buildkite job identity, independently
   verified provider provenance, and a narrow control-plane grant.

@@ -17,16 +17,17 @@ cancellation, and the build UI.
 
 ## Buildkite controls the pipeline; the workflow describes the workload
 
-A GitHub Actions workflow combines two concerns: `on:` and related settings
-control when GitHub creates a workflow run, while `jobs` and `steps` describe
-the work in that run. `buildkite-gha` imports only the supported workload
-portion into a Buildkite build that already exists.
+A GitHub Actions workflow combines two concerns: run triggers and event filters
+under `on:` control when GitHub creates a workflow run, while `jobs` and `steps`
+describe the work in that run. `buildkite-gha` imports only the supported
+workload portion into a Buildkite build that already exists. The supported
+local `on.workflow_call` interface is workload composition, not trigger setup.
 
 Buildkite pipeline integrations, settings, schedules, and manual or API build
 requests decide when to create a build. The initial Buildkite pipeline
 definition then invokes the plugin, which dynamically uploads the supported
-workflow jobs into that build. The workflow's `on:` block neither creates nor
-filters Buildkite builds.
+workflow jobs into that build. The workflow's run triggers and event filters
+neither create nor filter Buildkite builds.
 
 Buildkite configuration also remains authoritative for agent targeting and
 protected capabilities. Workflow settings such as `runs-on`, `permissions`,
@@ -209,7 +210,7 @@ runtime behavior. JSON output is available with `--format json`.
 
 | GitHub Actions | Buildkite |
 | --- | --- |
-| `on:` and event filters | Not translated; Buildkite configuration creates the build |
+| Run triggers and event filters under `on:` | Not translated; Buildkite configuration creates the build |
 | Workflow run | Existing Buildkite build |
 | Job | Command job |
 | Matrix entry | Command job with a stable key |
