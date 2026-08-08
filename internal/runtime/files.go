@@ -116,12 +116,10 @@ func (files commandFiles) apply(result *Result, state map[string]string) (fileCo
 		return effects, errors.Join(outputErr, envErr, stateErr, summaryErr, pathErr)
 	}
 	for name := range env {
+		// Match GitHub Runner's file-command behavior: NODE_OPTIONS is blocked,
+		// while actions may deliberately propagate GITHUB_* and RUNNER_* values.
 		if strings.EqualFold(name, "NODE_OPTIONS") {
 			return effects, errors.New("GITHUB_ENV may not set NODE_OPTIONS")
-		}
-		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
-			return effects, fmt.Errorf("GITHUB_ENV may not set reserved variable %s", name)
 		}
 	}
 	effects.paths = paths
