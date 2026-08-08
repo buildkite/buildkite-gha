@@ -131,14 +131,33 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
-	if job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write") {
-		if r.Redactor == nil {
-			return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+	providerTokenRequired := job.HasCapability("provider-token-read") || job.HasCapability("provider-token-write")
+	cacheRequired := false
+	for _, lock := range job.Actions {
+		if usesCacheService(lock) {
+			cacheRequired = true
+			break
 		}
-		var err error
-		r.Redactor, err = resolveAgentRedactorBeforeWorkflow(r.Redactor)
-		if err != nil {
-			return JobResult{}, err
+	}
+	if providerTokenRequired || r.Cache != nil {
+		if r.Redactor == nil {
+			if providerTokenRequired {
+				return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+			}
+			if cacheRequired {
+				return JobResult{}, fmt.Errorf("actions/cache requires the Buildkite Agent redactor")
+			}
+			r.Cache = nil
+		} else {
+			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
+			if err != nil {
+				if providerTokenRequired || cacheRequired {
+					return JobResult{}, err
+				}
+				r.Cache = nil
+			} else {
+				r.Redactor = resolved
+			}
 		}
 	}
 	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
