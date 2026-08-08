@@ -1,4 +1,4 @@
-# ADR 0004: Authenticate hosted public Action source resolution with a dedicated GitHub App
+# ADR 0004: Reuse the scoped job token for hosted public Action source
 
 - Status: Proposed
 - Date: 2026-08-08
@@ -6,257 +6,270 @@
 
 ## Context
 
-Hosted `buildkite-gha upload` currently resolves public GitHub Action refs,
-commits, and tarballs anonymously. This is correctly public-only, but shares
-GitHub's low unauthenticated rate-limit bucket. The existing
-`github_scoped_access_token` operation is not a safe substitute: it is bound to
-the pipeline repository and accepts workflow permissions, so a private pipeline
-can receive a token that reads its private repository.
+Hosted `buildkite-gha upload` resolves public GitHub Action repositories to
+immutable commits and downloads their source before generating jobs. It
+currently does so anonymously. This preserves a public-only source boundary but
+shares GitHub's low unauthenticated rate-limit bucket.
 
-Users should not configure a PAT, token flag, repository URL, or permissions.
-Authentication is a compiler implementation detail and must not create a new
-workflow capability.
+Users should not configure a PAT, token flag, repository URL, or permission map
+for hosted compilation. Authentication is an importer implementation detail and
+must not create a workflow capability or put a provider credential in generated
+jobs.
+
+Buildkite already exposes a job-bound Agent operation used for workflow
+`GITHUB_TOKEN` compatibility:
+
+```http
+POST /v3/jobs/<current-job-id>/github_scoped_access_token
+Authorization: Token <current-job Agent access token>
+Content-Type: application/json
+```
+
+The backend independently requires the requested repository to equal the
+pipeline's configured GitHub repository and validates the requested permissions.
+For the current public-only importer, reusing this operation with an
+importer-owned fixed request is smaller than introducing another token issuer.
+
+## Observable GitHub Actions architecture
+
+GitHub Actions uses several distinct job credentials rather than one general
+action-source token:
+
+1. At each job start, GitHub creates a unique GitHub App installation
+   `GITHUB_TOKEN`, scoped to the workflow repository and the job's effective
+   permissions. It expires with the job and is separate from the runner's
+   service credential.
+2. The open-source runner does not resolve `owner/repository@ref` through the
+   public GitHub API. `ActionManager.GetDownloadInfoAsync` sends unresolved
+   action references to a plan/job-scoped Actions/Launch resolver, authenticated
+   with the job's `SystemVssConnection` service token.
+3. The resolver returns the resolved name and SHA, tarball and zipball URLs, and
+   optional download authentication containing a token and expiry. Resolution,
+   visibility policy, URL selection, and token minting are server concerns not
+   present in `actions/runner`.
+4. `ActionManager` registers any resolver-supplied token with its secret masker
+   and prefers that token. If the resolver omits download authentication, it
+   explicitly falls back to `github.token`, the job's workflow-repository
+   `GITHUB_TOKEN`, for the archive GET.
+5. GitHub's supported private-action sharing path uses another one-hour,
+   read-only token scoped to the private source repository.
+
+The relevant observable runner contracts are
+[`ActionManager.GetDownloadInfoAsync`](https://github.com/actions/runner/blob/main/src/Runner.Worker/ActionManager.cs),
+[`LaunchHttpClient`](https://github.com/actions/runner/blob/main/src/Sdk/WebApi/WebApi/LaunchHttpClient.cs),
+and
+[`LaunchContracts`](https://github.com/actions/runner/blob/main/src/Sdk/WebApi/WebApi/LaunchContracts.cs).
+
+This ADR adopts the runner's **workflow-token fallback** shape for the current
+public-only scope. It does not claim parity with GitHub's authoritative
+server-side action resolver or private-action download-token model.
 
 ## Decision
 
-### Dedicated job-bound operation
+### Use an importer-owned fixed request to the existing endpoint
 
-The Buildkite Agent API adds this separate operation:
-
-```http
-POST /v3/jobs/<current-job-id>/github_public_source_token
-Authorization: Token <current-job Agent access token>
-Accept: application/json
-```
-
-The request has no body. In particular, it has no repository, installation,
-permission, organization, pipeline, or workflow field. A non-empty body is
-rejected with `400`; unknown query parameters are rejected. The server derives
-the current job from the path and Agent token and uses only server-owned GitHub
-App configuration.
-
-A successful response is deliberately minimal:
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-Cache-Control: no-store
-```
+Hosted `upload` requests one token through the existing endpoint only when
+preflight finds remote GitHub Actions:
 
 ```json
-{"token":"<GitHub installation access token>"}
+{
+  "repo_url": "https://github.com/<authoritative pipeline repository>",
+  "permissions": {
+    "contents": "read"
+  }
+}
 ```
 
-The token is opaque to the client. GitHub installation tokens currently expire
-after one hour; the backend must request no longer lifetime if GitHub later
-makes lifetime configurable. The operation does not reuse, alias, or widen
-`github_scoped_access_token`.
+The importer, not workflow content, constructs this exact request. It obtains
+the repository from the authoritative pipeline/event binding already required
+by hosted compilation and requires those repository identities to agree. A
+workflow cannot select the repository, permissions, installation, or token
+purpose. The permission map is always exactly `{"contents":"read"}`.
 
-Expected failures are:
+The backend remains authoritative: it authenticates the current job's Agent
+token, binds the path job ID to that credential, independently verifies the
+requested repository against the pipeline's configured GitHub repository, and
+limits the token's selected installation repositories to that exact repository.
+The importer requests only the configurable `contents: read` permission;
+GitHub's automatic `metadata: read` remains effective.
 
-- `400` malformed request (including any body or query);
-- `401`/`403` Agent authentication or current-job authorization failure;
-- `404` operation unavailable for this Buildkite installation;
-- `429` mint capacity or upstream rate limit, with a numeric `Retry-After` when
-  known;
-- `503` temporary GitHub App or installation failure, also optionally carrying
-  `Retry-After`; and
-- other `5xx` unexpected backend failure.
+This token may be able to read the pipeline repository when that repository is
+private. It is therefore not intrinsically public-only. The current design is
+safe only because the importer keeps the credential inside the compiler and
+separately refuses every action repository whose authenticated metadata reports
+`private: true`. The decision gates below must be satisfied before enabling the
+path.
 
-Error bodies must never contain a GitHub token or upstream response body. The
-client ignores response bodies for non-2xx statuses and validates a bounded,
-single-field success response.
+### Enforce public action targets and contain the token
 
-### GitHub App is structurally public-only
+The compiler treats the returned token as sensitive inert bytes:
 
-Use a dedicated GitHub App and installation, not the App/installation used for
-pipeline checkout or workflow tokens:
+1. Validate the bounded response and token shape without including response
+   bodies or decoder-controlled text in errors.
+2. Register the exact token with the Buildkite Agent redactor. If registration
+   fails, discard it and use anonymous resolution.
+3. Keep it only in compiler memory. Never serialize it into compiler IR, plans,
+   plan digest input, pipeline YAML, generated jobs, workflow expression
+   contexts, action metadata or inputs, subprocess environments, command
+   arguments, URLs, cache manifests, errors, metrics, traces, or logs.
+4. Before resolving refs, annotated tags, commits, or tarballs for each distinct
+   action repository, request repository metadata and require an explicit
+   `private: false`. Missing, malformed, denied, or private metadata fails that
+   action as not public. Do not continue to source endpoints on a private result.
+5. Attach `Authorization` only to HTTPS requests whose exact host is
+   `api.github.com`. Never send it to caller-selected hosts. Strip
+   `Authorization` and cookies before following the expected archive redirect
+   to `codeload.github.com`, and retain the resolver's existing redirect-host
+   allowlist.
+6. Drop the token and authenticated transport when compilation ends. Runtime
+   jobs and action subprocesses never receive them.
 
-1. Configure **no repository permissions**, no organization/account
-   permissions, and no webhook subscriptions. GitHub Apps have no permissions
-   by default; public REST resources remain readable without private repository
-   permission. Do not request `Contents: read`: that permission is required for
-   private Git refs, commits, and tarballs and would make selected private
-   repositories readable.
-2. Disable OAuth authorization during installation and device flow. Do not
-   generate or deploy OAuth client secrets or callback credentials. Give the
-   minting service only the App private key and fixed installation ID. The
-   service uses only installation access tokens with the REST API. Withholding
-   `Contents` is what prevents authenticated private Git/source access; there is
-   no separate Git-access switch on which this design relies.
-3. Install the App on a dedicated Buildkite-controlled account or organization
-   with **Only select repositories**, selecting only a purpose-built public
-   canary if GitHub requires a selection. Never select a private repository and
-   never use **All repositories**. Alert on installation repository-selection
-   or App-permission changes.
-4. Mint from that one configured installation ID without accepting a caller
-   installation ID, repository list, or permission map. The mint request must
-   not ask GitHub to widen the App's configured permissions.
+This is analogous to `actions/runner` using `github.token` when its resolver did
+not supply action-specific download authentication. Unlike the runner, the
+current importer still resolves public refs and validates visibility itself; it
+does not delegate policy or resolution to a Buildkite service.
 
-Zero App permissions, rather than a server-side allowlist alone, is the primary
-private-source boundary. The installation placement and change monitoring
-protect against later configuration drift.
+### Keep local and hosted credential sources separate
 
-Before deployment, run a live conformance test with the exact installation
-token and API version used in production:
+Local development and corpus evaluation may use
+`BUILDKITE_GHA_GITHUB_TOKEN` only when an operator explicitly sets it and
+otherwise resolve anonymously. They apply the same `private: false`, host,
+redirect, bounded-error, and non-leakage rules. They must not infer or read
+ambient `GH_TOKEN`, `GITHUB_TOKEN`, a Git credential helper, or another provider
+credential.
 
-1. For two public repositories, one selected canary and one repository outside
-   the installation owner, resolve a lightweight tag and branch through
-   `GET /repos/{owner}/{repo}/git/ref/{ref}`; resolve the returned object through
-   the annotated-tag path when applicable; validate an exact commit through
-   `GET /repos/{owner}/{repo}/commits/{sha}`; and download
-   `GET /repos/{owner}/{repo}/tarball/{sha}`, following only GitHub's expected
-   redirect to `codeload.github.com` after stripping `Authorization`.
-2. Keep the production installation limited to the public canary and verify its
-   installation repository listing contains no private repository. Requests to
-   a controlled unselected private repository must return GitHub's
-   not-found/denied response.
-3. Create a separate conformance installation of the same zero-permission App
-   and select one sacrificial private repository. With that installation token,
-   repeat the ref, annotated-tag, commit, tarball, and authenticated Git-read
-   requests. Every source request must fail without returning Git objects or
-   archive bytes. GitHub's installation repository API may reveal the selected
-   repository's identity and metadata; the invariant is that the token cannot
-   read private repository source contents, not that it cannot enumerate a
-   deliberately selected repository.
-4. Repeat the private source checks against another controlled private
-   repository outside the conformance installation. Record the App permission
-   and installation repository-selection snapshots with the test result, never
-   the token.
-5. Make the private negative test a deployment gate and scheduled canary. Revoke
-   the installation and disable issuance immediately if any private source read
-   succeeds.
+Hosted `upload` ignores `BUILDKITE_GHA_GITHUB_TOKEN` and prefers the current
+job's Agent endpoint. On bounded endpoint construction, minting, response
+validation, or redaction failures, hosted compilation emits one sanitized
+warning and falls back to the anonymous public resolver. Cancellation and
+deadlines still stop compilation. It never falls back to a workflow-provided
+token, PAT, ambient credential, or repository credential helper.
 
-This live proof is required because GitHub's endpoint documentation lists
-`Contents: read` for private resources while allowing some endpoints on public
-resources without it; local mocks cannot prove the deployed App configuration.
+For `429` or `503`, honor only an integer `Retry-After`, cap the wait at five
+seconds and token requests at two, then resolve anonymously. For authenticated
+GitHub `401`, discard the token and permit at most one fresh mint and request
+retry. GitHub primary or secondary rate-limit responses use the existing bounded
+`RateLimitError`; do not retry them in a loop.
 
-### Compiler lifecycle and containment
+## Decision gates before implementation
 
-Only hosted `upload`, and only when preflight finds remote GitHub Actions,
-requests one token. The compiler registers the exact returned literal with the
-Buildkite Agent redactor before installing it in an in-memory HTTP transport.
-If redactor registration fails, the token is discarded and compilation falls
-back to anonymous resolution. The transport adds `Authorization: Bearer` only
-for requests to `api.github.com`, never for arbitrary URLs. Archive redirects
-must strip both `Authorization` and cookies before reaching
-`codeload.github.com`.
+Buildkite backend owners must confirm with contract tests that the existing
+operation:
 
-The token is compiler-owned ephemeral state. It must never enter a plan, plan
-digest input, pipeline YAML, workflow expression context, action metadata or
-inputs, subprocess environment, command argument, URL, cache manifest, error,
-metric label, trace attribute, or log. It is dropped with the resolver after
-compilation. Runtime jobs never receive it. Existing workflow `GH_TOKEN` /
-`GITHUB_TOKEN` support remains a separate scoped-token path.
+- supports the importer as a caller authenticated by the current job's Agent
+  token;
+- independently binds the request to that exact job and authoritative pipeline
+  repository;
+- limits the token's selected installation repositories to exactly the
+  authoritative pipeline repository, not every selected repository in the
+  installation;
+- requests exactly `contents: read` and grants no write or other configurable
+  repository, organization, or account permission; GitHub's automatic
+  `metadata: read` is the only expected additional effective repository
+  permission;
+- expires in no more than one hour; and
+- uses the customer's relevant GitHub App installation and authenticated rate
+  limit bucket rather than a shared Buildkite-wide source credential.
 
-The backend may cache one encrypted token per installation until five minutes
-before expiry, but must not persist plaintext or return an expired token. The
-client does not persist or refresh during a normal compile. On an authenticated
-GitHub `401`, a future integration may discard the token, mint once more, and
-retry the failed request once; it must not loop.
+Before rollout, a hosted live test must use the exact endpoint response and HTTP
+transport intended for production to prove:
 
-Local development and corpus evaluation use a separate explicit fallback. Those
-non-hosted tools may read `BUILDKITE_GHA_GITHUB_TOKEN` when an operator sets it
-and otherwise resolve anonymously. They must apply the same host-scoped header,
-redirect stripping, bounded error, and non-leakage rules. They must not infer or
-read `GH_TOKEN`, `GITHUB_TOKEN`, a Git credential helper, or another ambient
-provider credential. Hosted `upload` must ignore
-`BUILDKITE_GHA_GITHUB_TOKEN` and obtain its credential only through the
-job-bound in-memory Agent endpoint; this preserves the zero-configuration hosted
-UX and prevents pipeline environment from selecting hosted source authority.
+1. Repository metadata, lightweight and annotated refs/tags, commits, and the
+   tarball for an immutable commit work for a public action repository outside
+   the customer's installation repository selection.
+2. A controlled private action repository reports private or denied and the
+   importer performs no ref, commit, or tarball request for it. Direct token
+   access to a private repository other than the exact authoritative pipeline
+   repository must fail. Access to an exact private pipeline repository may
+   succeed and must be treated as expected endpoint scope, not public-action
+   authority.
+3. Representative write operations against both the authoritative repository
+   and a public repository fail.
+4. The archive request follows only the expected GitHub redirect and neither
+   `Authorization` nor cookies reach `codeload.github.com`.
+5. The token appears in no compiler output, generated artifact, subprocess
+   environment, captured log, error, metric, or trace, including malformed and
+   rate-limited responses.
 
-### Availability and rate limits
+Failure of any gate keeps hosted authenticated resolution disabled; the current
+anonymous behavior remains available.
 
-Authentication is an availability optimization, not authorization for source.
-If endpoint construction, minting, response validation, or mandatory redaction
-fails, hosted compilation emits one sanitized warning and uses the existing
-anonymous public resolver. Cancellation and deadlines still stop compilation.
-No failure may cause the workflow-token endpoint,
-`BUILDKITE_GHA_GITHUB_TOKEN`, a PAT, or ambient `GH_TOKEN`/`GITHUB_TOKEN` to be
-used by hosted compilation instead.
+## Future direction: a job-bound action resolver
 
-For `429` or `503`, `PublicSourceToken` will own the follow-up retry behavior:
-honor only an integer `Retry-After`, cap the wait at five seconds and the mint
-attempt count at two, then fall back anonymously. The current unwired client
-preserves sanitized status and retry information but intentionally makes one
-request; before compiler wiring, the provider must be extended to perform that
-retry internally rather than make the compiler parse error text. For GitHub API
-primary or secondary rate-limit responses, report the existing
-bounded `RateLimitError`; one token refresh is allowed only for `401`, not for
-rate limits. Metrics distinguish authenticated resolution, anonymous fallback,
-mint status class, and GitHub rate-limit class without recording repository
-names, refs, headers, URLs containing credentials, or tokens.
+If Buildkite adds private Actions, centralized source policy, or server-side ref
+resolution, follow GitHub Actions' richer model rather than extending this
+fallback token into a general source credential. A Buildkite service would
+accept unresolved action identities over a current-job authenticated channel and
+return immutable commits, approved archive URLs, visibility/policy decisions,
+and optional per-action download authentication. Private source credentials
+would be short-lived, read-only, and scoped to the exact source repository.
 
-## Repository ownership and delivery
+That service would own source authorization and auditing. The compiler would
+prefer resolver-supplied per-action authentication and would not infer broader
+authority from the workflow-repository token. This future protocol is separate
+from the current public-only decision.
 
-This repository owns the small `PublicSourceTokenProvider` client boundary and
-its strict Agent API transport tests. They will land in a backend-coordinated
-client-and-wiring change. This ADR is design-only and does not enable hosted
-authenticated resolution.
+## Rejected and deferred alternatives
 
-Wiring depends on the local `BUILDKITE_GHA_GITHUB_TOKEN` workstream's source
-transport hardening (bounded response parsing, host-scoped authorization,
-redirect credential stripping, and token validation). The hosted path may reuse
-that transport behavior, but must not read the local fallback variable or reuse
-the workflow-token interface, endpoint, plan fields, permission maps, or
-expression/runtime exposure. The action-source package currently guarantees
-credential-free clients and strips `Authorization` from every request. Adding
-authenticated API-only headers therefore needs a focused follow-up in that
-package; it should not be hidden inside a general resolver refactor.
+### Dedicated zero-permission public-source App and endpoint
 
-The follow-up is complete when hosted `upload` constructs the provider from the
-current job's Agent endpoint, job ID, and Agent access token; obtains and masks
-one credential; injects it only into API requests; and proves anonymous fallback
-and non-leakage. Outside a Buildkite job, networked validation and corpus tools
-remain anonymous unless the operator explicitly sets
-`BUILDKITE_GHA_GITHUB_TOKEN`.
+Do not currently add
+`POST /v3/jobs/<current-job-id>/github_public_source_token` or a dedicated
+zero-permission GitHub App installation. That design can provide stronger token
+isolation, but adds another backend route, App, installation, cache, rotation,
+monitoring, and live-conformance surface before the public-only importer needs
+it. The existing job-bound scoped-token endpoint plus strict compiler
+containment is the smaller current change and matches the runner's observable
+`GITHUB_TOKEN` fallback more closely.
 
-## External Buildkite backend work
+Reconsider the dedicated endpoint/App if any of these becomes true:
 
-The Agent API/backend repository must:
+- the existing endpoint token cannot be narrowed to the exact authoritative
+  repository;
+- live conformance fails for the public metadata, ref, commit, or tarball paths;
+- policy requires the credential itself to be incapable of reading any private
+  source, rather than relying on compiler containment and `private: false`;
+- authenticated imports from providers other than GitHub are required; or
+- the importer no longer has current-job Agent authority or an authoritative
+  pipeline repository binding.
 
-1. route the exact operation and authenticate the path job ID with that same
-   job's Agent access token;
-2. reject bodies, query parameters, cross-job tokens, finished/revoked jobs, and
-   non-Agent authentication;
-3. load only the dedicated App installation from server configuration and mint
-   a token without caller-controlled repositories or permissions;
-4. enforce organization/feature rollout policy without consulting workflow or
-   pipeline repository data;
-5. set `Cache-Control: no-store`, redact tokens before all logging/tracing, avoid
-   plaintext persistence, and emit token-free audit/availability metrics;
-6. bound caching and refresh by GitHub's expiry and prevent stampedes; and
-7. map upstream throttling/unavailability to sanitized `429`/`503` responses and
-   bounded numeric `Retry-After` values.
+### Workflow or ambient credentials
 
-Backend tests must cover exact success response and headers; empty request;
-rejection of every caller-controlled field/query; same-job and cross-job Agent
-authorization; revoked/finished jobs; feature-disabled organizations; App and
-installation misconfiguration; GitHub mint timeout, malformed response, `401`,
-`403`, `429`, and `5xx`; cache reuse/expiry/concurrent refresh; and a log/trace
-sink assertion that neither the Agent token, installation token, nor upstream
-body is emitted. The live public/private conformance test above is a release
-gate, not a replacement for unit and integration tests.
+Do not accept workflow-controlled repository or permission input, add PAT flags,
+or consult ambient `GH_TOKEN`/`GITHUB_TOKEN` in hosted compilation. Do not reuse
+the runtime workflow-token plan fields or expose the compiler token as
+`github.token`, `secrets.GITHUB_TOKEN`, or an action input. The explicit
+`BUILDKITE_GHA_GITHUB_TOKEN` path remains non-hosted only.
 
-## Key learnings from pressure-testing
+## Repository and backend work
 
-- Reusing the pipeline installation token cannot guarantee public-only access,
-  even if the client promises to request only public repositories.
-- Requesting `Contents: read` would make operational repository selection part
-  of the private-source boundary; zero App permissions is narrower and must be
-  live-tested against every endpoint the resolver uses.
-- Authenticated resolution must remain optional until redaction and strict
-  host-scoped header injection are wired. Landing only the client contract now
-  avoids weakening the source package's current credential-free invariant.
+This ADR is design-only and does not enable authenticated hosted resolution.
+The implementation belongs in a backend-coordinated follow-up after every
+decision gate passes. This repository will own the fixed-request Agent client,
+redaction-before-use sequence, authenticated metadata/publicness gate,
+host-scoped source transport, anonymous fallback, and non-leakage tests.
 
-## Unresolved assumptions
+The Buildkite backend may require no new route. Its owners must confirm or add
+importer caller support and the exact repository/permission/lifetime narrowing
+above, then add regression tests for same-job and cross-job authorization,
+repository mismatch, permission rejection, importer availability, token expiry,
+customer installation selection, and sanitized upstream failures. Backend logs,
+traces, metrics, and errors must never contain the Agent token, installation
+token, or upstream response body.
 
-- GitHub must continue allowing this zero-permission installation token to call
-  all four production read paths (refs, annotated tags, commits, and tarballs)
-  for arbitrary public repositories. The live conformance test decides this;
-  do not add `Contents: read` merely to make the test pass.
-- The Agent API owner must confirm whether `404` or another status is the
-  platform convention for an undeployed/disabled operation. The client can
-  tolerate either because integration falls back anonymously.
-- The backend repository and its concrete routing/configuration names are not
-  present here, so exact backend file paths cannot be named from this checkout.
+The existing local `BUILDKITE_GHA_GITHUB_TOKEN` source-transport work may supply
+bounded parsing, publicness checks, host-scoped authorization, and redirect
+credential stripping. Hosted wiring must not read that environment variable.
+
+## Consequences
+
+- Hosted users retain zero configuration and gain a customer/job-bound
+  authenticated rate-limit bucket when the endpoint is available.
+- The current change reuses an existing backend operation and avoids a new App
+  and issuer.
+- The token is not structurally public-only when the authoritative pipeline
+  repository is private. Safety depends on compiler-memory containment,
+  redaction, strict host scoping, and an explicit `private: false` gate before
+  all action source requests.
+- This does not provide private Actions or parity with GitHub's action resolver.
+- Anonymous behavior remains the bounded availability fallback.
