@@ -2041,15 +2041,19 @@ jobs:
       - uses: ./.github/actions/observer
 
       - env:
+          GITHUB_ACTION_PATH: step-action-path
           GITHUB_TOKEN: step-token
           GITHUB_SHA: step-sha
           RUNNER_TEMP: /step-temp
+          ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
           ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
           ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
         run: |
+          test "$GITHUB_ACTION_PATH" = "step-action-path"
           test "$GITHUB_TOKEN" = "step-token"
           test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
           test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+          test "$ENV_GITHUB_ACTION_PATH" = "file-action-path"
           test "$ENV_GITHUB_SHA" = "action-sha"
           test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)

@@ -729,9 +729,10 @@ func mergeStepEnvironment(base map[string]string, overlays ...map[string]string)
 }
 
 func isRuntimeContextEnvironment(name string) bool {
+	// GITHUB_ACTION_PATH is invocation-scoped and overlaid by action runtimes,
+	// not protected for ordinary top-level steps.
 	switch name {
-	case "GITHUB_ACTION_PATH",
-		"GITHUB_ACTIONS",
+	case "GITHUB_ACTIONS",
 		"GITHUB_ACTOR",
 		"GITHUB_EVENT_NAME",
 		"GITHUB_JOB",
