@@ -152,7 +152,9 @@ workflows built from:
 - bounded native upload and exact-name download for the audited artifact v4
   commits; and
 - the audited `actions/cache` v6.1.0 commit through the official Buildkite
-  cache-v2 Results service, with an optional operator override.
+  cache-v2 Results service, plus compatible cache clients bundled into
+  JavaScript and Docker actions such as `actions/setup-go`, with an optional
+  operator override.
 
 It is not currently a fit for workflows that require:
 
@@ -161,8 +163,8 @@ It is not currently a fit for workflows that require:
   compatibility guide;
 - ordinary workflow secrets—the scoped `secrets.GITHUB_TOKEN` contract is the
   only workflow-visible secret exception;
-- workflow-authored `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible
-  OIDC, or protected queues;
+- workflow-authored `github.token`, automatic ambient `GITHUB_TOKEN` injection,
+  GitHub-compatible OIDC, or protected queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload, or condition

@@ -230,6 +230,9 @@ if [[ "$1" == buildx && "$2" == build ]]; then
 fi
 
 if [[ "$1" == run ]]; then
+	if [[ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+		printf '%s|%s|%s' "$ACTIONS_RUNTIME_TOKEN" "${ACTIONS_RESULTS_URL:-}" "${ACTIONS_CACHE_SERVICE_V2:-}" > "$state/cache-runtime"
+	fi
   files=''
   workspace=''
   runner_temp=''
@@ -2036,6 +2039,7 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 }
 
 func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
+	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
 	workflow := []byte(`on: push
@@ -2046,18 +2050,74 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/token
+
+      - if: env.GITHUB_SHA == 'action-sha' && env.RUNNER_TEMP == '/action-temp'
+        env:
+          ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+          ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
+        run: |
+          test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+          test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+          test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+          test "$ENV_GITHUB_SHA" = "action-sha"
+          test "$ENV_RUNNER_TEMP" = "/action-temp"
+          printf 'exported token: %s\n' "$GITHUB_TOKEN"
+
+      - uses: ./.github/actions/observer
+
+      - env:
+          GITHUB_ACTION_PATH: step-action-path
+          GITHUB_TOKEN: step-token
+          GITHUB_SHA: step-sha
+          RUNNER_TEMP: /step-temp
+          ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
+          ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+          ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
+        run: |
+          test "$GITHUB_ACTION_PATH" = "step-action-path"
+          test "$GITHUB_TOKEN" = "step-token"
+          test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+          test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+          test "$ENV_GITHUB_ACTION_PATH" = "file-action-path"
+          test "$ENV_GITHUB_SHA" = "action-sha"
+          test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)
 	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
 inputs:
   github_token:
     default: ${{ github.token }}
 runs:
+  using: node24
+  main: dist/index.js
+`)
+	writeFixtureFile(t, workspace, ".github/actions/token/dist/index.js", `const fs = require("node:fs");
+if (process.env.GITHUB_TOKEN !== undefined) throw new Error("GITHUB_TOKEN was injected before the action exported it");
+if (process.env.INPUT_GITHUB_TOKEN !== "ghs_scoped_action_default") throw new Error("scoped token input was not provided");
+fs.appendFileSync(process.env.GITHUB_ENV,
+  "GITHUB_TOKEN=" + process.env.INPUT_GITHUB_TOKEN + "\n" +
+  "GITHUB_ACTION_PATH=file-action-path\n" +
+  "GITHUB_SHA=action-sha\n" +
+  "RUNNER_TEMP=/action-temp\n" +
+  "EXPECTED_RUNNER_TEMP=" + process.env.RUNNER_TEMP + "\n");
+`)
+	writeFixtureFile(t, workspace, ".github/actions/observer/action.yml", `name: context observer
+runs:
   using: composite
   steps:
     - shell: sh
+      env:
+        ENV_GITHUB_ACTION_PATH: ${{ env.GITHUB_ACTION_PATH }}
+        ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
+        ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
       run: |
-        test "${{ inputs.github_token }}" = "ghs_scoped_action_default"
-        test "${GITHUB_TOKEN+x}" = ""
+        test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+        test "$GITHUB_ACTION_PATH" != "file-action-path"
+        test -f "$GITHUB_ACTION_PATH/action.yml"
+        test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
+        test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
+        test "$ENV_GITHUB_ACTION_PATH" = "file-action-path"
+        test "$ENV_GITHUB_SHA" = "action-sha"
+        test "$ENV_RUNNER_TEMP" = "/action-temp"
 `)
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
 	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
@@ -2079,12 +2139,16 @@ runs:
 	}
 	provider := &testWorkflowTokenProvider{token: "ghs_scoped_action_default"}
 	redactor := &testRedactor{}
-	result, err := (Runner{WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
+	var logs bytes.Buffer
+	result, err := (Runner{Node24: node, Stdout: &logs, Stderr: &logs, WorkflowToken: provider, Redactor: redactor}).RunJob(context.Background(), plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
 		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	}
+	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "action-sha" || result.Env["RUNNER_TEMP"] != "/action-temp" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
+		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())
 	}
 }
 
@@ -2499,10 +2563,20 @@ func TestFileCommandParsing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = files.cleanup() }()
-	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
+	if err := os.WriteFile(files.env, []byte("GITHUB_TOKEN=action-token\nRUNNER_CUSTOM=action-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result := newResult()
+	if _, err := files.apply(&result, nil); err != nil {
+		t.Fatalf("commandFiles.apply() GitHub-compatible environment error = %v", err)
+	}
+	if !maps.Equal(result.Env, map[string]string{"GITHUB_TOKEN": "action-token", "RUNNER_CUSTOM": "action-value"}) {
+		t.Fatalf("commandFiles.apply() environment = %#v", result.Env)
+	}
+	if err := os.WriteFile(files.env, []byte("NODE_OPTIONS=--require bad\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = newResult()
 	if _, err := files.apply(&result, nil); err == nil || !strings.Contains(err.Error(), "NODE_OPTIONS") {
 		t.Fatalf("commandFiles.apply() error = %v, want NODE_OPTIONS rejection", err)
 	}

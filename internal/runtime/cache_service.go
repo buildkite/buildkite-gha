@@ -22,8 +22,8 @@ const (
 
 var cacheRuntimeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 
-// CacheCredentials are the short-lived values exposed only to one verified
-// actions/cache lifecycle phase.
+// CacheCredentials are the short-lived values exposed only to one action
+// lifecycle invocation.
 type CacheCredentials struct {
 	ResultsURL string
 	Token      string
@@ -195,10 +195,28 @@ func cacheCredentialStatusError(status int) error {
 	}
 }
 
+func isCacheServiceEnvironment(name string) bool {
+	switch name {
+	case "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL":
+		return true
+	default:
+		return false
+	}
+}
+
+func removeCacheServiceEnvironment(env map[string]string) map[string]string {
+	clean := cloneStrings(env)
+	for name := range clean {
+		if isCacheServiceEnvironment(name) {
+			delete(clean, name)
+		}
+	}
+	return clean
+}
+
 func isolateCacheActionEnvironment(env map[string]string) map[string]string {
-	isolated := cloneStrings(env)
+	isolated := removeCacheServiceEnvironment(env)
 	for _, name := range []string{
-		"ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_SERVICE_V2", "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
 		"NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
 		"OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
 		"TAR_OPTIONS",

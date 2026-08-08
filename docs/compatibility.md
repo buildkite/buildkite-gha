@@ -96,21 +96,22 @@ service.
 | GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
 | `run` steps | Supported subset | Linux `bash` and `sh`, environment/working-directory precedence, process-tree cancellation, and workspace confinement are supported. PowerShell, Python-as-shell, Windows command shells, and custom shell templates are not supported. |
-| Environment files | Supported | `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`, including multiline values, are supported with bounded files and entries. Writes to `NODE_OPTIONS` and `GITHUB_*`/`RUNNER_*` variables are blocked. |
+| Environment files | Supported | `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`, including multiline values, are supported with bounded files and entries. `NODE_OPTIONS` remains blocked. Matching GitHub Runner behavior, actions may propagate `GITHUB_*` and `RUNNER_*` values to later `env` expressions; runtime-owned context values are overlaid with their canonical values when each step process launches. |
 | Workflow commands | Supported subset | `::add-mask`, `::stop-commands`, `::warning`, `::error`, `::group`, and `::endgroup` are supported. Groups flatten to linear Buildkite log sections. Debug and matcher commands are consumed without presentation behavior. `::notice`, command echo control, and other legacy commands are not supported. |
 | Step summaries | Supported | Summaries publish as bounded job-scoped Buildkite annotations. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped; the aggregate job summary is limited to 1 MiB. |
 | Local actions | Supported subset | Workspace actions are digest-locked and reverified. JavaScript, composite, and compiler-verified Dockerfile runtimes are supported; other action runtimes are not. |
 | Anonymous public GitHub actions | Supported subset | Sources are anonymously resolved to exact commits, complete trees are digest-verified, and JavaScript/composite/Dockerfile runtime rules still apply. Private actions and actions that require unavailable GitHub services are not supported merely because source resolution succeeds. |
-| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes, pre/main/post lifecycle, inputs, outputs, state, and LIFO post ordering are supported. Other Node action runtime declarations are not. |
+| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes, pre/main/post lifecycle, inputs, outputs, state, LIFO post ordering, and the standard cache-v2 environment are supported. Other Node action runtime declarations are not. |
 | Composite actions | Supported subset | Nested shell/action steps, outputs, and global pre/main/post ordering are supported. Composite `run` steps must select `bash` or `sh`. |
-| Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. Lifecycle overrides, arbitrary Docker options, credentials, volumes, private images, and privileged execution are not supported. |
+| Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
 | `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and shallow fetch are supported. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
 | `actions/upload-artifact` | Supported subset | Only the audited v4 commit is adapted. It supports bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
-| Other GitHub service-backed actions | Not supported | Except for the integrations listed above, no general GitHub artifact, cache, OIDC, Packages, Releases, Checks, or deployment service emulation is provided. An otherwise supported action runtime may still fail if its code requires one of those services. |
+| Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
+| Other GitHub service-backed actions | Not supported | Except for the integrations listed above, no general GitHub artifact, OIDC, Packages, Releases, Checks, or deployment service emulation is provided. An otherwise supported action runtime may still fail if its code requires one of those services. |
 
 ### Repositories, credentials, and platforms
 
@@ -118,9 +119,9 @@ service.
 | --- | --- | --- |
 | Public GitHub repositories | Supported subset | Public event-repository checkout and anonymous public GitHub actions are supported. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
 | Private repositories | Supported subset | The event repository can be checked out when Buildkite supplies repository-provider Git credentials to the job and its backend authorizes the concrete repository URL. Alternate repositories, private actions, and private reusable workflows are not supported. |
-| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. It is not injected as an ambient environment variable. |
+| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. The runtime does not inject it into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
-| `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and ambient `GITHUB_TOKEN` remain unavailable. An explicitly supplied action input, including an empty value, suppresses its metadata default. |
+| `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` remain unavailable. An action may explicitly export its input as `GITHUB_TOKEN` for later steps through `GITHUB_ENV`; an explicitly supplied action input, including an empty value, suppresses its metadata default. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
 | Windows and macOS | Not supported | Runner labels fail validation. Linux arm64 is also outside the current Linux x86-64 distribution/runtime contract. |
 | GitHub-hosted image parity | Not supported | Accepted Ubuntu labels do not promise GitHub's installed tools, image updates, filesystem layout, or service configuration. The selected Buildkite agents must provide the workflow's external tools. |
@@ -315,10 +316,11 @@ containing it are scrubbed.
 An explicit `secrets.GITHUB_TOKEN` reference continues to resolve through the
 scoped-token contract. For compatible actions, `github.token` is additionally
 populated only while evaluating an effective metadata input default; it remains
-unavailable to workflow-authored expressions. The token is not an ambient
-`GITHUB_TOKEN` environment variable. Other secrets still use the existing
-explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary and are not enabled by this
-feature.
+unavailable to workflow-authored expressions. The runtime does not inject an
+ambient `GITHUB_TOKEN`, but an action can explicitly export the token to later
+steps through `GITHUB_ENV`, matching GitHub Runner file-command behavior. Other
+secrets still use the existing explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary
+and are not enabled by this feature.
 
 This job-bound service does not independently establish fork or actor trust.
 Pipelines that permit workflow changes from untrusted sources must apply the
@@ -356,33 +358,42 @@ mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
 fabricated. Exact-commit Buildkite build 270 and its independent artifact
 observation prove the producer-to-two-consumer roundtrip contract.
 
-### Cache v6 uses the standard cache-v2 protocol
+### Actions use the standard cache-v2 protocol
 
-The cache integration recognizes only
+The explicit cache-action integration recognizes only
 `actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9` (v6.1.0), including
 the `restore` and `save` entry points from that same immutable source tree.
 Older majors and every other commit fail closed. Unlike the artifact actions,
 the runtime does not replace the upstream implementation: it executes the
 audited action's stock Node 24 ESM lifecycle and supplies the standard
-cache-v2 environment only to that verified action invocation.
+cache-v2 environment to the action.
 
-Before each pre, main, or post phase that runs, the runtime posts an empty body
-to the current job's
+Before each JavaScript pre, main, or post phase and each Docker action that
+runs, the runtime attempts to post an empty body to the current job's
 `/v3/jobs/<BUILDKITE_JOB_ID>/ghac_tokens` Agent API endpoint using the ambient
 `BUILDKITE_AGENT_ACCESS_TOKEN`. The returned short-lived token is registered
 with both the local log scrubber and `buildkite-agent redactor add` before the
-action starts. A fresh token is minted for post-save rather than retaining a
-main-phase credential. The runtime exposes only `ACTIONS_CACHE_SERVICE_V2`,
-`ACTIONS_RESULTS_URL`, and `ACTIONS_RUNTIME_TOKEN` to the cache action; it does
-not forward the Agent job token, persist cache credentials into job state, or
-expose them to ordinary actions. Credential-bearing phases also discard
-workflow-controlled legacy cache URLs, Node/process injection settings, TLS
-and OpenSSL configuration/module overrides, tar and dynamic-loader controls,
-and upper- or lower-case proxy settings before overlaying the runtime-owned
-service values. Cache subprocesses use the fixed
+action starts. A fresh token is minted for each invocation rather than
+retaining a broad job credential. The runtime exposes only
+`ACTIONS_CACHE_SERVICE_V2`, `ACTIONS_RESULTS_URL`, and
+`ACTIONS_RUNTIME_TOKEN`; it does not forward the Agent job token, persist cache
+credentials into job state, or expose them to ordinary `run` steps or native
+adapters. Workflow-controlled cache service variables are discarded before
+the runtime-owned values are overlaid.
+
+The audited `actions/cache` integration remains stricter than a general action
+invocation: credential or redaction failure stops it before its JavaScript
+executes. It additionally discards Node/process injection settings, TLS and
+OpenSSL configuration/module overrides, tar and dynamic-loader controls, and
+upper- or lower-case proxy settings. Its subprocesses use the fixed
 `/usr/local/bin:/usr/bin:/bin` tool path rather than workflow `PATH` changes. If
-a credential appears in a phase's command-file effects, those effects are
-discarded and the phase fails.
+a credential appears in any action's command-file effects, those effects are
+discarded and the action fails. Other JavaScript and Docker actions receive the
+same cache-v2 environment when credentials can be minted, allowing embedded
+clients such as `actions/setup-go` to use their normal cache lifecycle. If the
+cache service is unavailable, those general actions continue without the
+cache environment so an incidental cache does not make unrelated action
+execution fail.
 
 The runtime uses the official `https://ghacs.buildkite.com/` Results service by
 default. Operators can set `BUILDKITE_GHA_CACHE_URL` to override it with another
@@ -392,9 +403,10 @@ must have GHAC token minting enabled, and jobs must be able to reach both the
 Results service and the Agent API.
 The service-issued token scopes cache access to the current organization and
 pipeline, grants writes only for an authorized ref, and limits cross-repository
-pull requests to the read-only default-branch scope. Disabled minting, malformed
-responses, redirects, unsafe override configuration, or failed redaction stop
-the cache action before its JavaScript executes.
+pull requests to the read-only default-branch scope. For the explicit audited
+cache action, disabled minting, malformed responses, redirects, unsafe override
+configuration, or failed redaction stop the action before its JavaScript
+executes.
 
 This implemented and admitted contract has hosted runtime evidence. The
 then-combined advanced migration POC in [Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)

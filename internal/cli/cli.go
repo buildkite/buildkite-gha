@@ -221,16 +221,19 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
-	if cacheRequired {
+	if cacheRequired || len(job.Actions) > 0 {
 		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
 			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
 			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
 		})
-		if err != nil {
+		if err != nil && cacheRequired {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache v6 service: %v\n", err)
 			return 1
+		}
+		if err != nil {
+			cacheCredentials = nil
 		}
 	}
 	var workflowTokens gharuntime.WorkflowTokenProvider

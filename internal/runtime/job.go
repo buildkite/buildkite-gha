@@ -135,14 +135,33 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
-	if job.HasCapability("provider-token-write") {
-		if r.Redactor == nil {
-			return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+	providerTokenRequired := job.HasCapability("provider-token-write")
+	cacheRequired := false
+	for _, lock := range job.Actions {
+		if usesCacheService(lock) {
+			cacheRequired = true
+			break
 		}
-		var err error
-		r.Redactor, err = resolveAgentRedactorBeforeWorkflow(r.Redactor)
-		if err != nil {
-			return JobResult{}, err
+	}
+	if providerTokenRequired || r.Cache != nil {
+		if r.Redactor == nil {
+			if providerTokenRequired {
+				return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+			}
+			if cacheRequired {
+				return JobResult{}, fmt.Errorf("actions/cache requires the Buildkite Agent redactor")
+			}
+			r.Cache = nil
+		} else {
+			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
+			if err != nil {
+				if providerTokenRequired || cacheRequired {
+					return JobResult{}, err
+				}
+				r.Cache = nil
+			} else {
+				r.Redactor = resolved
+			}
 		}
 	}
 	if len(job.Dependencies) != 0 && len(job.Needs) == 0 {
@@ -327,7 +346,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		eval.Services = backend.servicePorts
 		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
 	}
-	jobResult.Env = mergeStepEnvironment(standardEnvironment(job, workspace, runnerTemp), jobEnv)
+	runtimeEnv := standardEnvironment(job, workspace, runnerTemp)
+	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
 	if r.jobContainer != nil && !explicitJobPATH {
 		jobResult.Env["PATH"] = r.jobContainer.imagePATH
 	}
@@ -374,7 +394,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			if entry := actions.locks[step.Action.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
 				continue
 			}
-			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), jobResult.Env, eval, &posts, actions, prepared, &preStatus, nil)
+			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
+			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, eval, &posts, actions, prepared, &preStatus, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -434,7 +455,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		jobEnv := cloneStrings(jobResult.Env)
+		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 		evalSnapshot := cloneExpressionContext(eval)
 		if step.Background {
 			step := step
@@ -723,12 +744,33 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp string) map[string]
 func mergeStepEnvironment(base map[string]string, overlays ...map[string]string) map[string]string {
 	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
 	for name, value := range base {
-		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "RUNNER_") {
+		if isRuntimeContextEnvironment(name) {
 			out[name] = value
 		}
 	}
 	return out
+}
+
+func isRuntimeContextEnvironment(name string) bool {
+	// GITHUB_ACTION_PATH is invocation-scoped and overlaid by action runtimes,
+	// not protected for ordinary top-level steps.
+	switch name {
+	case "GITHUB_ACTIONS",
+		"GITHUB_ACTOR",
+		"GITHUB_EVENT_NAME",
+		"GITHUB_JOB",
+		"GITHUB_REF",
+		"GITHUB_REPOSITORY",
+		"GITHUB_SERVER_URL",
+		"GITHUB_SHA",
+		"GITHUB_WORKSPACE",
+		"RUNNER_OS",
+		"RUNNER_TEMP",
+		"RUNNER_TOOL_CACHE":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
@@ -985,7 +1027,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			stepEnv, compositeEvalErr = evaluateMap(step.Env, eval)
 		}
 		eval.Inputs = inputs
-		compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 		for i, childStep := range action.Runs.Steps {
 			if childStep.Uses == "" {
 				continue
@@ -995,9 +1038,9 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				return result, fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses)
 			}
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
-			childEnv := mergeStepEnvironment(compositeEnv, result.Env)
-			eval.Env = childEnv
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childEnv, eval, posts, actions, prepared, status, compositeEvalErr)
+			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
+			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, compositeEvalErr)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
@@ -1241,14 +1284,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	eval.Steps = make(map[string]map[string]string)
 	eval.StepStatuses = make(map[string]expression.StepStatus)
 	statuses := eval.StepStatuses
-	compositeEnv := mergeStepEnvironment(jobEnv, stepEnv)
-	compositeEnv["GITHUB_ACTION_PATH"] = actionPath
+	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
+	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
+	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 	var runErr error
 	for i, step := range action.Runs.Steps {
 		// GITHUB_ENV effects are visible to subsequent children. Keep this
 		// composite's invocation environment in expression contexts, while
 		// rebuilding the map so a child's declared env cannot leak to siblings.
-		eval.Env = mergeStringMaps(compositeEnv, result.Env)
+		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
 		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.If, condition)
@@ -1265,7 +1309,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		}
 		stepResult := newResult()
 		childErr := error(nil)
-		childJobEnv := mergeStepEnvironment(compositeEnv, result.Env)
+		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
 		if step.Uses != "" {
 			// runActionStep owns template evaluation for an action invocation.
