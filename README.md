@@ -9,10 +9,11 @@ runtime. Buildkite remains the source of truth for scheduling, logs, retries,
 cancellation, and the build UI.
 
 > [!IMPORTANT]
-> This is an experimental v0.2 preview for **Linux x86-64 workflows**. The
+> This is an experimental pre-1.0 preview for **Linux x86-64 workflows**. The
 > default remains public and tokenless. Direct upload has an explicit,
 > fail-closed private-checkout preview for the pipeline's exact repository;
-> private actions and workflow-visible protected credentials remain rejected.
+> private actions and workflow secrets other than the explicitly scoped
+> `secrets.GITHUB_TOKEN` contract remain rejected.
 
 ## Try an existing workflow
 
@@ -25,23 +26,23 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.2:
+      - github-actions#v0.4.4:
           workflow: .github/workflows/ci.yml
 ```
 
-The pinned released plugin downloads and verifies `buildkite-gha` v0.2.3 by
-default, derives the event context from the Buildkite build, and uploads the
-generated jobs to the fixed `hosted` queue. Pin a released plugin version rather
-than a floating branch. Source builds containing the default-agent-targeting
-change omit agent selectors when invoked directly; the plugin path will inherit
-configured defaults only after a release bundles that CLI behavior. In those
-builds, jobs that can execute JavaScript reuse mise 2026.5.12 or newer from
-`PATH` or the absolute path in `BUILDKITE_GHA_MISE`; when neither provides a
-compatible version, the runtime downloads and verifies a managed 2026.5.12
-copy. Hosted Agents use their attached cache; other environments fall back to
-an ephemeral cache when that path is unavailable. Shell-only jobs and action
-jobs whose resolved trees contain only shell steps, native adapters, or Docker
-do not require or install mise.
+The pinned released plugin downloads and verifies `buildkite-gha` v0.4.2 by
+default, derives the event context from the Buildkite build, and explicitly
+targets the fixed `hosted` queue. Pin a released plugin version rather than a
+floating branch. The current source CLI instead omits agent selectors by
+default, so direct uploads inherit Buildkite's configured agent targeting unless
+`BUILDKITE_GHA_TARGET_QUEUE` selects one queue explicitly. Jobs that can execute
+JavaScript reuse mise 2026.5.12 or newer from `PATH` or the absolute path in
+`BUILDKITE_GHA_MISE`; when neither provides a compatible version, the runtime
+downloads and verifies a managed 2026.5.12 copy. Hosted Agents use their
+attached cache; other environments fall back to an ephemeral cache when that
+path is unavailable. Shell-only jobs and action jobs whose resolved trees
+contain only shell steps, native adapters, or Docker do not require or install
+mise.
 
 Configure branch, tag, and pull request triggers in Buildkite. The plugin
 derives a `pull_request` context for pull request builds and a `push` context
@@ -59,7 +60,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.2.2:
+      - github-actions#v0.4.4:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -101,7 +102,10 @@ artifacts, retries, and cancellation behavior.
 
 ## Is my workflow a fit?
 
-The plugin path currently supports:
+The [support matrix](docs/compatibility.md#support-matrix) is the authoritative
+list of supported, partially supported, not-admitted, and unsupported GitHub
+Actions behavior. As a quick screen, the plugin path is a good fit for
+workflows built from:
 
 - Linux Bash and `sh` steps;
 - JavaScript, composite, local, and anonymous public actions;
@@ -109,13 +113,9 @@ The plugin path currently supports:
 - static matrices, ordinary `needs` and outputs, and local reusable workflows
   with statically resolved inputs, caller-visible results, and directly mapped
   declared outputs;
-- statically resolvable workflow and job `concurrency` groups, translated to
-  repository-scoped Buildkite queues and whole-workflow concurrency gates;
-  workflow-level literal `cancel-in-progress: true` is accepted with a warning
-  because cancellation must be configured in Buildkite pipeline settings;
 - the documented job and step condition subset, with unsupported functions and
   unavailable runtime contexts rejected before pipeline upload;
-- background, wait, cancellation, and parallel step controls;
+- GitHub Actions background, wait, cancellation, and parallel step controls;
 - timeouts, `continue-on-error`, masking, summaries, warning/error annotations,
   and pre/main/post actions;
 - public, credential-free checkout of the event repository at its exact commit;
@@ -126,17 +126,21 @@ The plugin path currently supports:
 - the audited `actions/cache` v6.1.0 commit through the official Buildkite
   cache-v2 Results service, with an optional operator override.
 
-It does **not** currently support:
+It is not currently a fit for workflows that require:
 
 - private actions or general private-source access; direct upload has only the
   explicit pipeline-repository checkout described in the compatibility guide;
-- workflow secrets other than the scoped `GITHUB_TOKEN`, `github.token`,
-  GitHub-compatible OIDC, or protected queues;
+- ordinary workflow secrets—the scoped `secrets.GITHUB_TOKEN` contract is the
+  only workflow-visible secret exception;
+- `github.token`, ambient `GITHUB_TOKEN`, GitHub-compatible OIDC, or protected
+  queues;
 - `actions/cache` v4/v5 or unrecognized v6 commits, artifact
   merge/all/pattern/ID modes, or cross-run downloads;
 - runtime condition access to the `github.event` payload, or condition
   functions and contexts outside the documented subset;
 - job containers or service containers through the production plugin path;
+- GitHub matrix fail-fast semantics—the complete static matrix is uploaded and
+  sibling jobs are not canceled after one entry fails;
 - compound or literal local reusable-workflow output mappings and reusable-call
   conditions;
 - job-level or expression-valued `concurrency.cancel-in-progress`,

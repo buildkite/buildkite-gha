@@ -8,8 +8,9 @@ Target repository: `buildkite/buildkite-gha`
 > This is the active product and implementation plan. It records future UX,
 > implementation detail, delivery evidence, and deferred decisions together.
 > For behavior users can rely on today, start with the [README](../../README.md)
-> and [compatibility guide](../compatibility.md). A planned example is not a
-> support promise until it is reflected in those user-facing docs.
+> and the compatibility guide's canonical [support
+> matrix](../compatibility.md#support-matrix). A planned example is not a support
+> promise until it is reflected in those user-facing docs.
 
 ## Summary
 
@@ -1044,14 +1045,15 @@ again at credential exchange. Runtime enforcement must never treat a plan's
 self-declared event, trust classification, signature, or capability list as
 sufficient authority.
 
-When GitHub is the repository provider, populate `github.token` and
+For the future general capability path, populate `github.token` or ambient
 `GITHUB_TOKEN` only from a repository- and permission-scoped GitHub App
-installation token brokered for the authenticated job. This approximates but
-does not duplicate native `GITHUB_TOKEN`: app identity, endpoint support,
-expiration, and event-recursion behavior can differ and must be documented. Do
-not invent a token or silently grant write access. Validation must identify
-actions and expressions requiring a provider token when no compatible grant can
-be issued.
+installation token brokered for the authenticated job. The current narrow
+exception populates only an explicit `secrets.GITHUB_TOKEN` reference; the other
+two forms remain unsupported. This approximates but does not duplicate native
+`GITHUB_TOKEN`: app identity, endpoint support, expiration, and event-recursion
+behavior can differ and must be documented. Do not invent a token or silently
+grant write access. Validation must identify actions and expressions requiring
+a provider token when no compatible grant can be issued.
 
 ### Installation and release model
 
@@ -1200,6 +1202,10 @@ findings are machine-readable through `--format json`.
 
 ## Initial support target
 
+This is the remaining beta target, not a statement of current production
+support. The [support matrix](../compatibility.md#support-matrix) records the
+implemented and admitted surface today.
+
 The first externally useful beta should support:
 
 - Linux x86-64 on a compatible Hosted Agent image;
@@ -1226,8 +1232,10 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - GitHub Enterprise Server;
 - all repository event types;
 - remote private reusable workflows;
-- private checkout and private actions;
-- protected secrets and GitHub token issuance;
+- private checkout beyond the explicit read-only pipeline-repository exception,
+  and all private actions;
+- protected secrets and GitHub authority beyond the scoped
+  `secrets.GITHUB_TOKEN` exception;
 - dynamic matrices and other runtime graph generation;
 - job-level replacement;
 - deployment environments and approval parity;
@@ -1235,10 +1243,11 @@ Explicitly defer from beta unless implementation evidence changes the order:
 - provider API compatibility for arbitrary GitHub-mutating actions; and
 - a first-class Buildkite pipeline import schema.
 
-These deferrals cover the credential-returning Phase 6 slices. The preceding
-signed no-op grant proof remains a required security foundation, but does not
-make private source, secret, or provider-token delivery an initial beta gate.
-Cursor Origin public checkout remains a separate provider integration gate.
+These deferrals cover the remaining general credential-returning Phase 6
+slices beyond the two narrow exceptions above. The preceding signed no-op grant
+proof remains a required security foundation, but does not make broader private
+source, secret, or provider-token delivery an initial beta gate. Cursor Origin
+public checkout remains a separate provider integration gate.
 
 ## Delivery plan
 
@@ -1294,10 +1303,11 @@ Cursor Origin public checkout remains a separate provider integration gate.
   before workflow code and resolve compatibility versions through `mise
   --no-config`.
   This path remains `EventUntrusted`, uses Buildkite's configured default agent
-  targeting, and accepts no capability, `network`, or the Phase 5
-  compiler-proven Dockerfile-action provenance. Operators remain responsible
-  for selecting suitably isolated agents for untrusted workflow code.
-  Private remote action or repository source, provider tokens, secrets, job- or
+  targeting, and admits only `network`, compiler-proven Dockerfile-action
+  provenance, the scoped workflow-token contract, and the explicitly enabled
+  private-checkout exception. Operators remain responsible for selecting
+  suitably isolated agents for untrusted workflow code. Private remote action
+  source, alternate repository source, ordinary secrets, job- or
   service-container provenance, privileged queues, and other protected
   capabilities fail closed.
   Because this repository is private, the historical live evidence is split:
@@ -1391,7 +1401,8 @@ Cursor Origin public checkout remains a separate provider integration gate.
   slice 1 and delivery slice 2. Cursor Origin public checkout still requires a
   provider context/source contract. Delivery slice 3—the OIDC-authenticated,
   policy-checked, signed no-op grant—is the next control-plane slice; the
-  credential-returning slices remain deferred from the initial beta.
+  remaining general credential-returning slices remain deferred from the
+  initial beta.
 - The first work wave is integrated: the Go/CLI foundation is runnable,
   ADR 0001 records the actionlint/act reuse boundary, and ADR 0002 plus schemas
   and eight conformance cases preserve the Phase 0 signed-envelope transport
@@ -2118,8 +2129,9 @@ Start with `testdata/smoke` rather than an external workflow catalog:
 - `ci.yml` adds a pinned checkout action plus repository-owned JavaScript and
   composite actions, including masking, state, summaries, post-actions, and
   environment propagation; and
-- `artifact.yml` is dormant until Phase 6, when it proves upload/download
-  compatibility and content preservation across jobs; and
+- `artifact.yml` is `runtime-pass`: exact-commit Buildkite build 270 and an
+  independent artifact observation proved upload/download compatibility and
+  content preservation across one producer and two matrix consumers; and
 - `testdata/phase6/.github/workflows/cache-v6.yml` preserves the exact audited
   cache-v2 admission contract and the targeted build-unique miss, post-save,
   and dependent exact-hit shape as compile-only conformance coverage. The
@@ -2279,10 +2291,11 @@ The project is not globally blocked on the protected-capability control plane.
 The public, tokenless product path is substantial enough to harden and demo
 while the signed no-op grant proof waits for a named platform owner and the
 interfaces required by [ADR 0003](../architecture/0003-protected-capability-control-plane.md).
-Private actions and reusable workflows, workflow-visible provider tokens,
-secrets, environments, and compatible OIDC remain fail-closed during that work.
-The explicit private-checkout exception is limited to fixed read-only Git use
-for the pipeline repository and does not relax those deferrals.
+Private actions and reusable workflows, workflow-visible provider tokens and
+secrets beyond the scoped `secrets.GITHUB_TOKEN` exception, environments, and
+compatible OIDC remain fail-closed during that work. The explicit
+private-checkout exception is limited to fixed read-only Git use for the
+pipeline repository. Neither narrow exception relaxes the other deferrals.
 
 The complete published installation experience is now proven. The initial CLI
 and companion plugin `v0.2.0` releases remain the subject of the repository's
@@ -2366,14 +2379,15 @@ This milestone does not by itself satisfy every public-beta gate. The initial
 support target still names manual-input event envelopes plus job and service
 containers that the production plugin does not expose or admit. The release
 gate also currently requires signed, repeatable Hosted and self-hosted
-installation even though the implemented preview is checksummed and fixed to a
-Hosted runtime queue. Those are explicit scope decisions: either implement and
-prove them or deliberately revise the beta contract before claiming the
-initial support target is complete. A production cache endpoint and several
-customer migrations beyond the first `mcncl/gotyper` proof are also still
-outstanding. The signed no-op capability grant remains a parallel
-security-foundation item, not permission to block or weaken the service-free
-demo.
+installation even though the released production plugin is checksummed and
+explicitly targets the Hosted queue. The current source CLI instead inherits
+Buildkite's configured agent targeting by default. Those are explicit scope
+decisions: either implement and prove them or deliberately revise the beta
+contract before claiming the initial support target is complete. A production
+cache endpoint and several customer migrations beyond the first
+`mcncl/gotyper` proof are also still outstanding. The signed no-op capability
+grant remains a parallel security-foundation item, not permission to block or
+weaken the service-free demo.
 
 ## Release gates
 
@@ -2555,16 +2569,18 @@ them in the phase that first needs the capability:
    using Buildkite defaults must independently provide suitable whole-job
    isolation. Phases 6 and 9 still own authorization and queue policy for
    protected Docker capabilities and privileged workloads.
-6. Phase 6 will define the GitHub App installation-token compatibility contract
-   for `github.token` and `GITHUB_TOKEN`, including repository/permission
-   narrowing and documented differences from native Actions tokens. The
-   runtime-internal `contents:read` checkout credential does not define that
-   workflow-visible contract; tokenless workflows remain the default.
+6. The narrow workflow-visible token contract is now defined for explicit
+   `secrets.GITHUB_TOKEN` references with non-empty permission maps and exact
+   event-repository binding. `github.token`, ambient `GITHUB_TOKEN`, broader
+   provider authority, and event-provenance policy remain Phase 6 work. The
+   runtime-internal `contents:read` checkout credential remains separate;
+   tokenless workflows remain the default.
 
-## Recommended first product milestone
+## Historical first product milestone (landed)
 
-Do not begin by implementing every workflow keyword. Build a vertical slice
-that proves the product boundary:
+This vertical slice established the product boundary and is retained as context
+for the implemented sequencing. Current behavior is defined by the [support
+matrix](../compatibility.md#support-matrix).
 
 1. A Buildkite bootstrap job runs `buildkite-gha upload` on
    `testdata/smoke/.github/workflows/ci.yml` materialized as the fixture
@@ -2574,8 +2590,9 @@ that proves the product boundary:
 4. It publishes a bounded output, which the second job consumes through its
    producer-attributed result manifest.
 5. The runtime separately uploads and downloads a Buildkite-native diagnostic
-   artifact to prove job transport; GHA artifact-action compatibility remains a
-   Phase 6 deliverable.
+   artifact to prove job transport. The later Phase 6 slices added the bounded
+   `actions/upload-artifact` and exact-name `actions/download-artifact`
+   adapters now listed in the support matrix.
 6. Both jobs stream masked logs and display action warnings and summaries in
    Buildkite.
 7. A native Buildkite job depends on the imported workflow and succeeds.
