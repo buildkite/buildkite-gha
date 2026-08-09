@@ -87,7 +87,8 @@ type Runtime string
 const (
 	// MaxNestedActionDepth bounds local action expansion in both compilation and execution.
 	MaxNestedActionDepth = 10
-	// RuntimeNode20 executes a JavaScript action with managed Node 20.
+	// RuntimeNode20 identifies the accepted node20 action declaration. Matching
+	// GitHub-hosted runners, Runtime maps it to the managed Node 24 runtime.
 	RuntimeNode20 Runtime = "node20"
 	// RuntimeNode24 executes a JavaScript action with managed Node 24.
 	RuntimeNode24 Runtime = "node24"
@@ -279,7 +280,7 @@ func mappingKeyNode(node *yaml.Node, name string) *yaml.Node {
 func (metadata Metadata) Runtime() (Runtime, error) {
 	switch metadata.Runs.Using {
 	case string(RuntimeNode20):
-		return RuntimeNode20, nil
+		return RuntimeNode24, nil
 	case string(RuntimeNode24):
 		return RuntimeNode24, nil
 	case string(RuntimeComposite):

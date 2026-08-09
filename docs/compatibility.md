@@ -101,7 +101,7 @@ service.
 | Step summaries | Supported | Summaries publish as bounded job-scoped Buildkite annotations. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped; the aggregate job summary is limited to 1 MiB. |
 | Local actions | Supported subset | Workspace actions are digest-locked and reverified. JavaScript, composite, and compiler-verified Dockerfile runtimes are supported; other action runtimes are not. |
 | Anonymous public GitHub actions | Supported subset | Sources are anonymously resolved to exact commits, complete trees are digest-verified, and JavaScript/composite/Dockerfile runtime rules still apply. Private actions and actions that require unavailable GitHub services are not supported merely because source resolution succeeds. |
-| JavaScript actions | Supported | Managed, digest-verified Node 20 and 24 runtimes, pre/main/post lifecycle, inputs, outputs, state, LIFO post ordering, and the standard cache-v2 environment are supported. Other Node action runtime declarations are not. |
+| JavaScript actions | Supported | `node20` and `node24` declarations run on the managed, digest-verified Node 24 runtime, matching GitHub-hosted runners' current Node 20 deprecation behavior. The temporary `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` opt-out is not supported. Pre/main/post lifecycle, inputs, outputs, state, LIFO post ordering, and the standard cache-v2 environment are supported. Other Node action runtime declarations are not. |
 | Composite actions | Supported subset | Nested shell/action steps, outputs, and global pre/main/post ordering are supported. Composite `run` steps must select `bash` or `sh`. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or anonymous public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
@@ -474,9 +474,9 @@ there before execution, so the shared cache remains an accelerator rather than
 executable authority. An explicit `BUILDKITE_GHA_MISE` must be absolute and
 compatible rather than silently falling back. The runtime resolves and
 validates the executable before workflow code can modify `PATH`, then uses it
-with repository configuration disabled to install exact Node 20.20.2 or
-24.18.0 releases. Those Node binaries require glibc 2.28 or newer; the static
-Go CLI does not. Shell-only jobs and action jobs whose resolved trees contain
+with repository configuration disabled to install the exact Node 24.18.0
+release. That Node binary requires glibc 2.28 or newer; the static Go CLI does
+not. Shell-only jobs and action jobs whose resolved trees contain
 only shell steps, native adapters, or Docker do not require or install mise.
 Importers, `validate`, and `compile` do not require or install mise either.
 

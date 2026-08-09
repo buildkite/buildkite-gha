@@ -1504,7 +1504,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: lazy container action\n")
 	actionSource := t.TempDir()
-	actionYAML := "name: lazy\nruns:\n  using: node24\n  main: main.js\n"
+	actionYAML := "name: lazy\nruns:\n  using: node20\n  main: main.js\n"
 	mainJS := `require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "lazy=ready\n")
 `
 	writeFixtureFile(t, actionSource, "action.yml", actionYAML)
@@ -1525,9 +1525,33 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
 	node20 := filepath.Join(t.TempDir(), "node20")
 	writeNodeExecutable(t, node20, 20)
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node20: node20, Node24: requireNode24(t)}).RunJob(context.Background(), job, workspace)
+	node24 := requireNode24(t)
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node20: node20, Node24: node24}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Outputs["lazy"] != "ready" {
 		t.Fatalf("lazy container action result = %#v, error = %v", result, err)
+	}
+	calls := f.calls(t)
+	createIndex := jobDockerCallIndex(calls, "create")
+	if createIndex < 0 {
+		t.Fatalf("Docker create absent: %#v", calls)
+	}
+	createArgs := calls[createIndex].Args
+	if !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") {
+		t.Fatalf("lazy node20 declaration mounts = %#v", createArgs)
+	}
+	seenLifecycleExec := false
+	for _, call := range calls {
+		joined := strings.Join(call.Args, "\x00")
+		if !strings.Contains(joined, ContainerProcessHelperCommand+"\x00run") || !strings.Contains(joined, "/.github/actions/lazy/") {
+			continue
+		}
+		seenLifecycleExec = true
+		if !strings.Contains(joined, "/__buildkite-gha/node24") {
+			t.Fatalf("lazy node20 declaration did not execute with Node 24: %#v", call.Args)
+		}
+	}
+	if !seenLifecycleExec {
+		t.Fatalf("lazy node20 lifecycle exec absent: %#v", calls)
 	}
 }
 

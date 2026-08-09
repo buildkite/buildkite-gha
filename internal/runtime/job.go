@@ -916,7 +916,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 		}
 	}
 	if unknownWorkspaceRuntime && actions.job.NeedsMise() {
-		requiredNode[20], requiredNode[24] = true, true
+		requiredNode[24] = true
 	}
 	for _, major := range []int{20, 24} {
 		if !requiredNode[major] {
