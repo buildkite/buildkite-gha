@@ -1318,7 +1318,7 @@ runs:
 	}
 }
 
-func TestJavaScriptMainSeesPrePathEffects(t *testing.T) {
+func TestNode20DeclarationUsesNode24ForJavaScriptLifecycle(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
@@ -1332,17 +1332,17 @@ runs:
 	writeFixtureFile(t, workspace, ".github/actions/path/pre.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/path/main.js", "")
 	writeFixtureFile(t, workspace, ".github/actions/path/post.js", "")
-	fakeNode := filepath.Join(workspace, "node20")
-	writeFixtureFile(t, workspace, "node20", `#!/bin/sh
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then
-  echo v20.0.0
+  echo v24.0.0
   exit 0
 fi
 case "${1##*/}" in
   pre.js) printf '%s\n' "$PATH_ENTRY" >> "$GITHUB_PATH" ;;
   main.js) case ":$PATH:" in *":$PATH_ENTRY:"*) ;; *) exit 9 ;; esac ;;
-  post.js) printf 'NODE20_POST=true\n' >> "$GITHUB_ENV" ;;
+  post.js) printf 'NODE24_POST=true\n' >> "$GITHUB_ENV" ;;
 esac
 `)
 	if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -1352,15 +1352,15 @@ esac
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/path"}})
 	job.Env = map[string]string{"PATH_ENTRY": pathEntry}
 
-	result, err := (Runner{Node20: fakeNode}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Node24: fakeNode}).RunJob(context.Background(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
 	if result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v", result)
 	}
-	if result.Env["NODE20_POST"] != "true" {
-		t.Fatalf("RunJob() environment = %#v, want node20 post lifecycle effect", result.Env)
+	if result.Env["NODE24_POST"] != "true" {
+		t.Fatalf("RunJob() environment = %#v, want Node 24 post lifecycle effect", result.Env)
 	}
 }
 
@@ -3614,7 +3614,7 @@ inputs:
   message:
     required: true
 runs:
-  using: node24
+  using: node20
   main: main.js
 `)
 	writeFixtureFile(t, workspace, ".github/actions/js/main.js", "")
@@ -3765,8 +3765,12 @@ func TestRemoteActionPreHooksRunBeforeJobMainInDepthFirstOrder(t *testing.T) {
 	workflowPath := ".github/workflows/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: remote lifecycle ordering\n")
 	remote := t.TempDir()
-	for _, name := range []string{"first", "skipped", "second"} {
-		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	for i, name := range []string{"first", "skipped", "second"} {
+		using := "node24"
+		if i == 0 {
+			using = "node20"
+		}
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: "+using+"\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 		for _, phase := range []string{"pre", "main", "post"} {
 			writeFixtureFile(t, remote, name+"/"+phase+".js", "")
 		}
