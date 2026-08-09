@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -587,6 +588,94 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
+	}
+}
+
+func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *testing.T) {
+	const token = "ghs_job_scoped"
+	provider := &cliWorkflowTokenProvider{token: token}
+	redactor := &cliRedactor{}
+	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor}
+	option, err := authentication.option(context.Background(), "buildkite/buildkite-gha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if option == nil || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !slices.Equal(redactor.values, []string{token}) {
+		t.Fatalf("authentication = option %v, provider %#v, redactions %#v", option != nil, provider, redactor.values)
+	}
+
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path == "/repos/o/r" {
+			_, _ = io.WriteString(w, `{"private":false,"visibility":"public"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"sha":"0123456789abcdef0123456789abcdef01234567"}`)
+	}))
+	defer server.Close()
+	resolver, err := actionsource.NewResolver(server.Client(), option, actionsource.WithTestEndpoints(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := actionsource.Parse("o/r@0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 {
+		t.Fatalf("Resolve() error/requests = %v / %d", err, requests)
+	}
+
+	for _, test := range []struct {
+		name      string
+		provider  *cliWorkflowTokenProvider
+		redactor  *cliRedactor
+		cancelled bool
+	}{
+		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("unavailable")}, redactor: &cliRedactor{}},
+		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("unavailable")}},
+		{name: "cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, cancelled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			if test.cancelled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			option, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor}).option(ctx, "buildkite/buildkite-gha")
+			if test.cancelled {
+				if !errors.Is(err, context.Canceled) || option != nil {
+					t.Fatalf("option/error = %v / %v", option != nil, err)
+				}
+			} else if err != nil || option != nil {
+				t.Fatalf("option/error = %v / %v, want anonymous fallback", option != nil, err)
+			}
+		})
+	}
+}
+
+func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testing.T) {
+	t.Setenv("GH_TOKEN", "ignored")
+	t.Setenv("GITHUB_TOKEN", "ignored")
+	t.Setenv("BUILDKITE_GHA_GITHUB_TOKEN", "ignored")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
+	t.Setenv("BUILDKITE_JOB_ID", "")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
+	if authentication := jobScopedActionSourceAuthentication(); authentication != nil {
+		t.Fatal("ambient GitHub token configured action-source authentication")
+	}
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	if authentication := jobScopedActionSourceAuthentication(); authentication == nil {
+		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }
 
@@ -1692,6 +1781,31 @@ type cliCaptureRunner struct {
 	dataByPath     map[string][]byte
 	uploaded       map[string][]byte
 	contextErrors  []error
+}
+
+type cliWorkflowTokenProvider struct {
+	token       string
+	err         error
+	repository  string
+	permissions map[string]string
+	calls       int
+}
+
+func (p *cliWorkflowTokenProvider) WorkflowToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+	p.calls++
+	p.repository = repository
+	p.permissions = permissions
+	return p.token, p.err
+}
+
+type cliRedactor struct {
+	values []string
+	err    error
+}
+
+func (r *cliRedactor) AddRedaction(_ context.Context, value string) error {
+	r.values = append(r.values, value)
+	return r.err
 }
 
 func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {

@@ -918,7 +918,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "")
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", nil)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -1121,7 +1121,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue)
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, jobScopedActionSourceAuthentication())
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1178,7 +1178,47 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 	return &hostedTokenlessFailure{Kind: kind, Err: err}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string) (hostedTokenlessCompilation, error) {
+type actionSourceAuthentication struct {
+	provider gharuntime.WorkflowTokenProvider
+	redactor gharuntime.Redactor
+}
+
+func jobScopedActionSourceAuthentication() *actionSourceAuthentication {
+	provider, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
+		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:    os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+	})
+	if err != nil {
+		return nil
+	}
+	return &actionSourceAuthentication{
+		provider: provider,
+		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+	}
+}
+
+func (a *actionSourceAuthentication) option(ctx context.Context, repository string) (actionsource.Option, error) {
+	if a == nil {
+		return nil, nil
+	}
+	token, err := a.provider.WorkflowToken(ctx, repository, map[string]string{"contents": "read"})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+	if err := a.redactor.AddRedaction(ctx, token); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, nil
+	}
+	return actionsource.WithScopedGitHubToken(token, repository), nil
+}
+
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -1209,11 +1249,19 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
 		}
 		defer func() { _ = os.RemoveAll(actionRoot) }()
-		resolver, err := actionsource.NewResolver(nil)
+		var sourceOptions []actionsource.Option
+		authenticationOption, err := actionAuthentication.option(ctx, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name)
+		if err != nil {
+			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, err)
+		}
+		if authenticationOption != nil {
+			sourceOptions = append(sourceOptions, authenticationOption)
+		}
+		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
 		}
-		store, err := actionsource.NewStore(actionRoot, nil)
+		store, err := actionsource.NewStore(actionRoot, nil, sourceOptions...)
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
 		}
