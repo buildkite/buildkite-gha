@@ -125,6 +125,15 @@ steps:
           version: "2026.5.12"
     command: "mise run --jobs 1 check"
 
+  - label: ":github: OSS workflow compatibility"
+    key: "oss-workflow-corpus"
+    soft_fail: true
+    timeout_in_minutes: 10
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: "mise run corpus:oss-profile"
+
   - label: ":github: Exact-source plugin smoke"
     key: "plugin-source-smoke-importer"
     env:

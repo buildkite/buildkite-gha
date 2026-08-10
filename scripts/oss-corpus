@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo 'usage: scripts/oss-corpus [--profile] [case ...]' >&2
+}
+
+profile=false
+case_ids=()
+while (( $# > 0 )); do
+  case "$1" in
+    --profile) profile=true ;;
+    --help|-h) usage; exit 0 ;;
+    -*) usage; exit 2 ;;
+    *) case_ids+=("$1") ;;
+  esac
+  shift
+done
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root manifest="$root/testdata/oss/manifest.json"
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-oss-corpus.XXXXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+
+cd "$root"
+jq -e '
+  .schema == "buildkite-gha/oss-corpus/v3" and
+  (.cases | type == "array" and length > 0) and
+  all(.cases[];
+    (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+    (.repository | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
+    (.commit | test("^[0-9a-f]{40}$")) and
+    (.workflow | test("^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$")) and
+    (.workflow_sha256 | test("^[0-9a-f]{64}$")) and
+    (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
+    (.event | IN("push", "pull_request")) and
+    ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$")))) and
+  ([.cases[].id] | length == (unique | length))
+' "$manifest" >/dev/null
+
+if (( ${#case_ids[@]} == 0 )); then
+  mapfile -t case_ids < <(jq -r '.cases[].id' "$manifest")
+fi
+for id in "${case_ids[@]}"; do
+  jq -e --arg id "$id" 'any(.cases[]; .id == $id)' "$manifest" >/dev/null || {
+    echo "unknown corpus case: $id" >&2
+    exit 2
+  }
+done
+
+CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
+mode=compile
+desired=compilable
+validate_args=()
+if $profile; then
+  mode=profile
+  desired=admitted
+  validate_args=(--profile hosted-tokenless)
+fi
+summary="$work/summary.md"
+printf '### OSS workflow compatibility — %s\n\n' "$mode" > "$summary"
+passed=0
+blocked=0
+
+clean_env() {
+  env \
+    -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy -u no_proxy \
+    -u CURL_CA_BUNDLE -u SSL_CERT_FILE -u SSL_CERT_DIR \
+    -u GH_TOKEN -u GITHUB_TOKEN -u BUILDKITE_GHA_GITHUB_TOKEN \
+    "$@"
+}
+
+make_event() {
+  local repository=$1 commit=$2 branch=$3 event=$4 destination=$5
+  local owner=${repository%%/*} name=${repository#*/}
+  jq -n \
+    --arg owner "$owner" --arg name "$name" --arg sha "$commit" \
+    --arg branch "$branch" --arg event "$event" '
+    def clone_url: "https://github.com/" + $owner + "/" + $name + ".git";
+    def payload_repo: {
+      clone_url: clone_url,
+      full_name: ($owner + "/" + $name)
+    };
+    def repository: {
+      owner: $owner,
+      name: $name,
+      clone_url: clone_url,
+      default_branch: $branch
+    };
+    {
+      provider: "github",
+      event: $event,
+      repository: repository,
+      ref: (if $event == "pull_request" then "refs/pull/1/head" else "refs/heads/" + $branch end),
+      sha: $sha,
+      actor: "buildkite-gha-corpus",
+      payload: (if $event == "pull_request" then {
+        number: 1,
+        pull_request: {
+          number: 1,
+          head: {sha: $sha, ref: "corpus", repo: payload_repo},
+          base: {ref: $branch, repo: payload_repo}
+        }
+      } else {ref: ("refs/heads/" + $branch)} end)
+    }
+  ' > "$destination"
+}
+
+record_report() {
+  local id=$1 status=$2 output=$3 result codes graph icon
+  if result="$(jq -er '.result | select(type == "string")' "$output")"; then
+    codes="$(jq -r '[.diagnostics[]?.code] | unique | join(", ")' "$output")"
+    graph="$(jq -r 'if has("compile") then .compile else . end | "\(.logical_jobs // 0) jobs, \(.instances // 0) instances"' "$output")"
+  else
+    result=invalid-report
+    codes=E_REPORT
+    graph='0 jobs, 0 instances'
+  fi
+  if [[ "$status" == 0 && "$result" == "$desired" ]]; then
+    icon='✅'
+    passed=$((passed + 1))
+  else
+    icon='❌'
+    blocked=$((blocked + 1))
+  fi
+  echo "$icon $id: result=$result; $graph; diagnostics=${codes:-none}"
+  if [[ "$icon" == '❌' ]]; then
+    jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$output" >&2 || true
+  fi
+  if [[ -n "$codes" ]]; then
+    printf -- "- %s \`%s\`: \`%s\` — %s\n" "$icon" "$id" "$result" "$codes" >> "$summary"
+  else
+    printf -- "- %s \`%s\`: \`%s\`\n" "$icon" "$id" "$result" >> "$summary"
+  fi
+}
+
+for id in "${case_ids[@]}"; do
+  entry="$(jq -c --arg id "$id" '.cases[] | select(.id == $id)' "$manifest")"
+  repository="$(jq -r '.repository' <<<"$entry")"
+  commit="$(jq -r '.commit' <<<"$entry")"
+  workflow="$(jq -r '.workflow' <<<"$entry")"
+  workflow_sha256="$(jq -r '.workflow_sha256' <<<"$entry")"
+  branch="$(jq -r '.default_branch' <<<"$entry")"
+  event="$(jq -r '.event' <<<"$entry")"
+
+  case_root="$work/cases/$id"
+  workflow_path="$case_root/$workflow"
+  event_path="$work/$id.event.json"
+  mkdir -p "$(dirname "$workflow_path")"
+  clean_env curl -q --fail --silent --show-error --proto '=https' --tlsv1.2 \
+    --max-time 30 --max-filesize 1048576 --output "$workflow_path" \
+    "https://raw.githubusercontent.com/$repository/$commit/$workflow"
+  actual_sha256="$(sha256sum "$workflow_path" | cut -d' ' -f1)"
+  [[ "$actual_sha256" == "$workflow_sha256" ]] || {
+    echo "$id: workflow digest=$actual_sha256, want $workflow_sha256" >&2
+    exit 1
+  }
+  make_event "$repository" "$commit" "$branch" "$event" "$event_path"
+
+  status=0
+  report="$work/$id.$mode.json"
+  (
+    cd "$case_root"
+    clean_env "$work/buildkite-gha" validate "${validate_args[@]}" --format json \
+      --event-path "$event_path" "$workflow"
+  ) > "$report" || status=$?
+  record_report "$id" "$status" "$report"
+done
+
+printf '\n**%d passing; %d blocked.**\n' "$passed" "$blocked" >> "$summary"
+cat "$summary"
+if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
+  style=success
+  (( blocked > 0 )) && style=warning
+  buildkite-agent annotate --context "oss-workflow-corpus-$mode" --style "$style" < "$summary" || \
+    echo 'warning: failed to publish Buildkite annotation' >&2
+fi
+if $profile; then
+  echo 'CAVEAT: profile checks resolve actions but do not execute third-party code.'
+fi
+(( blocked == 0 ))

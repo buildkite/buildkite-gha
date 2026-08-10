@@ -2167,9 +2167,9 @@ terminal evidence, including failures, without changing those security or
 dependency boundaries. Keep the phase-specific selectors for focused reruns and
 fault isolation.
 
-### Initial checked-in corpus
+### Checked-in and external compatibility corpora
 
-Start with `testdata/smoke` rather than an external workflow catalog:
+The initial corpus remains `testdata/smoke`:
 
 - `shell.yml` proves the graph, static matrix, shell runtime, bounded job output,
   and downstream `needs` consumption;
@@ -2189,8 +2189,19 @@ Start with `testdata/smoke` rather than an external workflow catalog:
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression
-fixtures as behavior is implemented; do not introduce a general external-canary
-manifest until this corpus runs reliably.
+fixtures as behavior is implemented.
+
+The opt-in `testdata/oss` corpus complements those owned fixtures with unchanged
+workflows from exact public repository commits. `mise run corpus:oss` downloads
+only each raw workflow, verifies its pinned SHA-256, and reports which workflows
+compile. `mise run corpus:oss-profile` additionally resolves public actions and
+reports which workflows production `hosted-tokenless` policy admits. The
+Buildkite pipeline runs that profile as one soft-failing canary and annotates the
+per-case results; blocked cases remain visible without blocking other gates.
+Neither lane executes third-party code. External Hosted execution requires a
+separately reviewed allowlist, exact event and action locks, disposable
+isolation, and no workflow secrets or ambient provider credentials. The normal
+`mise run check` gate remains network-free.
 
 ### Unit and golden tests
 
