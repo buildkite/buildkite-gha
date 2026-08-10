@@ -1274,7 +1274,8 @@ printf 'NODE16_%s=true\n' "$(basename "$1" .js | tr '[:lower:]' '[:upper:]')" >>
 		t.Fatal(err)
 	}
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "javascript", Kind: "uses", Uses: "./.github/actions/node16"}})
-	result, err := (Runner{Node16: fakeNode}).RunJob(context.Background(), job, workspace)
+	var logs bytes.Buffer
+	result, err := (Runner{Node16: fakeNode, Stderr: &logs}).RunJob(context.Background(), job, workspace)
 	if err != nil {
 		t.Fatalf("RunJob() error = %v", err)
 	}
@@ -1282,6 +1283,64 @@ printf 'NODE16_%s=true\n' "$(basename "$1" .js | tr '[:lower:]' '[:upper:]')" >>
 		if result.Env["NODE16_"+phase] != "true" {
 			t.Fatalf("RunJob() environment = %#v, want node16 %s lifecycle effect", result.Env, phase)
 		}
+	}
+	warning := fmt.Sprintf(node16DeprecationMessage, "./.github/actions/node16")
+	if got := logs.String(); strings.Count(got, warning) != 1 {
+		t.Fatalf("RunJob() logs = %q, want one Node 16 lifecycle warning %q", got, warning)
+	}
+}
+
+func TestJavaScriptNode16WarningAggregatesActions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	for _, name := range []string{"alpha", "beta"} {
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/action.yml", "name: "+name+"\nruns:\n  using: node16\n  main: main.js\n")
+		writeFixtureFile(t, workspace, ".github/actions/"+name+"/main.js", "")
+	}
+	fakeNode := filepath.Join(workspace, "node16")
+	writeNodeExecutable(t, fakeNode, 16)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "beta", Kind: "uses", Uses: "./.github/actions/beta"},
+		{ID: "alpha", Kind: "uses", Uses: "./.github/actions/alpha"},
+		{ID: "alpha-again", Kind: "uses", Uses: "./.github/actions/alpha"},
+	})
+	var logs bytes.Buffer
+	result, err := (Runner{Node16: fakeNode, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	warning := fmt.Sprintf(node16DeprecationMessage, "./.github/actions/alpha, ./.github/actions/beta")
+	if got := logs.String(); strings.Count(got, warning) != 1 {
+		t.Fatalf("RunJob() logs = %q, want one aggregated Node 16 warning %q", got, warning)
+	}
+}
+
+func TestJavaScriptNode16WarningSurvivesStreamSuppression(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/node16/action.yml", "name: node16\nruns:\n  using: node16\n  main: main.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/node16/main.js", "")
+	fakeNode := filepath.Join(workspace, "node16")
+	writeFixtureFile(t, workspace, "node16", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v16.20.2; exit 0; fi
+head -c 1048577 /dev/zero | tr '\000' x
+printf '\n'
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "node16", Kind: "uses", Uses: "./.github/actions/node16"}})
+	var logs bytes.Buffer
+	_, err := (Runner{Node16: fakeNode, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "line exceeds 1048576-byte limit") {
+		t.Fatalf("RunJob() error = %v, want oversized-line failure", err)
+	}
+	warning := fmt.Sprintf(node16DeprecationMessage, "./.github/actions/node16")
+	if got := logs.String(); strings.Count(got, warning) != 1 {
+		t.Fatalf("RunJob() logs = %q, want one Node 16 warning after stream suppression %q", got, warning)
 	}
 }
 

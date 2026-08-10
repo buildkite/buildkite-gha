@@ -71,7 +71,8 @@ The plugin path currently supports:
 
 - Linux Bash and `sh` steps;
 - JavaScript actions using managed Node 16, 20, or 24, plus composite, local,
-  and anonymous public actions;
+  and anonymous public actions. Node 16 actions remain executable but emit an
+  end-of-job deprecation warning;
 - supported local and public Dockerfile actions;
 - `actions/cache` and actions using the GitHub Actions Cache v1 protocol when
   the experimental cache backend is enabled;

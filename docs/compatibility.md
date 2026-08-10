@@ -35,7 +35,7 @@ artifact, token, or OIDC service that this project does not provide.
 | Local reusable workflows | Supported when statically resolvable | Remote and runtime-dependent reusable workflows are deferred. |
 | Job and step conditions | Supported subset | Syntax is checked, but not every runtime function or context limitation is preflighted. Some unsupported expressions fail only when the job runs. |
 | Concurrent step controls | Supported | Includes `background`, `wait`, `wait-all`, `cancel`, and `parallel`. |
-| JavaScript actions | Supported | Managed, digest-verified Node 16, 20, and 24 runtimes are used. Node 16 is retained for actions such as `actions/cache@v3` that still declare `node16`. |
+| JavaScript actions | Supported | Managed, digest-verified Node 16, 20, and 24 runtimes are used. Node 16 is retained for actions such as `actions/cache@v3` that still declare `node16`; executed Node 16 actions are named in one end-of-job deprecation warning, matching GitHub Actions' historical migration behavior. |
 | Composite and local actions | Supported | Nested composites and global pre/main/post ordering are supported. |
 | Anonymous public actions | Supported | Sources are resolved to immutable commits and complete trees are verified. |
 | `actions/checkout` | Narrow support | Public `github.com` event repository, exact event SHA, workspace root, shallow credential-free fetch. |

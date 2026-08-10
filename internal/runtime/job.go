@@ -57,6 +57,38 @@ type remotePreparationStatus struct {
 	unsuccessful bool
 }
 
+const node16DeprecationMessage = "Node.js 16 actions are deprecated. Please update the following actions to use Node.js 20: %s. For more information see: https://github.blog/changelog/2023-09-22-github-actions-transitioning-from-node-16-to-node-20/."
+
+type node16DeprecationWarnings struct {
+	mu      sync.Mutex
+	actions map[string]struct{}
+}
+
+func (w *node16DeprecationWarnings) record(reference string) {
+	if w == nil || reference == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.actions == nil {
+		w.actions = make(map[string]struct{})
+	}
+	w.actions[reference] = struct{}{}
+}
+
+func (w *node16DeprecationWarnings) emit(processor *commandProcessor) {
+	if w == nil || processor == nil {
+		return
+	}
+	w.mu.Lock()
+	actions := sortedKeys(w.actions)
+	w.mu.Unlock()
+	if len(actions) == 0 {
+		return
+	}
+	processor.diagnostic("buildkite-gha: warning: " + fmt.Sprintf(node16DeprecationMessage, strings.Join(actions, ", ")))
+}
+
 func actionNodeMajor(runtime metadata.Runtime) (int, bool) {
 	switch runtime {
 	case metadata.RuntimeNode16:
@@ -121,6 +153,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return JobResult{}, fmt.Errorf("job has %d static dependencies but no hydrated prerequisite results", len(job.Dependencies))
 	}
 	processor := newCommandProcessor(r.stdout(), r.stderr())
+	r.node16Warnings = &node16DeprecationWarnings{}
+	defer r.node16Warnings.emit(processor)
 	eval := expression.Context{
 		Matrix:      job.Matrix,
 		Steps:       make(map[string]map[string]string, len(job.Steps)),
@@ -757,7 +791,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		}
 		major, _ := actionNodeMajor(runtime)
 		explicit := r.explicitNode(major)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, nodeMajor: major, reference: step.Uses}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -965,7 +999,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, nodeMajor: major}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, nodeMajor: major, reference: step.Uses}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {

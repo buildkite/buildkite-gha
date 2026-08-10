@@ -63,6 +63,7 @@ type Runner struct {
 	jobDocker         *jobContainerBackend
 	nodeVerification  *managedNodeVerification
 	nodeDigests       map[int]string
+	node16Warnings    *node16DeprecationWarnings
 }
 
 // CacheConfig supplies a cache backend session to RunJob. Identity (namespace
@@ -116,6 +117,7 @@ type JavaScriptAction struct {
 	Env    map[string]string
 
 	nodeMajor int
+	reference string
 }
 
 // DockerAction is an already-resolved local Docker action.
@@ -533,6 +535,9 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
+	if r.node16Warnings != nil && action.nodeMajor == 16 {
+		r.node16Warnings.record(action.reference)
+	}
 	if err := r.runProcess(ctx, processor, workspace, env, result, stateOut, name, args...); err != nil {
 		return fmt.Errorf("JavaScript action %q entry %q: %w", action.Name, entry, err)
 	}
@@ -1095,6 +1100,15 @@ func (p *commandProcessor) process(target io.Writer, line string) {
 		line = strings.ReplaceAll(line, mask, "***")
 	}
 	_, _ = fmt.Fprintln(target, line)
+}
+
+func (p *commandProcessor) diagnostic(line string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, mask := range p.masks {
+		line = strings.ReplaceAll(line, mask, "***")
+	}
+	_, _ = fmt.Fprintln(p.stderr, line)
 }
 
 func (p *commandProcessor) suppress() {
