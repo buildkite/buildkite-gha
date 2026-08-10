@@ -128,8 +128,20 @@ artifacts, retries, and cancellation behavior.
 
 The [support matrix](docs/compatibility.md#support-matrix) is the authoritative
 list of supported, partially supported, not-admitted, and unsupported GitHub
-Actions behavior. As a quick screen, the plugin path is a good fit for
-workflows built from:
+Actions behavior.
+
+During `upload`, an explicit `--event-path` has highest precedence. Otherwise
+the CLI reads Buildkite's reserved `buildkite:webhook` metadata once for the
+compile-time `github.event` object, falling back to a reduced-fidelity
+`BUILDKITE_*` snapshot only when Buildkite reports no available webhook
+association. Buildkite environment values always define the exact top-level
+repository, SHA, and ref being executed. Every source remains untrusted; raw
+webhook data cannot grant protected capabilities and is not retained in plans
+or pipeline YAML. Stored webhook data has no delivery headers, and GitHub push
+payloads may omit `commits`. See [Event snapshots](docs/compatibility.md#event-snapshots)
+for limits and failure behavior.
+
+As a quick screen, the plugin path is a good fit for workflows built from:
 
 - Linux Bash and `sh` steps;
 - JavaScript, composite, local, and anonymous public actions;
