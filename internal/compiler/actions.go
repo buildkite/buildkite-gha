@@ -67,6 +67,10 @@ type actionCompilation struct {
 	requiresGitHubToken bool
 }
 
+type actionRequirements struct {
+	githubToken bool
+}
+
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
 func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
@@ -112,11 +116,11 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	requiresGitHubToken := false
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			required, err := root.requiresGitHubToken(suppliedInputs[i])
+			requirements, err := root.inspectInvocation(suppliedInputs[i])
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
-			requiresGitHubToken = requiresGitHubToken || required
+			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
 		}
 	}
 	return actionCompilation{
@@ -198,24 +202,27 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) requiresGitHubToken(supplied map[string]string) (bool, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequirements, error) {
 	if n.native {
-		return false, nil
+		return actionRequirements{}, nil
 	}
-	required := false
+	var requirements actionRequirements
 	for _, name := range sortedKeys(n.metadata.Inputs) {
 		input := n.metadata.Inputs[name]
 		if input.Default == nil || hasActionInput(supplied, name) {
 			continue
 		}
+		if err := expression.ValidateRuntimeTemplate(*input.Default); err != nil {
+			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
+		}
 		referencesToken, err := expression.ReferencesGitHubToken(*input.Default)
 		if err != nil {
-			return false, fmt.Errorf("action input %q default: %w", name, err)
+			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
-		required = required || referencesToken
+		requirements.githubToken = requirements.githubToken || referencesToken
 	}
 	if n.runtime != metadata.RuntimeComposite {
-		return required, nil
+		return requirements, nil
 	}
 	for i, step := range n.metadata.Runs.Steps {
 		if step.Uses == "" {
@@ -223,15 +230,15 @@ func (n *actionNode) requiresGitHubToken(supplied map[string]string) (bool, erro
 		}
 		child := n.children[step.Uses]
 		if child == nil {
-			return false, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
+			return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 		}
-		childRequired, err := child.requiresGitHubToken(step.With)
+		childRequirements, err := child.inspectInvocation(step.With)
 		if err != nil {
-			return false, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
+			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
-		required = required || childRequired
+		requirements.githubToken = requirements.githubToken || childRequirements.githubToken
 	}
-	return required, nil
+	return requirements, nil
 }
 
 func hasActionInput(inputs map[string]string, name string) bool {

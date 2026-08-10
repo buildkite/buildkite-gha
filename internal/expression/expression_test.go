@@ -52,6 +52,50 @@ func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
+	for _, template := range []string{
+		"literal",
+		"${{ github.actor }}",
+		"${{ inputs.target }}",
+		"${{ matrix.version }}",
+		"${{ secrets.TOKEN }}",
+		"${{ vars.RELEASE }}",
+		"${{ env.PATH }}",
+		"${{ steps.build.outputs.release }}",
+		"${{ steps.build.outcome }}",
+		"${{ steps.build.conclusion }}",
+		"${{ needs.build.outputs.release }}",
+		"${{ needs.build.result }}",
+		"${{ job.services.redis.ports[6379] }}",
+		"prefix-${{ github.actor }}-${{ matrix.version }}",
+	} {
+		t.Run(template, func(t *testing.T) {
+			if err := ValidateRuntimeTemplate(template); err != nil {
+				t.Fatalf("ValidateRuntimeTemplate(%q) error = %v", template, err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", want: "requires a direct context reference"},
+		{template: "${{ hashFiles('go.sum') }}", want: "requires a direct context reference"},
+		{template: "${{ github }}", want: `unsupported runtime expression "github"`},
+		{template: "${{ steps.build.status }}", want: `unsupported runtime expression "steps.build.status"`},
+		{template: "${{ github[env.NAME] }}", want: "index must be a string literal"},
+		{template: "${{ true || }}", want: "invalid expression"},
+	} {
+		t.Run(test.template, func(t *testing.T) {
+			err := ValidateRuntimeTemplate(test.template)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
