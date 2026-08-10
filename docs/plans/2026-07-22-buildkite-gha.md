@@ -2167,9 +2167,9 @@ terminal evidence, including failures, without changing those security or
 dependency boundaries. Keep the phase-specific selectors for focused reruns and
 fault isolation.
 
-### Initial checked-in corpus
+### Checked-in and external compatibility corpora
 
-Start with `testdata/smoke` rather than an external workflow catalog:
+The initial corpus remains `testdata/smoke`:
 
 - `shell.yml` proves the graph, static matrix, shell runtime, bounded job output,
   and downstream `needs` consumption;
@@ -2189,8 +2189,18 @@ Start with `testdata/smoke` rather than an external workflow catalog:
 
 The fixture owns its event input, local actions, and expected observations. All
 external actions use immutable commits. Add narrow repository-owned regression
-fixtures as behavior is implemented; do not introduce a general external-canary
-manifest until this corpus runs reliably.
+fixtures as behavior is implemented.
+
+The opt-in `testdata/oss` corpus complements those owned fixtures with unchanged
+workflows from exact public repository commits. `mise run corpus:oss` fetches
+each source anonymously, verifies the workflow against its pinned Git blob,
+validates it, and compares two compilations byte-for-byte. Selected
+`mise run corpus:oss-profile -- <case>...` checks may additionally resolve
+public actions and apply production `hosted-tokenless` admission. Neither lane
+executes third-party action or repository code, and the normal `mise run check`
+gate remains network-free. External Hosted execution requires a separately
+reviewed allowlist, exact event and action locks, disposable isolation, and no
+workflow secrets or ambient provider credentials.
 
 ### Unit and golden tests
 
