@@ -173,3 +173,17 @@ func TestParseWebhookPayloadRejectsInvalidDocuments(t *testing.T) {
 		})
 	}
 }
+
+func TestParseWebhookPayloadPreservesEmptyArrays(t *testing.T) {
+	payload, err := parseWebhookPayload([]byte("{\"commits\":[],\"nested\":{\"requested_reviewers\":[]}}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != "{\"commits\":[],\"nested\":{\"requested_reviewers\":[]}}" {
+		t.Fatalf("encoded payload = %s", encoded)
+	}
+}

@@ -202,7 +202,7 @@ func decodeWebhookValue(decoder *json.Decoder) (any, error) {
 		}
 		return object, nil
 	case '[':
-		var array []any
+		array := []any{}
 		for decoder.More() {
 			value, err := decodeWebhookValue(decoder)
 			if err != nil {
