@@ -1,0 +1,205 @@
+{
+  "schema": "buildkite-gha/oss-corpus/v1",
+  "cases": [
+    {
+      "id": "urfave-cli-lint",
+      "repository": "urfave/cli",
+      "commit": "c6f4cf7e9223793478cfcde9b8f135cc8f86e78f",
+      "workflow": ".github/workflows/lint.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": "https://github.com/urfave/cli/actions/runs/29794452917",
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"golangci-lint\": compile action \"actions/setup-go@v7\": action input \"token\" default: .*unsupported expression reference$",
+        "warning_code": null
+      },
+      "runtime": "candidate-after-admission",
+      "note": "Common Go lint workflow; current setup-go token default uses an unsupported compound runtime expression."
+    },
+    {
+      "id": "fastify-markdown-lint",
+      "repository": "fastify/fastify",
+      "commit": "2e81c38bfede1858c3705c5a6f7753abd93019b3",
+      "workflow": ".github/workflows/md-lint.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": null,
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"build\": compile action \"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020\": action input \"token\" default: .*unsupported expression reference$",
+        "warning_code": null
+      },
+      "runtime": "candidate-after-admission",
+      "note": "Small Node lint workflow with immutable action refs; current setup-node token default uses an unsupported compound runtime expression."
+    },
+    {
+      "id": "prettier-lint",
+      "repository": "prettier/prettier",
+      "commit": "903845c7d16ce66dedd9d5ab4b858d233f48341a",
+      "workflow": ".github/workflows/lint.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": "https://github.com/prettier/prettier/actions/runs/31316608109",
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"lint\": compile action \"actions/setup-node@820762786026740c76f36085b0efc47a31fe5020\": action input \"token\" default: .*unsupported expression reference$",
+        "warning_code": null
+      },
+      "runtime": "deferred",
+      "note": "Substantial Yarn lint workflow covering concurrency and cache-aware setup-node; current setup-node token default blocks admission evaluation."
+    },
+    {
+      "id": "bat-changelog",
+      "repository": "sharkdp/bat",
+      "commit": "2ba8db9c14e5794572f5ea338c2b90404c9769cb",
+      "workflow": ".github/workflows/require-changelog-for-PRs.yml",
+      "default_branch": "master",
+      "event": "pull_request",
+      "github_run": null,
+      "expected": {
+        "compile": "compilable",
+        "profile": "admitted",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": null,
+        "diagnostic_pattern": null,
+        "warning_code": "W_ACTION_RUNTIME_UNKNOWN"
+      },
+      "runtime": "deferred",
+      "note": "Small admitted shell workflow; meaningful execution requires a real pull-request event and base revision rather than the structural preflight snapshot."
+    },
+    {
+      "id": "p-map-main",
+      "repository": "sindresorhus/p-map",
+      "commit": "bc26cf03f81292325236a1188063dac8e7a4de0f",
+      "workflow": ".github/workflows/main.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": "https://github.com/sindresorhus/p-map/actions/runs/29779845179",
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 2,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"test\": compile action \"actions/setup-node@v4\": action input \"token\" default: .*unsupported expression reference$",
+        "warning_code": null
+      },
+      "runtime": "deferred",
+      "note": "Minimal two-entry Node matrix; current setup-node token default blocks admission evaluation before its absent explicit permissions can be assessed."
+    },
+    {
+      "id": "fzf-linux",
+      "repository": "junegunn/fzf",
+      "commit": "715d26fa3949c9a0f1e41fcbda5440f3ac338e51",
+      "workflow": ".github/workflows/linux.yml",
+      "default_branch": "master",
+      "event": "push",
+      "github_run": "https://github.com/junegunn/fzf/actions/runs/31253573599",
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"build\": compile action \"actions/setup-go@v7\": action input \"token\" default: .*unsupported expression reference$",
+        "warning_code": null
+      },
+      "runtime": "deferred",
+      "note": "Cross-shell Go workflow blocked first by setup-go's unsupported compound token default; checkout also requests full history for the next compatibility review."
+    },
+    {
+      "id": "jq-valgrind",
+      "repository": "jqlang/jq",
+      "commit": "603db3f57741d217ba651e61086b550a72148b83",
+      "workflow": ".github/workflows/valgrind.yml",
+      "default_branch": "master",
+      "event": "push",
+      "github_run": "https://github.com/jqlang/jq/actions/runs/30182447884",
+      "expected": {
+        "compile": "compilable",
+        "profile": "indeterminate",
+        "logical_jobs": 1,
+        "instances": 1,
+        "diagnostic_code": "E_PROFILE_EVALUATION",
+        "diagnostic_pattern": "build plan for job \"linux\": compile action \"actions/upload-artifact@v7\": actions/upload-artifact native adapter supports only commit .*; Phase 6 is required$",
+        "warning_code": null
+      },
+      "runtime": "candidate-after-admission",
+      "note": "Compact autotools and Valgrind workflow blocked by an unaudited actions/upload-artifact v7 commit."
+    },
+    {
+      "id": "go-task-ci",
+      "repository": "go-task/task",
+      "commit": "d2b02e3c6994b17e6fe009fe9414e088b16a3c73",
+      "workflow": ".github/workflows/ci.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": "https://github.com/go-task/task/actions/runs/31330279154",
+      "expected": {
+        "compile": "incompatible",
+        "profile": "not-run",
+        "logical_jobs": null,
+        "instances": null,
+        "diagnostic_code": "E_COMPILE",
+        "diagnostic_pattern": "workflow concurrency group cannot be resolved at compile time: unsupported compile-time expression$",
+        "warning_code": null
+      },
+      "runtime": "unsupported",
+      "note": "Representative Go matrix rejected first by a compound concurrency expression and subsequently containing non-Linux matrix rows."
+    },
+    {
+      "id": "gum-build",
+      "repository": "charmbracelet/gum",
+      "commit": "716d8b5d0221558f944b5a078dbbcca8572534fb",
+      "workflow": ".github/workflows/build.yml",
+      "default_branch": "main",
+      "event": "push",
+      "github_run": null,
+      "expected": {
+        "compile": "incompatible",
+        "profile": "not-run",
+        "logical_jobs": null,
+        "instances": null,
+        "diagnostic_code": "E_COMPILE",
+        "diagnostic_pattern": "reusable-workflow secrets are runtime-dependent and unsupported$",
+        "warning_code": null
+      },
+      "runtime": "unsupported",
+      "note": "Concise negative case for a mutable remote reusable workflow with runtime-dependent secret forwarding."
+    },
+    {
+      "id": "just-ci",
+      "repository": "casey/just",
+      "commit": "4f41f609278edb6f1024e3dd7a9912946e1e7bc3",
+      "workflow": ".github/workflows/ci.yaml",
+      "default_branch": "master",
+      "event": "push",
+      "github_run": "https://github.com/casey/just/actions/runs/31140381397",
+      "expected": {
+        "compile": "incompatible",
+        "profile": "not-run",
+        "logical_jobs": null,
+        "instances": null,
+        "diagnostic_code": "E_COMPILE",
+        "diagnostic_pattern": "unsupported operating system runner label \"macos-latest\"$",
+        "warning_code": null
+      },
+      "runtime": "unsupported",
+      "note": "Small Rust graph with a static mixed Linux, macOS, and Windows runner matrix."
+    }
+  ]
+}

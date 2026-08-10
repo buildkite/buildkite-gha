@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/oss-corpus [--profile] [case ...]
+
+Without case names, compile every case. --profile requires one or more explicit
+case names and also applies hosted-tokenless admission preflight to those cases.
+EOF
+}
+
+profile=false
+case_ids=()
+while (( $# > 0 )); do
+  case "$1" in
+    --profile)
+      $profile && { usage; exit 2; }
+      profile=true
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    -*)
+      usage
+      exit 2
+      ;;
+    *)
+      case_ids+=("$1")
+      ;;
+  esac
+  shift
+done
+
+if $profile && (( ${#case_ids[@]} == 0 )); then
+  echo '--profile requires at least one explicit case name to bound anonymous GitHub API use' >&2
+  exit 2
+fi
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+readonly manifest="$root/testdata/oss/manifest.json"
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-oss-corpus.XXXXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+readonly git_home="$work/git-home"
+readonly git_xdg="$work/git-xdg"
+mkdir -m 700 "$git_home" "$git_xdg"
+
+cd "$root"
+[[ "$(jq --version)" == jq-1.8.2 ]] || { echo 'oss-corpus requires mise-pinned jq 1.8.2' >&2; exit 1; }
+
+jq -e '
+  keys == ["cases", "schema"] and
+  .schema == "buildkite-gha/oss-corpus/v1" and
+  (.cases | type == "array" and length >= 5 and length <= 10) and
+  all(.cases[];
+    keys == ["commit", "default_branch", "event", "expected", "github_run", "id", "note", "repository", "runtime", "workflow"] and
+    (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
+    (.repository | test("^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")) and
+    (.commit | test("^[0-9a-f]{40}$")) and
+    (.workflow | test("^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$") and (contains("..") | not)) and
+    (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
+    (.event | IN("push", "pull_request")) and
+    ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"))) and
+    (.expected | keys == ["compile", "diagnostic_code", "diagnostic_pattern", "instances", "logical_jobs", "profile", "warning_code"]) and
+    (.expected.compile | IN("compilable", "incompatible")) and
+    (.expected.profile | IN("admitted", "not-admitted", "indeterminate", "not-run")) and
+    ((.expected.logical_jobs == null) or (.expected.logical_jobs | type == "number" and . > 0 and floor == .)) and
+    ((.expected.instances == null) or (.expected.instances | type == "number" and . > 0 and floor == .)) and
+    ((.expected.diagnostic_code == null) or (.expected.diagnostic_code | test("^[A-Z][A-Z0-9_]+$"))) and
+    ((.expected.diagnostic_pattern == null) or (.expected.diagnostic_pattern | type == "string" and length > 0)) and
+    ((.expected.warning_code == null) or (.expected.warning_code | test("^W_[A-Z0-9_]+$"))) and
+    (.runtime | IN("candidate-after-admission", "deferred", "unsupported")) and
+    (.note | type == "string" and length > 0) and
+    (if .expected.compile == "incompatible" then
+       .expected.profile == "not-run" and .expected.logical_jobs == null and .expected.instances == null and
+       .expected.diagnostic_code == "E_COMPILE" and .expected.diagnostic_pattern != null
+     elif .expected.profile == "admitted" then
+       .expected.logical_jobs != null and .expected.instances != null and
+       .expected.diagnostic_code == null and .expected.diagnostic_pattern == null
+     else
+       .expected.logical_jobs != null and .expected.instances != null and
+       .expected.profile != "not-run" and .expected.diagnostic_code != null and .expected.diagnostic_pattern != null
+     end)) and
+  ([.cases[].id] | length == (unique | length)) and
+  ([.cases[] | [.repository, .commit, .workflow] | join("\u0000")] | length == (unique | length))
+' "$manifest" >/dev/null
+
+if (( ${#case_ids[@]} == 0 )); then
+  mapfile -t case_ids < <(jq -r '.cases[].id' "$manifest")
+fi
+
+declare -A seen=()
+for id in "${case_ids[@]}"; do
+  [[ "$id" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || { echo "invalid case name: $id" >&2; exit 2; }
+  [[ -z "${seen[$id]:-}" ]] || { echo "duplicate case name: $id" >&2; exit 2; }
+  seen[$id]=true
+  jq -e --arg id "$id" 'any(.cases[]; .id == $id)' "$manifest" >/dev/null || {
+    echo "unknown corpus case: $id" >&2
+    exit 2
+  }
+done
+
+CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
+
+git_command() {
+  local -a unset_environment=()
+  local name
+  while IFS= read -r name; do
+    case "$name" in
+      GIT_CONFIG_* | GIT_TRACE* | GIT_CURL_VERBOSE | GIT_ALTERNATE_OBJECT_DIRECTORIES | GIT_COMMON_DIR | \
+        GIT_DIR | GIT_INDEX_FILE | GIT_OBJECT_DIRECTORY | GIT_WORK_TREE | \
+        GIT_TEMPLATE_DIR | GIT_ASKPASS | SSH_ASKPASS | GIT_SSH | GIT_SSH_COMMAND | GIT_EXEC_PATH)
+        unset_environment+=(-u "$name")
+        ;;
+    esac
+  done < <(compgen -e)
+  env "${unset_environment[@]}" \
+    HOME="$git_home" \
+    XDG_CONFIG_HOME="$git_xdg" \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=/bin/false \
+    SSH_ASKPASS=/bin/false \
+    GIT_SSH_COMMAND='ssh -oBatchMode=yes' \
+    git -c credential.helper= -c http.extraheader= -c core.hooksPath=/dev/null "$@"
+}
+
+make_event() {
+  local repository=$1 commit=$2 default_branch=$3 event=$4 destination=$5
+  local owner=${repository%%/*} name=${repository#*/}
+  if [[ "$event" == pull_request ]]; then
+    jq -n \
+      --arg owner "$owner" --arg name "$name" --arg sha "$commit" --arg branch "$default_branch" \
+      '{
+        provider: "github",
+        event: "pull_request",
+        repository: {
+          owner: $owner,
+          name: $name,
+          clone_url: ("https://github.com/" + $owner + "/" + $name + ".git"),
+          default_branch: $branch
+        },
+        ref: "refs/pull/1/head",
+        sha: $sha,
+        actor: "buildkite-gha-corpus",
+        payload: {
+          number: 1,
+          pull_request: {
+            number: 1,
+            head: {
+              sha: $sha,
+              ref: "corpus",
+              repo: {
+                clone_url: ("https://github.com/" + $owner + "/" + $name + ".git"),
+                full_name: ($owner + "/" + $name)
+              }
+            },
+            base: {
+              ref: $branch,
+              repo: {
+                clone_url: ("https://github.com/" + $owner + "/" + $name + ".git"),
+                full_name: ($owner + "/" + $name)
+              }
+            }
+          }
+        }
+      }' > "$destination"
+  else
+    jq -n \
+      --arg owner "$owner" --arg name "$name" --arg sha "$commit" --arg branch "$default_branch" \
+      '{
+        provider: "github",
+        event: "push",
+        repository: {
+          owner: $owner,
+          name: $name,
+          clone_url: ("https://github.com/" + $owner + "/" + $name + ".git"),
+          default_branch: $branch
+        },
+        ref: ("refs/heads/" + $branch),
+        sha: $sha,
+        actor: "buildkite-gha-corpus",
+        payload: {ref: ("refs/heads/" + $branch)}
+      }' > "$destination"
+  fi
+}
+
+for id in "${case_ids[@]}"; do
+  entry="$(jq -c --arg id "$id" '.cases[] | select(.id == $id)' "$manifest")"
+  repository="$(jq -r '.repository' <<<"$entry")"
+  commit="$(jq -r '.commit' <<<"$entry")"
+  workflow="$(jq -r '.workflow' <<<"$entry")"
+  default_branch="$(jq -r '.default_branch' <<<"$entry")"
+  event="$(jq -r '.event' <<<"$entry")"
+  expected_compile="$(jq -r '.expected.compile' <<<"$entry")"
+  expected_profile="$(jq -r '.expected.profile' <<<"$entry")"
+  expected_jobs="$(jq -r '.expected.logical_jobs // 0' <<<"$entry")"
+  expected_instances="$(jq -r '.expected.instances // 0' <<<"$entry")"
+  expected_diagnostic="$(jq -r '.expected.diagnostic_code // ""' <<<"$entry")"
+  expected_pattern="$(jq -r '.expected.diagnostic_pattern // ""' <<<"$entry")"
+  expected_warning="$(jq -r '.expected.warning_code // ""' <<<"$entry")"
+  github_run="$(jq -r '.github_run // "none"' <<<"$entry")"
+  runtime="$(jq -r '.runtime' <<<"$entry")"
+
+  echo "$id: source=$repository@$commit workflow=$workflow github_run=$github_run runtime=$runtime"
+  repo="$work/repositories/$id"
+  mkdir -p "$repo"
+  git_command -C "$repo" init --quiet --template=
+  git_command -C "$repo" remote add origin "https://github.com/$repository.git"
+  git_command -C "$repo" fetch --quiet --no-tags --no-recurse-submodules --depth=1 origin "$commit"
+  git_command -C "$repo" checkout --quiet --detach "$commit"
+  [[ "$(git_command -C "$repo" rev-parse HEAD)" == "$commit" ]] || {
+    echo "$id: fetched commit does not match manifest" >&2
+    exit 1
+  }
+  [[ -f "$repo/$workflow" && ! -L "$repo/$workflow" ]] || {
+    echo "$id: workflow is missing, not regular, or a symbolic link: $workflow" >&2
+    exit 1
+  }
+
+  event_path="$work/$id.event.json"
+  make_event "$repository" "$commit" "$default_branch" "$event" "$event_path"
+
+  compile_status=0
+  (
+    cd "$repo"
+    "$work/buildkite-gha" validate --format json --event-path "$event_path" "$workflow"
+  ) > "$work/$id.compile.json" || compile_status=$?
+  jq -e --arg workflow "$workflow" '
+    .schema == "buildkite-gha/compatibility-report/v1" and .workflow == $workflow
+  ' "$work/$id.compile.json" >/dev/null || {
+    echo "$id: compile report identity is invalid" >&2
+    exit 1
+  }
+  actual_compile="$(jq -r '.result' "$work/$id.compile.json")"
+  [[ "$actual_compile" == "$expected_compile" ]] || {
+    echo "$id: compile result=$actual_compile, want $expected_compile" >&2
+    jq '.diagnostics' "$work/$id.compile.json" >&2
+    exit 1
+  }
+
+  if [[ "$expected_compile" == incompatible ]]; then
+    [[ "$compile_status" == 1 ]] || { echo "$id: incompatible validation exited $compile_status, want 1" >&2; exit 1; }
+    jq -e --arg code "$expected_diagnostic" --arg pattern "$expected_pattern" \
+      'any(.diagnostics[]; .code == $code and (.message | test($pattern)))' "$work/$id.compile.json" >/dev/null || {
+      echo "$id: missing expected diagnostic $expected_diagnostic matching $expected_pattern" >&2
+      exit 1
+    }
+    echo "$id: compile=expected-incompatible diagnostic=$expected_diagnostic profile=not-run"
+    continue
+  fi
+
+  [[ "$compile_status" == 0 ]] || { echo "$id: compilable validation exited $compile_status, want 0" >&2; exit 1; }
+  jq -e --argjson jobs "$expected_jobs" --argjson instances "$expected_instances" '
+    .logical_jobs == $jobs and .instances == $instances
+  ' "$work/$id.compile.json" >/dev/null || {
+    echo "$id: compile graph shape changed" >&2
+    exit 1
+  }
+  (
+    cd "$repo"
+    "$work/buildkite-gha" compile --event-path "$event_path" "$workflow"
+  ) > "$work/$id.first"
+  (
+    cd "$repo"
+    "$work/buildkite-gha" compile --event-path "$event_path" "$workflow"
+  ) > "$work/$id.second"
+  [[ -s "$work/$id.first" ]] || { echo "$id: compiled pipeline is empty" >&2; exit 1; }
+  cmp -s "$work/$id.first" "$work/$id.second" || { echo "$id: compiled pipeline is nondeterministic" >&2; exit 1; }
+  logical_jobs="$(jq -r '.logical_jobs' "$work/$id.compile.json")"
+  instances="$(jq -r '.instances' "$work/$id.compile.json")"
+  echo "$id: compile=pass deterministic=true logical_jobs=$logical_jobs instances=$instances"
+
+  $profile || continue
+  profile_status=0
+  (
+    cd "$repo"
+    "$work/buildkite-gha" validate --profile hosted-tokenless --format json \
+      --event-path "$event_path" "$workflow"
+  ) > "$work/$id.profile.json" || profile_status=$?
+  if jq -e 'any(.diagnostics[]?; .message | test("rate limit"; "i"))' "$work/$id.profile.json" >/dev/null; then
+    echo "$id: profile failed because the anonymous GitHub API limit was exhausted; retry after its reported reset" >&2
+    jq '.diagnostics' "$work/$id.profile.json" >&2
+    exit 1
+  fi
+  actual_profile="$(jq -r '.result' "$work/$id.profile.json")"
+  jq -e --arg workflow "$workflow" --argjson jobs "$expected_jobs" --argjson instances "$expected_instances" '
+    .schema == "buildkite-gha/compatibility-report/v2" and
+    .workflow == $workflow and .profile == "hosted-tokenless" and
+    .compile.result == "compilable" and
+    .compile.logical_jobs == $jobs and .compile.instances == $instances
+  ' "$work/$id.profile.json" >/dev/null || {
+    echo "$id: profile report identity or graph shape is invalid" >&2
+    exit 1
+  }
+  [[ "$actual_profile" == "$expected_profile" ]] || {
+    echo "$id: profile result=$actual_profile, want $expected_profile" >&2
+    jq '.diagnostics' "$work/$id.profile.json" >&2
+    exit 1
+  }
+  if [[ "$expected_profile" == admitted ]]; then
+    [[ "$profile_status" == 0 ]] || { echo "$id: admitted profile exited $profile_status, want 0" >&2; exit 1; }
+    jq -e '.compile.result == "compilable" and .admission.result == "admitted"' "$work/$id.profile.json" >/dev/null
+  else
+    [[ "$profile_status" == 1 ]] || { echo "$id: rejected profile exited $profile_status, want 1" >&2; exit 1; }
+    if [[ "$expected_profile" == indeterminate ]]; then
+      jq -e '.compile.result == "compilable" and .admission.result == "not-evaluated"' "$work/$id.profile.json" >/dev/null
+    else
+      jq -e '.compile.result == "compilable" and .admission.result == "not-admitted"' "$work/$id.profile.json" >/dev/null
+    fi
+    jq -e --arg code "$expected_diagnostic" --arg pattern "$expected_pattern" \
+      'any(.diagnostics[]; .code == $code and (.message | test($pattern)))' "$work/$id.profile.json" >/dev/null || {
+      echo "$id: missing expected profile diagnostic $expected_diagnostic matching $expected_pattern" >&2
+      exit 1
+    }
+  fi
+  if [[ -n "$expected_warning" ]]; then
+    jq -e --arg code "$expected_warning" 'any(.diagnostics[]; .level == "warning" and .code == $code)' \
+      "$work/$id.profile.json" >/dev/null || {
+      echo "$id: missing expected profile warning $expected_warning" >&2
+      exit 1
+    }
+  fi
+  echo "$id: profile=$actual_profile diagnostic=${expected_diagnostic:-none}"
+done
+
+echo "PASS: ${#case_ids[@]} pinned open-source workflow case(s) matched their compatibility classifications."
+if $profile; then
+  echo 'CAVEAT: profile admission resolves actions but does not execute action or repository code.'
+fi
