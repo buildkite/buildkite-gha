@@ -147,10 +147,17 @@ func ReferencePath(text string) (string, []string, error) {
 }
 
 // ValidateRuntimeTemplate verifies that every expression in a runtime template
-// has a reference shape supported by Evaluate. Runtime values are deliberately
-// not resolved because many contexts do not exist until a job or step runs.
+// has a shape supported by Evaluate. Runtime values are deliberately not
+// resolved because many contexts do not exist until a job or step runs.
 func ValidateRuntimeTemplate(template string) error {
-	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+	return visitTemplateExpressions(template, validateRuntimeNode)
+}
+
+func validateRuntimeNode(node actionlint.ExprNode) error {
+	switch node := node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
 		if err != nil {
 			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
@@ -159,7 +166,22 @@ func ValidateRuntimeTemplate(template string) error {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
-	})
+	case *actionlint.LogicalOpNode:
+		if err := validateRuntimeNode(node.Left); err != nil {
+			return err
+		}
+		return validateRuntimeNode(node.Right)
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return fmt.Errorf("runtime interpolation comparison %s is unsupported", node.Kind)
+		}
+		if err := validateRuntimeNode(node.Left); err != nil {
+			return err
+		}
+		return validateRuntimeNode(node.Right)
+	default:
+		return fmt.Errorf("runtime interpolation expression is unsupported")
+	}
 }
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
@@ -987,7 +1009,7 @@ func Evaluate(template string, context Context) (string, error) {
 			return "", fmt.Errorf("unterminated expression in %q", template)
 		}
 		end += start + len(open)
-		replacement, err := evaluateReference(strings.TrimSpace(remaining[start+len(open):end]), context)
+		replacement, err := evaluateRuntimeExpression(strings.TrimSpace(remaining[start+len(open):end]), context)
 		if err != nil {
 			return "", err
 		}
@@ -996,15 +1018,85 @@ func Evaluate(template string, context Context) (string, error) {
 	}
 }
 
-func evaluateReference(reference string, context Context) (string, error) {
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(reference + "}}"))
+func evaluateRuntimeExpression(source string, context Context) (string, error) {
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(source + "}}"))
 	if parseErr != nil {
 		return "", fmt.Errorf("invalid expression: %w", parseErr)
 	}
-	root, path, err := referencePath(node)
+	value, err := evaluateRuntimeNode(node, context)
 	if err != nil {
 		return "", err
 	}
+	switch value := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	default:
+		return fmt.Sprint(value), nil
+	}
+}
+
+func evaluateRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return nil, nil
+	case *actionlint.BoolNode:
+		return node.Value, nil
+	case *actionlint.IntNode:
+		return node.Value, nil
+	case *actionlint.FloatNode:
+		return node.Value, nil
+	case *actionlint.StringNode:
+		return node.Value, nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return nil, err
+		}
+		return resolveRuntimeReference(root, path, context)
+	case *actionlint.LogicalOpNode:
+		left, err := evaluateRuntimeNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		if node.Kind == actionlint.LogicalOpNodeKindAnd {
+			if !conditionTruthy(left) {
+				return left, nil
+			}
+			return evaluateRuntimeNode(node.Right, context)
+		}
+		if conditionTruthy(left) {
+			return left, nil
+		}
+		return evaluateRuntimeNode(node.Right, context)
+	case *actionlint.CompareOpNode:
+		left, err := evaluateRuntimeNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		right, err := evaluateRuntimeNode(node.Right, context)
+		if err != nil {
+			return nil, err
+		}
+		equal, err := conditionEqual(left, right)
+		if err != nil {
+			return nil, err
+		}
+		switch node.Kind {
+		case actionlint.CompareOpNodeKindEq:
+			return equal, nil
+		case actionlint.CompareOpNodeKindNotEq:
+			return !equal, nil
+		default:
+			return nil, fmt.Errorf("runtime interpolation comparison %s is unsupported", node.Kind)
+		}
+	default:
+		return nil, fmt.Errorf("runtime interpolation expression is unsupported")
+	}
+}
+
+func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
 	switch classifyRuntimeReference(root, path) {
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
@@ -1013,13 +1105,13 @@ func evaluateReference(reference string, context Context) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 		}
-		return fmt.Sprint(value), nil
+		return value, nil
 	case runtimeReferenceInput:
 		return findString(context.Inputs, path[0]), nil
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
-				return fmt.Sprint(value), nil
+				return value, nil
 			}
 		}
 		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
@@ -1062,7 +1154,7 @@ func evaluateReference(reference string, context Context) (string, error) {
 		}
 		return "", fmt.Errorf("expression references unavailable need %q", path[0])
 	default:
-		return "", fmt.Errorf("unsupported expression %q", reference)
+		return nil, fmt.Errorf("unsupported expression %q", referenceName(root, path))
 	}
 }
 

@@ -411,7 +411,7 @@ jobs:
 	})
 }
 
-func TestUploadRejectsUnsupportedEffectiveActionInputDefaultBeforeBuildkiteCalls(t *testing.T) {
+func TestUploadAcceptsConditionalActionInputDefault(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "complex-default")
@@ -421,7 +421,7 @@ func TestUploadRejectsUnsupportedEffectiveActionInputDefaultBeforeBuildkiteCalls
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/complex-default\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: push\npermissions:\n  contents: read\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/complex-default\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte(`name: complex default
@@ -443,16 +443,11 @@ runs:
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	for _, want := range []string{`compile action "./.github/actions/complex-default"`, `action input "token" default`, "requires a direct context reference"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
-		}
-	}
-	if len(runner.commands) != 0 {
-		t.Fatalf("unsupported action default made Buildkite calls: %#v", runner.commands)
+	if len(runner.commands) == 0 {
+		t.Fatal("conditional action default did not upload a pipeline")
 	}
 }
 

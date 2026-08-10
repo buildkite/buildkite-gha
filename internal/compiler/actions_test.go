@@ -213,7 +213,7 @@ runs:
 		{name: "explicit empty input", ref: "./token", supplied: map[string]string{"github_token": ""}},
 		{name: "case-insensitive explicit input", ref: "./token", supplied: map[string]string{"GITHUB_TOKEN": "explicit"}},
 		{name: "unrelated GitHub default", ref: "./actor"},
-		{name: "unsupported complex default", ref: "./complex", wantErr: `compile action "./complex": action input "token" default: runtime interpolation requires a direct context reference`},
+		{name: "conditional token default", ref: "./complex", want: true},
 		{name: "explicit input bypasses default", ref: "./complex", supplied: map[string]string{"token": ""}},
 		{name: "dynamic GitHub index", ref: "./dynamic", wantErr: "index must be a string literal"},
 		{name: "token before dynamic GitHub index", ref: "./mixed", wantErr: "index must be a string literal"},
@@ -236,7 +236,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsValidatesResolvedRemoteDefaults(t *testing.T) {
+func TestCompileActionInvocationsAcceptsResolvedRemoteConditionalDefaults(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", `name: complex remote default
 inputs:
@@ -247,9 +247,12 @@ runs:
   main: index.js
 `)
 	actionSource := &fakeActionSource{root: remote, calls: map[string]int{}}
-	_, err := compileActionInvocations(context.Background(), workspace, actionSource, []string{"owner/action@v1"}, []map[string]string{nil})
-	if err == nil || !strings.Contains(err.Error(), `compile action "owner/action@v1": action input "token" default`) || !strings.Contains(err.Error(), "requires a direct context reference") {
-		t.Fatalf("compileActionInvocations() error = %v, want resolved remote default rejection", err)
+	compiled, err := compileActionInvocations(context.Background(), workspace, actionSource, []string{"owner/action@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compiled.requiresGitHubToken {
+		t.Fatal("conditional remote action default did not require a GitHub token")
 	}
 	if actionSource.calls["owner/action@v1"] != 1 {
 		t.Fatalf("remote action resolutions = %#v, want one", actionSource.calls)

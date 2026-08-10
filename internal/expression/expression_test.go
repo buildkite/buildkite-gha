@@ -67,6 +67,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"${{ needs.build.outputs.release }}",
 		"${{ needs.build.result }}",
 		"${{ job.services.redis.ports[6379] }}",
+		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
 		"prefix-${{ github.actor }}-${{ matrix.version }}",
 	} {
 		t.Run(template, func(t *testing.T) {
@@ -80,8 +81,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		template string
 		want     string
 	}{
-		{template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", want: "requires a direct context reference"},
-		{template: "${{ hashFiles('go.sum') }}", want: "requires a direct context reference"},
+		{template: "${{ hashFiles('go.sum') }}", want: "expression is unsupported"},
 		{template: "${{ github }}", want: `unsupported runtime expression "github"`},
 		{template: "${{ steps.build.status }}", want: `unsupported runtime expression "steps.build.status"`},
 		{template: "${{ github[env.NAME] }}", want: "index must be a string literal"},
@@ -96,11 +96,39 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
+func TestEvaluateSupportsConditionalValueExpressions(t *testing.T) {
+	template := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
+	for _, test := range []struct {
+		name    string
+		github  map[string]any
+		want    string
+		wantErr string
+	}{
+		{name: "GitHub.com token", github: map[string]any{"server_url": "https://github.com", "token": "ghs_scoped"}, want: "ghs_scoped"},
+		{name: "case insensitive URL", github: map[string]any{"server_url": "HTTPS://GITHUB.COM", "token": "ghs_scoped"}, want: "ghs_scoped"},
+		{name: "GHES empty token", github: map[string]any{"server_url": "https://github.example.com"}},
+		{name: "GitHub.com missing token", github: map[string]any{"server_url": "https://github.com"}, wantErr: `unavailable github value "token"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := Evaluate(template, Context{GitHub: test.github})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Evaluate() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("Evaluate() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
 		Inputs:       map[string]string{"value": literal},
-		Matrix:       map[string]any{"value": literal, "secret": "reevaluated"},
+		Matrix:       map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
 		Steps:        map[string]map[string]string{"producer": {"value": literal}},
 		StepStatuses: map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success"}},
 		Needs:        map[string]map[string]string{"producer": {"value": literal}},
@@ -114,6 +142,7 @@ func TestEvaluateIsSinglePass(t *testing.T) {
 		"${{ steps.Producer.conclusion }}":    "success",
 		"${{ needs.Producer.outputs.value }}": literal,
 		"${{ needs.Producer.result }}":        "success",
+		"${{ matrix.number }}":                "1e3",
 		"before ${{ inputs.value }} after":    "before " + literal + " after",
 	}
 	for template, want := range tests {

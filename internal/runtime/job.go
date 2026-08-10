@@ -720,6 +720,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":        job.Event.SHA,
 		"actor":      job.Event.Actor,
 		"event_name": job.Event.Name,
+		"server_url": "https://github.com",
 	}
 }
 
