@@ -32,23 +32,28 @@ Run the networked compile corpus with:
 mise run corpus:oss
 ```
 
-This checks each expected compile classification, graph size, and diagnostic
-code without resolving actions. Seven cases also retain a successful upstream
-GitHub run at the exact source SHA as a future comparison reference. Compiler
-determinism remains covered by the repository-owned smoke fixtures.
+This prints every result, reports a passing/blocked summary, and exits non-zero
+while any workflow is not compilable. Seven cases also retain a successful
+upstream GitHub run at the exact source SHA as a future comparison reference.
+Compiler determinism remains covered by the repository-owned smoke fixtures.
 
-Profile checks resolve public actions and are explicit and case-selective to
-bound GitHub API use:
+The profile scan resolves public actions and treats only admitted workflows as
+passing:
 
 ```sh
-mise run corpus:oss-profile -- bat-changelog
-mise run corpus:oss-profile -- fzf-linux jq-valgrind
+mise run corpus:oss-profile
+mise run corpus:oss-profile -- bat-changelog jq-valgrind
 ```
 
 The profile applies the same `hosted-tokenless` admission policy as production,
 but still does not execute action or repository code. Mutable action tags remain
 as declared upstream, so these checks are observational: runtime comparisons
 must separately retain immutable resolved action locks.
+
+The Buildkite pipeline runs the full profile scan as one soft-failing step. It
+publishes a build annotation listing each admitted or blocked case and its
+diagnostic codes. The step remains visibly soft-failed without blocking the
+pipeline until the corpus is fully admitted.
 
 Actual Hosted execution must use a separately reviewed allowlist, an exact
 event/source commit, disposable whole-job isolation, and no workflow secrets or

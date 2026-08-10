@@ -1,5 +1,5 @@
 {
-  "schema": "buildkite-gha/oss-corpus/v2",
+  "schema": "buildkite-gha/oss-corpus/v3",
   "cases": [
     {
       "id": "urfave-cli-lint",
@@ -9,8 +9,7 @@
       "workflow_sha256": "baf2be9c09968049a86dcbd412263fbc9a1c55ecf191e3cf32b982e730d8735d",
       "default_branch": "main",
       "event": "push",
-      "github_run": "https://github.com/urfave/cli/actions/runs/29794452917",
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 1, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": "https://github.com/urfave/cli/actions/runs/29794452917"
     },
     {
       "id": "fastify-markdown-lint",
@@ -20,8 +19,7 @@
       "workflow_sha256": "1df71d89b1ce8a22025539d35760db833c4c7a182d0e0eac417d95d8420f2cee",
       "default_branch": "main",
       "event": "push",
-      "github_run": null,
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 1, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": null
     },
     {
       "id": "prettier-lint",
@@ -31,8 +29,7 @@
       "workflow_sha256": "5dc390993993c78f9d3419e30584dc53fd96a4aa13bf4c1b3ef66b5188f0f37a",
       "default_branch": "main",
       "event": "push",
-      "github_run": "https://github.com/prettier/prettier/actions/runs/31316608109",
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 1, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": "https://github.com/prettier/prettier/actions/runs/31316608109"
     },
     {
       "id": "bat-changelog",
@@ -42,8 +39,7 @@
       "workflow_sha256": "31f33b596fbced2e8b1291bcda024ffc2300b3c1c27cc66df19dbce37c3acbb5",
       "default_branch": "master",
       "event": "pull_request",
-      "github_run": null,
-      "expected": {"compile": "compilable", "profile": "admitted", "logical_jobs": 1, "instances": 1, "diagnostic_code": null}
+      "github_run": null
     },
     {
       "id": "p-map-main",
@@ -53,8 +49,7 @@
       "workflow_sha256": "031b54ee811aa1b0c37d55033238c65c5f8748723533fde6451bca8c63fc52f4",
       "default_branch": "main",
       "event": "push",
-      "github_run": "https://github.com/sindresorhus/p-map/actions/runs/29779845179",
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 2, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": "https://github.com/sindresorhus/p-map/actions/runs/29779845179"
     },
     {
       "id": "fzf-linux",
@@ -64,8 +59,7 @@
       "workflow_sha256": "d1ade49ed341892b7afa6ee637e24e4c96cecd684783d5896dd01851b9993f01",
       "default_branch": "master",
       "event": "push",
-      "github_run": "https://github.com/junegunn/fzf/actions/runs/31253573599",
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 1, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": "https://github.com/junegunn/fzf/actions/runs/31253573599"
     },
     {
       "id": "jq-valgrind",
@@ -75,8 +69,7 @@
       "workflow_sha256": "c23fec5e67550d3317752a3dca375655aa9aaaa31b2defb8f45470f041782c7f",
       "default_branch": "master",
       "event": "push",
-      "github_run": "https://github.com/jqlang/jq/actions/runs/30182447884",
-      "expected": {"compile": "compilable", "profile": "indeterminate", "logical_jobs": 1, "instances": 1, "diagnostic_code": "E_PROFILE_EVALUATION"}
+      "github_run": "https://github.com/jqlang/jq/actions/runs/30182447884"
     },
     {
       "id": "go-task-ci",
@@ -86,8 +79,7 @@
       "workflow_sha256": "b5d4c9a1ad505c6211f390930187ce73ccb1e4aa0c5dedf015c51fd1eff9ed62",
       "default_branch": "main",
       "event": "push",
-      "github_run": "https://github.com/go-task/task/actions/runs/31330279154",
-      "expected": {"compile": "incompatible", "profile": "not-run", "logical_jobs": null, "instances": null, "diagnostic_code": "E_COMPILE"}
+      "github_run": "https://github.com/go-task/task/actions/runs/31330279154"
     },
     {
       "id": "gum-build",
@@ -97,8 +89,7 @@
       "workflow_sha256": "5baf39a2fc8d1b68db30e5e1caecfb2daf796585af03dc308b802c8d4a69ca00",
       "default_branch": "main",
       "event": "push",
-      "github_run": null,
-      "expected": {"compile": "incompatible", "profile": "not-run", "logical_jobs": null, "instances": null, "diagnostic_code": "E_COMPILE"}
+      "github_run": null
     },
     {
       "id": "just-ci",
@@ -108,8 +99,7 @@
       "workflow_sha256": "c5d6d37a6565ca2abaa3a66e30b25a0d32ec89a2b426b2d802723df88068bafc",
       "default_branch": "master",
       "event": "push",
-      "github_run": "https://github.com/casey/just/actions/runs/31140381397",
-      "expected": {"compile": "incompatible", "profile": "not-run", "logical_jobs": null, "instances": null, "diagnostic_code": "E_COMPILE"}
+      "github_run": "https://github.com/casey/just/actions/runs/31140381397"
     }
   ]
 }

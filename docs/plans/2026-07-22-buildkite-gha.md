@@ -2193,14 +2193,15 @@ fixtures as behavior is implemented.
 
 The opt-in `testdata/oss` corpus complements those owned fixtures with unchanged
 workflows from exact public repository commits. `mise run corpus:oss` downloads
-only each raw workflow, verifies its pinned SHA-256, and checks its expected
-compile result and graph size. Selected `mise run corpus:oss-profile --
-<case>...` checks may additionally resolve public actions and apply production
-`hosted-tokenless` admission. Neither lane executes third-party code. External
-Hosted execution requires a separately reviewed allowlist, exact event and
-action locks, disposable isolation, and no workflow secrets or ambient provider
-credentials. Both corpus commands are opt-in; the normal `mise run check` gate
-remains network-free.
+only each raw workflow, verifies its pinned SHA-256, and reports which workflows
+compile. `mise run corpus:oss-profile` additionally resolves public actions and
+reports which workflows production `hosted-tokenless` policy admits. The
+Buildkite pipeline runs that profile as one soft-failing canary and annotates the
+per-case results; blocked cases remain visible without blocking other gates.
+Neither lane executes third-party code. External Hosted execution requires a
+separately reviewed allowlist, exact event and action locks, disposable
+isolation, and no workflow secrets or ambient provider credentials. The normal
+`mise run check` gate remains network-free.
 
 ### Unit and golden tests
 

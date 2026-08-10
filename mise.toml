@@ -63,11 +63,11 @@ description = "Resolve actions and apply the hosted-tokenless profile to smoke f
 run = "./scripts/smoke-local --profile hosted-tokenless"
 
 [tasks."corpus:oss"]
-description = "Fetch and deterministically compile the pinned open-source workflow corpus"
+description = "Report compile compatibility for the pinned open-source workflow corpus"
 run = "./scripts/oss-corpus"
 
 [tasks."corpus:oss-profile"]
-description = "Apply hosted-tokenless preflight to explicitly selected open-source corpus cases"
+description = "Report hosted-tokenless admission for the pinned open-source workflow corpus"
 run = "./scripts/oss-corpus --profile"
 
 [tasks.check]

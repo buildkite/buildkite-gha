@@ -16,10 +16,6 @@ while (( $# > 0 )); do
   esac
   shift
 done
-if $profile && (( ${#case_ids[@]} == 0 )); then
-  echo '--profile requires explicit case names to bound anonymous GitHub API use' >&2
-  exit 2
-fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly root manifest="$root/testdata/oss/manifest.json"
@@ -28,7 +24,7 @@ trap 'rm -rf -- "$work"' EXIT
 
 cd "$root"
 jq -e '
-  .schema == "buildkite-gha/oss-corpus/v2" and
+  .schema == "buildkite-gha/oss-corpus/v3" and
   (.cases | type == "array" and length > 0) and
   all(.cases[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
@@ -38,18 +34,7 @@ jq -e '
     (.workflow_sha256 | test("^[0-9a-f]{64}$")) and
     (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
     (.event | IN("push", "pull_request")) and
-    ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$"))) and
-    (.expected.compile | IN("compilable", "incompatible")) and
-    (.expected.profile | IN("admitted", "not-admitted", "indeterminate", "not-run")) and
-    ((.expected.logical_jobs == null) or (.expected.logical_jobs | type == "number" and . > 0)) and
-    ((.expected.instances == null) or (.expected.instances | type == "number" and . > 0)) and
-    ((.expected.diagnostic_code == null) or (.expected.diagnostic_code | test("^E_[A-Z0-9_]+$"))) and
-    (if .expected.compile == "incompatible" then
-       .expected.profile == "not-run" and .expected.diagnostic_code == "E_COMPILE"
-     else
-       .expected.logical_jobs != null and .expected.instances != null and
-       (if .expected.profile == "admitted" then .expected.diagnostic_code == null else .expected.diagnostic_code != null end)
-     end)) and
+    ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$")))) and
   ([.cases[].id] | length == (unique | length))
 ' "$manifest" >/dev/null
 
@@ -64,6 +49,18 @@ for id in "${case_ids[@]}"; do
 done
 
 CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$work/buildkite-gha" ./cmd/buildkite-gha
+mode=compile
+desired=compilable
+validate_args=()
+if $profile; then
+  mode=profile
+  desired=admitted
+  validate_args=(--profile hosted-tokenless)
+fi
+summary="$work/summary.md"
+printf '### OSS workflow compatibility — %s\n\n' "$mode" > "$summary"
+passed=0
+blocked=0
 
 clean_env() {
   env \
@@ -110,29 +107,32 @@ make_event() {
   ' > "$destination"
 }
 
-run_report() {
-  local case_root=$1 label=$2 expected=$3 jobs=$4 instances=$5 diagnostic=$6 output=$7
-  shift 7
-  local status=0 expected_status=1
-  (cd "$case_root" && clean_env "$@") > "$output" || status=$?
-  [[ "$expected" == compilable || "$expected" == admitted ]] && expected_status=0
-  [[ "$status" == "$expected_status" ]] || {
-    echo "$label: exit=$status, want $expected_status" >&2
-    return 1
-  }
-  jq -e \
-    --arg result "$expected" --arg diagnostic "$diagnostic" \
-    --argjson jobs "$jobs" --argjson instances "$instances" '
-    def graph: if has("compile") then .compile else . end;
-    .result == $result and
-    (if $jobs == 0 then true else graph.logical_jobs == $jobs and graph.instances == $instances end) and
-    (if $diagnostic == "" then true else any(.diagnostics[]?; .code == $diagnostic) end)
-  ' "$output" >/dev/null || {
-    echo "$label: report did not match result=$expected diagnostic=${diagnostic:-none}" >&2
-    jq '{result, compile, admission, diagnostics}' "$output" >&2
-    return 1
-  }
-  echo "$label: result=$expected logical_jobs=${jobs:-0} instances=${instances:-0} diagnostic=${diagnostic:-none}"
+record_report() {
+  local id=$1 status=$2 output=$3 result codes graph icon
+  if result="$(jq -er '.result | select(type == "string")' "$output")"; then
+    codes="$(jq -r '[.diagnostics[]?.code] | unique | join(", ")' "$output")"
+    graph="$(jq -r 'if has("compile") then .compile else . end | "\(.logical_jobs // 0) jobs, \(.instances // 0) instances"' "$output")"
+  else
+    result=invalid-report
+    codes=E_REPORT
+    graph='0 jobs, 0 instances'
+  fi
+  if [[ "$status" == 0 && "$result" == "$desired" ]]; then
+    icon='✅'
+    passed=$((passed + 1))
+  else
+    icon='❌'
+    blocked=$((blocked + 1))
+  fi
+  echo "$icon $id: result=$result; $graph; diagnostics=${codes:-none}"
+  if [[ "$icon" == '❌' ]]; then
+    jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$output" >&2 || true
+  fi
+  if [[ -n "$codes" ]]; then
+    printf -- "- %s \`%s\`: \`%s\` — %s\n" "$icon" "$id" "$result" "$codes" >> "$summary"
+  else
+    printf -- "- %s \`%s\`: \`%s\`\n" "$icon" "$id" "$result" >> "$summary"
+  fi
 }
 
 for id in "${case_ids[@]}"; do
@@ -143,15 +143,6 @@ for id in "${case_ids[@]}"; do
   workflow_sha256="$(jq -r '.workflow_sha256' <<<"$entry")"
   branch="$(jq -r '.default_branch' <<<"$entry")"
   event="$(jq -r '.event' <<<"$entry")"
-  expected_compile="$(jq -r '.expected.compile' <<<"$entry")"
-  expected_profile="$(jq -r '.expected.profile' <<<"$entry")"
-  expected_jobs="$(jq -r '.expected.logical_jobs // 0' <<<"$entry")"
-  expected_instances="$(jq -r '.expected.instances // 0' <<<"$entry")"
-  expected_diagnostic="$(jq -r '.expected.diagnostic_code // ""' <<<"$entry")"
-  compile_diagnostic=
-  if [[ "$expected_compile" == incompatible ]]; then
-    compile_diagnostic=$expected_diagnostic
-  fi
 
   case_root="$work/cases/$id"
   workflow_path="$case_root/$workflow"
@@ -167,19 +158,25 @@ for id in "${case_ids[@]}"; do
   }
   make_event "$repository" "$commit" "$branch" "$event" "$event_path"
 
-  if $profile && [[ "$expected_profile" != not-run ]]; then
-    run_report "$case_root" "$id/profile" "$expected_profile" "$expected_jobs" \
-      "$expected_instances" "$expected_diagnostic" "$work/$id.profile.json" \
-      "$work/buildkite-gha" validate --profile hosted-tokenless --format json \
+  status=0
+  report="$work/$id.$mode.json"
+  (
+    cd "$case_root"
+    clean_env "$work/buildkite-gha" validate "${validate_args[@]}" --format json \
       --event-path "$event_path" "$workflow"
-  else
-    run_report "$case_root" "$id/compile" "$expected_compile" "$expected_jobs" \
-      "$expected_instances" "$compile_diagnostic" "$work/$id.compile.json" \
-      "$work/buildkite-gha" validate --format json --event-path "$event_path" "$workflow"
-  fi
+  ) > "$report" || status=$?
+  record_report "$id" "$status" "$report"
 done
 
-echo "PASS: ${#case_ids[@]} open-source workflow case(s) matched their expected classifications."
+printf '\n**%d passing; %d blocked.**\n' "$passed" "$blocked" >> "$summary"
+cat "$summary"
+if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
+  style=success
+  (( blocked > 0 )) && style=warning
+  buildkite-agent annotate --context "oss-workflow-corpus-$mode" --style "$style" < "$summary" || \
+    echo 'warning: failed to publish Buildkite annotation' >&2
+fi
 if $profile; then
   echo 'CAVEAT: profile checks resolve actions but do not execute third-party code.'
 fi
+(( blocked == 0 ))
