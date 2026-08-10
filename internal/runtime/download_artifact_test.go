@@ -313,6 +313,10 @@ func TestDownloadArtifactRejectsRawCorruptAndDuplicateArchivesWithoutDestination
 			name, _, _ := testDownloadZIP(t, "same/child", "same")
 			return name
 		}, fileCount: 2},
+		{name: "lexically separated file and child", archive: func(t *testing.T) string {
+			name, _, _ := testDownloadZIP(t, "same", "same.", "same/child")
+			return name
+		}, fileCount: 3},
 		{name: "corrupt member", archive: func(t *testing.T) string {
 			name, _, _ := testDownloadZIP(t, "first", "second")
 			zr, err := zip.OpenReader(name)

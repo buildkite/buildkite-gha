@@ -176,7 +176,7 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 		foldedNames = append(foldedNames, strings.ToLower(name))
 		members = append(members, downloadMember{file: f, name: name, size: int64(f.UncompressedSize64)})
 	}
-	sort.Strings(foldedNames)
+	sort.Slice(foldedNames, func(i, j int) bool { return downloadPathLess(foldedNames[i], foldedNames[j]) })
 	for i := 1; i < len(foldedNames); i++ {
 		previous, current := foldedNames[i-1], foldedNames[i]
 		if current == previous || strings.HasPrefix(current, previous+"/") {
@@ -233,6 +233,22 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 		return err
 	}
 	return installDownloadMembers(ctx, workspace, staging, destination, members)
+}
+
+func downloadPathLess(left, right string) bool {
+	for i := 0; i < min(len(left), len(right)); i++ {
+		if left[i] == right[i] {
+			continue
+		}
+		if left[i] == '/' {
+			return true
+		}
+		if right[i] == '/' {
+			return false
+		}
+		return left[i] < right[i]
+	}
+	return len(left) < len(right)
 }
 
 func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
