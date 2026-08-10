@@ -1999,13 +1999,15 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 
 func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.T) {
 	tokenDefault := "${{ github.token }}"
+	conditionalTokenDefault := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
 	actorDefault := "${{ github.actor }}"
 	action := metadata.Metadata{Inputs: map[string]metadata.Input{
-		"github_token": {Default: &tokenDefault},
-		"actor":        {Default: &actorDefault},
+		"github_token":      {Default: &tokenDefault},
+		"conditional_token": {Default: &conditionalTokenDefault},
+		"actor":             {Default: &actorDefault},
 	}}
 	eval := expression.Context{
-		GitHub:  map[string]any{"actor": "octocat"},
+		GitHub:  map[string]any{"actor": "octocat", "server_url": "https://github.com"},
 		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_action_default"},
 	}
 
@@ -2013,7 +2015,7 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(inputs, map[string]string{"github_token": "ghs_scoped_action_default", "actor": "octocat"}) {
+	if !reflect.DeepEqual(inputs, map[string]string{"github_token": "ghs_scoped_action_default", "conditional_token": "ghs_scoped_action_default", "actor": "octocat"}) {
 		t.Fatalf("resolved action inputs = %#v", inputs)
 	}
 	if _, leaked := eval.GitHub["token"]; leaked {
@@ -2035,6 +2037,14 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 	withoutToken.Secrets = nil
 	if _, err := resolveActionInputs(action, nil, withoutToken); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
 		t.Fatalf("unplanned metadata github.token evaluation error = %v, want unavailable value", err)
+	}
+	ghesAction := metadata.Metadata{Inputs: map[string]metadata.Input{"token": {Default: &conditionalTokenDefault}}}
+	ghes := eval
+	ghes.GitHub = map[string]any{"server_url": "https://github.example.com"}
+	ghes.Secrets = nil
+	inputs, err = resolveActionInputs(ghesAction, nil, ghes)
+	if err != nil || inputs["token"] != "" {
+		t.Fatalf("GHES conditional token input = %#v, %v, want empty token", inputs, err)
 	}
 }
 
@@ -2083,7 +2093,7 @@ jobs:
 	writeFixtureFile(t, workspace, ".github/actions/token/action.yml", `name: token default
 inputs:
   github_token:
-    default: ${{ github.token }}
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
 runs:
   using: node24
   main: dist/index.js

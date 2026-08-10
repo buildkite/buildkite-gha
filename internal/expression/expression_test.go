@@ -96,11 +96,83 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
+func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
+	for _, template := range []string{
+		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
+		"${{ true && 'quoted }} braces' || '' }}",
+	} {
+		if err := ValidateActionInputDefault(template); err != nil {
+			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
+		}
+	}
+	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}"} {
+		if err := ValidateActionInputDefault(template); err == nil {
+			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
+		}
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsConditionalValueExpressions(t *testing.T) {
+	template := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
+	for _, test := range []struct {
+		name    string
+		github  map[string]any
+		want    string
+		wantErr string
+	}{
+		{name: "GitHub.com token", github: map[string]any{"server_url": "https://github.com", "token": "ghs_scoped"}, want: "ghs_scoped"},
+		{name: "case insensitive URL", github: map[string]any{"server_url": "HTTPS://GITHUB.COM", "token": "ghs_scoped"}, want: "ghs_scoped"},
+		{name: "GHES empty token", github: map[string]any{"server_url": "https://github.example.com"}},
+		{name: "GitHub.com missing token", github: map[string]any{"server_url": "https://github.com"}, wantErr: `unavailable github value "token"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateActionInputDefault(template, Context{GitHub: test.github})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Evaluate() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("Evaluate() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := Evaluate(template, Context{}); err == nil {
+		t.Fatal("Evaluate() accepted action-default compound expression outside action metadata")
+	}
+}
+
+func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		template string
+		context  Context
+		want     string
+	}{
+		{name: "quoted closing delimiter", template: "${{ true && 'quoted }} braces' || '' }}", want: "quoted }} braces"},
+		{name: "numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
+		{name: "null and zero", template: "${{ null == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "false and zero", template: "${{ false == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "empty string and zero", template: "${{ '' == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "not equal", template: "${{ 'not-a-number' != 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "falsy zero", template: "${{ 0 && 'yes' || 'no' }}", want: "no"},
+		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateActionInputDefault(test.template, test.context)
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateActionInputDefault() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	context := Context{
 		Inputs:       map[string]string{"value": literal},
-		Matrix:       map[string]any{"value": literal, "secret": "reevaluated"},
+		Matrix:       map[string]any{"value": literal, "secret": "reevaluated", "number": json.Number("1e3")},
 		Steps:        map[string]map[string]string{"producer": {"value": literal}},
 		StepStatuses: map[string]StepStatus{"producer": {Outcome: "failure", Conclusion: "success"}},
 		Needs:        map[string]map[string]string{"producer": {"value": literal}},
@@ -114,6 +186,7 @@ func TestEvaluateIsSinglePass(t *testing.T) {
 		"${{ steps.Producer.conclusion }}":    "success",
 		"${{ needs.Producer.outputs.value }}": literal,
 		"${{ needs.Producer.result }}":        "success",
+		"${{ matrix.number }}":                "1e3",
 		"before ${{ inputs.value }} after":    "before " + literal + " after",
 	}
 	for template, want := range tests {

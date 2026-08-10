@@ -147,8 +147,9 @@ func ReferencePath(text string) (string, []string, error) {
 }
 
 // ValidateRuntimeTemplate verifies that every expression in a runtime template
-// has a reference shape supported by Evaluate. Runtime values are deliberately
-// not resolved because many contexts do not exist until a job or step runs.
+// is one direct reference supported by Evaluate. Runtime values are
+// deliberately not resolved because many contexts do not exist until a job or
+// step runs.
 func ValidateRuntimeTemplate(template string) error {
 	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
 		root, path, err := referencePath(node)
@@ -160,6 +161,43 @@ func ValidateRuntimeTemplate(template string) error {
 		}
 		return nil
 	})
+}
+
+// ValidateActionInputDefault verifies the restricted compound expression
+// surface supported only while evaluating action metadata input defaults.
+func ValidateActionInputDefault(template string) error {
+	return visitTemplateExpressions(template, validateActionInputDefaultNode)
+}
+
+func validateActionInputDefaultNode(node actionlint.ExprNode) error {
+	switch node := node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+		}
+		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
+		return nil
+	case *actionlint.LogicalOpNode:
+		if err := validateActionInputDefaultNode(node.Left); err != nil {
+			return err
+		}
+		return validateActionInputDefaultNode(node.Right)
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
+		}
+		if err := validateActionInputDefaultNode(node.Left); err != nil {
+			return err
+		}
+		return validateActionInputDefaultNode(node.Right)
+	default:
+		return fmt.Errorf("action input default expression is unsupported")
+	}
 }
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
@@ -970,9 +1008,19 @@ func decodeJSONValue(source string) (any, error) {
 	return value, nil
 }
 
-// Evaluate substitutes the supported Phase 0 expressions in a template once.
+// Evaluate substitutes direct runtime references in a template once.
 func Evaluate(template string, context Context) (string, error) {
-	const open, close = "${{", "}}"
+	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
+}
+
+// EvaluateActionInputDefault substitutes the restricted compound expressions
+// supported only in action metadata input defaults.
+func EvaluateActionInputDefault(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
+}
+
+func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
+	const open = "${{"
 	var evaluated strings.Builder
 	remaining := template
 	for {
@@ -982,29 +1030,171 @@ func Evaluate(template string, context Context) (string, error) {
 			return evaluated.String(), nil
 		}
 		evaluated.WriteString(remaining[:start])
-		end := strings.Index(remaining[start+len(open):], close)
-		if end < 0 {
-			return "", fmt.Errorf("unterminated expression in %q", template)
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			if !strings.Contains(source, "}}") {
+				return "", fmt.Errorf("unterminated expression in %q", template)
+			}
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
 		}
-		end += start + len(open)
-		replacement, err := evaluateReference(strings.TrimSpace(remaining[start+len(open):end]), context)
+		node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(source[:consumed]))
+		if parseErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", parseErr)
+		}
+		value, err := evaluate(node, context)
 		if err != nil {
 			return "", err
 		}
-		evaluated.WriteString(replacement)
-		remaining = remaining[end+len(close):]
+		switch value := value.(type) {
+		case nil:
+		case string:
+			evaluated.WriteString(value)
+		default:
+			_, _ = fmt.Fprint(&evaluated, value)
+		}
+		remaining = source[consumed:]
 	}
 }
 
-func evaluateReference(reference string, context Context) (string, error) {
-	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(reference + "}}"))
-	if parseErr != nil {
-		return "", fmt.Errorf("invalid expression: %w", parseErr)
-	}
+func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
 	root, path, err := referencePath(node)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	return resolveRuntimeReference(root, path, context)
+}
+
+func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return nil, nil
+	case *actionlint.BoolNode:
+		return node.Value, nil
+	case *actionlint.IntNode:
+		return node.Value, nil
+	case *actionlint.FloatNode:
+		return node.Value, nil
+	case *actionlint.StringNode:
+		return node.Value, nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		return evaluateDirectRuntimeNode(node, context)
+	case *actionlint.LogicalOpNode:
+		left, err := evaluateActionInputDefaultNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		switch node.Kind {
+		case actionlint.LogicalOpNodeKindAnd:
+			if !actionInputDefaultTruthy(left) {
+				return left, nil
+			}
+			return evaluateActionInputDefaultNode(node.Right, context)
+		case actionlint.LogicalOpNodeKindOr:
+			if actionInputDefaultTruthy(left) {
+				return left, nil
+			}
+			return evaluateActionInputDefaultNode(node.Right, context)
+		default:
+			return nil, fmt.Errorf("action input default logical operator %s is unsupported", node.Kind)
+		}
+	case *actionlint.CompareOpNode:
+		left, err := evaluateActionInputDefaultNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		right, err := evaluateActionInputDefaultNode(node.Right, context)
+		if err != nil {
+			return nil, err
+		}
+		equal := actionInputDefaultEqual(left, right)
+		switch node.Kind {
+		case actionlint.CompareOpNodeKindEq:
+			return equal, nil
+		case actionlint.CompareOpNodeKindNotEq:
+			return !equal, nil
+		default:
+			return nil, fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
+		}
+	default:
+		return nil, fmt.Errorf("action input default expression is unsupported")
+	}
+}
+
+func actionInputDefaultTruthy(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		return value != ""
+	}
+	if number, ok := conditionNumber(value); ok {
+		return number.Sign() != 0
+	}
+	return true
+}
+
+func actionInputDefaultEqual(left, right any) bool {
+	if left == nil && right == nil {
+		return true
+	}
+	if leftNumber, leftOK := conditionNumber(left); leftOK {
+		if rightNumber, rightOK := conditionNumber(right); rightOK {
+			return leftNumber.Cmp(rightNumber) == 0
+		}
+	}
+	switch left := left.(type) {
+	case string:
+		if right, ok := right.(string); ok {
+			return strings.EqualFold(left, right)
+		}
+	case bool:
+		if right, ok := right.(bool); ok {
+			return left == right
+		}
+	}
+	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
+		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
+		switch leftValue.Kind() {
+		case reflect.Map, reflect.Pointer, reflect.Slice:
+			return leftValue.Pointer() == rightValue.Pointer()
+		}
+	}
+	leftNumber, leftOK := actionInputDefaultNumber(left)
+	rightNumber, rightOK := actionInputDefaultNumber(right)
+	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+}
+
+func actionInputDefaultNumber(value any) (*big.Rat, bool) {
+	switch value := value.(type) {
+	case nil:
+		return new(big.Rat), true
+	case bool:
+		if value {
+			return big.NewRat(1, 1), true
+		}
+		return new(big.Rat), true
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return new(big.Rat), true
+		}
+		decoded, err := decodeJSONValue(value)
+		if err != nil {
+			return nil, false
+		}
+		number, ok := decoded.(json.Number)
+		if !ok {
+			return nil, false
+		}
+		return conditionNumber(number)
+	default:
+		return conditionNumber(value)
+	}
+}
+
+func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
 	switch classifyRuntimeReference(root, path) {
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
@@ -1013,13 +1203,13 @@ func evaluateReference(reference string, context Context) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 		}
-		return fmt.Sprint(value), nil
+		return value, nil
 	case runtimeReferenceInput:
 		return findString(context.Inputs, path[0]), nil
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
-				return fmt.Sprint(value), nil
+				return value, nil
 			}
 		}
 		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
@@ -1062,7 +1252,7 @@ func evaluateReference(reference string, context Context) (string, error) {
 		}
 		return "", fmt.Errorf("expression references unavailable need %q", path[0])
 	default:
-		return "", fmt.Errorf("unsupported expression %q", reference)
+		return nil, fmt.Errorf("unsupported expression %q", referenceName(root, path))
 	}
 }
 

@@ -736,6 +736,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":        job.Event.SHA,
 		"actor":      job.Event.Actor,
 		"event_name": job.Event.Name,
+		"server_url": "https://github.com",
 	}
 }
 
@@ -1469,7 +1470,7 @@ func resolveActionInputs(action metadata.Metadata, supplied map[string]string, c
 		}
 		if definition.Default != nil {
 			defaultContext.Inputs = inputs
-			value, err := expression.Evaluate(*definition.Default, defaultContext)
+			value, err := expression.EvaluateActionInputDefault(*definition.Default, defaultContext)
 			if err != nil {
 				return nil, fmt.Errorf("action input %q default: %w", name, err)
 			}

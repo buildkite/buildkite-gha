@@ -212,7 +212,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 		if input.Default == nil || hasActionInput(supplied, name) {
 			continue
 		}
-		if err := expression.ValidateRuntimeTemplate(*input.Default); err != nil {
+		if err := expression.ValidateActionInputDefault(*input.Default); err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		referencesToken, err := expression.ReferencesGitHubToken(*input.Default)
