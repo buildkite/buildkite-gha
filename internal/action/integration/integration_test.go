@@ -33,25 +33,46 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 }
 
 func TestDownloadArtifactExactContract(t *testing.T) {
-	if err := ValidateDownloadArtifactCommit(DownloadArtifactCommit); err != nil {
-		t.Fatal(err)
+	for _, commit := range DownloadArtifactCommits() {
+		if err := ValidateDownloadArtifactCommit(commit); err != nil {
+			t.Fatalf("audited commit %s rejected: %v", commit, err)
+		}
 	}
 	if err := ValidateDownloadArtifactCommit(strings.Repeat("0", 40)); err == nil {
 		t.Fatal("unrecognized commit accepted")
 	}
-	for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": "payload", "path": "out", "merge-multiple": "False"}} {
-		if err := ValidateDownloadArtifactInputs(inputs); err != nil {
-			t.Fatalf("valid inputs rejected: %v", err)
+	for _, commit := range DownloadArtifactCommits() {
+		for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": " payload ", "path": "", "merge-multiple": " False "}} {
+			if err := ValidateDownloadArtifactInputs(commit, inputs); err != nil {
+				t.Fatalf("commit %s valid inputs rejected: %v", commit, err)
+			}
+		}
+	}
+	for _, commit := range []string{DownloadArtifactV8Commit, DownloadArtifactV801Commit} {
+		if err := ValidateDownloadArtifactInputs(commit, map[string]string{"name": "payload", "skip-decompress": "false", "digest-mismatch": "error"}); err != nil {
+			t.Fatalf("v8 default inputs rejected: %v", err)
 		}
 	}
 	for name, inputs := range map[string]map[string]string{
 		"all": nil, "expression": {"name": "${{ x }}"}, "absolute": {"name": "x", "path": "/tmp"},
 		"merge": {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
-		"duplicate": {"name": "x", "Name": "y"},
+		"duplicate": {"name": "x", "Name": "y"}, "token": {"name": "x", "github-token": ""},
+		"drive path": {"name": "x", "path": "C:/out"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if ValidateDownloadArtifactInputs(inputs) == nil {
+			if ValidateDownloadArtifactInputs(DownloadArtifactV4Commit, inputs) == nil {
 				t.Fatal("unsupported inputs accepted")
+			}
+		})
+	}
+	for name, inputs := range map[string]map[string]string{
+		"raw":                    {"name": "x", "skip-decompress": "true"},
+		"digest warning":         {"name": "x", "digest-mismatch": "warn"},
+		"explicit empty boolean": {"name": "x", "skip-decompress": ""},
+	} {
+		t.Run("v8 "+name, func(t *testing.T) {
+			if ValidateDownloadArtifactInputs(DownloadArtifactV801Commit, inputs) == nil {
+				t.Fatal("unsupported v8 mode accepted")
 			}
 		})
 	}

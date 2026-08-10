@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"golang.org/x/sys/unix"
 )
 
 type downloadMember struct {
@@ -26,18 +28,20 @@ type downloadMember struct {
 	size int64
 }
 
-func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, inputs map[string]string) (result Result, returnErr error) {
+const maxDownloadCompressionRatio = 1_000
+
+func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := actionintegration.ValidateDownloadArtifactInputs(inputs); err != nil {
+	if err := actionintegration.ValidateDownloadArtifactInputs(commit, inputs); err != nil {
 		return result, fmt.Errorf("bounded download-artifact adapter: %w", err)
 	}
 	values := map[string]string{}
 	for k, v := range inputs {
-		values[strings.ToLower(k)] = v
+		values[strings.ToLower(k)] = strings.TrimSpace(v)
 	}
 	name, destinationRelative := values["name"], "."
 	for _, mask := range processor.maskValues() {
@@ -101,17 +105,22 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	if regular != 1 {
 		return result, fmt.Errorf("download contained %d regular files, want exactly the expected archive", regular)
 	}
-	info, err := os.Lstat(archivePath)
+	archive, err := os.OpenFile(archivePath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return result, fmt.Errorf("downloaded archive is not the expected regular file")
+	}
+	defer func() { _ = archive.Close() }()
+	info, err := archive.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return result, fmt.Errorf("downloaded archive is not the expected regular file")
 	}
 	if info.Size() != artifact.Size {
 		return result, fmt.Errorf("downloaded archive size mismatch")
 	}
-	if err := verifyDownloadDigest(ctx, archivePath, artifact.Digest, artifact.Size); err != nil {
+	if err := verifyDownloadDigestFile(ctx, archive, artifact.Digest, artifact.Size); err != nil {
 		return result, err
 	}
-	if err := extractDownloadZIP(ctx, archivePath, resolvedWorkspace, destinationRelative, artifact.FileCount); err != nil {
+	if err := extractDownloadZIPFile(ctx, archive, artifact.Size, resolvedWorkspace, destinationRelative, artifact.FileCount); err != nil {
 		return result, err
 	}
 	result.Outputs["download-path"] = absDestination
@@ -123,28 +132,55 @@ func verifyDownloadDigest(ctx context.Context, filename, digest string, size int
 	if err != nil {
 		return err
 	}
+	err = verifyDownloadDigestFile(ctx, f, digest, size)
+	return errors.Join(err, f.Close())
+}
+
+func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, size int64) error {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	h := sha256.New()
-	n, copyErr := io.Copy(h, io.LimitReader(contextReader{ctx: ctx, reader: f}, transport.MaxResultArtifactSizeBytes+1))
-	closeErr := f.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
+	n, err := io.Copy(h, io.LimitReader(contextReader{ctx: ctx, reader: f}, transport.MaxResultArtifactSizeBytes+1))
+	if err != nil {
 		return err
 	}
 	if n != size || "sha256:"+hex.EncodeToString(h.Sum(nil)) != digest {
 		return fmt.Errorf("downloaded archive digest mismatch")
 	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	return ctx.Err()
 }
 
 func extractDownloadZIP(ctx context.Context, filename, workspace, destination string, expectedCount int) error {
-	z, err := zip.OpenReader(filename)
+	f, err := os.Open(filename)
 	if err != nil {
 		return fmt.Errorf("open artifact ZIP: %w", err)
 	}
-	defer func() { _ = z.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("stat artifact ZIP: %w", err)
+	}
+	err = extractDownloadZIPFile(ctx, f, info.Size(), workspace, destination, expectedCount)
+	return errors.Join(err, f.Close())
+}
+
+func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspace, destination string, expectedCount int) error {
+	if err := preflightZIPDirectory(f, size); err != nil {
+		return fmt.Errorf("preflight artifact ZIP: %w", err)
+	}
+	z, err := zip.NewReader(f, size)
+	if err != nil {
+		return fmt.Errorf("open artifact ZIP: %w", err)
+	}
 	if len(z.File) != expectedCount || len(z.File) > transport.MaxResultArtifactFileCount {
 		return fmt.Errorf("artifact ZIP file count mismatch")
 	}
 	seen, folded := map[string]bool{}, map[string]bool{}
+	parents, foldedParents := map[string]bool{}, map[string]bool{}
 	members := make([]downloadMember, 0, len(z.File))
 	var expanded int64
 	for _, f := range z.File {
@@ -155,14 +191,27 @@ func extractDownloadZIP(ctx context.Context, filename, workspace, destination st
 		if !validArtifactMember(name) || seen[name] || folded[strings.ToLower(name)] {
 			return fmt.Errorf("unsafe or duplicate artifact ZIP member %q", name)
 		}
+		foldedName := strings.ToLower(name)
+		if parents[name] || foldedParents[foldedName] {
+			return fmt.Errorf("artifact ZIP member %q collides with another member path", name)
+		}
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if seen[parent] || folded[strings.ToLower(parent)] {
+				return fmt.Errorf("artifact ZIP member %q collides with another member path", name)
+			}
+			parents[parent], foldedParents[strings.ToLower(parent)] = true, true
+		}
 		if f.Method != zip.Store && f.Method != zip.Deflate || !f.Mode().IsRegular() || f.FileInfo().IsDir() {
 			return fmt.Errorf("artifact ZIP member %q is not a supported regular file", name)
 		}
 		if f.UncompressedSize64 > uint64(transport.MaxResultArtifactSizeBytes) || expanded > transport.MaxResultArtifactSizeBytes-int64(f.UncompressedSize64) {
 			return fmt.Errorf("artifact expanded bytes exceed 1 GiB")
 		}
+		if f.UncompressedSize64 > 0 && (f.CompressedSize64 == 0 || f.UncompressedSize64 > f.CompressedSize64*maxDownloadCompressionRatio) {
+			return fmt.Errorf("artifact ZIP member %q exceeds compression ratio limit", name)
+		}
 		expanded += int64(f.UncompressedSize64)
-		seen[name], folded[strings.ToLower(name)] = true, true
+		seen[name], folded[foldedName] = true, true
 		members = append(members, downloadMember{file: f, name: name, size: int64(f.UncompressedSize64)})
 	}
 	workspaceRoot, err := os.OpenRoot(workspace)
@@ -170,32 +219,23 @@ func extractDownloadZIP(ctx context.Context, filename, workspace, destination st
 		return fmt.Errorf("open download workspace: %w", err)
 	}
 	defer func() { _ = workspaceRoot.Close() }()
-	if err := validateDownloadDirectory(workspaceRoot, destination); err != nil {
-		return err
-	}
-	if err := workspaceRoot.MkdirAll(destination, 0o755); err != nil {
-		return err
-	}
-	if err := validateDownloadDirectory(workspaceRoot, destination); err != nil {
-		return err
-	}
-	root, err := workspaceRoot.OpenRoot(destination)
+	staging, err := os.MkdirTemp(workspace, ".buildkite-gha-extract-")
 	if err != nil {
-		return err
+		return fmt.Errorf("create artifact staging directory: %w", err)
 	}
-	defer func() { _ = root.Close() }()
-	if err := preflightDestination(root, members); err != nil {
-		return err
+	defer func() { _ = os.RemoveAll(staging) }()
+	stagingName := filepath.Base(staging)
+	stagingRoot, err := workspaceRoot.OpenRoot(stagingName)
+	if err != nil {
+		return fmt.Errorf("open artifact staging directory: %w", err)
 	}
+	defer func() { _ = stagingRoot.Close() }()
 	for _, member := range members {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if dir := path.Dir(member.name); dir != "." {
-			if err := root.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
-				return err
-			}
-			if err := validateDownloadDirectory(root, filepath.FromSlash(dir)); err != nil {
+			if err := stagingRoot.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
 				return err
 			}
 		}
@@ -203,14 +243,10 @@ func extractDownloadZIP(ctx context.Context, filename, workspace, destination st
 		if err != nil {
 			return err
 		}
-		out, err := root.OpenFile(filepath.FromSlash(member.name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644)
+		out, err := stagingRoot.OpenFile(filepath.FromSlash(member.name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644)
 		if err != nil {
 			_ = in.Close()
-			return fmt.Errorf("open artifact destination %q: %w", member.name, err)
-		}
-		info, statErr := out.Stat()
-		if statErr != nil || !info.Mode().IsRegular() {
-			return errors.Join(fmt.Errorf("artifact destination %q is not a regular file", member.name), statErr, out.Close(), in.Close())
+			return fmt.Errorf("open staged artifact member %q: %w", member.name, err)
 		}
 		if err := out.Chmod(0o644); err != nil {
 			return errors.Join(err, out.Close(), in.Close())
@@ -224,11 +260,207 @@ func extractDownloadZIP(ctx context.Context, filename, workspace, destination st
 			return fmt.Errorf("artifact ZIP member %q size mismatch", member.name)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return installDownloadMembers(ctx, workspace, staging, destination, members)
+}
+
+func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
+	const (
+		eocdSize      = 22
+		maxZIPComment = 1<<16 - 1
+		centralHeader = 46
+		eocdSignature = 0x06054b50
+		centralSig    = 0x02014b50
+		zip16Sentinel = 1<<16 - 1
+		zip32Sentinel = 1<<32 - 1
+	)
+	if size < eocdSize || size > transport.MaxResultArtifactSizeBytes {
+		return fmt.Errorf("artifact ZIP size is out of bounds")
+	}
+	tailSize := min(size, int64(eocdSize+maxZIPComment))
+	tail := make([]byte, tailSize)
+	if _, err := reader.ReadAt(tail, size-tailSize); err != nil {
+		return err
+	}
+	eocd := -1
+	for i := len(tail) - eocdSize; i >= 0; i-- {
+		if binary.LittleEndian.Uint32(tail[i:]) != eocdSignature {
+			continue
+		}
+		comment := int(binary.LittleEndian.Uint16(tail[i+20:]))
+		if i+eocdSize+comment == len(tail) {
+			eocd = i
+			break
+		}
+	}
+	if eocd < 0 {
+		return fmt.Errorf("artifact ZIP end record is missing")
+	}
+	for i := eocd + 1; i <= len(tail)-eocdSize; i++ {
+		if binary.LittleEndian.Uint32(tail[i:]) != eocdSignature {
+			continue
+		}
+		comment := int(binary.LittleEndian.Uint16(tail[i+20:]))
+		if i+eocdSize+comment <= len(tail) {
+			return fmt.Errorf("artifact ZIP has an ambiguous end record")
+		}
+	}
+	record := tail[eocd:]
+	entriesDisk := binary.LittleEndian.Uint16(record[8:])
+	entries := binary.LittleEndian.Uint16(record[10:])
+	centralSize := binary.LittleEndian.Uint32(record[12:])
+	centralOffset := binary.LittleEndian.Uint32(record[16:])
+	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
+		return fmt.Errorf("multi-disk or ZIP64 artifact is unsupported")
+	}
+	if entries == 0 || int(entries) > transport.MaxResultArtifactFileCount {
+		return fmt.Errorf("artifact ZIP file count is out of bounds")
+	}
+	position, end := int64(centralOffset), int64(centralOffset)+int64(centralSize)
+	eocdOffset := size - tailSize + int64(eocd)
+	if position < 0 || end < position || end != eocdOffset {
+		return fmt.Errorf("artifact ZIP central directory is out of bounds")
+	}
+	count := 0
+	for position < end {
+		var header [centralHeader]byte
+		if _, err := reader.ReadAt(header[:], position); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(header[:]) != centralSig {
+			return fmt.Errorf("artifact ZIP central directory is malformed")
+		}
+		nameSize := int64(binary.LittleEndian.Uint16(header[28:]))
+		extraSize := int64(binary.LittleEndian.Uint16(header[30:]))
+		commentSize := int64(binary.LittleEndian.Uint16(header[32:]))
+		position += centralHeader + nameSize + extraSize + commentSize
+		count++
+		if count > transport.MaxResultArtifactFileCount || position > end {
+			return fmt.Errorf("artifact ZIP central directory exceeds bounds")
+		}
+	}
+	if position != end || count != int(entries) {
+		return fmt.Errorf("artifact ZIP central directory count mismatch")
+	}
+	return nil
+}
+
+func installDownloadMembers(ctx context.Context, workspace, staging, destination string, members []downloadMember) error {
+	workspaceFD, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open pinned download workspace: %w", err)
+	}
+	defer func() { _ = unix.Close(workspaceFD) }()
+	stagingFD, err := unix.Open(staging, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return fmt.Errorf("open pinned artifact staging directory: %w", err)
+	}
+	defer func() { _ = unix.Close(stagingFD) }()
+	destinationFD, err := openDownloadDirectoryAt(workspaceFD, filepath.ToSlash(destination), true)
+	if err != nil {
+		return fmt.Errorf("open pinned artifact destination %q: %w", destination, err)
+	}
+	defer func() { _ = unix.Close(destinationFD) }()
+	return installDownloadMembersAt(ctx, stagingFD, destinationFD, members)
+}
+
+func installDownloadMembersAt(ctx context.Context, stagingFD, destinationFD int, members []downloadMember) error {
+	for _, member := range members {
+		if err := preflightDownloadMemberAt(destinationFD, member.name, false); err != nil {
+			return err
+		}
+	}
+	for _, member := range members {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		directory, base := path.Split(member.name)
+		sourceParent, err := openDownloadDirectoryAt(stagingFD, strings.TrimSuffix(directory, "/"), false)
+		if err != nil {
+			return err
+		}
+		destinationParent, err := openDownloadDirectoryAt(destinationFD, strings.TrimSuffix(directory, "/"), true)
+		if err != nil {
+			_ = unix.Close(sourceParent)
+			return err
+		}
+		installErr := preflightDownloadBaseAt(destinationParent, base)
+		if installErr == nil {
+			installErr = unix.Renameat(sourceParent, base, destinationParent, base)
+		}
+		closeErr := errors.Join(unix.Close(sourceParent), unix.Close(destinationParent))
+		if err := errors.Join(installErr, closeErr); err != nil {
+			return fmt.Errorf("install artifact destination %q: %w", member.name, err)
+		}
+	}
 	return ctx.Err()
+}
+
+func preflightDownloadMemberAt(root int, name string, createParents bool) error {
+	directory, base := path.Split(name)
+	parent, err := openDownloadDirectoryAt(root, strings.TrimSuffix(directory, "/"), createParents)
+	if err != nil {
+		if !createParents && errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	defer func() { _ = unix.Close(parent) }()
+	return preflightDownloadBaseAt(parent, base)
+}
+
+func preflightDownloadBaseAt(parent int, base string) error {
+	var stat unix.Stat_t
+	err := unix.Fstatat(parent, base, &stat, unix.AT_SYMLINK_NOFOLLOW)
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fmt.Errorf("artifact destination collision %q is not a regular file", base)
+	}
+	return nil
+}
+
+func openDownloadDirectoryAt(root int, directory string, create bool) (int, error) {
+	current, err := unix.Dup(root)
+	if err != nil {
+		return -1, err
+	}
+	if directory == "" || directory == "." {
+		return current, nil
+	}
+	for _, component := range strings.Split(directory, "/") {
+		if component == "" || component == "." || component == ".." {
+			_ = unix.Close(current)
+			return -1, fmt.Errorf("invalid artifact directory component")
+		}
+		next, openErr := unix.Openat(current, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if errors.Is(openErr, unix.ENOENT) && create {
+			if err := unix.Mkdirat(current, component, 0o755); err != nil && !errors.Is(err, unix.EEXIST) {
+				_ = unix.Close(current)
+				return -1, err
+			}
+			next, openErr = unix.Openat(current, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		}
+		_ = unix.Close(current)
+		if openErr != nil {
+			return -1, openErr
+		}
+		current = next
+	}
+	return current, nil
 }
 
 func validArtifactMember(name string) bool {
 	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, "../") || len(name) > actionintegration.MaxUploadArtifactPathBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "\\\x00") || path.Clean(name) != name || strings.HasPrefix(name, "/") {
+		return false
+	}
+	if len(name) >= 2 && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) && name[1] == ':' {
 		return false
 	}
 	if len(strings.Split(name, "/")) > 256 {
@@ -240,50 +472,4 @@ func validArtifactMember(name string) bool {
 		}
 	}
 	return true
-}
-
-func validateDownloadDirectory(root *os.Root, directory string) error {
-	if directory == "." {
-		return nil
-	}
-	current := ""
-	for _, component := range strings.Split(filepath.ToSlash(directory), "/") {
-		current = path.Join(current, component)
-		info, err := root.Lstat(filepath.FromSlash(current))
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("artifact path component %q is not a real directory", current)
-		}
-	}
-	return nil
-}
-
-func preflightDestination(root *os.Root, members []downloadMember) error {
-	for _, member := range members {
-		current := ""
-		parts := strings.Split(member.name, "/")
-		for i, part := range parts {
-			current = path.Join(current, part)
-			info, err := root.Lstat(filepath.FromSlash(current))
-			if os.IsNotExist(err) {
-				continue
-			}
-			if err != nil {
-				return err
-			}
-			if i < len(parts)-1 {
-				if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-					return fmt.Errorf("artifact path component %q is not a directory", current)
-				}
-			} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-				return fmt.Errorf("artifact destination collision %q is not a regular file", current)
-			}
-		}
-	}
-	return nil
 }

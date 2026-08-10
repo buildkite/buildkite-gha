@@ -970,19 +970,30 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		})
 	}
 
-	plans, err := compile(actionintegration.DownloadArtifactCommit, "    needs: producer\n", "        with:\n          name: payload\n          path: out\n          merge-multiple: false\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 2 || len(plans[1].NeedSources["producer"]) != 1 || plans[1].Actions[0].Commit != actionintegration.DownloadArtifactCommit {
-		t.Fatalf("download-artifact plans = %#v", plans)
+	for _, commit := range actionintegration.DownloadArtifactCommits() {
+		with := "        with:\n          name: payload\n          path: out\n          merge-multiple: false\n"
+		if commit == actionintegration.DownloadArtifactV8Commit || commit == actionintegration.DownloadArtifactV801Commit {
+			with += "          skip-decompress: false\n          digest-mismatch: error\n"
+		}
+		plans, err := compile(commit, "    needs: producer\n", with)
+		if err != nil {
+			t.Fatalf("audited download-artifact commit %s: %v", commit, err)
+		}
+		if len(plans) != 2 || len(plans[1].NeedSources["producer"]) != 1 || plans[1].Actions[0].Commit != commit {
+			t.Fatalf("download-artifact plans for %s = %#v", commit, plans)
+		}
 	}
 
 	for name, with := range map[string]string{
 		"missing name":  "        with:\n          path: out\n",
 		"pattern":       "        with:\n          name: payload\n          pattern: 'payload-*'\n",
+		"artifact IDs":  "        with:\n          name: payload\n          artifact-ids: '1'\n",
 		"merge":         "        with:\n          name: payload\n          merge-multiple: true\n",
 		"absolute path": "        with:\n          name: payload\n          path: /tmp/out\n",
+		"drive path":    "        with:\n          name: payload\n          path: C:/out\n",
+		"cross run":     "        with:\n          name: payload\n          run-id: '1'\n",
+		"cross repo":    "        with:\n          name: payload\n          repository: owner/repo\n",
+		"REST token":    "        with:\n          name: payload\n          github-token: token\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.DownloadArtifactCommit, "    needs: producer\n", with)
@@ -996,6 +1007,34 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	}
 	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
 		t.Fatalf("unsupported download-artifact commit error = %v", err)
+	}
+	for name, with := range map[string]string{
+		"raw":             "        with:\n          name: payload\n          skip-decompress: true\n",
+		"digest override": "        with:\n          name: payload\n          digest-mismatch: warn\n",
+	} {
+		t.Run("v8 "+name, func(t *testing.T) {
+			if _, err := compile(actionintegration.DownloadArtifactV801Commit, "    needs: producer\n", with); err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
+				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
+	remote := t.TempDir()
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	resolved := &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.DownloadArtifactV801Commit}
+	_, locks, _, _, err := compileActionLocks(context.Background(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locks) != 1 || locks[0].RequestedRef != "v8" || locks[0].Commit != actionintegration.DownloadArtifactV801Commit {
+		t.Fatalf("mutable v8 lock = %#v", locks)
+	}
+
+	resolved.commit = strings.Repeat("b", 40)
+	if _, _, _, _, err := compileActionLocks(context.Background(), t.TempDir(), resolved, []string{"actions/download-artifact@v8"}); err == nil {
+		t.Fatal("mutable v8 tag resolving to an unaudited commit was accepted")
 	}
 }
 

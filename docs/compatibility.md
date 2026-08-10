@@ -108,7 +108,7 @@ service.
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
 | `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
 | `actions/upload-artifact` | Supported subset | Exactly v4.6.2, v5.0.0, v6.0.0, and v7.0.1 are adapted at the immutable commits listed below, root entrypoint only and ZIP mode only. Bounded literal paths and final-component file globs, ZIP compression 0–9, hidden-file selection, no-file behavior, and advisory `retention-days` are supported. Recursive globs, exclusions, symlinks, effective retention control, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
-| `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
+| `actions/download-artifact` | Supported subset | Six exact audited release commits from v4.3.0 through v8.0.1 are adapted in one common exact-name ZIP mode. Selection is limited to one uniquely named artifact from verified direct `needs`; broader selection, raw, REST, and cross-run/repository modes fail closed. See the exact matrix below. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
 | Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
 | Runner tool cache | Supported subset | By default, the runtime points `RUNNER_TOOL_CACHE` at a fresh job-private directory and does not expose an agent or Hosted shared cache as executable authority. When pipeline configuration selects an immutable runtime image with `BUILDKITE_GHA_RUNTIME_IMAGE`, generated jobs use that image's baked `/opt/hostedtoolcache` facade instead. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`. The shared Hosted cache volume is never used for executable tools because stock action tool-cache clients trust a writable entry and completion marker without verifying its contents. |
@@ -485,18 +485,103 @@ all three outputs depend on the GitHub Artifact service. It therefore remains
 outside the native bridge and fails production admission rather than being
 silently approximated. The v7 merge entrypoint has no raw mode.
 
-The consumer recognizes only
-`actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093`.
-It scans only verified manifests from direct `needs`, requires one
-exact-name match, downloads by the bound producer job UUID,
-and verifies size and SHA-256 before preflighting and extracting the bounded
-ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
-mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
-fabricated. This native handling is an interim, bounded bridge; the parallel
-Results ArtifactService work is intended to let stock upstream JavaScript use
-its protocol rather than expanding this adapter into a protocol emulator.
-Exact-commit Buildkite build 270 and its independent artifact observation prove
-the producer-to-two-consumer roundtrip contract.
+### Download-artifact uses one audited, fail-closed ZIP profile
+
+The native adapter replaces the complete upstream JavaScript lifecycle. It
+therefore admits release **commits**, not version ranges: a mutable tag such as
+`v8` is usable only when source resolution locks it to an exact commit in this
+table. Any other commit, including a future release under an existing major
+tag, is rejected at compile time and again at runtime.
+
+| Upstream release | Exact admitted commit and metadata | Action runtime | Bundled `@actions/artifact` |
+| --- | --- | --- | --- |
+| v4.3.0 | [`d3f86a106a0bac45b974a628896c90dbdf5c8093`](https://github.com/actions/download-artifact/blob/d3f86a106a0bac45b974a628896c90dbdf5c8093/action.yml) | Node 20 | [`2.3.2`](https://github.com/actions/download-artifact/blob/d3f86a106a0bac45b974a628896c90dbdf5c8093/package-lock.json#L41-L44) |
+| v5.0.0 | [`634f93cb2916e3fdff6788551b99b062d0335ce0`](https://github.com/actions/download-artifact/blob/634f93cb2916e3fdff6788551b99b062d0335ce0/action.yml) | Node 20 | [`2.3.2`](https://github.com/actions/download-artifact/blob/634f93cb2916e3fdff6788551b99b062d0335ce0/package-lock.json#L41-L44) |
+| v6.0.0 | [`018cc2cf5baa6db3ef3c5f8a56943fffe632ef53`](https://github.com/actions/download-artifact/blob/018cc2cf5baa6db3ef3c5f8a56943fffe632ef53/action.yml) | Node 20 | [`4.0.0`](https://github.com/actions/download-artifact/blob/018cc2cf5baa6db3ef3c5f8a56943fffe632ef53/package-lock.json#L41-L44) |
+| v7.0.0 | [`37930b1c2abaa49bbe596cd826c3c89aef350131`](https://github.com/actions/download-artifact/blob/37930b1c2abaa49bbe596cd826c3c89aef350131/action.yml) | Node 24 | [`5.0.1`](https://github.com/actions/download-artifact/blob/37930b1c2abaa49bbe596cd826c3c89aef350131/package-lock.json#L41-L44) |
+| v8.0.0 | [`70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3`](https://github.com/actions/download-artifact/blob/70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3/action.yml) | Node 24 ESM | [`6.1.0`](https://github.com/actions/download-artifact/blob/70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3/package-lock.json#L38-L41) |
+| v8.0.1 | [`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`](https://github.com/actions/download-artifact/blob/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/action.yml) | Node 24 ESM | [`6.2.1`](https://github.com/actions/download-artifact/blob/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/package-lock.json#L38-L41) |
+
+This audit was current through v8.0.1 on 2026-08-10. v4.3 added ID selection; v5 changed
+single-result ID/pattern destination layout; v6 and v7 changed the artifact
+client and Node runtime; v8 added raw/direct downloads, content-type-sensitive
+ZIP handling, `skip-decompress`, and configurable digest mismatch behavior;
+v8.0.1 fixed CJK filename/content-disposition handling. None of those changes
+altered the exact-name, one-ZIP, direct-to-`path` profile below. The adapter's
+own UTF-8 path handling is covered independently and does not depend on the
+bundled client.
+
+| Upstream input or default | Native decision |
+| --- | --- |
+| `name` omitted or explicitly empty | Rejected. Upstream selects all artifacts; run-wide listing is outside the producer-bound bridge. |
+| `name: <exact value>` | Required. Leading/trailing whitespace is trimmed like `@actions/core`; the resulting UTF-8 name must satisfy the bounded upload name rules. Lookup is case-sensitive and must find exactly one artifact across all direct-needs manifests. Duplicate names, including matrix producers, are ambiguous and rejected. |
+| `path` omitted or explicitly empty | Workspace root, matching upstream fallback. The `download-path` output is its absolute logical path. |
+| `path: <value>` | Trimmed, clean, literal, workspace-relative slash path only. Absolute, drive, UNC, backslash, traversal, unclean, oversized, and expression-authored paths are rejected rather than reproducing upstream tilde/absolute-path expansion. |
+| `merge-multiple` omitted | `false`, matching every admitted release. |
+| `merge-multiple: false` | Accepted with the toolkit's `false`, `False`, or `FALSE` spellings after trimming. Empty or true values are rejected. Since exactly one artifact is allowed, this is only explicit-default compatibility. |
+| `artifact-ids`, `pattern` | Rejected, including empty values. ID, pattern, one-result pattern/ID layout, all-artifact selection, and partial missing-ID behavior are not implemented. |
+| `github-token`, `repository`, `run-id` | Rejected, including explicit empty/default-shaped values. The GitHub REST cross-run/cross-repository path is not emulated. |
+| v8 `skip-decompress` omitted or `false` | ZIP extraction. Explicit false accepts the toolkit's three case spellings. `true` and empty are rejected; raw archive download and direct non-ZIP artifacts are unsupported. The input itself is rejected for v4–v7 because it is not in those releases' metadata. |
+| v8 `digest-mismatch` omitted or `error` | Digest mismatch is fatal. `ignore`, `info`, and `warn` are rejected. The input itself is rejected for v4–v7; their upstream warning-only mismatch behavior is deliberately tightened by the bridge. |
+| Any other or future input | Rejected. Input names that collide case-insensitively are also rejected. |
+| Expressions in supported inputs | Workflow-authored expressions are rejected by compiler admission. Runtime validation is repeated after evaluation as defense in depth, but it does not broaden the admitted source syntax. |
+
+The only upstream output is `download-path`. The adapter sets it after a
+successful install, exposes it through normal step-output and environment-file
+machinery, and does not set it on failure. It is the absolute logical workspace
+destination, including for an omitted or empty `path`.
+
+The producer visibility boundary is narrower than GitHub's current-run artifact
+service. The consumer scans only canonical result manifests hydrated from its
+compiler-selected direct `needs`. Each artifact remains bound to its plan,
+build, generated producer step, and unique producer job UUID. The runtime asks
+Buildkite Agent for that exact native artifact path under the bound UUID; it
+does not search by user-controlled artifact name or trust metadata mirrors.
+Zero matches and every duplicate exact-name match fail. Failed, skipped, or
+cancelled producers expose only a terminal manifest they actually published;
+a producer cancellation that prevents publication makes hydration fail rather
+than silently widening the search. Retrying one producer can make producer
+selection ambiguous, so retry the whole build.
+
+Only ZIP artifacts published by the bounded native upload adapters are
+accepted. The consumer opens the manifest path without following a final
+symlink, pins that descriptor, and verifies its regular-file type, byte size,
+and SHA-256 digest before parsing the same descriptor; mismatch is always
+fatal. A bounded central-directory scan enforces the entry limit before Go's
+ZIP reader allocates its entry table and rejects multi-disk, ZIP64, malformed,
+ambiguous-end-record, forged-count, undeclared-entry, and out-of-bounds
+directories. ZIP admission then allows only
+regular stored/deflated members, at most 10,000 entries, 1 GiB archive and
+aggregate expanded size, a 1,000:1 per-member compression ratio, 4,096-byte
+member paths, and 256 path components. Empty names,
+duplicates (including case-folded and file/child path collisions), traversal,
+absolute/drive/UNC paths, control characters, invalid UTF-8, directory entries, symlinks,
+recognized special-file encodings, and unsupported compression methods fail
+closed. ZIP has no portable hardlink entry type; regular entries that originated
+from hardlinks are extracted as independent regular files. Raw content and
+malformed ZIPs are never reclassified as files.
+
+Digest and archive validation complete before extraction. Members are then
+fully decompressed into a private workspace staging directory with cancellation
+and declared-size checks before final destination members are changed. When the
+destination is the workspace root, the transient hidden staging directory is
+inside that destination, but it is removed on every return. Successful
+installation walks and opens workspace/destination directories without
+following symlinks, pins their descriptors, and renames relative to those
+descriptors. It creates directories as `0755`, writes files as `0644`, and may
+replace existing regular files. It does not preserve ZIP permissions or
+timestamps. Destination components and collisions may not be symlinks or
+special files. Validation, decompression, or cancellation before installation
+leaves final destination members unchanged and cleans temporary
+downloads/staging. Installation is atomic per file, not a multi-file
+transaction; a failure can leave already installed members, but a concurrent
+pathname or symlink swap cannot redirect installation away from the pinned
+destination tree.
+
+This bounded bridge is intentionally not a local implementation of GitHub's
+artifact protocol. The future direction is the parallel Results ArtifactService
+design, while preserving exact compiler-owned producer/dependency attribution;
+it is not a reason to broaden the current direct-needs semantics.
 
 ### Actions use the standard cache-v2 protocol
 

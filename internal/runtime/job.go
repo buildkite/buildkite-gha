@@ -1227,7 +1227,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			if err != nil {
 				return result, err
 			}
-			return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, inputs)
+			return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, lock.Commit, inputs)
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {

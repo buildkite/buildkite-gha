@@ -350,7 +350,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 					}
 				}
 				if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
-					if err := actionintegration.ValidateDownloadArtifactInputs(instance.Steps[stepIndex].With); err != nil {
+					if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
 						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}
