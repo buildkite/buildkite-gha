@@ -231,14 +231,17 @@ Content-Type: application/json
 }
 ```
 
-The compiler adds `provider-token-read` after resolving the exact
-`actions/checkout` adapter and validating its repository, ref, depth, path,
-submodule, and credential-persistence inputs. Fresh same-process compiler
-provenance permits that one capability through upload admission. The runtime
-uses `buildkite-agent git-credentials-helper` only when the immutable plan has
-that capability, a root checkout selector names the verified adapter, and the
-server-provided job environment indicates repository-provider Git credentials
-are enabled. Otherwise it performs the same checkout anonymously.
+The compiler adds `provider-token-read` only after the resolved
+`actions/checkout` commit is in the audited native-adapter allowlist and its
+repository, ref, depth, path, submodule, and credential-persistence inputs pass
+validation. Fresh same-process compiler provenance permits that one capability
+through upload admission. Before resolving Git or repository credentials, the
+runtime revalidates every checkout lock in the plan and requires a root checkout
+selector to name the verified adapter. It invokes
+`buildkite-agent git-credentials-helper` only when the immutable plan has that
+capability and the server-provided job environment indicates
+repository-provider Git credentials are enabled. Otherwise it performs the same
+checkout anonymously.
 
 The event repository and exact SHA remain the only checkout targets. The
 credential helper is configured as a command-scoped Git option only for the

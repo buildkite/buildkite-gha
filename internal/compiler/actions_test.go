@@ -766,7 +766,7 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 
 	unknown := strings.Repeat("0", 40)
 	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
-	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@v8"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
 	}
 }

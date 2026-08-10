@@ -63,6 +63,11 @@ func usesCheckoutAdapter(lock plan.ActionLock) bool {
 func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 	locks := make(map[string]plan.ActionLock, len(job.Actions))
 	for _, lock := range job.Actions {
+		if usesCheckoutAdapter(lock) {
+			if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
+				return false, err
+			}
+		}
 		locks[lock.ID] = lock
 	}
 	found := false
@@ -72,9 +77,6 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 		}
 		if lock, ok := locks[step.Action.Lock]; ok && usesCheckoutAdapter(lock) {
 			found = true
-			if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
-				return false, err
-			}
 		}
 	}
 	return found, nil

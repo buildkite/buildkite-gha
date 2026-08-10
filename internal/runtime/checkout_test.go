@@ -704,14 +704,15 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 }
 
 func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T) {
-	validID, unknownID := "a-0000000000000001", "a-0000000000000002"
+	validID, parentID, unknownID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
 	job := plan.Job{
 		Steps: []plan.Step{
 			{Kind: "uses", Action: &plan.ActionSelector{Lock: validID}},
-			{Kind: "uses", Action: &plan.ActionSelector{Lock: unknownID}},
+			{Kind: "uses", Action: &plan.ActionSelector{Lock: parentID}},
 		},
 		Actions: []plan.ActionLock{
 			{ID: validID, Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit},
+			{ID: parentID, Source: "github", Repository: "owner/composite", Commit: strings.Repeat("b", 40), Children: map[string]plan.ActionSelector{"actions/checkout@future": {Lock: unknownID}}},
 			{ID: unknownID, Source: "github", Repository: "actions/checkout", Commit: strings.Repeat("0", 40)},
 		},
 	}
