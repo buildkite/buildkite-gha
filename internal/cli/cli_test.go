@@ -614,14 +614,14 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 			_, _ = io.WriteString(w, `{"private":false,"visibility":"public"}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"sha":"0123456789abcdef0123456789abcdef01234567"}`)
+		_, _ = io.WriteString(w, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
 	}))
 	defer server.Close()
 	resolver, err := actionsource.NewResolver(server.Client(), option, actionsource.WithTestEndpoints(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := actionsource.Parse("o/r@0123456789abcdef0123456789abcdef01234567")
+	ref, err := actionsource.Parse("o/r@v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,19 +640,22 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 		{name: "cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, cancelled: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			var warnings bytes.Buffer
 			ctx := context.Background()
 			if test.cancelled {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			option, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor}).option(ctx, "buildkite/buildkite-gha")
+			option, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor, warnings: &warnings}).option(ctx, "buildkite/buildkite-gha")
 			if test.cancelled {
-				if !errors.Is(err, context.Canceled) || option != nil {
-					t.Fatalf("option/error = %v / %v", option != nil, err)
+				if !errors.Is(err, context.Canceled) || option != nil || warnings.Len() != 0 {
+					t.Fatalf("option/error/warnings = %v / %v / %q", option != nil, err, warnings.String())
 				}
 			} else if err != nil || option != nil {
 				t.Fatalf("option/error = %v / %v, want anonymous fallback", option != nil, err)
+			} else if !strings.Contains(warnings.String(), "resolving mutable public action references anonymously") || strings.Contains(warnings.String(), token) || strings.Contains(warnings.String(), "unavailable") {
+				t.Fatalf("fallback warning = %q, want sanitized observable warning", warnings.String())
 			}
 		})
 	}
@@ -665,8 +668,11 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
-	if authentication := jobScopedActionSourceAuthentication(); authentication != nil {
-		t.Fatal("ambient GitHub token configured action-source authentication")
+	var warnings bytes.Buffer
+	authentication := jobScopedActionSourceAuthentication(&warnings)
+	option, err := authentication.option(context.Background(), "buildkite/buildkite-gha")
+	if err != nil || option != nil || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
+		t.Fatalf("ambient GitHub token authentication = provider %v, option %v, error %v, warnings %q", authentication.provider != nil, option != nil, err, warnings.String())
 	}
 
 	server := httptest.NewServer(http.NotFoundHandler())
@@ -674,7 +680,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	if authentication := jobScopedActionSourceAuthentication(); authentication == nil {
+	if authentication := jobScopedActionSourceAuthentication(io.Discard); authentication.provider == nil {
 		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }

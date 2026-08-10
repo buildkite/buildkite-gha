@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,7 +85,7 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 		{name: "credential-scoping repository remains anonymous", token: "test-token", tokenRepository: "o/r", visibility: "public"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			var commitRequests int
+			var refRequests int
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if got := r.Header.Get("Authorization"); got != tt.wantAuth {
 					t.Errorf("Authorization = %q, want %q", got, tt.wantAuth)
@@ -92,9 +93,9 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 				switch r.URL.Path {
 				case "/repos/o/r":
 					_, _ = fmt.Fprintf(w, `{"private":%t,"visibility":%q}`, tt.private, tt.visibility)
-				case "/repos/o/r/commits/" + testSHA:
-					commitRequests++
-					_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, testSHA)
+				case "/repos/o/r/git/ref/tags/v1":
+					refRequests++
+					_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
 				default:
 					http.NotFound(w, r)
 				}
@@ -108,15 +109,15 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ref, _ := Parse("o/r@" + testSHA)
+			ref, _ := Parse("o/r@v1")
 			_, err = resolver.Resolve(context.Background(), ref)
 			if tt.wantNotPublic {
 				var notPublic *NotPublicError
-				if !errors.As(err, &notPublic) || commitRequests != 0 {
-					t.Fatalf("Resolve() error = %v, commit requests = %d", err, commitRequests)
+				if !errors.As(err, &notPublic) || refRequests != 0 {
+					t.Fatalf("Resolve() error = %v, ref requests = %d", err, refRequests)
 				}
-			} else if err != nil || commitRequests != 1 {
-				t.Fatalf("Resolve() error = %v, commit requests = %d", err, commitRequests)
+			} else if err != nil || refRequests != 1 {
+				t.Fatalf("Resolve() error = %v, ref requests = %d", err, refRequests)
 			}
 		})
 	}
@@ -124,11 +125,12 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 
 func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 	tests := []struct {
-		ref   string
-		calls []string
+		ref           string
+		authenticated bool
+		calls         []string
 	}{
-		{testSHA, []string{"/repos/o/r/commits/" + testSHA}},
-		{"feature/a+b", []string{"/repos/o/r/git/ref/tags/feature%2Fa+b", "/repos/o/r/git/ref/heads/feature%2Fa+b", "/repos/o/r/commits/feature%2Fa+b"}},
+		{ref: testSHA, authenticated: true},
+		{ref: "feature/a+b", calls: []string{"/repos/o/r/git/ref/tags/feature%2Fa+b", "/repos/o/r/git/ref/heads/feature%2Fa+b", "/repos/o/r/commits/feature%2Fa+b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.ref, func(t *testing.T) {
@@ -142,7 +144,11 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer ts.Close()
-			resolver, _ := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
+			opts := []Option{WithTestEndpoints(ts.URL)}
+			if tt.authenticated {
+				opts = append(opts, WithScopedGitHubToken("test-token", "pipeline/repo"))
+			}
+			resolver, _ := NewResolver(ts.Client(), opts...)
 			ref, _ := Parse("o/r@" + tt.ref)
 			if _, err := resolver.Resolve(context.Background(), ref); err != nil {
 				t.Fatal(err)
@@ -154,22 +160,29 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 	}
 }
 
-func TestResolverRejectsExactCommitMismatch(t *testing.T) {
-	otherSHA := strings.Repeat("a", 40)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, otherSHA)
+func TestResolverOnlyTreatsLowercaseFullSHAAsResolved(t *testing.T) {
+	upperSHA := strings.ToUpper(testSHA)
+	var calls []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		if strings.Contains(r.URL.Path, "/commits/") {
+			_, _ = fmt.Fprintf(w, `{"sha":"%s"}`, testSHA)
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer ts.Close()
 	resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := Parse("o/r@" + testSHA)
+	ref, err := Parse("o/r@" + upperSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "resolved exact commit") {
-		t.Fatalf("Resolve() error = %v, want exact-commit mismatch", err)
+	resolved, err := resolver.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != testSHA || !slices.Equal(calls, []string{"/repos/o/r/git/ref/tags/" + upperSHA, "/repos/o/r/git/ref/heads/" + upperSHA, "/repos/o/r/commits/" + upperSHA}) {
+		t.Fatalf("Resolve() = %#v, %v; calls = %v", resolved, err, calls)
 	}
 }
 
@@ -419,14 +432,13 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	var requests atomic.Int32
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if !strings.HasSuffix(r.URL.Path, "/tarball/"+testSHA) {
+		if r.URL.Path != "/Owner/Repo/tar.gz/"+testSHA {
 			t.Errorf("URL = %s", r.URL.Path)
 		}
 		_, _ = w.Write(archive)
 	}))
 	defer ts.Close()
-	u := strings.TrimPrefix(ts.URL, "https://")
-	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, u))
+	store, err := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,9 +464,8 @@ func TestStoreExpectedDigestAndManifestTamperFailClosed(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
 	defer ts.Close()
-	host := strings.TrimPrefix(ts.URL, "https://")
 	root := t.TempDir()
-	store, _ := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, host))
+	store, _ := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 	ref, _ := Parse("Owner/Repo@v1")
 	r := Resolved{Reference: ref, Commit: testSHA}
 	got, err := store.Materialize(context.Background(), r)
@@ -490,7 +501,7 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 				w.WriteHeader(tt.code)
 			}))
 			defer ts.Close()
-			store, _ := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, strings.TrimPrefix(ts.URL, "https://")))
+			store, _ := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 			ref, _ := Parse("o/r@v1")
 			_, err := store.Materialize(context.Background(), Resolved{Reference: ref, Commit: testSHA})
 			if tt.rate {
@@ -508,62 +519,91 @@ func TestStoreArchiveHTTPClassification(t *testing.T) {
 	}
 }
 
-func TestStoreAuthenticatedDownloadChecksVisibilityAndStripsRedirectCredentials(t *testing.T) {
+func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	const token = "test-token"
-	var private bool
-	visibility := "public"
+	var apiRequests int
 	var archiveRequests int
 	archiveServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		archiveRequests++
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
-			t.Errorf("redirect leaked credentials: Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+			t.Errorf("codeload credentials = Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+		}
+		if r.URL.Path != "/o/r/tar.gz/"+testSHA {
+			t.Errorf("codeload path = %q", r.URL.Path)
 		}
 		_, _ = w.Write(archive)
 	}))
 	defer archiveServer.Close()
 	apiServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/repos/o/r":
-			if r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Cookie") != "" {
-				t.Errorf("visibility request credentials = Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
-			}
-			_, _ = fmt.Fprintf(w, `{"private":%t,"visibility":%q}`, private, visibility)
-		case "/repos/o/r/tarball/" + testSHA:
-			if r.Header.Get("Authorization") != "Bearer "+token {
-				t.Errorf("tarball Authorization = %q", r.Header.Get("Authorization"))
-			}
-			http.Redirect(w, r, archiveServer.URL+"/archive", http.StatusFound)
-		default:
-			http.NotFound(w, r)
-		}
+		apiRequests++
+		http.Error(w, "GitHub REST must not be used for exact-commit materialization", http.StatusInternalServerError)
 	}))
 	defer apiServer.Close()
-	host := strings.TrimPrefix(archiveServer.URL, "https://")
 	ref, _ := Parse("o/r@v1")
 	resolved := Resolved{Reference: ref, Commit: testSHA}
-	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, host), WithScopedGitHubToken(token, "pipeline/repo"))
+	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, archiveServer.URL), WithScopedGitHubToken(token, "pipeline/repo"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Materialize(context.Background(), resolved); err != nil {
 		t.Fatal(err)
 	}
-	if archiveRequests != 1 {
-		t.Fatalf("archive requests = %d, want 1", archiveRequests)
+	if apiRequests != 0 || archiveRequests != 1 {
+		t.Fatalf("API/archive requests = %d / %d, want 0 / 1", apiRequests, archiveRequests)
 	}
+}
 
-	private = true
-	visibility = "private"
-	privateStore, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, host), WithScopedGitHubToken(token, "pipeline/repo"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = privateStore.Materialize(context.Background(), resolved)
-	var notPublic *NotPublicError
-	if !errors.As(err, &notPublic) || archiveRequests != 1 {
-		t.Fatalf("private Materialize() error = %v, archive requests = %d", err, archiveRequests)
-	}
+func TestStoreCodeloadRedirectPolicy(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	ref, _ := Parse("o/r@v1")
+	resolved := Resolved{Reference: ref, Commit: testSHA}
+	t.Run("same host remains anonymous", func(t *testing.T) {
+		var requests int
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+				t.Errorf("redirect request credentials = Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+			}
+			if r.URL.Path != "/archive" {
+				http.Redirect(w, r, "/archive", http.StatusFound)
+				return
+			}
+			_, _ = w.Write(archive)
+		}))
+		defer server.Close()
+		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL), WithScopedGitHubToken("test-token", "pipeline/repo"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Materialize(context.Background(), resolved); err != nil {
+			t.Fatal(err)
+		}
+		if requests != 2 {
+			t.Fatalf("requests = %d, want 2", requests)
+		}
+	})
+	t.Run("cross host denied before request", func(t *testing.T) {
+		var deniedRequests int
+		denied := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			deniedRequests++
+		}))
+		defer denied.Close()
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, denied.URL+"/archive", http.StatusFound)
+		}))
+		defer server.Close()
+		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Materialize(context.Background(), resolved); err == nil || !strings.Contains(err.Error(), "archive redirect denied") {
+			t.Fatalf("Materialize() error = %v, want denied redirect", err)
+		}
+		if deniedRequests != 0 {
+			t.Fatalf("denied host requests = %d, want 0", deniedRequests)
+		}
+	})
 }
 
 func TestStoreConcurrentMaterialize(t *testing.T) {
@@ -578,7 +618,7 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 		_, _ = w.Write(archive)
 	}))
 	defer ts.Close()
-	store, _ := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, strings.TrimPrefix(ts.URL, "https://")))
+	store, _ := NewStore(t.TempDir(), ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
 	ref, _ := Parse("o/r@v1")
 	resolved := Resolved{Reference: ref, Commit: testSHA}
 	var wg sync.WaitGroup

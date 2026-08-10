@@ -1121,7 +1121,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, jobScopedActionSourceAuthentication())
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, jobScopedActionSourceAuthentication(stderr))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1181,25 +1181,32 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 type actionSourceAuthentication struct {
 	provider gharuntime.WorkflowTokenProvider
 	redactor gharuntime.Redactor
+	warnings io.Writer
 }
 
-func jobScopedActionSourceAuthentication() *actionSourceAuthentication {
+func jobScopedActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
+	authentication := &actionSourceAuthentication{
+		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
+		warnings: warnings,
+	}
 	provider, err := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
 		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 		JobID:    os.Getenv("BUILDKITE_JOB_ID"),
 		JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 	})
 	if err != nil {
-		return nil
+		return authentication
 	}
-	return &actionSourceAuthentication{
-		provider: provider,
-		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
-	}
+	authentication.provider = provider
+	return authentication
 }
 
 func (a *actionSourceAuthentication) option(ctx context.Context, repository string) (actionsource.Option, error) {
 	if a == nil {
+		return nil, nil
+	}
+	if a.provider == nil {
+		a.warnAnonymousFallback("job-scoped GitHub source authentication is unavailable")
 		return nil, nil
 	}
 	token, err := a.provider.WorkflowToken(ctx, repository, map[string]string{"contents": "read"})
@@ -1207,15 +1214,23 @@ func (a *actionSourceAuthentication) option(ctx context.Context, repository stri
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		a.warnAnonymousFallback("could not mint a job-scoped GitHub source token")
 		return nil, nil
 	}
 	if err := a.redactor.AddRedaction(ctx, token); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		a.warnAnonymousFallback("could not register the job-scoped GitHub source token with the Buildkite Agent redactor")
 		return nil, nil
 	}
 	return actionsource.WithScopedGitHubToken(token, repository), nil
+}
+
+func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
+	if a.warnings != nil {
+		_, _ = fmt.Fprintf(a.warnings, "buildkite-gha: upload: warning: %s; resolving mutable public action references anonymously\n", reason)
+	}
 }
 
 func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
@@ -1261,7 +1276,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
 		}
-		store, err := actionsource.NewStore(actionRoot, nil, sourceOptions...)
+		store, err := actionsource.NewStore(actionRoot, nil)
 		if err != nil {
 			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
 		}

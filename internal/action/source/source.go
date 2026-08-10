@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	defaultAPI   = "https://api.github.com"
-	manifestName = "manifest-v1.json"
+	defaultAPI      = "https://api.github.com"
+	defaultCodeload = "https://codeload.github.com"
+	manifestName    = "manifest-v1.json"
 )
 
 var (
@@ -106,6 +107,7 @@ func (*NotPublicError) Error() string { return "GitHub action was not found or i
 
 type config struct {
 	api                                 *url.URL
+	codeload                            *url.URL
 	finalHosts                          map[string]bool
 	token                               string
 	tokenRepository                     string
@@ -115,8 +117,9 @@ type config struct {
 }
 
 func defaults() config {
-	u, _ := url.Parse(defaultAPI)
-	return config{api: u, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
+	api, _ := url.Parse(defaultAPI)
+	codeload, _ := url.Parse(defaultCodeload)
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
@@ -138,20 +141,26 @@ func WithScopedGitHubToken(token, repository string) Option {
 	}
 }
 
-// WithTestEndpoints replaces the API base and permitted archive final hosts.
-// It exists for hermetic tests; production callers should use defaults.
-func WithTestEndpoints(apiBase string, archiveFinalHosts ...string) Option {
+// WithTestEndpoints replaces the API base and, when supplied, the direct
+// codeload base. It exists for hermetic tests; production callers should use
+// defaults.
+func WithTestEndpoints(apiBase string, codeloadBase ...string) Option {
 	return func(c *config) error {
 		u, err := url.Parse(apiBase)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 			return fmt.Errorf("invalid API base")
 		}
 		c.api = u
-		if len(archiveFinalHosts) > 0 {
-			c.finalHosts = map[string]bool{}
-			for _, h := range archiveFinalHosts {
-				c.finalHosts[strings.ToLower(h)] = true
+		if len(codeloadBase) > 1 {
+			return fmt.Errorf("only one codeload base may be specified")
+		}
+		if len(codeloadBase) == 1 {
+			archive, err := url.Parse(codeloadBase[0])
+			if err != nil || archive.Scheme != "https" || archive.Host == "" || archive.User != nil || archive.RawQuery != "" || archive.Fragment != "" {
+				return fmt.Errorf("invalid codeload base")
 			}
+			c.codeload = archive
+			c.finalHosts = map[string]bool{strings.ToLower(archive.Host): true}
 		}
 		return nil
 	}
@@ -202,13 +211,13 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 		return Resolved{}, err
 	}
 	ref = parsed
+	if shaRE.MatchString(ref.Ref) {
+		return Resolved{Reference: ref, Commit: ref.Ref}, nil
+	}
 	if r.cfg.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
 			return Resolved{}, err
 		}
-	}
-	if shaRE.MatchString(ref.Ref) {
-		return r.resolveCommit(ctx, ref)
 	}
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
@@ -241,9 +250,6 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	}
 	if !shaRE.MatchString(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
-	}
-	if shaRE.MatchString(ref.Ref) && v.SHA != ref.Ref {
-		return Resolved{}, fmt.Errorf("GitHub resolved exact commit %s to different commit %s", ref.Ref, v.SHA)
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
@@ -372,8 +378,9 @@ func setAPIHeaders(r *http.Request, token string) {
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
 
-// Store downloads and atomically caches public repositories. A Store must not
-// be shared by mutually untrusted processes writing the same cache root.
+// Store downloads exact public commits directly from codeload and atomically
+// caches them. A Store must not be shared by mutually untrusted processes
+// writing the same cache root.
 type Store struct {
 	root   string
 	client *http.Client
@@ -404,11 +411,6 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		return Materialized{}, err
 	}
 	resolved.Reference = parsed
-	if s.cfg.token != "" {
-		if err := ensurePublic(ctx, s.client, s.cfg, parsed); err != nil {
-			return Materialized{}, err
-		}
-	}
 	base := filepath.Join(s.root, strings.ToLower(parsed.Owner), strings.ToLower(parsed.Repository), resolved.Commit)
 	tree := filepath.Join(base, "tree")
 	m, verifyErr := s.verify(base, resolved)
@@ -487,12 +489,17 @@ func selected(tree, p string) (string, error) {
 }
 
 func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) error {
-	u := apiURL(s.cfg.api, repoParts(r.Reference, "tarball", r.Commit)...)
+	u := apiURL(s.cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
+	if !validArchiveURL(u, s.cfg.finalHosts) {
+		return fmt.Errorf("archive URL denied")
+	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
 	}
-	setAPIHeaders(req, scopedToken(s.cfg, repoParts(r.Reference)))
+	req.Header.Del("Authorization")
+	req.Header.Del("Cookie")
+	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
