@@ -647,6 +647,8 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 		{name: "unavailable", redactor: &cliRedactor{}},
 		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("secret backend details")}, redactor: &cliRedactor{}},
 		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("secret backend details")}},
+		{name: "mint client timeout", provider: &cliWorkflowTokenProvider{err: context.DeadlineExceeded}, redactor: &cliRedactor{}},
+		{name: "redaction client timeout", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.DeadlineExceeded}},
 		{name: "pre-cancelled while unavailable", redactor: &cliRedactor{}, cancelContext: true, wantContext: true},
 		{name: "mint cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, wantContext: true},
 		{name: "redaction cancellation", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.Canceled}, wantContext: true},

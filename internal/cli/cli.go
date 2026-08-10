@@ -1223,7 +1223,7 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return "", err
 		}
 		a.warnAnonymousFallback("could not mint a job-scoped GitHub source token")
@@ -1233,7 +1233,7 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return "", err
 		}
 		a.warnAnonymousFallback("could not register the job-scoped GitHub source token with the Buildkite Agent redactor")
