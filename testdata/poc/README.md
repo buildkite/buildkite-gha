@@ -37,7 +37,7 @@ than the audited actions/cache v6.1.0 commit.
 The repository-only importer builds the exact checked-out source and runs the
 three service-free workflows before a CLI release exists:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 bk build create \
   --pipeline buildkite/buildkite-gha \
@@ -57,7 +57,7 @@ calls `upload` directly.
 Run the same workflows through the released companion plugin and its real
 anonymous release installer:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 bk build create \
   --pipeline buildkite/buildkite-gha \
@@ -71,7 +71,7 @@ bk build create \
 Add the optional cache extension only when the organization can mint GHAC
 tokens and the exact origin is configured:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 bk build create \
   --pipeline buildkite/buildkite-gha \

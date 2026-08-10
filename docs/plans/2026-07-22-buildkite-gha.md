@@ -1,8 +1,8 @@
-# `buildkite-gha`: GitHub Actions compatibility for Buildkite
+# buildkite-gha: GitHub Actions compatibility for Buildkite
 
 Status: **Active**
 Date: 2026-07-22
-Last reviewed: 2026-08-08
+Last reviewed: 2026-08-10
 Target repository: `buildkite/buildkite-gha`
 
 > This is the active product and implementation plan. It records future UX,
@@ -19,7 +19,7 @@ GitHub Actions workflow to run as a native Buildkite build. The project has two
 responsibilities:
 
 1. Compile a GitHub Actions workflow into ordinary Buildkite pipeline jobs.
-2. Execute the GitHub Actions steps inside each generated Buildkite job through
+1. Execute the GitHub Actions steps inside each generated Buildkite job through
    an Actions-compatible runtime.
 
 The intended entry point is conceptually:
@@ -28,7 +28,7 @@ The intended entry point is conceptually:
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-with a possible future Buildkite Agent integration:
+with a possible future Buildkite agent integration:
 
 ```bash
 buildkite-agent pipeline load-gha-workflow .github/workflows/ci.yml
@@ -74,15 +74,15 @@ parallel and background steps.
 A team should be able to:
 
 1. Create a Buildkite pipeline for an existing repository.
-2. Point it at an existing `.github/workflows/*.yml` file.
-3. Run the workflow on Buildkite with useful compatibility diagnostics and no
+1. Point it at an existing `.github/workflows/*.yml` file.
+1. Run the workflow on Buildkite with useful compatibility diagnostics and no
    GitHub Actions control-plane dependency.
-4. View progress and logs in Buildkite.
-5. Add native Buildkite jobs before or after the imported workflow.
-6. Replace individual imported jobs with native Buildkite jobs over time.
-7. Move the repository from GitHub to Cursor Origin while retaining the same
+1. View progress and logs in Buildkite.
+1. Add native Buildkite jobs before or after the imported workflow.
+1. Replace individual imported jobs with native Buildkite jobs over time.
+1. Move the repository from GitHub to Cursor Origin while retaining the same
    Buildkite pipeline and most portable actions.
-8. Remove the compatibility layer when the migration is complete.
+1. Remove the compatibility layer when the migration is complete.
 
 GitHub Actions becomes an accepted pipeline and action format, not the system
 of record.
@@ -175,7 +175,7 @@ runtime capabilities, and security-sensitive behavior before execution.
 
 The compiler records secret names and permission requirements, never values.
 The runtime resolves secrets inside the destination job, registers them with
-the Buildkite Agent redactor before action output can be emitted, and keeps
+the Buildkite agent redactor before action output can be emitted, and keeps
 them out of metadata, artifacts, generated YAML, and debug diagnostics.
 
 ## Goals
@@ -191,7 +191,7 @@ them out of metadata, artifacts, generated YAML, and debug diagnostics.
   uploads.
 - Provide deterministic compilation and a versioned intermediate
   representation.
-- Work through stable public Buildkite pipeline and Agent interfaces rather
+- Work through stable public Buildkite pipeline and agent interfaces rather
   than private Rails APIs.
 - Support GitHub and Cursor Origin as repository/event providers through a
   provider-neutral event and source interface.
@@ -263,7 +263,7 @@ buildkite-gha compile .github/workflows/ci.yml |
 ```
 
 `upload` is the ergonomic in-build command. It creates per-job plan artifacts,
-uploads the generated pipeline through the Buildkite Agent, and fails the
+uploads the generated pipeline through the Buildkite agent, and fails the
 bootstrap job if either operation fails.
 
 ### Initial Buildkite pipeline
@@ -319,7 +319,7 @@ visual insertion order is not an execution contract.
 ### Future first-class syntax
 
 Once the project is proven, Buildkite could recognize an import in its pipeline
-schema or expose it through the Agent:
+schema or expose it through the agent:
 
 ```yaml
 steps:
@@ -339,7 +339,7 @@ it.
 
 ## Architecture
 
-```diagram
+```text
 ┌──────────────────────────┐
 │ Workflow + event payload │
 └────────────┬─────────────┘
@@ -617,7 +617,7 @@ bootstrap contract is:
 - reject protected capability requests unless a matching control-plane grant
   can be established by the execution job.
 
-Buildkite signed pipelines are an optional Buildkite-specific defence-in-depth
+Buildkite signed pipelines are an optional Buildkite-specific defense-in-depth
 layer for installations that require uploaded step provenance. They are not a
 GitHub Actions compatibility requirement, and neither pipeline signatures nor
 plan signatures replace the protected capability service.
@@ -648,7 +648,7 @@ The emitter maps every expanded GHA job to an ordinary command step with:
 - the installation mechanism for the same pinned `buildkite-gha` version that
   performed compilation.
 
-Native checkout suppression requires Buildkite Agent v3.130.0 or later. The
+Native checkout suppression requires Buildkite agent v3.130.0 or later. The
 runtime must still allocate and verify a fresh empty directory for
 `GITHUB_WORKSPACE`; it must not assume that the agent command directory is empty
 or suitable merely because checkout was skipped. The generated command and
@@ -755,11 +755,11 @@ strategy:
 Represent these as deferred graph continuations:
 
 1. Compile and upload the known prerequisite graph.
-2. The prerequisite publishes a bounded, producer-attributed result manifest.
-3. A generated continuation command downloads that manifest from the exact
+1. The prerequisite publishes a bounded, producer-attributed result manifest.
+1. A generated continuation command downloads that manifest from the exact
    prerequisite step and verifies its plan identity.
-4. The compiler expands only the newly available portion of the graph.
-5. It publishes immutable plans and uploads the downstream Buildkite jobs with
+1. The compiler expands only the newly available portion of the graph.
+1. It publishes immutable plans and uploads the downstream Buildkite jobs with
    stable keys.
 
 Continuations are ordinary authoritative dynamic uploads within the same
@@ -798,22 +798,22 @@ protocol against a real partially retried build.
 job. Its state machine is:
 
 1. Verify the job plan and runtime version.
-2. Load producer-attributed prerequisite results and outputs, evaluate the job
+1. Load producer-attributed prerequisite results and outputs, evaluate the job
    condition, and, when false, record `skipped` and exit successfully without
    resolving secrets or starting containers.
-3. Resolve non-secret variables and required secrets.
-4. Register every resolved secret with the Buildkite Agent redactor.
-5. Create an empty GHA workspace and temporary directories.
-6. Start the job container and service containers, if configured.
-7. Resolve and prepare local and remote actions.
-8. Execute pre-actions in required order.
-9. Execute main steps, evaluating each condition at step start.
-10. Process workflow commands and environment files after every step.
-11. Execute post-actions in LIFO order, including after failure or cancellation
+1. Resolve non-secret variables and required secrets.
+1. Register every resolved secret with the Buildkite agent redactor.
+1. Create an empty GHA workspace and temporary directories.
+1. Start the job container and service containers, if configured.
+1. Resolve and prepare local and remote actions.
+1. Execute pre-actions in required order.
+1. Execute main steps, evaluating each condition at step start.
+1. Process workflow commands and environment files after every step.
+1. Execute post-actions in LIFO order, including after failure or cancellation
     within a bounded cleanup period.
-12. Evaluate and record job outputs and the logical job result.
-13. Publish step summaries and perform container/process cleanup.
-14. Exit with the Buildkite result corresponding to the logical GHA result.
+1. Evaluate and record job outputs and the logical job result.
+1. Publish step summaries and perform container/process cleanup.
+1. Exit with the Buildkite result corresponding to the logical GHA result.
 
 Generated GHA jobs should begin with an empty workspace rather than Buildkite's
 automatic repository checkout. This preserves Actions behavior for workflows
@@ -825,7 +825,7 @@ populated the workspace, as they do in GitHub Actions.
 
 Support these step/action types:
 
-#### `run` steps
+#### Run steps
 
 - GHA default-shell selection and shell flags;
 - `defaults.run.shell` and `working-directory`;
@@ -984,10 +984,10 @@ Actions fall into three product categories:
 1. **Portable actions** operate on the workspace, execute tools, or call an
    independent external API. Run their JavaScript, container, or composite
    implementation directly.
-2. **Actions-runtime integrations** depend on GitHub's cache, artifact, OIDC,
+1. **Actions-runtime integrations** depend on GitHub's cache, artifact, OIDC,
    or token services. Provide Buildkite-backed protocol services or explicit
    compatibility adapters.
-3. **Provider-dependent actions** modify GitHub repositories, pull requests,
+1. **Provider-dependent actions** modify GitHub repositories, pull requests,
    checks, issues, or releases. They can use a scoped GitHub token while GitHub
    is the repository provider. Under Cursor Origin they require an Origin
    equivalent or must be migrated.
@@ -1008,7 +1008,7 @@ repository metadata while preserving the action's documented inputs and
 outputs. Cache and artifact support should use Buildkite storage semantics
 without exposing GitHub's private service credentials.
 
-### Triggers and workflow `on`
+### Triggers and workflow event configuration
 
 `buildkite-gha` does not itself listen for repository events. A Buildkite
 pipeline integration, schedule, manual or API build request, or future Origin
@@ -1062,7 +1062,7 @@ authority.
   admitted queues for untrusted code.
 - Provider API tokens are short-lived and least-privilege.
 - Reusable workflows can only narrow inherited permissions.
-- Every secret is registered with the Agent redactor before use.
+- Every secret is registered with the agent redactor before use.
 - Job outputs containing registered secret literals or explicitly supported
   standard encodings are rejected rather than published; general secret taint
   tracking is out of scope.
@@ -1111,7 +1111,7 @@ release, verifies its checksum and fixed archive layout, caches the verified
 distribution, and invokes the tokenless upload path. For action
 jobs, the static bridge reuses mise 2026.5.12 or newer when available or
 downloads and digest-verifies its pinned 2026.5.12 official archive in the
-integration-owned managed cache path. Hosted Agents attach that cache
+integration-owned managed cache path. Buildkite hosted agents attach that cache
 automatically; other agent environments use it when available and otherwise
 fall back to ephemeral storage. Node 20.20.2 and 24.18.0 are installed by a
 reverified, job-private copy of that executable on demand into the same cache.
@@ -1243,7 +1243,7 @@ implemented and admitted surface today.
 
 The first externally useful beta should support:
 
-- Linux x86-64 on a compatible Hosted Agent image;
+- Linux x86-64 on a compatible Buildkite hosted agent image;
 - `push`, `pull_request`, and manual-input event envelopes;
 - `env`, `defaults`, `needs`, job and step `if`, timeouts, and bounded outputs;
 - static matrices with `include`, `exclude`, and `max-parallel`, plus
@@ -1385,10 +1385,11 @@ public checkout remains a separate provider integration gate.
   masking, so the distinct checked-in hosted fixture is now `runtime-pass`.
   The producer-side artifact slice now recognizes only the audited
   `actions/upload-artifact` v4 commit and replaces its lifecycle with a bounded
-  Buildkite Agent upload. Literal workspace files and directories become an
-  immutable, digest-addressed ZIP; compatible artifact ID and digest outputs
-  and the native path, size, and file count are bound into the authoritative
-  terminal result manifest. Globs, symlinks, overwrite, retention, raw upload,
+  native artifact upload through `buildkite-agent`. Literal workspace files and
+  directories become an immutable, digest-addressed ZIP; compatible artifact ID
+  and digest outputs and the native path, size, and file count are bound into
+  the authoritative terminal result manifest. Globs, symlinks, overwrite,
+  retention, raw upload,
   and unrecognized upstream commits fail explicitly. Build 259 and its
   exact-commit artifact observation prove publication, attribution, manifest
   binding, archive integrity and contents, hidden-file exclusion, and compatible
@@ -1411,7 +1412,7 @@ public checkout remains a separate provider integration gate.
   The runtime mints a fresh, job-bound GHAC token for each action lifecycle
   phase, registers it with both redaction layers before execution, and exposes
   the three cache-v2 variables only to the verified cache action. The ambient
-  Agent job token never enters action code or plan/result state. Older majors,
+  agent job token never enters action code or plan/result state. Older majors,
   other commits, unsafe mint responses, redirects, missing service
   configuration, and redaction failure all fail closed. The then-combined
   advanced migration POC forms the exact-commit implementation proof: it
@@ -1490,7 +1491,7 @@ public checkout remains a separate provider integration gate.
 - All local tests, race tests, vet, schema fixtures, shell checks, and offline
   pipeline validation pass. A default `.buildkite/pipeline.yml` now runs the
   repository checks, and all compilable smoke-manifest outputs pass the current
-  Buildkite Agent's `pipeline upload --dry-run --no-interpolation` parser.
+  `buildkite-agent pipeline upload --dry-run --no-interpolation` parser.
 - The smoke inventory now separates compilation, production-policy admission,
   and runtime evidence. `mise run smoke:local` is network-free: it validates
   the manifest and workflows and checks deterministic compilation, but is not
@@ -1654,8 +1655,9 @@ Phase 2 live evidence:
 - [Buildkite build 40](https://buildkite.com/buildkite/buildkite-gha/builds/40)
   ran exact implementation commit
   `e93298085ffef96e1cb0982e7a0b88f3558b11da`. The producer and both consumer
-  matrix jobs passed on ephemeral hosted Agent `4.0.0-beta.6`, followed by the
-  native Buildkite continuation and the full repository check.
+  matrix jobs passed on an ephemeral hosted agent running Buildkite agent
+  `4.0.0-beta.6`, followed by the native Buildkite continuation and the full
+  repository check.
 - The consumer logs emitted the normalized observations
   `{"result":"smoke-shell","variant":"one"}` and
   `{"result":"smoke-shell","variant":"two"}`, matching the checked-in
@@ -1682,7 +1684,7 @@ Phase 0 live evidence:
   passed the complete transport at commit
   `787b3adfe306a17fbf073c70b24f8b747b5882a8`: immutable plan artifacts,
   producer-constrained result download, generated dependency execution, native
-  dependency extension, metadata visibility, and Agent redaction all passed.
+  dependency extension, metadata visibility, and agent redaction all passed.
 - [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
   proved that the consumer runs and verifies a failure manifest after its
   producer fails. [Buildkite build 19](https://buildkite.com/buildkite/buildkite-gha/builds/19)
@@ -1699,7 +1701,7 @@ Phase 0 spike support snapshot:
 | Compile | Actionlint-backed owned model, deterministic compile-time context and vars evaluation, bounded local reusable-workflow flattening, source-ordered matrix `include`/`exclude`, exact dependency fan-out, policy-selected queues, schema-valid versioned plans, and Buildkite pipeline YAML | Runtime-dependent graph expressions, remote reusable workflows, unsupported operating systems, and unmapped runner labels fail closed |
 | Execute | Bash/sh steps; ten-active-step concurrency with barrier-scoped effects; JavaScript, composite, and Dockerfile actions; persistent job containers; services for container and host jobs; fresh workspaces; bounded prerequisite, step, and job outputs; file commands; conditions; masking; timeouts; process-tree cancellation; `continue-on-error`; bounded LIFO post-actions; and exact container cleanup | Producer result hydration enters through the transport boundary; private actions, `docker://` actions, protected credentials, arbitrary container options, unsupported operating systems, and unsupported expression/coercion forms fail closed |
 | Differential | Isolated committed fixture, canonical capture/comparison, offline validation, and matching hosted GitHub Actions and Buildkite observations | Broader runtime behavior remains phase-specific differential work |
-| Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, Agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
+| Transport | Confined materialization of verified content-addressed plan and binding bytes, deterministic two-job live upload, strict compiler edges, failure-settling logical edges, producer-bound manifests, metadata, agent redaction, signed markers, and native dependency extension | The probe deliberately avoids assuming upload atomicity |
 | Authorization | Eight signed-envelope conformance cases plus live rejection of a corrupted signature prove bounded signing and verification mechanics only | Protected capabilities require Buildkite Job OIDC authentication, provider provenance and policy verification, narrow signed grants, runtime exchange checks, and auditability; Buildkite signed-pipeline integration remains optional Phase 9 work |
 | Recovery | Ambiguous, partial, conflicting, or unattested interrupted uploads fail closed; a live interrupted upload and retry returned exit 75 | Operator cancel/rebuild is the supported recovery until Buildkite exposes an authoritative completed-upload query |
 
@@ -1719,11 +1721,11 @@ Build four spikes before committing to the runtime implementation:
 
 1. Parse and compile representative workflows using selected `act` and
    `actionlint` components into an owned intermediate representation.
-2. Run one JavaScript, one composite, and one Docker action inside a Buildkite
+1. Run one JavaScript, one composite, and one Docker action inside a Buildkite
    job while preserving outputs, masks, environment changes, and post-actions.
-3. Run equivalent fixture workflows on GitHub Actions and Buildkite and compare
+1. Run equivalent fixture workflows on GitHub Actions and Buildkite and compare
    normalized observations.
-4. Exercise the complete transport on a real Buildkite build: upload immutable
+1. Exercise the complete transport on a real Buildkite build: upload immutable
    plan artifacts, dynamically upload two dependent jobs, download and verify
    plans by compiler step, publish and consume producer-attributed result
    manifests, verify per-dependency failure handling keeps the compiler edge
@@ -1750,7 +1752,7 @@ Definition of done:
 - Compiler and runtime boundaries are proven without a GitHub runner service.
 - The action runtime can stream already-masked output into a Buildkite job.
 - Plan artifact ordering, dynamic dependency extension, metadata visibility,
-  producer attribution, and Agent redaction are proven in a real build.
+  producer attribution, and agent redaction are proven in a real build.
 - Interrupted-upload recovery is proven in a real build when a documented
   verification query exists; otherwise the fail-closed path and explicit
   operator recovery are proven and recorded as the supported behavior.
@@ -1829,14 +1831,14 @@ Delivery slices:
    conditions and status functions, environment precedence, supported shells
    and working directories, file commands, timeouts, cancellation,
    `continue-on-error`, and bounded cleanup.
-2. Promote the Phase 0 result probe into production transport contracts:
+1. Promote the Phase 0 result probe into production transport contracts:
    canonical producer-attributed manifests, exact-step artifact download,
    bounded metadata mirrors, and verified `needs` injection.
-3. Implement `buildkite-gha upload` for the explicit unprivileged local-event
+1. Implement `buildkite-gha upload` for the explicit unprivileged local-event
    mode, materializing immutable plans before dynamically uploading the
    generated pipeline. Protected capabilities remain unavailable until the
    control plane for that capability exists.
-4. Run `testdata/smoke/.github/workflows/shell.yml` on Buildkite, compare its
+1. Run `testdata/smoke/.github/workflows/shell.yml` on Buildkite, compare its
    normalized observation with the GitHub Actions oracle, exercise failure and
    cancellation cleanup, and inspect raw logs for the secret fixture.
 
@@ -1918,16 +1920,16 @@ Implemented order and fixed boundaries:
    the verified action tree, select `buildx build --builder default --load`, use
    fixed structured mounts and bridge-owned labels, and stop/remove containers
    and images under an independent bounded cleanup context.
-2. Admit only local and anonymously resolved public Dockerfile actions on the
+1. Admit only local and anonymously resolved public Dockerfile actions on the
    tokenless path. Generated jobs use Buildkite's configured agent defaults;
    operators must provide suitable whole-job Docker isolation. Continue
    rejecting `docker://` images, Docker pre/post entrypoints, arbitrary Docker
    options, private registries, credentials, provider tokens, host namespaces,
    devices, socket mounts, and privileged capabilities.
-3. Persistent job containers and path translation landed after Docker action
+1. Persistent job containers and path translation landed after Docker action
    lifecycle, command-file processing, masking, cancellation, and cleanup
    passed conformance coverage.
-4. Services, aliases, port context, health diagnostics, and startup/orphan
+1. Services, aliases, port context, health diagnostics, and startup/orphan
    cleanup use the same runtime-owned backend. Imported container definitions
    are not translated into workflow-controlled Buildkite plugins.
 
@@ -1974,7 +1976,7 @@ the narrowest available boundary:
   current-job endpoint's server-side repository and permission policy;
 - step summaries and annotations.
 
-Prefer documented Buildkite storage and Agent interfaces. If an action toolkit
+Prefer documented Buildkite storage and agent interfaces. If an action toolkit
 requires an HTTP protocol, use the official compatible service by default with
 an explicit operator override, or provide a well-defined adapter rather than
 proxying GitHub's private service. Cache credentials authorize storage access
@@ -1982,7 +1984,7 @@ only; they are distinct from the provider-feature grants below.
 
 For the native repository and scoped-token exceptions, the Buildkite backend's
 repository checks and permission allowlists are the authorization ceiling. The
-runtime omits the Agent access token from ordinary workflow subprocess
+runtime omits the agent access token from ordinary workflow subprocess
 environments, but that inheritance control is not OS-level isolation between
 hostile processes in one job. Exact checkout inputs and compiled workflow
 permissions constrain the supported client path rather than replacing the
@@ -2006,19 +2008,19 @@ Delivery slices:
 
 1. Ship artifact, summary, and public-checkout adapters without a service
    dependency.
-2. Run only the audited `actions/cache` v6.1.0 client against cache-v2, minting
+1. Run only the audited `actions/cache` v6.1.0 client against cache-v2, minting
    short-lived credentials through the exact current Buildkite job and keeping
-   all Agent authority outside action code.
-3. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
+   all agent authority outside action code.
+1. Prove Job OIDC authentication, build/job binding, GitHub provenance checks,
    policy evaluation, and signed no-op grants before returning credentials.
-4. Add private source through the narrowest practical credential or download
-   interface. Exact event-repository checkout uses the existing Buildkite Agent
+1. Add private source through the narrowest practical credential or download
+   interface. Exact event-repository checkout uses the existing Buildkite agent
    Git credential helper; private actions and private reusable-workflow source
    remain separate work.
-5. Add scoped GitHub tokens, selected secrets, and environment grants. The
-   job-bound Agent endpoint now covers explicit workflow tokens; selected
+1. Add scoped GitHub tokens, selected secrets, and environment grants. The
+   job-bound agent endpoint now covers explicit workflow tokens; selected
    secrets and general provenance-aware grants remain.
-6. Prefer direct Buildkite OIDC migration, then add only explicitly supported
+1. Prefer direct Buildkite OIDC migration, then add only explicitly supported
    compatibility-issuer claims for providers that cannot consume it directly.
 
 Status: the GitHub/tokenless portion of slice 1 and all of slice 2 are
@@ -2107,7 +2109,7 @@ Complete:
 - protected capability service availability, abuse controls, audit retention,
   key rotation, revocation, and external security review;
 - signed releases, checksums, provenance, and SBOMs;
-- Hosted Agent image integration;
+- Buildkite hosted agent image integration;
 - the installer Buildkite plugin;
 - metrics for compile time, runtime overhead, action compatibility, and failures;
 - user-facing compatibility documentation; and
@@ -2263,7 +2265,7 @@ Run real builds that exercise:
 - untrusted pull-request policy.
 
 The full Buildkite path must be tested; a local Docker harness cannot prove
-dynamic pipeline, Agent redaction, artifact, metadata, or cancellation behavior.
+dynamic pipeline, agent redaction, artifact, metadata, or cancellation behavior.
 
 ### Fuzzing and security tests
 
@@ -2340,7 +2342,7 @@ compatibility may justify Buildkite additions:
 - UI treatment for generated/imported pipelines and compatibility findings.
 
 Each addition should be proposed only after the standalone implementation
-proves that a public Agent or pipeline contract cannot provide the required
+proves that a public agent or pipeline contract cannot provide the required
 behavior safely.
 
 ## Beta readiness reconciliation
@@ -2394,7 +2396,7 @@ public-beta declaration. It has two explicit lanes:
    artifact transfer, summaries, warning/error annotations, and a native
    continuation without depending on the capability service or a cache
    service.
-2. The cache extension uses the same released plugin and CLI with an explicitly
+1. The cache extension uses the same released plugin and CLI with an explicitly
    configured origin-only Results URL. It additionally proves the audited
    `actions/cache` v6.1.0 miss, post-save, and direct-dependent hit using
    short-lived credentials minted for the exact Buildkite job. The development
@@ -2404,11 +2406,11 @@ public-beta declaration. It has two explicit lanes:
 Both lanes must start from ordinary documented plugin configuration rather
 than a repository-only importer. A recorded run must name the exact Git commit,
 plugin revision, CLI release, Buildkite build, and any cache prerequisite. A
-clean Hosted Agent must be able to repeat the run without an unpublished local
-binary or retained workspace state. The visible result should contain the
-importer, generated jobs at basic through advanced complexity, native logs and
-dependencies, artifact and cache observations, and the final native
-continuation.
+clean Buildkite hosted agent must be able to repeat the run without an
+unpublished local binary or retained workspace state. The visible result should
+contain the importer, generated jobs at basic through advanced complexity,
+native logs and dependencies, artifact and cache observations, and the final
+native continuation.
 
 The demo gap closed in this order, using small cross-repository changes:
 
@@ -2416,20 +2418,20 @@ The demo gap closed in this order, using small cross-repository changes:
    stable representative fixtures. Keep the service-free baseline independent
    of the cache extension, remove development-only source rewriting from the
    plugin path, and preserve deterministic compile/admission coverage locally.
-2. Completed: run the full local gate and existing exact-commit hosted proofs,
+1. Completed: run the full local gate and existing exact-commit hosted proofs,
    then publish the resulting CLI as `v0.2.0` with its current checksummed
    archive contract. The plugin cannot prove the current runtime before that
    runtime has a public immutable release; failures found by the plugin proof
    are fixed in a patch release rather than by replacing release assets.
-3. Completed: in the companion plugin repository, default to the proven CLI
+1. Completed: in the companion plugin repository, default to the proven CLI
    release, add a live installer/plugin smoke lane alongside the existing
    isolated tests, and document the exact prerequisites. Prove the candidate
    plugin commit against both demo lanes before tagging the plugin.
-4. Completed: tag the companion plugin, update this repository's quick start
+1. Completed: tag the companion plugin, update this repository's quick start
    from the temporary commit pin to that tag, and rerun both demo lanes using
    only the published configuration. Record those exact runs as the
    authoritative installation and demo evidence.
-5. Ongoing: use failures and diagnostics from those runs and real customer
+1. Ongoing: use failures and diagnostics from those runs and real customer
    workflow migrations to drive small compatibility or UX changes. The first
    external migration passed at `mcncl/gotyper` commit
    `8a74f88676a120e0bc6090b1aafc65edfd62ebbe`; several more remain. Do not add
@@ -2438,22 +2440,22 @@ The demo gap closed in this order, using small cross-repository changes:
 This milestone does not by itself satisfy every public-beta gate. The initial
 support target still names manual-input event envelopes plus job and service
 containers that the production plugin does not expose or admit. The release
-gate also currently requires signed, repeatable Hosted and self-hosted
-installation even though the released production plugin is checksummed and
-explicitly targets the Hosted queue. The current source CLI instead inherits
-Buildkite's configured agent targeting by default. Those are explicit scope
-decisions: either implement and prove them or deliberately revise the beta
-contract before claiming the initial support target is complete. A production
-cache endpoint and several customer migrations beyond the first
-`mcncl/gotyper` proof are also still outstanding. The signed no-op capability
-grant remains a parallel security-foundation item, not permission to block or
-weaken the service-free demo.
+gate also currently requires signed, repeatable hosted and self-hosted
+installation even though the released plugin is checksummed and, like the
+current CLI, inherits the pipeline or organization default agent targeting.
+Those are explicit scope decisions: either implement and prove them or
+deliberately revise the beta contract before claiming the initial support target
+is complete. A production cache endpoint and several customer migrations beyond
+the first `mcncl/gotyper` proof are also still outstanding. The signed no-op
+capability grant remains a parallel security-foundation item, not permission to
+block or weaken the service-free demo.
 
 ## Release gates
 
 ### Private alpha
 
-- Shell, JavaScript, and composite fixtures pass on Linux Hosted Agents.
+- Shell, JavaScript, and composite fixtures pass on Linux Buildkite hosted
+  agents.
 - The validator catches unsupported containers, platforms, and event fields.
 - Logs and outputs are native Buildkite data.
 - No GitHub Actions run or private runner protocol is involved.
@@ -2490,7 +2492,7 @@ runtime, hosted images, service protocols, and repository APIs. Manage scope
 through explicit compatibility levels, differential fixtures, and a Linux-first
 support contract rather than claiming universal compatibility.
 
-### Reusing `act` creates upstream coupling
+### Reusing act creates upstream coupling
 
 `act` provides the fastest Go starting point but is optimized for local
 container execution, not Buildkite compilation and hosted-agent fidelity. Own
@@ -2557,7 +2559,7 @@ unknown plan.
   build/job/queue binding in Phase 0. It is retained as an integrity mechanism,
   not as production capability authorization.
 - Buildkite pipeline signing protects uploaded command provenance and remains
-  optional installation-specific defence in depth; it is not required for
+  optional installation-specific defense in depth; it is not required for
   tokenless Actions compatibility.
 - Concurrent Actions steps require their own supervisor and conformance surface;
   they are now an explicit delivery phase rather than an unowned beta promise.
@@ -2573,39 +2575,39 @@ unknown plan.
    producer-attributed artifacts bound to the build, importer, target job, step,
    queue, compiler, and workflow. These bindings protect transport but do not
    authorize protected resources.
-2. The bootstrap is an ordinary Buildkite dynamic pipeline generator. It runs a
+1. The bootstrap is an ordinary Buildkite dynamic pipeline generator. It runs a
    pinned verified distribution, treats provider-fetched workflow text as inert
    data, exposes no ambient protected credential in tokenless mode, and emits
    fixed fail-closed job definitions.
-3. Buildkite signed pipelines are not required for the initial implementation.
-   Buildkite step signing is optional defence in depth and is deferred to Phase
-   9. Protected capabilities are separately authorized by the Phase 6 control
-   plane after Buildkite Job OIDC authentication.
-4. Generated compatibility jobs set `checkout.skip: true`, require Buildkite
-   Agent v3.130.0 or later, and allocate a fresh `GITHUB_WORKSPACE` themselves.
-5. Parallel and background steps remain in the beta target and are implemented
+1. Buildkite signed pipelines are not required for the initial implementation.
+   Buildkite step signing is optional defense in depth and is deferred to
+   Phase 9. Protected capabilities are separately authorized by the Phase 6
+   control plane after Buildkite Job OIDC authentication.
+1. Generated compatibility jobs set `checkout.skip: true`, require Buildkite
+   agent v3.130.0 or later, and allocate a fresh `GITHUB_WORKSPACE` themselves.
+1. Parallel and background steps remain in the beta target and are implemented
    in a dedicated phase after the sequential shell runtime.
-6. Static local reusable workflows are compiled in Phase 1. Phase 7 adds dynamic
+1. Static local reusable workflows are compiled in Phase 1. Phase 7 adds dynamic
    matrices and remote reusable workflows without reimplementing the local
    compiler path.
-7. Import actionlint v1.7.12 unchanged as the syntax frontend and immediately
+1. Import actionlint v1.7.12 unchanged as the syntax frontend and immediately
    adapt it into owned models. Keep act v0.2.89 and Actions runner v2.336.0 as
    pinned behavioral oracles; do not import or fork act for production.
-8. The Phase 0 envelope experiment uses detached ES256 JWS over bounded RFC 8785
+1. The Phase 0 envelope experiment uses detached ES256 JWS over bounded RFC 8785
    canonical claims and remains separate from Buildkite pipeline signing. It
    proves signing mechanics only. The production capability-grant profile, key
    custody, rotation, revocation, and audit contract are Phase 6 decisions.
-9. Explicit bridge, provider, and Buildkite variable maps use
+1. Explicit bridge, provider, and Buildkite variable maps use
    `Bridge < Provider < Buildkite` precedence and are snapshotted into every
    compiled plan.
-10. No current Buildkite query authoritatively verifies a completed dynamic
+1. No current Buildkite query authoritatively verifies a completed dynamic
     upload after interruption. Recovery fails closed with exit 75 and requires
     the operator to cancel and rebuild.
-11. Until Buildkite has a scheduler-visible skipped result, a runtime-skipped
+1. Until Buildkite has a scheduler-visible skipped result, a runtime-skipped
     imported job exits successfully after publishing its logical `skipped`
     result and emits a clear annotation. Downstream compatibility semantics use
     the logical result rather than the Buildkite job state.
-12. Generated jobs omit Buildkite agent targeting by default. Empty runner
+1. Generated jobs omit Buildkite agent targeting by default. Empty runner
     policy mappings mean "use Buildkite defaults"; explicit queue mappings
     remain available to embedding API callers. Schema v7 makes
     `target.queue` optional, and only explicit targets are runtime-verified.
@@ -2620,21 +2622,21 @@ them in the phase that first needs the capability:
 1. Phase 6 control-plane work will determine which authenticated GitHub event
    payload Buildkite exposes, whether the service must receive GitHub App
    webhooks directly, and whether a small Buildkite platform API is missing.
-2. Phase 5 uses direct Hosted Agent execution. Exact-commit build 102 proved
-   the local `default` Docker driver and queue prerequisites; build 136 proved
-   the complete container runtime. Importers can now opt generated jobs into an
-   immutable toolchain-enabled image; the default image and fresh job-private
-   tool cache remain unchanged when no image is selected.
-3. Phase 4 will set the customer-beta event and expression subset from the
+1. Phase 5 uses direct Buildkite hosted agent execution. Exact-commit build 102
+   proved the local `default` Docker driver and queue prerequisites; build 136
+   proved the complete container runtime. Importers can now opt generated jobs
+   into an immutable toolchain-enabled image; the default image and fresh
+   job-private tool cache remain unchanged when no image is selected.
+1. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
-4. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
+1. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
    and short-lived capability contracts alongside the GitHub provider adapter.
-5. The Phase 5 probe on Buildkite's `hosted` queue proves this repository's
+1. The Phase 5 probe on Buildkite's `hosted` queue proves this repository's
    Dockerfile-action evidence, not a product scheduling requirement. Deployments
    using Buildkite defaults must independently provide suitable whole-job
    isolation. Phases 6 and 9 still own authorization and queue policy for
    protected Docker capabilities and privileged workloads.
-6. The narrow token contract is now defined for static
+1. The narrow token contract is now defined for static
    `secrets.GITHUB_TOKEN` references and effective action metadata input
    defaults that reference `github.token`, with a narrow `contents:read` product
    default when permissions are omitted, non-empty effective permission maps,
@@ -2653,22 +2655,22 @@ matrix](../compatibility.md#support-matrix).
 1. A Buildkite bootstrap job runs `buildkite-gha upload` on
    `testdata/smoke/.github/workflows/ci.yml` materialized as the fixture
    repository.
-2. The compiler emits two native Buildkite jobs with a dependency between them.
-3. The first job runs a shell step, a JavaScript action, and a composite action.
-4. It publishes a bounded output, which the second job consumes through its
+1. The compiler emits two native Buildkite jobs with a dependency between them.
+1. The first job runs a shell step, a JavaScript action, and a composite action.
+1. It publishes a bounded output, which the second job consumes through its
    producer-attributed result manifest.
-5. The runtime separately uploads and downloads a Buildkite-native diagnostic
+1. The runtime separately uploads and downloads a Buildkite-native diagnostic
    artifact to prove job transport. The later Phase 6 slices added the bounded
    `actions/upload-artifact` and exact-name `actions/download-artifact`
    adapters now listed in the support matrix.
-6. Both jobs stream masked logs and display action warnings and summaries in
+1. Both jobs stream masked logs and display action warnings and summaries in
    Buildkite.
-7. A native Buildkite job depends on the imported workflow and succeeds.
-8. The same `ci.yml` fixture runs on GitHub Actions and produces the checked-in
+1. A native Buildkite job depends on the imported workflow and succeeds.
+1. The same `ci.yml` fixture runs on GitHub Actions and produces the checked-in
    output observation plus equivalent normalized log and action-lifecycle
    events; the Buildkite-native transport artifact is excluded from differential
    comparison.
-9. Generated jobs skip checkout, create fresh workspaces, and reject a plan
+1. Generated jobs skip checkout, create fresh workspaces, and reject a plan
    whose digest or build, importer, job, step, queue, or runtime binding does not
    match. The tokenless queue exposes no ambient protected credential.
 

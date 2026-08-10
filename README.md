@@ -1,22 +1,25 @@
 # buildkite-gha
 
-Run a GitHub Actions workflow as native Buildkite jobs—without creating a
+Run a GitHub Actions workflow as native Buildkite jobs without creating a
 GitHub Actions run.
 
 `buildkite-gha` translates each workflow job (and each static matrix entry)
 into a Buildkite job, then runs that job's Actions steps in a compatibility
-runtime. Buildkite remains the source of truth for scheduling, logs, retries,
-cancellation, and the build UI.
+runtime. Buildkite Pipelines is the source of truth for scheduling, logs,
+retries, cancellation, and the build interface.
 
 > [!IMPORTANT]
-> This is an experimental pre-1.0 preview for **Linux x86-64 workflows**. The
+> This is a research preview for **Linux x86-64 workflows**. The
 > default remains limited to public actions and no general workflow secrets.
 > Verified checkout automatically uses Buildkite's repository-provider Git
 > credentials when the job is configured for them, and otherwise checks out
 > anonymously. Private actions and workflow secrets other than the explicitly
 > scoped `secrets.GITHUB_TOKEN` contract remain rejected.
+>
+> To provide feedback or report issues, contact the [Buildkite Support
+> team](mailto:support@buildkite.com).
 
-## Buildkite controls the pipeline; the workflow describes the workload
+## Buildkite Pipelines controls the pipeline; the workflow describes the workload
 
 A GitHub Actions workflow combines two concerns: run triggers and event filters
 under `on:` control when GitHub creates a workflow run, while `jobs` and `steps`
@@ -50,21 +53,22 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.4.4:
+      - github-actions#v0.7.1:
           workflow: .github/workflows/ci.yml
+          version: "0.7.2"
 ```
 
-The pinned released plugin downloads and verifies `buildkite-gha` v0.4.2 by
-default, derives the event context from the Buildkite build, and explicitly
-targets the fixed `hosted` queue. Pin a released plugin version rather than a
-floating branch. The current source CLI instead omits agent selectors by
-default, so direct uploads inherit Buildkite's configured agent targeting unless
-`BUILDKITE_GHA_TARGET_QUEUE` selects one queue explicitly. Jobs that can execute
+Every importer step must have a unique `key`. Pin a released plugin version
+rather than a floating branch. Plugin and binary releases are independent. The
+v0.7.1 plugin defaults to `buildkite-gha` v0.7.1, while this example explicitly
+selects `buildkite-gha` v0.7.2. Generated jobs inherit the pipeline or
+organization default agent targeting unless the importer sets
+`BUILDKITE_GHA_TARGET_QUEUE` to select one queue. Jobs that can execute
 JavaScript reuse mise 2026.5.12 or newer from `PATH` or the absolute path in
 `BUILDKITE_GHA_MISE`; when neither provides a compatible version, the runtime
-downloads and verifies a managed 2026.5.12 copy. Hosted Agents use their
-attached cache; other environments fall back to an ephemeral cache when that
-path is unavailable. Shell-only jobs and action jobs whose resolved trees
+downloads and verifies a managed 2026.5.12 copy. Buildkite hosted agents use
+their attached cache; other environments fall back to an ephemeral cache when
+that path is unavailable. Shell-only jobs and action jobs whose resolved trees
 contain only shell steps, native adapters, or Docker do not require or install
 mise.
 
@@ -84,8 +88,9 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.4.4:
+      - github-actions#v0.7.1:
           workflow: .github/workflows/ci.yml
+          version: "0.7.2"
 
   - label: ":rocket: Deploy"
     key: "deploy"
@@ -107,7 +112,7 @@ offers the same three choices through a Buildkite block step.
 To launch both providers at the current branch's exact remote commit and print
 their run URLs together:
 
-```sh
+```bash
 scripts/compare-example basic
 scripts/compare-example artifacts
 scripts/compare-example advanced
@@ -200,7 +205,7 @@ for the exact distinction and intentional behavior differences.
 
 Static validation does not contact Buildkite or execute the workflow:
 
-```sh
+```bash
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
@@ -216,7 +221,7 @@ Result: compilable
 To also resolve public actions and apply the same policy as the plugin's
 `hosted-tokenless` upload, provide an event snapshot:
 
-```sh
+```bash
 buildkite-gha validate \
   --profile hosted-tokenless \
   --event-path .buildkite/events/current.json \
@@ -248,7 +253,7 @@ share a workspace, environment changes, action state, containers, and
 post-action lifecycle in GitHub Actions, so they must stay inside one job here
 too.
 
-```diagram
+```text
 ┌──────────────────────────┐
 │ Buildkite configuration  │
 │ creates the build        │

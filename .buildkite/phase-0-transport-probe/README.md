@@ -10,7 +10,9 @@ This probe is intentionally dormant: local tests capture commands and never call
 
 Buildkite signed pipelines are outside this initial transport probe. Run the probe on the existing `hosted` queue without secrets, provider tokens, privileged containers, or other production capabilities. The signed, build-bound plan envelope remains mandatory and is a separate trust mechanism: `PHASE0_SIGN_JSON` signs plan bindings and markers, and `PHASE0_VERIFY_JSON` verifies them before runtime use.
 
-Signed-pipeline compatibility is deferred to the hardening phase as optional defence in depth for installations that already require it. It must use keys separate from the plan-envelope signer when implemented.
+Signed-pipeline compatibility is deferred to the hardening phase as optional
+defense in depth for installations that already require it. It must use keys
+separate from the plan-envelope signer when implemented.
 
 The live probe also requires:
 
@@ -62,7 +64,7 @@ Also run a negative build with `PHASE0_TAMPER_BINDING=1`; the producer must reje
 ## Recorded evidence
 
 - [Buildkite build 27](https://buildkite.com/buildkite/buildkite-gha/builds/27)
-  passed the complete transport and Agent-redaction path at commit
+  passed the complete transport and agent redaction path at commit
   `787b3adfe306a17fbf073c70b24f8b747b5882a8`.
 - [Buildkite build 15](https://buildkite.com/buildkite/buildkite-gha/builds/15)
   failed its producer while the failure-settling consumer passed.

@@ -28,7 +28,7 @@ The initial ten cases deliberately mix outcomes:
 
 Run the networked compile corpus with:
 
-```sh
+```bash
 mise run corpus:oss
 ```
 
@@ -40,7 +40,7 @@ Compiler determinism remains covered by the repository-owned smoke fixtures.
 The profile scan resolves public actions and treats only admitted workflows as
 passing:
 
-```sh
+```bash
 mise run corpus:oss-profile
 mise run corpus:oss-profile -- bat-changelog jq-valgrind
 ```

@@ -9,7 +9,7 @@
 The service-free compatibility path can execute public, anonymous workflow code
 without giving it authority beyond its Buildkite job. Summaries, annotations,
 native artifact adapters, public exact-SHA checkout, and the audited
-`actions/cache` v6 client all use public Agent or explicitly configured
+`actions/cache` v6 client all use public agent or explicitly configured
 cache-v2 interfaces. With two narrow exceptions described below, they do not
 establish general authority for private source, secrets, provider tokens,
 environments, privileged queues, or compatible OIDC claims.
@@ -20,7 +20,7 @@ the Phase 0 runtime binding proves integrity rather than provider provenance.
 The runtime needs a separate authorization result tied to both the actual
 Buildkite job and independently established provider facts.
 
-Buildkite Job OIDC supplies the job half of that identity. A running Agent can
+Buildkite Job OIDC supplies the job half of that identity. A running agent can
 mint a short-lived token for an exact audience with immutable organization,
 pipeline, build, job, cluster, and queue identifiers. It does not prove the
 complete GitHub event, actor, fork relationship, workflow source, installation,
@@ -70,9 +70,10 @@ separate.
 
 ### Job authentication
 
-The client obtains a fresh token with the Agent command equivalent to:
+The client obtains a fresh token by running the equivalent of this
+`buildkite-agent` command:
 
-```sh
+```bash
 buildkite-agent oidc request-token \
   --audience "$BUILDKITE_GHA_CONTROL_PLANE_URL" \
   --claim organization_id,pipeline_id,build_id,cluster_id,queue_id,queue_key
@@ -85,7 +86,7 @@ paths, queries, fragments, and redirects are rejected. The setting cannot be
 overridden by plan-, workflow-, repository-, or ordinary build-supplied
 environment. The client captures the token without logging it, keeps it in
 memory for one exchange, and sends it only to that bound service as the
-control-plane bearer credential. It never reads or forwards the ambient Agent
+control-plane bearer credential. It never reads or forwards the ambient agent
 access token to that service or to action code.
 
 The control plane validates the token against the fixed Buildkite issuer
@@ -207,18 +208,18 @@ remain in the platform signing boundary.
 
 Buildkite has two native, job-bound credential paths that support narrower
 integrations without waiting for the general grant protocol. Repository
-checkout uses the Agent's Git credential helper and delegates authorization for
+checkout uses the agent's Git credential helper and delegates authorization for
 the concrete URL supplied by Git to Buildkite's repository-provider backend.
-Workflow `GITHUB_TOKEN` support uses the Agent API below to mint a GitHub
+Workflow `GITHUB_TOKEN` support uses the agent API below to mint a GitHub
 installation token for the exact current job, exact pipeline repository, and
 caller-requested permission set. The server authenticates the request with the
-same job's Agent access token, independently requires the requested repository
+same job's agent access token, independently requires the requested repository
 to equal the pipeline's configured GitHub repository, and validates permissions
 against its own allowlist:
 
 ```http
 POST /v3/jobs/<current-job-id>/github_scoped_access_token
-Authorization: Token <current-job Agent access token>
+Authorization: Token <current-job agent access token>
 Content-Type: application/json
 ```
 
@@ -242,7 +243,7 @@ are enabled. Otherwise it performs the same checkout anonymously.
 
 The event repository and exact SHA remain the only checkout targets. The
 credential helper is configured as a command-scoped Git option only for the
-fetch, uses HTTP-path matching, receives the current job's Agent API identity,
+fetch, uses HTTP-path matching, receives the current job's agent API identity,
 and is not persisted. The runtime forwards proxy variables captured from the job
 process before workflow execution to that credentialed fetch but does not add
 the job credential to ordinary workflow subprocess environments. This is
@@ -250,7 +251,7 @@ inheritance control, not OS-level isolation between hostile processes in the
 same job. The Buildkite backend independently authorizes the concrete repository
 URL received through Git's credential protocol. Through the supported adapter
 no workflow input can select another credential target or access level, and the
-job's Agent credential is not placed in plans.
+job's agent credential is not placed in plans.
 
 A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
@@ -266,7 +267,7 @@ the capability.
 
 The runtime requests one token for the plan's exact event repository and exact
 permission map. It validates both independently, masks the returned token, and
-requires Agent redaction registration before making the synthetic secret
+requires agent redaction registration before making the synthetic secret
 available to expression evaluation. Job-level permissions replace workflow
 defaults; flattened local reusable workflows can only narrow caller authority.
 Permission aliases, empty grants, and `id-token` fail closed. `github.token` is
@@ -282,7 +283,7 @@ organization enablement, and permission allowlist are authoritative, but
 pipelines remain responsible for whether untrusted workflow changes may request
 an allowed write permission. The compiled permission map constrains the supported
 client path; it is not an independent authorization ceiling against same-job
-code that obtains the Agent access token and calls the endpoint directly.
+code that obtains the agent access token and calls the endpoint directly.
 Private actions, arbitrary reusable-workflow source, selected non-provider
 secrets, environments, and OIDC still require the general control-plane decision
 in this ADR.
@@ -292,17 +293,18 @@ in this ADR.
 The runtime treats the response as inert bytes until all of these checks pass:
 
 1. Bound response size and structural depth.
-2. Validate the protected header and select a configured, non-revoked key.
-3. Verify the JWS signature before using any claim in routing or diagnostics.
-4. Validate schema, issuer, audience, ID, time window, and capability vocabulary.
-5. Match every Buildkite claim exposed through immutable current-job context,
+1. Validate the protected header and select a configured, non-revoked key.
+1. Verify the JWS signature before using any claim in routing or diagnostics.
+1. Validate schema, issuer, audience, ID, time window, and capability
+   vocabulary.
+1. Match every Buildkite claim exposed through immutable current-job context,
    including build/job identity, step key, and queue key. IDs that are present
    only in verified Job OIDC are enforced by the control plane and retained in
    the signed grant for audit and later platform-supported runtime comparison.
-6. Match the plan and event digests to the exact decoded plan.
-7. Require the granted set to be a subset of the plan request and current local
+1. Match the plan and event digests to the exact decoded plan.
+1. Require the granted set to be a subset of the plan request and current local
    runtime policy.
-8. Resolve only the intersection of plan request, signed grant, and local
+1. Resolve only the intersection of plan request, signed grant, and local
    policy, at the point where a protected value is needed.
 
 For the no-op slice, the runtime verifies and discards the empty grant. It must
@@ -331,16 +333,16 @@ record; a successful job alone does not prove policy or audit behavior.
 ## Initial implementation sequence
 
 1. Finalize the request/grant schemas and platform endpoint ownership.
-2. Implement the platform verifier for Buildkite OIDC and authoritative GitHub
+1. Implement the platform verifier for Buildkite OIDC and authoritative GitHub
    event-to-build correlation.
-3. Implement empty-request policy, signed empty grants, JWKS publication, and
+1. Implement empty-request policy, signed empty grants, JWKS publication, and
    audit records without any credential backend.
-4. Add the `buildkite-gha` OIDC client and grant verifier behind explicit
+1. Add the `buildkite-gha` OIDC client and grant verifier behind explicit
    control-plane configuration.
-5. Add positive and negative conformance fixtures for signature, audience,
+1. Add positive and negative conformance fixtures for signature, audience,
    expiry, build/job/step/queue, plan/event digest, provider event, policy,
    capability broadening, key rotation, revocation, and service absence.
-6. Run one exact-commit hosted no-op proof and independently observe its audit
+1. Run one exact-commit hosted no-op proof and independently observe its audit
    binding before considering any credential-returning slice.
 
 ## Deferred decisions
@@ -385,7 +387,7 @@ grant.
 
 ## References checked
 
-- [Buildkite Agent OIDC](https://buildkite.com/docs/agent/cli/reference/oidc),
+- [Buildkite agent OIDC](https://buildkite.com/docs/agent/cli/reference/oidc),
   checked 2026-08-04
 - [Buildkite OIDC security guidance](https://buildkite.com/docs/pipelines/security/oidc),
   checked 2026-08-04

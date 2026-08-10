@@ -10,12 +10,12 @@ workflow is executable:
 
 1. `shell.yml` is the first runtime target. It has two logical jobs, a static
    consumer matrix, shell steps, and a bounded `needs` output.
-2. `concurrent.yml` adds background, targeted and full waits, cancellation,
+1. `concurrent.yml` adds background, targeted and full waits, cancellation,
    bounded queueing, parallel lowering, implicit cleanup, and concurrent
    masking probes.
-3. `ci.yml` adds checkout plus local JavaScript and composite actions, including
+1. `ci.yml` adds checkout plus local JavaScript and composite actions, including
    output, environment-file, masking, summary, and post-action events.
-4. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
+1. `artifact.yml` adds GitHub artifact-action compatibility and verifies one
    payload in both consumer matrix instances.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for

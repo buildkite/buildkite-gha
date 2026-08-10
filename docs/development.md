@@ -4,14 +4,14 @@
 
 The repository pins Go and all lint and release tools with mise:
 
-```sh
+```bash
 mise trust mise.toml
 mise install
 ```
 
 Run the complete repository check with:
 
-```sh
+```bash
 mise run check
 ```
 
@@ -26,7 +26,7 @@ live prerequisites and fails rather than silently losing Phase 5 coverage.
 
 Focused tasks are also available:
 
-```sh
+```bash
 mise run format
 mise run build
 mise run test
@@ -43,7 +43,7 @@ The smoke inventory deliberately separates three kinds of evidence.
 
 ### Network-free compilation
 
-```sh
+```bash
 mise run smoke:local
 ```
 
@@ -57,7 +57,7 @@ and the precise meaning of each expectation.
 
 ### Production-policy preflight
 
-```sh
+```bash
 mise run smoke:profile
 ```
 
@@ -91,7 +91,7 @@ execution.
 After the example workflows exist on the default branch, launch the same
 workflow at the current branch's exact remote commit in both products:
 
-```sh
+```bash
 scripts/compare-example basic
 scripts/compare-example artifacts
 scripts/compare-example advanced
@@ -110,7 +110,7 @@ not replace the normalized smoke evidence below.
 
 Run all implemented hosted proofs against one exact commit:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -141,7 +141,7 @@ outcome does not by itself prove that Buildkite persisted the annotation. After
 the targeted or aggregate build settles, use an authenticated `bk` CLI with
 `read_builds` access to verify the job-scoped annotation independently:
 
-```sh
+```bash
 scripts/phase-6-summary-annotation-verify <build-number> <commit>
 ```
 
@@ -153,7 +153,7 @@ fragments.
 Workflow-command annotation publication is also advisory. Verify its distinct
 warning and error contexts independently after the annotations proof settles:
 
-```sh
+```bash
 scripts/phase-6-workflow-annotations-verify <build-number> <commit>
 ```
 
@@ -165,7 +165,7 @@ absence of the registered masking canary.
 Artifact publication and consumption require independent native-storage
 observations after their targeted or aggregate builds settle:
 
-```sh
+```bash
 scripts/phase-6-upload-artifact-verify <build-number> <commit>
 scripts/phase-6-artifact-roundtrip-verify <build-number> <commit>
 ```
@@ -181,7 +181,7 @@ advanced service-free workflow without adding another phase-specific proof. It
 builds the exact checked-out source locally, so it is runtime evidence rather
 than installation evidence:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -228,7 +228,7 @@ repository's main branch after the CLI `v0.2.1` tag. They are current
 repository-demo UX rather than evidence about the released CLI runtime. Repeat
 the customer installation path with the current released-plugin demo:
 
-```sh
+```bash
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -241,7 +241,7 @@ action, and advanced workflows, then a native terminal step. Add the cache
 extension only for an organization with GHAC token minting enabled; the runtime
 uses the official Buildkite Results service by default:
 
-```sh
+```bash
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
   --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" \
@@ -273,7 +273,7 @@ coverage, differential oracles, commits, and historical Buildkite evidence.
 
 From a clean, up-to-date `main`, run:
 
-```sh
+```bash
 mise run release
 ```
 
