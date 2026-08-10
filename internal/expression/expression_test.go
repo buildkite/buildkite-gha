@@ -67,7 +67,6 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"${{ needs.build.outputs.release }}",
 		"${{ needs.build.result }}",
 		"${{ job.services.redis.ports[6379] }}",
-		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
 		"prefix-${{ github.actor }}-${{ matrix.version }}",
 	} {
 		t.Run(template, func(t *testing.T) {
@@ -81,7 +80,8 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		template string
 		want     string
 	}{
-		{template: "${{ hashFiles('go.sum') }}", want: "expression is unsupported"},
+		{template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", want: "requires a direct context reference"},
+		{template: "${{ hashFiles('go.sum') }}", want: "requires a direct context reference"},
 		{template: "${{ github }}", want: `unsupported runtime expression "github"`},
 		{template: "${{ steps.build.status }}", want: `unsupported runtime expression "steps.build.status"`},
 		{template: "${{ github[env.NAME] }}", want: "index must be a string literal"},
@@ -96,7 +96,23 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	}
 }
 
-func TestEvaluateSupportsConditionalValueExpressions(t *testing.T) {
+func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
+	for _, template := range []string{
+		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
+		"${{ true && 'quoted }} braces' || '' }}",
+	} {
+		if err := ValidateActionInputDefault(template); err != nil {
+			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
+		}
+	}
+	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}"} {
+		if err := ValidateActionInputDefault(template); err == nil {
+			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
+		}
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsConditionalValueExpressions(t *testing.T) {
 	template := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
 	for _, test := range []struct {
 		name    string
@@ -110,7 +126,7 @@ func TestEvaluateSupportsConditionalValueExpressions(t *testing.T) {
 		{name: "GitHub.com missing token", github: map[string]any{"server_url": "https://github.com"}, wantErr: `unavailable github value "token"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := Evaluate(template, Context{GitHub: test.github})
+			got, err := EvaluateActionInputDefault(template, Context{GitHub: test.github})
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("Evaluate() error = %v, want %q", err, test.wantErr)
@@ -119,6 +135,34 @@ func TestEvaluateSupportsConditionalValueExpressions(t *testing.T) {
 			}
 			if err != nil || got != test.want {
 				t.Fatalf("Evaluate() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := Evaluate(template, Context{}); err == nil {
+		t.Fatal("Evaluate() accepted action-default compound expression outside action metadata")
+	}
+}
+
+func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		template string
+		context  Context
+		want     string
+	}{
+		{name: "quoted closing delimiter", template: "${{ true && 'quoted }} braces' || '' }}", want: "quoted }} braces"},
+		{name: "numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
+		{name: "null and zero", template: "${{ null == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "false and zero", template: "${{ false == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "empty string and zero", template: "${{ '' == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "not equal", template: "${{ 'not-a-number' != 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "falsy zero", template: "${{ 0 && 'yes' || 'no' }}", want: "no"},
+		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateActionInputDefault(test.template, test.context)
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateActionInputDefault() = %q, %v, want %q", got, err, test.want)
 			}
 		})
 	}
