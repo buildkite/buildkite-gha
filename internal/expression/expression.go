@@ -83,6 +83,23 @@ const (
 	StepCondition
 )
 
+type runtimeReferenceKind uint8
+
+const (
+	runtimeReferenceUnsupported runtimeReferenceKind = iota
+	runtimeReferenceServicePort
+	runtimeReferenceGitHub
+	runtimeReferenceInput
+	runtimeReferenceMatrix
+	runtimeReferenceSecret
+	runtimeReferenceVar
+	runtimeReferenceEnv
+	runtimeReferenceStepOutput
+	runtimeReferenceStepStatus
+	runtimeReferenceNeedOutput
+	runtimeReferenceNeedResult
+)
+
 // CompileContext contains the non-secret values available while constructing
 // a workflow graph. Values are snapshots supplied by the compiler; evaluation
 // never reads the process environment or a secret provider.
@@ -127,6 +144,22 @@ func ReferencePath(text string) (string, []string, error) {
 		return "", nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
 	return referencePath(node)
+}
+
+// ValidateRuntimeTemplate verifies that every expression in a runtime template
+// has a reference shape supported by Evaluate. Runtime values are deliberately
+// not resolved because many contexts do not exist until a job or step runs.
+func ValidateRuntimeTemplate(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		root, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+		}
+		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
+		return nil
+	})
 }
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
@@ -972,37 +1005,37 @@ func evaluateReference(reference string, context Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	switch {
-	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
+	switch classifyRuntimeReference(root, path) {
+	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
-	case len(path) >= 1 && strings.EqualFold(root, "github"):
+	case runtimeReferenceGitHub:
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 		}
 		return fmt.Sprint(value), nil
-	case len(path) == 1 && strings.EqualFold(root, "inputs"):
+	case runtimeReferenceInput:
 		return findString(context.Inputs, path[0]), nil
-	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
 				return fmt.Sprint(value), nil
 			}
 		}
 		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
-	case len(path) == 1 && strings.EqualFold(root, "secrets"):
+	case runtimeReferenceSecret:
 		return findString(context.Secrets, path[0]), nil
-	case len(path) == 1 && strings.EqualFold(root, "vars"):
+	case runtimeReferenceVar:
 		return findString(context.Vars, path[0]), nil
-	case len(path) == 1 && strings.EqualFold(root, "env"):
+	case runtimeReferenceEnv:
 		return findString(context.Env, path[0]), nil
-	case len(path) == 3 && strings.EqualFold(root, "steps") && strings.EqualFold(path[1], "outputs"):
+	case runtimeReferenceStepOutput:
 		outputs, ok := findOutputs(context.Steps, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable step %q", path[0])
 		}
 		return findString(outputs, path[2]), nil
-	case len(path) == 2 && strings.EqualFold(root, "steps"):
+	case runtimeReferenceStepStatus:
 		for candidate, status := range context.StepStatuses {
 			if !strings.EqualFold(candidate, path[0]) {
 				continue
@@ -1015,13 +1048,13 @@ func evaluateReference(reference string, context Context) (string, error) {
 			}
 		}
 		return "", fmt.Errorf("expression references unavailable step %q", path[0])
-	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
+	case runtimeReferenceNeedOutput:
 		outputs, ok := findOutputs(context.Needs, path[0])
 		if !ok {
 			return "", fmt.Errorf("expression references unavailable need %q", path[0])
 		}
 		return findString(outputs, path[2]), nil
-	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
+	case runtimeReferenceNeedResult:
 		for candidate, result := range context.NeedResults {
 			if strings.EqualFold(candidate, path[0]) {
 				return result, nil
@@ -1031,6 +1064,42 @@ func evaluateReference(reference string, context Context) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported expression %q", reference)
 	}
+}
+
+func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
+	switch {
+	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
+		return runtimeReferenceServicePort
+	case len(path) >= 1 && strings.EqualFold(root, "github"):
+		return runtimeReferenceGitHub
+	case len(path) == 1 && strings.EqualFold(root, "inputs"):
+		return runtimeReferenceInput
+	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+		return runtimeReferenceMatrix
+	case len(path) == 1 && strings.EqualFold(root, "secrets"):
+		return runtimeReferenceSecret
+	case len(path) == 1 && strings.EqualFold(root, "vars"):
+		return runtimeReferenceVar
+	case len(path) == 1 && strings.EqualFold(root, "env"):
+		return runtimeReferenceEnv
+	case len(path) == 3 && strings.EqualFold(root, "steps") && strings.EqualFold(path[1], "outputs"):
+		return runtimeReferenceStepOutput
+	case len(path) == 2 && strings.EqualFold(root, "steps") && (strings.EqualFold(path[1], "outcome") || strings.EqualFold(path[1], "conclusion")):
+		return runtimeReferenceStepStatus
+	case len(path) == 3 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "outputs"):
+		return runtimeReferenceNeedOutput
+	case len(path) == 2 && strings.EqualFold(root, "needs") && strings.EqualFold(path[1], "result"):
+		return runtimeReferenceNeedResult
+	default:
+		return runtimeReferenceUnsupported
+	}
+}
+
+func referenceName(root string, path []string) string {
+	if len(path) == 0 {
+		return root
+	}
+	return root + "." + strings.Join(path, ".")
 }
 
 func lookupRuntimeValue(value any, path []string) (any, bool) {
