@@ -57,12 +57,14 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactCommitIsExact(t *testing.T) {
-	if err := ValidateUploadArtifactCommit(UploadArtifactCommit); err != nil {
-		t.Fatal(err)
+func TestUploadArtifactCommitsAreExact(t *testing.T) {
+	for _, commit := range []string{UploadArtifactCommit, UploadArtifactV7Commit} {
+		if err := ValidateUploadArtifactCommit(commit); err != nil {
+			t.Fatalf("audited commit %s rejected: %v", commit, err)
+		}
 	}
-	if err := ValidateUploadArtifactCommit(strings.Repeat("0", 40)); err == nil {
-		t.Fatal("unrecognized commit accepted")
+	if err := ValidateUploadArtifactCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
+		t.Fatalf("unrecognized commit error = %v, want both audited commits", err)
 	}
 }
 
@@ -135,6 +137,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 	for _, inputs := range []map[string]string{
 		nil,
 		{"repository": "BUILDKITE/BUILDKITE-GHA", "ref": sha, "fetch-depth": "1", "persist-credentials": "false", "clean": "true", "set-safe-directory": "true"},
+		{"fetch-depth": "0"},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)

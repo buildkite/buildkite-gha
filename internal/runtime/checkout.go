@@ -118,7 +118,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err := run(env, "remote", "add", "origin", url); err != nil {
 		return result, err
 	}
-	fetchArgs := []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", job.Event.SHA}
+	fetchArgs := checkoutFetchArgs(inputs, job.Event.SHA)
 	if credentialed {
 		if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, workspace, env, git, base, fetchArgs); err != nil {
 			return result, fmt.Errorf("%s git fetch: %w", adapter, err)
@@ -136,6 +136,20 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	result.Outputs["ref"] = job.Event.Ref
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
+}
+
+func checkoutFetchArgs(inputs map[string]string, sha string) []string {
+	for name, value := range inputs {
+		if strings.EqualFold(name, "fetch-depth") && value == "0" {
+			return []string{
+				"fetch", "--no-tags", "--prune", "--no-recurse-submodules", "origin",
+				"+refs/heads/*:refs/remotes/origin/*",
+				"+refs/tags/*:refs/tags/*",
+				"+" + sha + ":refs/buildkite-gha/event",
+			}
+		}
+	}
+	return []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", sha}
 }
 
 func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, fetchArgs []string) error {

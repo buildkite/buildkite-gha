@@ -34,9 +34,11 @@ const (
 	// AdapterDownloadArtifactBuildkite extracts one producer-attributed native
 	// archive without using the GitHub Actions artifact service.
 	AdapterDownloadArtifactBuildkite Adapter = "download-artifact-buildkite-v1"
-	// UploadArtifactCommit is the only upstream implementation whose input and
-	// archive semantics this adapter implements.
+	// UploadArtifactCommit and UploadArtifactV7Commit are the audited upstream
+	// implementations whose ZIP-mode semantics this adapter implements. Raw v7
+	// uploads remain explicitly unsupported by ValidateUploadArtifactInputs.
 	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	DownloadArtifactCommit = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
 	// CacheCommit is the only actions/cache implementation admitted to the
 	// Buildkite-backed cache-v2 service.
@@ -82,8 +84,8 @@ var catalog = map[Identity]Descriptor{
 
 // ValidateUploadArtifactCommit rejects semantic drift from the audited action.
 func ValidateUploadArtifactCommit(commit string) error {
-	if commit != UploadArtifactCommit {
-		return fmt.Errorf("actions/upload-artifact native adapter supports only commit %s, resolved %q; Phase 6 is required", UploadArtifactCommit, commit)
+	if commit != UploadArtifactCommit && commit != UploadArtifactV7Commit {
+		return fmt.Errorf("actions/upload-artifact native adapter supports only commits %s and %s, resolved %q; Phase 6 is required", UploadArtifactCommit, UploadArtifactV7Commit, commit)
 	}
 	return nil
 }
@@ -282,7 +284,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "fetch-depth":
-			if value == "1" {
+			if value == "0" || value == "1" {
 				continue
 			}
 		case "clean", "set-safe-directory":
