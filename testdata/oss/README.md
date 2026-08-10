@@ -6,16 +6,10 @@ contracts, while these cases reveal compatibility gaps in ordinary workflows
 that were not written for this project.
 
 Each manifest entry pins the source repository commit and workflow path. The
-harness fetches that exact commit anonymously into a temporary directory; it
-clears ambient Git credentials, configuration, proxies, hooks, filters, and
-transport overrides, then verifies the checked-out workflow bytes against the
-pinned Git blob. It does not vendor third-party source or execute repository
-code. Action references remain exactly as the upstream workflow declared them,
-including mutable tags. Profile checks against mutable tags are intentionally
-observational: the harness asserts the resulting compatibility boundary, not
-the resolved action commit. A tag movement that preserves that boundary is not
-reported. Hosted runtime comparisons must separately retain the immutable
-resolved action locks.
+harness downloads only that raw workflow and verifies its checked-in SHA-256.
+It does not clone the repository or execute third-party code. This deliberately
+limits the corpus to workflows that do not need repository-local actions or
+reusable workflows during compilation.
 
 The initial ten cases deliberately mix outcomes:
 
@@ -38,13 +32,13 @@ Run the networked compile corpus with:
 mise run corpus:oss
 ```
 
-This clones pinned repositories, validates every workflow, and compiles every
-compatible workflow twice to prove deterministic output. It does not resolve
-actions or execute workflow commands. Seven cases also retain a successful
-upstream GitHub run at the exact source SHA as the future differential oracle.
+This checks each expected compile classification, graph size, and diagnostic
+code without resolving actions. Seven cases also retain a successful upstream
+GitHub run at the exact source SHA as a future comparison reference. Compiler
+determinism remains covered by the repository-owned smoke fixtures.
 
-Profile checks anonymously resolve public actions and consume GitHub's small
-unauthenticated API allowance. They are therefore explicit and case-selective:
+Profile checks resolve public actions and are explicit and case-selective to
+bound GitHub API use:
 
 ```sh
 mise run corpus:oss-profile -- bat-changelog
@@ -52,19 +46,14 @@ mise run corpus:oss-profile -- fzf-linux jq-valgrind
 ```
 
 The profile applies the same `hosted-tokenless` admission policy as production,
-but still does not execute action or repository code. It verifies the expected
-graph size and boundary-specific diagnostic or warning. A GitHub API rate-limit
-response is reported as an environmental failure, never accepted as the case's
-expected compatibility result.
-
-The `runtime` field is a review gate, not runtime evidence:
-
-- `candidate-after-admission` is small and credential-free enough to review for
-  eventual execution once its admission blocker is removed;
-- `deferred` needs event fidelity, heavier dependencies, or more review;
-- `unsupported` deliberately records a current fail-closed boundary.
+but still does not execute action or repository code. Mutable action tags remain
+as declared upstream, so these checks are observational: runtime comparisons
+must separately retain immutable resolved action locks.
 
 Actual Hosted execution must use a separately reviewed allowlist, an exact
 event/source commit, disposable whole-job isolation, and no workflow secrets or
 ambient provider credentials. This harness intentionally stops before that
 authority boundary.
+
+Both corpus commands are opt-in; the normal `mise run check` remains
+network-free.

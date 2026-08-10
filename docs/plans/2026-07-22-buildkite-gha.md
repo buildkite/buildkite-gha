@@ -2192,15 +2192,15 @@ external actions use immutable commits. Add narrow repository-owned regression
 fixtures as behavior is implemented.
 
 The opt-in `testdata/oss` corpus complements those owned fixtures with unchanged
-workflows from exact public repository commits. `mise run corpus:oss` fetches
-each source anonymously, verifies the workflow against its pinned Git blob,
-validates it, and compares two compilations byte-for-byte. Selected
-`mise run corpus:oss-profile -- <case>...` checks may additionally resolve
-public actions and apply production `hosted-tokenless` admission. Neither lane
-executes third-party action or repository code, and the normal `mise run check`
-gate remains network-free. External Hosted execution requires a separately
-reviewed allowlist, exact event and action locks, disposable isolation, and no
-workflow secrets or ambient provider credentials.
+workflows from exact public repository commits. `mise run corpus:oss` downloads
+only each raw workflow, verifies its pinned SHA-256, and checks its expected
+compile result and graph size. Selected `mise run corpus:oss-profile --
+<case>...` checks may additionally resolve public actions and apply production
+`hosted-tokenless` admission. Neither lane executes third-party code. External
+Hosted execution requires a separately reviewed allowlist, exact event and
+action locks, disposable isolation, and no workflow secrets or ambient provider
+credentials. Both corpus commands are opt-in; the normal `mise run check` gate
+remains network-free.
 
 ### Unit and golden tests
 
