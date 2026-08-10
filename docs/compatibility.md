@@ -107,7 +107,7 @@ service.
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
 | `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and shallow fetch are supported. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
-| `actions/upload-artifact` | Supported subset | Only the audited v4 commit is adapted. It supports bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, raw uploads, merge, and GitHub URLs are not supported. |
+| `actions/upload-artifact` | Supported subset | The audited v4 and v7 commits are adapted in ZIP mode. They support bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
 | Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
@@ -330,11 +330,14 @@ to the service's repository and permission policy.
 
 ### Artifact uploads use bounded native storage
 
-The producer-side adapter recognizes only
-`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`.
-It verifies that immutable action source and metadata, then replaces the whole
-upstream JavaScript lifecycle with a Buildkite Agent artifact upload. A mutable
-v4 reference is accepted only when resolution produces that audited commit.
+The producer-side adapter recognizes only the audited commits
+`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`
+(v4) and
+`actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`
+(v7). It verifies the immutable action source and metadata, then replaces the
+whole upstream JavaScript lifecycle with a Buildkite Agent artifact upload. A
+mutable v4 or v7 reference is accepted only when resolution produces one of
+those audited commits.
 
 The supported inputs are `name`, `path`, `if-no-files-found`,
 `include-hidden-files`, `compression-level`, explicit `overwrite: false`, and

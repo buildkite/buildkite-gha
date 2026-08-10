@@ -808,6 +808,16 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
 		t.Fatalf("upload-artifact plans = %#v", plans)
 	}
+	plans, err = compile(actionintegration.UploadArtifactV7Commit, "        with:\n          name: payload\n          path: payload/result.txt\n          archive: true\n")
+	if err != nil {
+		t.Fatalf("audited v7 ZIP upload rejected: %v", err)
+	}
+	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
+		t.Fatalf("upload-artifact v7 plans = %#v", plans)
+	}
+	if _, err := compile(actionintegration.UploadArtifactV7Commit, "        with:\n          path: payload/result.txt\n          archive: false\n"); err == nil || !strings.Contains(err.Error(), `input "archive" may only be omitted or true`) {
+		t.Fatalf("upload-artifact v7 raw mode error = %v", err)
+	}
 
 	for name, input := range map[string]string{
 		"missing path": "          name: payload\n",
@@ -823,7 +833,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) {
+	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
 		t.Fatalf("unsupported upload-artifact commit error = %v", err)
 	}
 }
