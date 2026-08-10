@@ -111,7 +111,7 @@ service.
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
 | Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
-| Runner tool cache | Supported subset | For non-Docker processes, the runtime points `RUNNER_TOOL_CACHE` at a fresh job-private directory and does not expose an agent or Hosted shared cache as executable authority. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`. Setup actions therefore download tools on a miss rather than trusting entries written by another job. The shared Hosted cache volume is not used for executable tools because stock action tool-cache clients trust a writable entry and completion marker without verifying its contents. |
+| Runner tool cache | Supported subset | By default, the runtime points `RUNNER_TOOL_CACHE` at a fresh job-private directory and does not expose an agent or Hosted shared cache as executable authority. When pipeline configuration selects an immutable runtime image with `BUILDKITE_GHA_RUNTIME_IMAGE`, generated jobs use that image's baked `/opt/hostedtoolcache` facade instead. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`. The shared Hosted cache volume is never used for executable tools because stock action tool-cache clients trust a writable entry and completion marker without verifying its contents. |
 | Other GitHub service-backed actions | Not supported | Except for the integrations listed above, no general GitHub artifact, OIDC, Packages, Releases, Checks, or deployment service emulation is provided. An otherwise supported action runtime may still fail if its code requires one of those services. |
 
 ### Repositories, credentials, and platforms
@@ -612,6 +612,20 @@ pipeline upload. This setting is ordinary pipeline configuration, not an
 authenticated grant: it admits untrusted workflow code to the named queue, so
 that queue must provide suitable whole-job isolation and no ambient protected
 credentials.
+
+An importer can opt every generated workflow job into a toolchain-enabled
+Hosted image by setting `BUILDKITE_GHA_RUNTIME_IMAGE` to an immutable registry
+digest, for example:
+
+```yaml
+env:
+  BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03
+```
+
+The uploader emits this as each generated job's `image` and points the job's
+`RUNNER_TOOL_CACHE` at the image-baked `/opt/hostedtoolcache` inventory. Tags
+and other mutable references are rejected. Without this setting, generated
+jobs retain their current image selection and fresh job-private tool cache.
 
 `run-job` is an internal command emitted into generated jobs. Users should not
 need to invoke it directly.

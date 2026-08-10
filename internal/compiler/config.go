@@ -51,6 +51,9 @@ type Options struct {
 	// GroupLabel merges generated jobs into the Buildkite group containing the
 	// importer. It affects pipeline presentation only, not compiler IR or plans.
 	GroupLabel string
+	// RuntimeImage selects one immutable image for generated workflow jobs. It
+	// affects pipeline placement only, not compiler IR or plans.
+	RuntimeImage string
 }
 
 func defaultOptions() Options {

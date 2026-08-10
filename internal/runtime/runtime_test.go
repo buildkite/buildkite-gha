@@ -2375,6 +2375,25 @@ func TestRunnerToolCacheIsPerJobAndReserved(t *testing.T) {
 	}
 }
 
+func TestRunnerUsesConfiguredToolCache(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	toolCache, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:      "tool-cache",
+		Kind:    "run",
+		Command: `test "$RUNNER_TOOL_CACHE" = "$EXPECTED_TOOL_CACHE"`,
+	}})
+	job.Env = map[string]string{"EXPECTED_TOOL_CACHE": toolCache}
+	if result, err := (Runner{ToolCache: toolCache}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestUbuntuImageOS(t *testing.T) {
 	for _, test := range []struct {
 		name   string

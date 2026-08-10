@@ -18,12 +18,17 @@ const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 const runtimeCachePath = "/cache/bkcache/buildkite-gha"
 
+// HostedToolCachePath is the trusted, image-baked Actions tool-cache facade
+// used by explicitly selected runtime images.
+const HostedToolCachePath = "/opt/hostedtoolcache"
+
 // MinimumMiseVersion is the oldest supported mise release and the exact
 // release installed when no compatible runtime executable is available.
 const MinimumMiseVersion = "2026.5.12"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
@@ -31,6 +36,7 @@ type Pipeline struct {
 	CompilerStep       string
 	DistributionDigest string
 	GroupLabel         string
+	RuntimeImage       string
 	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
 }
@@ -94,6 +100,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err := validateConcurrencyGate(pipeline.ConcurrencyGate); err != nil {
 		return nil, err
 	}
+	if pipeline.RuntimeImage != "" && !runtimeImagePattern.MatchString(pipeline.RuntimeImage) {
+		return nil, fmt.Errorf("runtime image %q must be an immutable registry sha256 reference", pipeline.RuntimeImage)
+	}
 	distributionPath, err := DistributionPath(pipeline.DistributionDigest)
 	if err != nil {
 		return nil, err
@@ -119,6 +128,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
+		if pipeline.RuntimeImage != "" {
+			_, _ = fmt.Fprintf(&out, "%simage: %s\n", attributeIndent, yamlScalar(pipeline.RuntimeImage))
+		}
 		commands := []string{
 			"set -euo pipefail",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
@@ -131,7 +143,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
-		commands = append(commands, `"$distribution" run-job --plan "$plan"`)
+		runJob := `"$distribution" run-job --plan "$plan"`
+		if pipeline.RuntimeImage != "" {
+			runJob += " --hosted-tool-cache"
+		}
+		commands = append(commands, runJob)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(&out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if job.Queue != "" {
