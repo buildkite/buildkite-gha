@@ -1201,30 +1201,36 @@ func jobScopedActionSourceAuthentication(warnings io.Writer) *actionSourceAuthen
 	return authentication
 }
 
-func (a *actionSourceAuthentication) option(ctx context.Context, repository string) (actionsource.Option, error) {
+func (a *actionSourceAuthentication) option(repository string) actionsource.Option {
 	if a == nil {
-		return nil, nil
+		return nil
 	}
+	return actionsource.WithScopedGitHubTokenProvider(repository, func(ctx context.Context) (string, error) {
+		return a.token(ctx, repository)
+	})
+}
+
+func (a *actionSourceAuthentication) token(ctx context.Context, repository string) (string, error) {
 	if a.provider == nil {
 		a.warnAnonymousFallback("job-scoped GitHub source authentication is unavailable")
-		return nil, nil
+		return "", nil
 	}
 	token, err := a.provider.WorkflowToken(ctx, repository, map[string]string{"contents": "read"})
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return "", ctx.Err()
 		}
 		a.warnAnonymousFallback("could not mint a job-scoped GitHub source token")
-		return nil, nil
+		return "", nil
 	}
 	if err := a.redactor.AddRedaction(ctx, token); err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return "", ctx.Err()
 		}
 		a.warnAnonymousFallback("could not register the job-scoped GitHub source token with the Buildkite Agent redactor")
-		return nil, nil
+		return "", nil
 	}
-	return actionsource.WithScopedGitHubToken(token, repository), nil
+	return token, nil
 }
 
 func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
@@ -1265,10 +1271,7 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		}
 		defer func() { _ = os.RemoveAll(actionRoot) }()
 		var sourceOptions []actionsource.Option
-		authenticationOption, err := actionAuthentication.option(ctx, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name)
-		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, err)
-		}
+		authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
 		if authenticationOption != nil {
 			sourceOptions = append(sourceOptions, authenticationOption)
 		}

@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -109,8 +110,7 @@ type config struct {
 	api                                 *url.URL
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
-	token                               string
-	tokenRepository                     string
+	credential                          *scopedCredential
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -131,14 +131,47 @@ type Option func(*config) error
 // credential. The token is never sent to an archive redirect target.
 func WithScopedGitHubToken(token, repository string) Option {
 	return func(c *config) error {
-		parts := strings.Split(repository, "/")
-		if token == "" || len(parts) != 2 || !ownerRE.MatchString(parts[0]) || !repoRE.MatchString(parts[1]) || strings.HasSuffix(parts[1], ".git") {
+		if token == "" || !validRepository(repository) {
 			return fmt.Errorf("invalid scoped GitHub credential")
 		}
-		c.token = token
-		c.tokenRepository = strings.ToLower(repository)
+		c.credential = &scopedCredential{repository: strings.ToLower(repository), token: token}
 		return nil
 	}
+}
+
+// WithScopedGitHubTokenProvider authenticates mutable-ref API requests using a
+// credential provisioned at the first such request and cached for this client.
+// Returning an empty token selects anonymous resolution. Full lowercase SHAs
+// never invoke the provider.
+func WithScopedGitHubTokenProvider(repository string, provider func(context.Context) (string, error)) Option {
+	return func(c *config) error {
+		if provider == nil || !validRepository(repository) {
+			return fmt.Errorf("invalid scoped GitHub credential provider")
+		}
+		c.credential = &scopedCredential{repository: strings.ToLower(repository), provider: provider}
+		return nil
+	}
+}
+
+func validRepository(repository string) bool {
+	parts := strings.Split(repository, "/")
+	return len(parts) == 2 && ownerRE.MatchString(parts[0]) && repoRE.MatchString(parts[1]) && !strings.HasSuffix(parts[1], ".git")
+}
+
+type scopedCredential struct {
+	repository string
+	provider   func(context.Context) (string, error)
+	once       sync.Once
+	token      string
+	err        error
+}
+
+func (c *scopedCredential) provision(ctx context.Context) error {
+	if c == nil || c.provider == nil {
+		return nil
+	}
+	c.once.Do(func() { c.token, c.err = c.provider(ctx) })
+	return c.err
 }
 
 // WithTestEndpoints replaces the API base and, when supplied, the direct
@@ -214,7 +247,10 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if shaRE.MatchString(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
-	if r.cfg.token != "" {
+	if err := r.cfg.credential.provision(ctx); err != nil {
+		return Resolved{}, err
+	}
+	if r.cfg.credential != nil && r.cfg.credential.token != "" {
 		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
 			return Resolved{}, err
 		}
@@ -348,10 +384,13 @@ func ensurePublic(ctx context.Context, client *http.Client, cfg config, ref Refe
 	return nil
 }
 func scopedToken(cfg config, parts []string) string {
-	if len(parts) >= 3 && parts[0] == "repos" && strings.EqualFold(parts[1]+"/"+parts[2], cfg.tokenRepository) {
+	if cfg.credential == nil {
 		return ""
 	}
-	return cfg.token
+	if len(parts) >= 3 && parts[0] == "repos" && strings.EqualFold(parts[1]+"/"+parts[2], cfg.credential.repository) {
+		return ""
+	}
+	return cfg.credential.token
 }
 func rateLimitError(resp *http.Response, body []byte) error {
 	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {

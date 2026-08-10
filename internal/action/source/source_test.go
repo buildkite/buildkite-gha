@@ -135,6 +135,7 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.ref, func(t *testing.T) {
 			var calls []string
+			var provisions int
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls = append(calls, r.URL.EscapedPath())
 				if strings.Contains(r.URL.Path, "/commits/") {
@@ -146,15 +147,18 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 			defer ts.Close()
 			opts := []Option{WithTestEndpoints(ts.URL)}
 			if tt.authenticated {
-				opts = append(opts, WithScopedGitHubToken("test-token", "pipeline/repo"))
+				opts = append(opts, WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+					provisions++
+					return "test-token", nil
+				}))
 			}
 			resolver, _ := NewResolver(ts.Client(), opts...)
 			ref, _ := Parse("o/r@" + tt.ref)
 			if _, err := resolver.Resolve(context.Background(), ref); err != nil {
 				t.Fatal(err)
 			}
-			if fmt.Sprint(calls) != fmt.Sprint(tt.calls) {
-				t.Fatalf("calls = %q, want %q", calls, tt.calls)
+			if fmt.Sprint(calls) != fmt.Sprint(tt.calls) || provisions != 0 {
+				t.Fatalf("calls/provisions = %q / %d, want %q / 0", calls, provisions, tt.calls)
 			}
 		})
 	}

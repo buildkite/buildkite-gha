@@ -596,11 +596,8 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 	provider := &cliWorkflowTokenProvider{token: token}
 	redactor := &cliRedactor{}
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor}
-	option, err := authentication.option(context.Background(), "buildkite/buildkite-gha")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if option == nil || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !slices.Equal(redactor.values, []string{token}) {
+	option := authentication.option("buildkite/buildkite-gha")
+	if option == nil || provider.calls != 0 || len(redactor.values) != 0 {
 		t.Fatalf("authentication = option %v, provider %#v, redactions %#v", option != nil, provider, redactor.values)
 	}
 
@@ -621,12 +618,23 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 	if err != nil {
 		t.Fatal(err)
 	}
+	exact, err := actionsource.Parse("o/r@0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), exact); err != nil || requests != 0 || provider.calls != 0 || len(redactor.values) != 0 {
+		t.Fatalf("exact Resolve() error/requests/provider/redactions = %v / %d / %d / %#v", err, requests, provider.calls, redactor.values)
+	}
 	ref, err := actionsource.Parse("o/r@v1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 {
+	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !slices.Equal(redactor.values, []string{token}) {
 		t.Fatalf("Resolve() error/requests = %v / %d", err, requests)
+	}
+	second, _ := actionsource.Parse("o/r@v2")
+	if _, err := resolver.Resolve(context.Background(), second); err != nil || provider.calls != 1 || !slices.Equal(redactor.values, []string{token}) {
+		t.Fatalf("second Resolve() error/provider/redactions = %v / %d / %#v", err, provider.calls, redactor.values)
 	}
 
 	for _, test := range []struct {
@@ -647,17 +655,50 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			option, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor, warnings: &warnings}).option(ctx, "buildkite/buildkite-gha")
+			gotToken, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor, warnings: &warnings}).token(ctx, "buildkite/buildkite-gha")
 			if test.cancelled {
-				if !errors.Is(err, context.Canceled) || option != nil || warnings.Len() != 0 {
-					t.Fatalf("option/error/warnings = %v / %v / %q", option != nil, err, warnings.String())
+				if !errors.Is(err, context.Canceled) || gotToken != "" || warnings.Len() != 0 {
+					t.Fatalf("token/error/warnings = %q / %v / %q", gotToken, err, warnings.String())
 				}
-			} else if err != nil || option != nil {
-				t.Fatalf("option/error = %v / %v, want anonymous fallback", option != nil, err)
+			} else if err != nil || gotToken != "" {
+				t.Fatalf("token/error = %q / %v, want anonymous fallback", gotToken, err)
 			} else if !strings.Contains(warnings.String(), "resolving mutable public action references anonymously") || strings.Contains(warnings.String(), token) || strings.Contains(warnings.String(), "unavailable") {
 				t.Fatalf("fallback warning = %q, want sanitized observable warning", warnings.String())
 			}
 		})
+	}
+}
+
+func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "local.yml")
+	actionPath := filepath.Join(root, ".github", "actions", "local")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowSource := []byte("on: push\njobs:\n  local:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n")
+	if err := os.WriteFile(workflowPath, workflowSource, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &cliWorkflowTokenProvider{token: "must-not-be-minted"}
+	redactor := &cliRedactor{}
+	var warnings bytes.Buffer
+	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
+	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", "", authentication); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
+		t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
 	}
 }
 
@@ -670,9 +711,9 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
 	var warnings bytes.Buffer
 	authentication := jobScopedActionSourceAuthentication(&warnings)
-	option, err := authentication.option(context.Background(), "buildkite/buildkite-gha")
-	if err != nil || option != nil || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
-		t.Fatalf("ambient GitHub token authentication = provider %v, option %v, error %v, warnings %q", authentication.provider != nil, option != nil, err, warnings.String())
+	token, err := authentication.token(context.Background(), "buildkite/buildkite-gha")
+	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
+		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
 	}
 
 	server := httptest.NewServer(http.NotFoundHandler())
