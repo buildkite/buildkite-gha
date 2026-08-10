@@ -1,13 +1,20 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+var githubEventNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,99}$`)
 
 // buildkiteEventSource creates compatibility data only. Buildkite environment
 // variables can be changed by hooks and this snapshot is not an attestation.
@@ -103,6 +110,125 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		return nil, fmt.Errorf("encode Buildkite compatibility snapshot: %w", err)
 	}
 	return result, nil
+}
+
+// buildkiteWebhookEventSource overlays untrusted trigger data onto the
+// execution identity derived and validated by buildkiteEventSource.
+func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]byte, error) {
+	base, err := buildkiteEventSource(getenv)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := parseWebhookPayload(webhook)
+	if err != nil {
+		return nil, err
+	}
+	var snapshot map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(base))
+	decoder.UseNumber()
+	if err := decoder.Decode(&snapshot); err != nil {
+		return nil, fmt.Errorf("decode Buildkite compatibility snapshot: %w", err)
+	}
+	snapshot["payload"] = payload
+	if event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(event) {
+		snapshot["event"] = event
+	}
+	if sender, ok := payload["sender"].(map[string]any); ok {
+		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {
+			snapshot["actor"] = login
+		}
+	}
+	result, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
+	}
+	return result, nil
+}
+
+func parseWebhookPayload(source []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(source)) == 0 || !utf8.Valid(source) {
+		return nil, fmt.Errorf("buildkite:webhook must contain one valid UTF-8 JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(source))
+	decoder.UseNumber()
+	value, err := decodeWebhookValue(decoder)
+	if err != nil {
+		return nil, fmt.Errorf("parse buildkite:webhook: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("parse buildkite:webhook: multiple JSON values")
+		}
+		return nil, fmt.Errorf("parse buildkite:webhook: %w", err)
+	}
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("buildkite:webhook must be a JSON object")
+	}
+	return payload, nil
+}
+
+func decodeWebhookValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delimiter {
+	case '{':
+		object := map[string]any{}
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("object key is not a string")
+			}
+			if _, exists := object[key]; exists {
+				return nil, fmt.Errorf("conflicting duplicate object key %q", key)
+			}
+			object[key], err = decodeWebhookValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return object, nil
+	case '[':
+		var array []any
+		for decoder.More() {
+			value, err := decodeWebhookValue(decoder)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return array, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+}
+
+func safeGitHubLogin(login string) bool {
+	if strings.TrimSpace(login) != login || login == "" || len(login) > 255 {
+		return false
+	}
+	for _, r := range login {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func parsePublicGitHubRepository(raw string) (owner, name, cloneURL string, err error) {

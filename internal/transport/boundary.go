@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,13 +11,19 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"unicode/utf8"
 )
 
 const (
 	maxAnnotationBodyBytes         = 1024 * 1024
 	maxAnnotationContextCharacters = 100
+	maxAgentErrorBytes             = 64 * 1024
 )
+
+// ErrMetadataUnavailable means Buildkite confirmed that reserved webhook
+// metadata does not apply to the build or its linked webhook is unavailable.
+var ErrMetadataUnavailable = errors.New("buildkite webhook metadata is unavailable")
 
 // Runner is the only process boundary used by the Buildkite adapter.
 type Runner interface {
@@ -44,6 +51,50 @@ func (r CommandRunner) Run(ctx context.Context, dir, name string, args []string,
 		return stdout.Bytes(), err
 	}
 	return stdout.Bytes(), nil
+}
+
+// RunBounded executes a command while bounding captured stdout and stderr.
+func (r CommandRunner) RunBounded(ctx context.Context, dir, name string, args []string, stdin []byte, limit int) ([]byte, []byte, error) {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Dir = dir
+	command.Stdin = bytes.NewReader(stdin)
+	stdout := newBoundedBuffer(limit)
+	stderr := newBoundedBuffer(maxAgentErrorBytes)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	err := command.Run()
+	if stdout.overflow {
+		return nil, stderr.Bytes(), fmt.Errorf("command output exceeds %d bytes", limit)
+	}
+	if stderr.overflow {
+		return stdout.Bytes(), nil, fmt.Errorf("command error output exceeds %d bytes", maxAgentErrorBytes)
+	}
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+type boundedBuffer struct {
+	buffer    bytes.Buffer
+	remaining int
+	overflow  bool
+}
+
+func newBoundedBuffer(limit int) *boundedBuffer {
+	return &boundedBuffer{remaining: limit}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if len(p) > b.remaining {
+		_, _ = b.buffer.Write(p[:b.remaining])
+		b.remaining = 0
+		b.overflow = true
+		return len(p), nil
+	}
+	b.remaining -= len(p)
+	return b.buffer.Write(p)
+}
+
+func (b *boundedBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
 }
 
 func (a Agent) UploadArtifact(ctx context.Context, path string) error {
@@ -80,6 +131,44 @@ func (a Agent) SetMetadata(ctx context.Context, key, value string) error {
 
 func (a Agent) GetMetadata(ctx context.Context, key string) ([]byte, error) {
 	return a.run(ctx, []string{"meta-data", "get", key}, nil)
+}
+
+// GetMetadataBounded retrieves metadata once without allowing agent stdout to
+// grow beyond limit. CommandRunner also captures bounded stderr so the two
+// documented reserved-webhook absence responses can be distinguished from
+// authorization, transport, and rate-limit failures.
+func (a Agent) GetMetadataBounded(ctx context.Context, key string, limit int) ([]byte, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("metadata output limit must be positive")
+	}
+	runner, ok := a.Runner.(interface {
+		RunBounded(context.Context, string, string, []string, []byte, int) ([]byte, []byte, error)
+	})
+	if !ok {
+		result, err := a.GetMetadata(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if len(result) > limit {
+			return nil, fmt.Errorf("command output exceeds %d bytes", limit)
+		}
+		return result, nil
+	}
+	stdout, stderr, err := runner.RunBounded(ctx, "", "buildkite-agent", []string{"meta-data", "get", key}, nil, limit)
+	if err == nil {
+		return stdout, nil
+	}
+	message := strings.TrimSpace(string(stderr))
+	var exitError *exec.ExitError
+	if key == "buildkite:webhook" && len(stdout) == 0 && errors.As(err, &exitError) && exitError.ExitCode() == 1 &&
+		(strings.Contains(message, "400 Bad Request: Build was not triggered by a webhook") ||
+			strings.Contains(message, "404 Not Found: Build webhook is not available")) {
+		return nil, ErrMetadataUnavailable
+	}
+	if message != "" {
+		return nil, fmt.Errorf("get Buildkite metadata %q: %v: %s", key, err, message)
+	}
+	return nil, fmt.Errorf("get Buildkite metadata %q: %w", key, err)
 }
 
 func (a Agent) UploadPipeline(ctx context.Context, pipeline []byte) error {

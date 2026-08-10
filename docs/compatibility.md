@@ -564,12 +564,36 @@ When invoking the v0.4.2 release directly, add `--runtime-queue hosted`; that
 release requires the argument and uses it to
 select the `hosted` queue.
 
-It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Without `--event-path`,
-it derives a bounded compatibility snapshot from the current Buildkite build.
-With `--event-path`, it uses that explicit snapshot. Both paths remain
-unattested. Apart from the documented scoped workflow-token contract and
-Buildkite's native, job-bound repository-provider credentials for verified
-checkout, they remain free of provider credentials.
+It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`. Event source precedence
+is:
+
+1. An explicit `--event-path`. This never reads Buildkite metadata.
+2. Buildkite's reserved `buildkite:webhook` metadata for webhook-linked builds.
+3. A reduced-fidelity snapshot derived from `BUILDKITE_*` variables when
+   Buildkite reports that the build is not webhook-triggered or its linked
+   webhook is unavailable.
+
+The webhook metadata is fetched once and must be one valid JSON object no larger
+than 25 MiB. Malformed, duplicate-key, non-object, oversized, transport,
+authorization, and rate-limit failures stop upload; they do not silently select
+the fallback. `BUILDKITE_GITHUB_EVENT`, when valid, supplies `github.event_name`,
+and a valid webhook `sender.login` improves `github.actor` compatibility.
+Buildkite's validated repository mapping and exact `BUILDKITE_COMMIT` and
+branch/tag/PR ref always supply top-level `github.repository`, `github.sha`, and
+`github.ref`. These values intentionally need not equal trigger payload fields:
+pull requests and rebuilds can legitimately execute different identities.
+
+All three paths remain untrusted compatibility data. Webhook fields cannot
+authorize queues, secrets, tokens, or protected capabilities. Generated plans
+and pipeline YAML retain only the existing payload digest and values deliberately
+selected by compile-time expressions, never the raw payload object. The metadata
+is Buildkite's stored parsed webhook document rather than the original HTTP
+delivery: delivery headers are unavailable, and GitHub push payloads may omit
+`commits`.
+
+Apart from the documented scoped workflow-token contract and Buildkite's native,
+job-bound repository-provider credentials for verified checkout, upload remains
+free of provider credentials.
 
 The command uploads the exact executable and content-addressed plans before
 calling `buildkite-agent pipeline upload --no-interpolation --reject-secrets`.

@@ -3,6 +3,7 @@ package cli
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -61,7 +62,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. The default path accepts an explicit event file or derives compatibility data from Buildkite and remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment)
+		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment)
 	}
 }
 
@@ -76,6 +77,7 @@ const (
 	runtimeMiseBinaryDigest                     = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
 	runtimeMiseArchiveLimit                     = 64 << 20
 	runtimeMiseBinaryLimit                      = 128 << 20
+	maxWebhookMetadataBytes                     = 25 << 20
 )
 
 func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
@@ -1089,11 +1091,26 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	var eventSource []byte
 	if eventPath != "" {
 		eventSource, err = os.ReadFile(eventPath)
 	} else {
-		eventSource, err = buildkiteEventSource(os.Getenv)
+		webhook, metadataErr := agent.GetMetadataBounded(ctx, "buildkite:webhook", maxWebhookMetadataBytes+1)
+		switch {
+		case metadataErr == nil:
+			webhook = bytes.TrimSuffix(webhook, []byte("\n"))
+			if len(webhook) > maxWebhookMetadataBytes {
+				err = fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
+			} else {
+				eventSource, err = buildkiteWebhookEventSource(os.Getenv, webhook)
+			}
+		case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
+			eventSource, err = buildkiteEventSource(os.Getenv)
+		default:
+			err = metadataErr
+		}
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -1104,8 +1121,6 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)

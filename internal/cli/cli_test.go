@@ -483,7 +483,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
-	runner := &cliCaptureRunner{}
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
@@ -680,6 +680,98 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	}
 	if planCount != 3 {
 		t.Fatalf("derived-event plan count = %d, want 3", planCount)
+	}
+	if len(runner.commands) == 0 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
+		t.Fatalf("first command = %#v, want one webhook metadata read", runner.commands)
+	}
+	for _, command := range runner.commands[1:] {
+		if slices.Equal(command.args, []string{"meta-data", "get", "buildkite:webhook"}) {
+			t.Fatalf("webhook metadata read more than once: %#v", runner.commands)
+		}
+	}
+}
+
+func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "webhook.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-${{ github.event.marker }}\n    steps:\n      - run: echo selected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "webhook-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "executed")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Build Author")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
+	rawSecret := "raw-webhook-value-must-not-be-retained"
+	runner := &cliCaptureRunner{webhook: []byte(fmt.Sprintf("{\"marker\":\"latest\",\"private\":\"%s\",\"ref\":\"refs/heads/trigger\",\"after\":\"%s\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"}}", rawSecret, strings.Repeat("b", 40)))}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(runner.commands) == 0 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
+		t.Fatalf("commands = %#v, want metadata read first", runner.commands)
+	}
+	metadataReads, planCount := 0, 0
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"meta-data", "get", "buildkite:webhook"}) {
+			metadataReads++
+		}
+		if bytes.Contains(command.stdin, []byte(rawSecret)) {
+			t.Fatalf("command retained raw webhook payload: %#v", command.args)
+		}
+	}
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		if bytes.Contains(contents, []byte(rawSecret)) {
+			t.Fatalf("plan %q retained raw webhook payload", path)
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planCount++
+		if job.Event.Name != "pull_request" || job.Event.Repository != "buildkite/buildkite-gha" || job.Event.Ref != "refs/heads/executed" || job.Event.SHA != sha || job.Event.Actor != "octocat" {
+			t.Fatalf("webhook plan = %#v", job)
+		}
+	}
+	if metadataReads != 1 || planCount != 1 {
+		t.Fatalf("metadata reads = %d, plans = %d", metadataReads, planCount)
+	}
+}
+
+func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "webhook-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", strings.Repeat("a", 40))
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	for _, test := range []struct {
+		name    string
+		webhook []byte
+		err     error
+		want    string
+	}{
+		{name: "malformed", webhook: []byte("{\"incomplete\":"), want: "parse buildkite:webhook"},
+		{name: "non-object", webhook: []byte(`[1]`), want: "must be a JSON object"},
+		{name: "oversized", webhook: bytes.Repeat([]byte("x"), maxWebhookMetadataBytes+1), want: "exceeds"},
+		{name: "operational failure", err: errors.New("agent authorization failed"), want: "agent authorization failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &cliCaptureRunner{webhook: test.webhook, webhookErr: test.err}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
+			}
+			if len(runner.commands) != 1 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
+				t.Fatalf("commands = %#v, want only one metadata read", runner.commands)
+			}
+		})
 	}
 }
 
@@ -1549,6 +1641,8 @@ type cliCaptureRunner struct {
 	failAt         int
 	failMetadata   bool
 	failAnnotation bool
+	webhook        []byte
+	webhookErr     error
 	jobByStep      map[string]string
 	dataByPath     map[string][]byte
 	uploaded       map[string][]byte
@@ -1560,6 +1654,15 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	r.contextErrors = append(r.contextErrors, ctx.Err())
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
+	}
+	if slices.Equal(args, []string{"meta-data", "get", "buildkite:webhook"}) {
+		if r.webhookErr != nil {
+			return nil, r.webhookErr
+		}
+		if r.webhook == nil {
+			return nil, transport.ErrMetadataUnavailable
+		}
+		return bytes.Clone(r.webhook), nil
 	}
 	if len(args) >= 2 && args[0] == "artifact" && args[1] == "search" {
 		return []byte(r.jobByStep[args[4]] + "\n"), nil

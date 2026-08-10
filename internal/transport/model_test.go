@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -474,6 +475,44 @@ func TestUploadRejectsTamperedMaterializedBindingBeforeAgentReadsIt(t *testing.T
 	err = Upload(context.Background(), Agent{Runner: runner}, root, []PlanArtifact{producer, consumer}, pipeline, expected, completed)
 	if err == nil || !strings.Contains(err.Error(), "on-disk bytes differ") || len(runner.commands) != 1 {
 		t.Fatalf("Upload() error = %v, commands = %d", err, len(runner.commands))
+	}
+}
+
+func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
+	stdout, _, err := (CommandRunner{}).RunBounded(context.Background(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {
+		t.Fatalf("runBounded() stdout = %q, error = %v", stdout, err)
+	}
+}
+
+func TestGetMetadataBoundedClassifiesOnlyExpectedWebhookAbsence(t *testing.T) {
+	for _, test := range []struct {
+		name, message, stdout string
+		exit                  int
+		wantAbsent            bool
+	}{
+		{name: "non-webhook", message: "400 Bad Request: Build was not triggered by a webhook", exit: 1, wantAbsent: true},
+		{name: "missing linked webhook", message: "404 Not Found: Build webhook is not available", exit: 1, wantAbsent: true},
+		{name: "rate limited", message: "429 Too Many Requests: rate limit exceeded", exit: 1},
+		{name: "unexpected exit", message: "400 Bad Request: Build was not triggered by a webhook", exit: 2},
+		{name: "oversized output", message: "400 Bad Request: Build was not triggered by a webhook", stdout: strings.Repeat("x", 1025), exit: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			agentPath := filepath.Join(dir, "buildkite-agent")
+			script := "#!/bin/sh\nprintf '%s' '" + test.stdout + "'\nprintf '%s\\n' '" + test.message + "' >&2\nexit " + strconv.Itoa(test.exit) + "\n"
+			if err := os.WriteFile(agentPath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			_, err := (Agent{Runner: CommandRunner{}}).GetMetadataBounded(context.Background(), "buildkite:webhook", 1024)
+			if got := errors.Is(err, ErrMetadataUnavailable); got != test.wantAbsent {
+				t.Fatalf("GetMetadataBounded() error = %v, absent = %t, want %t", err, got, test.wantAbsent)
+			}
+			if !test.wantAbsent && err == nil {
+				t.Fatalf("operational error = %v", err)
+			}
+		})
 	}
 }
 

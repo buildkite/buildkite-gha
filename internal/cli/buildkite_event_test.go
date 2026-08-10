@@ -108,3 +108,68 @@ func TestBuildkiteEventSourceFailsClosed(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestBuildkiteWebhookEventSourceUsesPayloadButPreservesExecutionIdentity(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":         "https://github.com/buildkite/buildkite-gha",
+		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":       "executed-branch",
+		"BUILDKITE_BUILD_AUTHOR": "Build Author",
+		"BUILDKITE_GITHUB_EVENT": "pull_request_target",
+	}
+	webhook := []byte("{\"ref\":\"refs/heads/trigger-branch\",\"after\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"repository\":{\"full_name\":\"other/trigger\"},\"sender\":{\"login\":\"octocat\"},\"nested\":{\"complete\":true}}")
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, webhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	payload := snapshot["payload"].(map[string]any)
+	repository := snapshot["repository"].(map[string]any)
+	if snapshot["event"] != "pull_request_target" || snapshot["actor"] != "octocat" ||
+		snapshot["sha"] != strings.Repeat("a", 40) || snapshot["ref"] != "refs/heads/executed-branch" ||
+		repository["owner"] != "buildkite" || repository["name"] != "buildkite-gha" ||
+		payload["after"] != strings.Repeat("b", 40) || payload["nested"].(map[string]any)["complete"] != true {
+		t.Fatalf("webhook snapshot = %#v", snapshot)
+	}
+}
+
+func TestBuildkiteWebhookEventSourceEventAndActorFallbacks(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO": "https://github.com/a/b", "BUILDKITE_COMMIT": strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH": "main", "BUILDKITE_BUILD_AUTHOR": "Build Author",
+		"BUILDKITE_GITHUB_EVENT": "not valid",
+	}
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte("{\"sender\":{\"login\":\" bad \"}}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["event"] != "push" || snapshot["actor"] != "Build Author" {
+		t.Fatalf("fallback snapshot = %#v", snapshot)
+	}
+}
+
+func TestParseWebhookPayloadRejectsInvalidDocuments(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{name: "malformed", source: "{\"sender\":", want: "parse buildkite:webhook"},
+		{name: "non-object", source: `[1,2]`, want: "must be a JSON object"},
+		{name: "multiple", source: `{} {}`, want: "multiple JSON values"},
+		{name: "conflicting duplicate", source: "{\"ref\":\"one\",\"ref\":\"two\"}", want: "conflicting duplicate object key"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseWebhookPayload([]byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("parseWebhookPayload() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
