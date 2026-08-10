@@ -1386,12 +1386,14 @@ public checkout remains a separate provider integration gate.
   and its exact-commit API observation prove both persisted annotations and
   masking, so the distinct checked-in hosted fixture is now `runtime-pass`.
   The producer-side artifact slice now recognizes only the audited
-  `actions/upload-artifact` v4 commit and replaces its lifecycle with a bounded
-  Buildkite Agent upload. Literal workspace files and directories become an
-  immutable, digest-addressed ZIP; compatible artifact ID and digest outputs
+  `actions/upload-artifact` v4.6.2 and v7.0.1 commits and replaces their root
+  ZIP-mode lifecycle with a bounded Buildkite Agent upload. Literal workspace
+  files and directories and final-component file globs become an immutable,
+  digest-addressed ZIP; compatible artifact ID and digest outputs
   and the native path, size, and file count are bound into the authoritative
-  terminal result manifest. Globs, symlinks, overwrite, retention, raw upload,
-  and unrecognized upstream commits fail explicitly. Build 259 and its
+  terminal result manifest. Broader globs, symlinks, overwrite, effective
+  retention control, raw upload, and unrecognized upstream commits fail
+  explicitly. Build 259 and its
   exact-commit artifact observation prove publication, attribution, manifest
   binding, archive integrity and contents, hidden-file exclusion, and compatible
   action outputs, so the separate upload-only fixture is now `runtime-pass`.
@@ -2142,7 +2144,7 @@ buildkite-gha validate --profile hosted-tokenless \
 ```
 
 Admission is policy evidence, not execution evidence. The exact audited
-`actions/upload-artifact` commit and exact-name `actions/download-artifact`
+`actions/upload-artifact` commits and exact-name `actions/download-artifact`
 commit are admitted through bounded native adapters. The exact audited
 `actions/cache` v6.1.0 commit is admitted through the cache-v2 credential
 boundary; all other cache commits, artifact merge and broad download modes, and

@@ -170,9 +170,23 @@ func ValidateDownloadArtifactInputs(inputs map[string]string) error {
 	return nil
 }
 
-// ValidateUploadArtifactInputs validates the bounded adapter's input surface.
-// The runtime applies the same validation after expression evaluation.
-func ValidateUploadArtifactInputs(inputs map[string]string) error {
+// ValidateUploadArtifactInputs validates the bounded adapter's static input
+// surface. Values containing expressions are validated by the runtime after
+// evaluation.
+func ValidateUploadArtifactInputs(commit string, inputs map[string]string) error {
+	return validateUploadArtifactInputs(commit, inputs, false)
+}
+
+// ValidateEvaluatedUploadArtifactInputs validates the bounded adapter's input
+// surface after runtime expression evaluation.
+func ValidateEvaluatedUploadArtifactInputs(commit string, inputs map[string]string) error {
+	return validateUploadArtifactInputs(commit, inputs, true)
+}
+
+func validateUploadArtifactInputs(commit string, inputs map[string]string, evaluated bool) error {
+	if err := ValidateUploadArtifactCommit(commit); err != nil {
+		return err
+	}
 	allowed := map[string]bool{"name": true, "path": true, "if-no-files-found": true, "include-hidden-files": true, "compression-level": true, "overwrite": true, "archive": true, "retention-days": true}
 	seen := map[string]bool{}
 	for _, name := range sortedNames(inputs) {
@@ -184,41 +198,59 @@ func ValidateUploadArtifactInputs(inputs map[string]string) error {
 		if !allowed[lower] {
 			return fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter; Phase 6 is required", name)
 		}
-		if lower == "retention-days" {
-			return fmt.Errorf("input %q is unsupported; Phase 6 is required", name)
+		if lower == "archive" && commit != UploadArtifactV7Commit {
+			return fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
 		}
 	}
 	pathValue, ok := inputFold(inputs, "path")
 	if !ok || strings.TrimSpace(pathValue) == "" {
 		return fmt.Errorf("required input %q is missing", "path")
 	}
-	if _, err := UploadArtifactPaths(pathValue); err != nil {
-		return err
-	}
-	if value, ok := inputFold(inputs, "name"); ok {
-		if err := ValidateUploadArtifactName(value); err != nil {
+	if evaluated || !uploadArtifactExpression(pathValue) {
+		_, err := UploadArtifactPaths(pathValue)
+		if err != nil {
 			return err
 		}
 	}
-	if value, ok := inputFold(inputs, "if-no-files-found"); ok && value != "warn" && value != "error" && value != "ignore" {
+	if value, ok := inputFold(inputs, "name"); ok && (evaluated || !uploadArtifactExpression(value)) {
+		if err := ValidateUploadArtifactName(strings.TrimSpace(value)); err != nil {
+			return err
+		}
+	}
+	if value, ok := inputFold(inputs, "if-no-files-found"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactNoFilesValue(value) {
 		return fmt.Errorf("input %q must be warn, error, or ignore", "if-no-files-found")
 	}
-	if value, ok := inputFold(inputs, "include-hidden-files"); ok && !uploadArtifactBoolean(value) {
+	if value, ok := inputFold(inputs, "include-hidden-files"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactBoolean(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q must be a GitHub Actions boolean", "include-hidden-files")
 	}
-	if value, ok := inputFold(inputs, "compression-level"); ok {
-		level, err := strconv.Atoi(value)
+	if value, ok := inputFold(inputs, "compression-level"); ok && (evaluated || !uploadArtifactExpression(value)) {
+		level, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || level < 0 || level > 9 {
 			return fmt.Errorf("input %q must be an integer from 0 to 9", "compression-level")
 		}
 	}
-	if value, ok := inputFold(inputs, "overwrite"); ok && !uploadArtifactFalse(value) {
+	if value, ok := inputFold(inputs, "retention-days"); ok && (evaluated || !uploadArtifactExpression(value)) {
+		days, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || days < 0 {
+			return fmt.Errorf("input %q must be a non-negative integer", "retention-days")
+		}
+	}
+	if value, ok := inputFold(inputs, "overwrite"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactFalse(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q may only be omitted or false; Phase 6 is required", "overwrite")
 	}
-	if value, ok := inputFold(inputs, "archive"); ok && !uploadArtifactTrue(value) {
+	if value, ok := inputFold(inputs, "archive"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactTrue(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q may only be omitted or true; Phase 6 is required", "archive")
 	}
 	return nil
+}
+
+func uploadArtifactExpression(value string) bool {
+	return strings.Contains(value, "${{")
+}
+
+func uploadArtifactNoFilesValue(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "warn" || value == "error" || value == "ignore"
 }
 
 // ValidateUploadArtifactName enforces the upstream forbidden-character rules
@@ -230,7 +262,8 @@ func ValidateUploadArtifactName(name string) error {
 	return nil
 }
 
-// UploadArtifactPaths returns the bounded literal workspace-relative roots.
+// UploadArtifactPaths returns bounded workspace-relative literal roots and
+// final-component file globs.
 func UploadArtifactPaths(value string) ([]string, error) {
 	if strings.Contains(value, "${{") {
 		return nil, fmt.Errorf("input %q must contain literal paths, not expressions; Phase 6 is required", "path")
@@ -241,8 +274,21 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if root == "" {
 			continue
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.ContainsAny(root, "*?[]{}") || strings.Contains(root, "\\") || !filepath.IsLocal(root) || path.Clean(root) != root {
-			return nil, fmt.Errorf("path %q is unsafe or non-literal; bounded adapter requires clean workspace-relative paths", root)
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.Contains(root, "\\") || strings.Contains(root, "{") || strings.Contains(root, "}") || !filepath.IsLocal(root) || path.Clean(root) != root {
+			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
+		}
+		if strings.ContainsAny(root, "*?[") {
+			directory, pattern := path.Split(root)
+			directory = strings.TrimSuffix(directory, "/")
+			if directory == "" {
+				directory = "."
+			}
+			if strings.ContainsAny(directory, "*?[") {
+				return nil, fmt.Errorf("path %q uses a glob outside its final component; Phase 6 is required", root)
+			}
+			if _, err := path.Match(pattern, "probe"); err != nil {
+				return nil, fmt.Errorf("path %q has an invalid glob: %w", root, err)
+			}
 		}
 		roots = append(roots, root)
 	}

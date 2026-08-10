@@ -63,8 +63,10 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateUploadArtifactCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
-		t.Fatalf("unrecognized commit error = %v, want both audited commits", err)
+	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
+		if err := ValidateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
+			t.Fatalf("unrecognized commit %s error = %v, want both audited commits", commit, err)
+		}
 	}
 }
 
@@ -89,26 +91,32 @@ func TestCacheCommitIsExactV6(t *testing.T) {
 }
 
 func TestValidateUploadArtifactInputs(t *testing.T) {
-	for _, inputs := range []map[string]string{
-		{"path": "payload/result.txt"},
-		{
-			"name": "payload-${{ matrix.variant }}", "path": "payload\nreports/result.txt\n",
-			"if-no-files-found": "error", "include-hidden-files": "TRUE",
-			"compression-level": "0", "overwrite": "False", "archive": "true",
-		},
+	for _, test := range []struct {
+		commit string
+		inputs map[string]string
+	}{
+		{UploadArtifactCommit, map[string]string{"path": "payload/result.txt"}},
+		{UploadArtifactCommit, map[string]string{
+			"path": "tests/*.log", "retention-days": " 7 ", "if-no-files-found": " warn ",
+			"include-hidden-files": " TRUE ", "compression-level": " 6 ", "overwrite": " false ",
+		}},
+		{UploadArtifactV7Commit, map[string]string{
+			"name": "payload-${{ matrix.variant }}", "path": "${{ matrix.path }}",
+			"if-no-files-found": "${{ matrix.no_files }}", "include-hidden-files": "${{ matrix.hidden }}",
+			"compression-level": "${{ matrix.compression }}", "overwrite": "${{ matrix.overwrite }}", "archive": "${{ matrix.archive }}",
+		}},
 	} {
-		if err := ValidateUploadArtifactInputs(inputs); err != nil {
-			t.Fatalf("ValidateUploadArtifactInputs(%#v) = %v", inputs, err)
+		if err := ValidateUploadArtifactInputs(test.commit, test.inputs); err != nil {
+			t.Fatalf("ValidateUploadArtifactInputs(%s, %#v) = %v", test.commit, test.inputs, err)
 		}
 	}
 
 	rejected := map[string]map[string]string{
 		"missing path":        nil,
-		"glob":                {"path": "payload/**"},
-		"path expression":     {"path": "${{ matrix.path }}"},
+		"recursive glob":      {"path": "payload/**/*.log"},
 		"unclean path":        {"path": "./payload"},
 		"too many roots":      {"path": strings.Repeat("payload\n", MaxUploadArtifactRoots+1)},
-		"retention":           {"path": "payload", "retention-days": "1"},
+		"bad retention":       {"path": "payload", "retention-days": "-1"},
 		"overwrite":           {"path": "payload", "overwrite": "true"},
 		"raw upload":          {"path": "payload", "archive": "false"},
 		"bad no-files":        {"path": "payload", "if-no-files-found": "WARN"},
@@ -120,10 +128,16 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 	for name, inputs := range rejected {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateUploadArtifactInputs(inputs); err == nil {
+			if err := ValidateUploadArtifactInputs(UploadArtifactV7Commit, inputs); err == nil {
 				t.Fatalf("ValidateUploadArtifactInputs(%#v) succeeded", inputs)
 			}
 		})
+	}
+	if err := ValidateUploadArtifactInputs(UploadArtifactCommit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+		t.Fatalf("v4 archive input error = %v", err)
+	}
+	if err := ValidateEvaluatedUploadArtifactInputs(UploadArtifactV7Commit, map[string]string{"path": "${{ still.unresolved }}"}); err == nil {
+		t.Fatal("runtime accepted an unevaluated path expression")
 	}
 }
 

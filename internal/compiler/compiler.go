@@ -344,7 +344,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 					authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
 				}
 				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
-					if err := actionintegration.ValidateUploadArtifactInputs(instance.Steps[stepIndex].With); err != nil {
+					if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
 						return nil, nil, fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 					}

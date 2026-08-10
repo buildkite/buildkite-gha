@@ -145,6 +145,25 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 	}
 }
 
+func TestCompileActionInvocationsValidatesNestedUploadArtifact(t *testing.T) {
+	workspace, upload := t.TempDir(), t.TempDir()
+	writeAction(t, upload, "", "name: upload artifact\nruns:\n  using: node20\n  main: index.js\n")
+	source := classifiedActionSource{
+		roots:   map[string]string{"actions/upload-artifact": upload},
+		commits: map[string]string{"actions/upload-artifact": actionintegration.UploadArtifactCommit},
+	}
+
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: payload\n        overwrite: true\n")
+	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
+		t.Fatalf("nested literal validation error = %v", err)
+	}
+
+	writeAction(t, workspace, "parent", "name: parent\ninputs:\n  path:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: ${{ inputs.path }}\n")
+	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
+		t.Fatalf("nested expression was not deferred to runtime: %v", err)
+	}
+}
+
 func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "js", "name: js\nruns:\n  using: node20\n  main: index.js\n")
@@ -863,12 +882,18 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.UploadArtifactV7Commit, "        with:\n          path: payload/result.txt\n          archive: false\n"); err == nil || !strings.Contains(err.Error(), `input "archive" may only be omitted or true`) {
 		t.Fatalf("upload-artifact v7 raw mode error = %v", err)
 	}
+	if _, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          path: payload/result.txt\n          archive: true\n"); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+		t.Fatalf("upload-artifact v4 archive input error = %v", err)
+	}
+	if _, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          path: tests/*.log\n          retention-days: '7'\n"); err != nil {
+		t.Fatalf("bounded glob and advisory retention rejected: %v", err)
+	}
 
 	for name, input := range map[string]string{
-		"missing path": "          name: payload\n",
-		"glob":         "          path: payload/**\n",
-		"retention":    "          path: payload\n          retention-days: '1'\n",
-		"overwrite":    "          path: payload\n          overwrite: true\n",
+		"missing path":   "          name: payload\n",
+		"recursive glob": "          path: payload/**/*.log\n",
+		"bad retention":  "          path: payload\n          retention-days: '-1'\n",
+		"overwrite":      "          path: payload\n          overwrite: true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.UploadArtifactCommit, "        with:\n"+input)
