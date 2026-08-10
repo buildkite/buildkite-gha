@@ -110,6 +110,31 @@ make_event() {
   ' > "$destination"
 }
 
+run_report() {
+  local case_root=$1 label=$2 expected=$3 jobs=$4 instances=$5 diagnostic=$6 output=$7
+  shift 7
+  local status=0 expected_status=1
+  (cd "$case_root" && clean_env "$@") > "$output" || status=$?
+  [[ "$expected" == compilable || "$expected" == admitted ]] && expected_status=0
+  [[ "$status" == "$expected_status" ]] || {
+    echo "$label: exit=$status, want $expected_status" >&2
+    return 1
+  }
+  jq -e \
+    --arg result "$expected" --arg diagnostic "$diagnostic" \
+    --argjson jobs "$jobs" --argjson instances "$instances" '
+    def graph: if has("compile") then .compile else . end;
+    .result == $result and
+    (if $jobs == 0 then true else graph.logical_jobs == $jobs and graph.instances == $instances end) and
+    (if $diagnostic == "" then true else any(.diagnostics[]?; .code == $diagnostic) end)
+  ' "$output" >/dev/null || {
+    echo "$label: report did not match result=$expected diagnostic=${diagnostic:-none}" >&2
+    jq '{result, compile, admission, diagnostics}' "$output" >&2
+    return 1
+  }
+  echo "$label: result=$expected logical_jobs=${jobs:-0} instances=${instances:-0} diagnostic=${diagnostic:-none}"
+}
+
 for id in "${case_ids[@]}"; do
   entry="$(jq -c --arg id "$id" '.cases[] | select(.id == $id)' "$manifest")"
   repository="$(jq -r '.repository' <<<"$entry")"
@@ -123,6 +148,10 @@ for id in "${case_ids[@]}"; do
   expected_jobs="$(jq -r '.expected.logical_jobs // 0' <<<"$entry")"
   expected_instances="$(jq -r '.expected.instances // 0' <<<"$entry")"
   expected_diagnostic="$(jq -r '.expected.diagnostic_code // ""' <<<"$entry")"
+  compile_diagnostic=
+  if [[ "$expected_compile" == incompatible ]]; then
+    compile_diagnostic=$expected_diagnostic
+  fi
 
   case_root="$work/cases/$id"
   workflow_path="$case_root/$workflow"
@@ -138,62 +167,16 @@ for id in "${case_ids[@]}"; do
   }
   make_event "$repository" "$commit" "$branch" "$event" "$event_path"
 
-  compile_status=0
-  (
-    cd "$case_root"
-    clean_env "$work/buildkite-gha" validate --format json --event-path "$event_path" "$workflow"
-  ) > "$work/$id.compile.json" || compile_status=$?
-  actual_compile="$(jq -r '.result' "$work/$id.compile.json")"
-  [[ "$actual_compile" == "$expected_compile" ]] || {
-    echo "$id: compile=$actual_compile, want $expected_compile" >&2
-    jq '.diagnostics' "$work/$id.compile.json" >&2
-    exit 1
-  }
-
-  if [[ "$expected_compile" == incompatible ]]; then
-    [[ "$compile_status" == 1 ]] || { echo "$id: compile exit=$compile_status, want 1" >&2; exit 1; }
-    jq -e --arg code "$expected_diagnostic" 'any(.diagnostics[]; .code == $code)' \
-      "$work/$id.compile.json" >/dev/null || {
-      echo "$id: missing compile diagnostic $expected_diagnostic" >&2
-      jq '.diagnostics' "$work/$id.compile.json" >&2
-      exit 1
-    }
-    echo "$id: compile=incompatible diagnostic=$expected_diagnostic"
-    continue
-  fi
-
-  [[ "$compile_status" == 0 ]] || { echo "$id: compile exit=$compile_status, want 0" >&2; exit 1; }
-  jq -e --argjson jobs "$expected_jobs" --argjson instances "$expected_instances" '
-    .schema == "buildkite-gha/compatibility-report/v1" and
-    .logical_jobs == $jobs and .instances == $instances
-  ' "$work/$id.compile.json" >/dev/null || { echo "$id: compile graph changed" >&2; exit 1; }
-  echo "$id: compile=compilable logical_jobs=$expected_jobs instances=$expected_instances"
-
-  $profile || continue
-  profile_status=0
-  (
-    cd "$case_root"
-    clean_env "$work/buildkite-gha" validate --profile hosted-tokenless --format json \
+  if $profile && [[ "$expected_profile" != not-run ]]; then
+    run_report "$case_root" "$id/profile" "$expected_profile" "$expected_jobs" \
+      "$expected_instances" "$expected_diagnostic" "$work/$id.profile.json" \
+      "$work/buildkite-gha" validate --profile hosted-tokenless --format json \
       --event-path "$event_path" "$workflow"
-  ) > "$work/$id.profile.json" || profile_status=$?
-  actual_profile="$(jq -r '.result' "$work/$id.profile.json")"
-  [[ "$actual_profile" == "$expected_profile" ]] || {
-    echo "$id: profile=$actual_profile, want $expected_profile" >&2
-    jq '.diagnostics' "$work/$id.profile.json" >&2
-    exit 1
-  }
-  if [[ "$expected_profile" == admitted ]]; then
-    [[ "$profile_status" == 0 ]] || { echo "$id: profile exit=$profile_status, want 0" >&2; exit 1; }
   else
-    [[ "$profile_status" == 1 ]] || { echo "$id: profile exit=$profile_status, want 1" >&2; exit 1; }
-    jq -e --arg code "$expected_diagnostic" 'any(.diagnostics[]; .code == $code)' \
-      "$work/$id.profile.json" >/dev/null || {
-      echo "$id: missing profile diagnostic $expected_diagnostic" >&2
-      jq '.diagnostics' "$work/$id.profile.json" >&2
-      exit 1
-    }
+    run_report "$case_root" "$id/compile" "$expected_compile" "$expected_jobs" \
+      "$expected_instances" "$compile_diagnostic" "$work/$id.compile.json" \
+      "$work/buildkite-gha" validate --format json --event-path "$event_path" "$workflow"
   fi
-  echo "$id: profile=$actual_profile diagnostic=${expected_diagnostic:-none}"
 done
 
 echo "PASS: ${#case_ids[@]} open-source workflow case(s) matched their expected classifications."
