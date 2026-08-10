@@ -893,6 +893,7 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 	t.Setenv("BUILDKITE_COMMIT", sha)
 	t.Setenv("BUILDKITE_BRANCH", "executed")
+	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Build Author")
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
