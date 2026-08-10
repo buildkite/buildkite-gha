@@ -262,6 +262,17 @@ commit is in this audited allowlist (snapshot 2026-08-10):
 | v7 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml) | **Supported subset.** Node 24 ESM implementation with the same public inputs, main/post entrypoint, and outputs as current v6. |
 | v7 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/blob/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/action.yml) | **Supported subset.** The v7.0.0-era pin used by the OSS corpus. v7.0.1's default-self-checkout guard bypass, explicit-ref parsing, and cleanup hardening do not alter this bounded native result. |
 
+The upstream metadata surface evolved as follows. “Unset” means the manifest has
+no default; it is not the same as a declared empty string.
+
+| Majors | Input/default and lifecycle changes |
+| --- | --- |
+| v1 | Declares `repository`, `ref`, `token`, `clean: true`, `submodules`, `lfs`, `fetch-depth`, and `path`; all except `clean` are unset (the depth description says unlimited). Uses the runner `checkout` plugin and has no outputs or action lifecycle entrypoints. |
+| v2 | Changes the default depth to `1`; defaults `repository` to `${{ github.repository }}`, `token` to `${{ github.token }}`, `ssh-strict`, `persist-credentials`, `clean`, and `set-safe-directory` to true, and `lfs`, `submodules`, and `allow-unsafe-pr-checkout` to false. Adds unset `ssh-key` and `ssh-known-hosts`. Uses Node 12 main/post with no pre or outputs. |
+| v3 | Retains v2 and adds `sparse-checkout: null`, `sparse-checkout-cone-mode: true`, `fetch-tags: false`, and unset `github-server-url`. Uses Node 16 main/post with no pre or outputs. |
+| v4 | Adds `ssh-user: git`, `filter: null`, and `show-progress: true`; adds `ref` and `commit` outputs and moves to Node 20. |
+| v5-v7 | Retain the current v4 public inputs, defaults, outputs, and main/post shape with no pre. v5-v7 use Node 24; v6 isolates persisted credentials under runner temp, and v7 migrates the implementation to ESM. |
+
 Major tags are mutable. A tag such as `actions/checkout@v7` works only while it
 resolves to an allowlisted commit; a moved tag or arbitrary future commit is
 rejected until its exact source and metadata are audited. v1-v3 are explicitly
