@@ -1212,7 +1212,7 @@ esac
 		t.Fatalf("container checkout chain result = %#v, error = %v", result, err)
 	}
 	for _, call := range f.calls(t) {
-		if slices.Contains(call.Args, "/__buildkite-gha/node20") || slices.Contains(call.Args, "/__buildkite-gha/node24") || slices.Contains(call.Args, "/__buildkite-gha/nodes") {
+		if slices.Contains(call.Args, "/__buildkite-gha/node16") || slices.Contains(call.Args, "/__buildkite-gha/node20") || slices.Contains(call.Args, "/__buildkite-gha/node24") || slices.Contains(call.Args, "/__buildkite-gha/nodes") {
 			t.Fatalf("no-mise container checkout chain mounted or probed Node: %#v", call.Args)
 		}
 	}
@@ -1523,10 +1523,12 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
 	job.Outputs = map[string]string{"lazy": "${{ steps.lazy.outputs.lazy }}"}
+	node16 := filepath.Join(t.TempDir(), "node16")
+	writeNodeExecutable(t, node16, 16)
 	node20 := filepath.Join(t.TempDir(), "node20")
 	writeNodeExecutable(t, node20, 20)
 	node24 := requireNode24(t)
-	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node20: node20, Node24: node24}).RunJob(context.Background(), job, workspace)
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Node16: node16, Node20: node20, Node24: node24}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Outputs["lazy"] != "ready" {
 		t.Fatalf("lazy container action result = %#v, error = %v", result, err)
 	}
@@ -1536,7 +1538,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 		t.Fatalf("Docker create absent: %#v", calls)
 	}
 	createArgs := calls[createIndex].Args
-	if !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") {
+	if !slices.Contains(createArgs, "type=bind,source="+node16+",target=/__buildkite-gha/node16,readonly") || !slices.Contains(createArgs, "type=bind,source="+node24+",target=/__buildkite-gha/node24,readonly") || slices.Contains(createArgs, "type=bind,source="+node20+",target=/__buildkite-gha/node20,readonly") {
 		t.Fatalf("lazy node20 declaration mounts = %#v", createArgs)
 	}
 	seenLifecycleExec := false

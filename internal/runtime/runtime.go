@@ -48,6 +48,7 @@ const (
 type Runner struct {
 	Stdout                io.Writer
 	Stderr                io.Writer
+	Node16                string
 	Node20                string
 	Node24                string
 	ManagedNodeRoot       string
@@ -77,6 +78,7 @@ type Runner struct {
 	nodeVerification      *managedNodeVerification
 	nodeDigests           map[int]string
 	artifactRegistry      *artifactRegistry
+	node16Warnings        *node16DeprecationWarnings
 }
 
 func resolveHostExecutableBeforeWorkflow(configured, fallback, label string) (string, error) {
@@ -108,6 +110,30 @@ type managedNodeVerification struct {
 	paths map[int]string
 }
 
+func (r Runner) explicitNode(major int) string {
+	switch major {
+	case 16:
+		return r.Node16
+	case 20:
+		return r.Node20
+	case 24:
+		return r.Node24
+	default:
+		return ""
+	}
+}
+
+func (r *Runner) setExplicitNode(major int, path string) {
+	switch major {
+	case 16:
+		r.Node16 = path
+	case 20:
+		r.Node20 = path
+	case 24:
+		r.Node24 = path
+	}
+}
+
 // JavaScriptAction is an already-resolved local JavaScript action.
 type JavaScriptAction struct {
 	Name   string
@@ -120,6 +146,7 @@ type JavaScriptAction struct {
 	Cache  bool
 
 	nodeMajor int
+	reference string
 }
 
 // DockerAction is an already-resolved local Docker action.
@@ -633,6 +660,9 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		entrypoint = r.jobContainer.containerPath(entrypoint)
 	}
 	name, args := node, []string{entrypoint}
+	if r.node16Warnings != nil && action.nodeMajor == 16 {
+		r.node16Warnings.record(action.reference)
+	}
 	var beforeResult Result
 	var beforeState map[string]string
 	if cacheToken != "" {
@@ -904,15 +934,19 @@ func trimStreamLineEnding(line string) string {
 }
 
 const (
+	Node16Version = "16.20.2"
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
 	// Digests are for bin/node in the official Linux x86-64 release archives.
+	node16Digest = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
 	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
 	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
 )
 
 func nodeTool(major int) string {
 	switch major {
+	case 16:
+		return "core:node@" + Node16Version
 	case 20:
 		return "core:node@" + Node20Version
 	case 24:
@@ -1007,6 +1041,8 @@ func (r Runner) nodeDigest(major int) string {
 		return digest
 	}
 	switch major {
+	case 16:
+		return node16Digest
 	case 20:
 		return node20Digest
 	case 24:
@@ -1122,6 +1158,8 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	}
 	var wantVersion string
 	switch major {
+	case 16:
+		wantVersion = "v" + Node16Version
 	case 20:
 		wantVersion = "v" + Node20Version
 	case 24:
@@ -1255,14 +1293,15 @@ func sortedKeys[V any](values map[string]V) []string {
 }
 
 type commandProcessor struct {
-	mu        sync.Mutex
-	stdout    io.Writer
-	stderr    io.Writer
-	masks     []string
-	warnings  workflowCommandAnnotationBuffer
-	errors    workflowCommandAnnotationBuffer
-	stopToken string
-	discard   bool
+	mu              sync.Mutex
+	stdout          io.Writer
+	stderr          io.Writer
+	masks           []string
+	trustedWarnings workflowCommandAnnotationBuffer
+	warnings        workflowCommandAnnotationBuffer
+	errors          workflowCommandAnnotationBuffer
+	stopToken       string
+	discard         bool
 }
 
 type workflowCommandAnnotationBuffer struct {
@@ -1406,6 +1445,15 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 	p.writeMaskedLineLocked(target, severity+": "+message)
 }
 
+// trustedWarning records a runner-owned warning even after untrusted action
+// output has been suppressed, while preserving the job's registered masks.
+func (p *commandProcessor) trustedWarning(message string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, "Warning", parsedWorkflowCommand{message: message})
+	p.writeWorkflowCommandMessageLocked(p.stderr, "warning", message)
+}
+
 func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) {
 	_, _ = fmt.Fprintln(target, p.maskTextLocked(line))
 }
@@ -1487,7 +1535,14 @@ func (p *commandProcessor) scrubError(err error) error {
 func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.warnings.body, p.warnings.truncated, p.errors.body, p.errors.truncated
+	warnings, warningsTruncated = p.warnings.body, p.warnings.truncated
+	if p.trustedWarnings.body != "" {
+		warnings, warningsTruncated = "", false
+		appendBoundedText(&warnings, &warningsTruncated, p.trustedWarnings.body, p.trustedWarnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+		untrusted := strings.TrimPrefix(p.warnings.body, workflowWarningAnnotationHeading)
+		appendBoundedText(&warnings, &warningsTruncated, untrusted, p.warnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	}
+	return warnings, warningsTruncated, p.errors.body, p.errors.truncated
 }
 
 func (p *commandProcessor) addMaskLocked(value string) {

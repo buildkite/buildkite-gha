@@ -862,7 +862,7 @@ at barriers, and the cross-stream masking race.
 
 #### JavaScript actions
 
-- `node20` and `node24` action metadata;
+- `node16`, `node20`, and `node24` action metadata;
 - runner-compatible handling of deprecated Node versions;
 - action `pre`, `main`, and `post` entry points;
 - `INPUT_*`, `GITHUB_ACTION_PATH`, runtime files, and action state; and
@@ -878,10 +878,12 @@ verifies embedded archive and executable SHA-256 digests. Managed cache bytes
 are copied into a job-private directory and reverified before execution. The
 runtime resolves and pins that private executable before workflow code runs,
 then installs exactly
-`core:node@20.20.2` or `core:node@24.18.0` with mise configuration disabled,
+`core:node@16.20.2` or `core:node@24.18.0` with mise configuration disabled,
 digest-verifies the resulting Node executable, and invokes that exact path
-directly. It never uses a fuzzy Node major, a data-dir plugin, repository mise
-configuration, or a workflow-modifiable tool-bin `PATH`.
+directly. Node 20 and 24 declarations use Node 24, while Node 16 declarations
+retain exact Node 16 compatibility and produce an aggregate deprecation
+warning. The runtime never uses a fuzzy Node major, a data-dir plugin,
+repository mise configuration, or a workflow-modifiable tool-bin `PATH`.
 `MISE_*` workflow environment overrides therefore cannot redirect compatibility
 Node; ordinary shell steps retain them.
 Generated action jobs declare a dedicated, pipeline-scoped Buildkite hosted
@@ -1113,7 +1115,7 @@ jobs, the static bridge reuses mise 2026.5.12 or newer when available or
 downloads and digest-verifies its pinned 2026.5.12 official archive in the
 integration-owned managed cache path. Hosted Agents attach that cache
 automatically; other agent environments use it when available and otherwise
-fall back to ephemeral storage. Node 20.20.2 and 24.18.0 are installed by a
+fall back to ephemeral storage. Node 16.20.2 and 24.18.0 are installed by a
 reverified, job-private copy of that executable on demand into the same cache.
 Cached mise and Node executables are digest-verified before use, so cache
 sharing across builds is an optimization rather than a trust boundary.
@@ -1250,7 +1252,7 @@ The first externally useful beta should support:
   best-effort `fail-fast` that prevents undispatched siblings from starting;
 - shell `run` steps;
 - `background`, `wait`, `wait-all`, `cancel`, and `parallel` step controls;
-- JavaScript actions using managed Node 20/24;
+- JavaScript actions using managed Node 16/24;
 - composite actions;
 - Docker actions, job containers, and service containers;
 - environment files and workflow commands;
@@ -1330,9 +1332,9 @@ public checkout remains a separate provider integration gate.
 - Phase 4 is implemented within the tokenless public-action boundary.
   Action-resolved v3 plans carry immutable local and public action locks, verify
   complete source trees, execute nested composites and JavaScript pre/main/post
-  lifecycle through exact mise-managed Node 20.20.2 or 24.18.0, and fail closed
-  on private sources or provider-dependent authentication. Action resolution is
-  independent of event trust. Normal `upload` resolves local and anonymous
+  lifecycle through exact mise-managed Node 16.20.2 or 24.18.0, and fail closed
+  on private sources or provider-dependent authentication. Action resolution
+  is independent of event trust. Normal `upload` resolves local and anonymous
   public JavaScript/composite actions without transporting mise or Node
   executable bytes; generated agents reuse or install the pinned mise release
   before workflow code and resolve compatibility versions through `mise
