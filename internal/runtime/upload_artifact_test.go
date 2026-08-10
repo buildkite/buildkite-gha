@@ -35,6 +35,10 @@ type captureArtifactUploader struct {
 	err     error
 }
 
+func (r Runner) runUploadArtifact(ctx context.Context, processor *commandProcessor, workspace string, inputs map[string]string) (Result, error) {
+	return r.runUploadArtifactCommit(ctx, processor, workspace, actionintegration.UploadArtifactCommit, inputs)
+}
+
 func (u *captureArtifactUploader) DownloadArtifact(context.Context, string, string, string) error {
 	return errors.New("unexpected artifact download")
 }
@@ -294,6 +298,27 @@ func TestUploadArtifactNoFilesModes(t *testing.T) {
 	_, _, commandErrors, _ := processor.workflowCommandAnnotations()
 	if !strings.Contains(commandErrors, message) || stdout.String() != "error: "+message+"\n" {
 		t.Fatalf("error output = %q, annotation = %q", stdout.String(), commandErrors)
+	}
+}
+
+func TestUploadArtifactScrubsExpressionDerivedPathsFromErrors(t *testing.T) {
+	const maskedPath = "runtime-secret-path"
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(maskedPath)
+	r := Runner{artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifact(context.Background(), processor, t.TempDir(), map[string]string{
+		"path": maskedPath, "if-no-files-found": "error",
+	}); err == nil || strings.Contains(err.Error(), maskedPath) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("masked no-file error = %v", err)
+	}
+
+	const quotedMask = `runtime"secret`
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, quotedMask, "masked")
+	processor = newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(quotedMask)
+	if _, err := r.runUploadArtifact(context.Background(), processor, workspace, map[string]string{"path": quotedMask}); err == nil || strings.Contains(err.Error(), quotedMask) || strings.Contains(err.Error(), `runtime\"secret`) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("quoted masked path error = %v", err)
 	}
 }
 
