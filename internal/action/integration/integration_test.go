@@ -137,6 +137,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 	for _, inputs := range []map[string]string{
 		nil,
 		{"repository": "BUILDKITE/BUILDKITE-GHA", "ref": sha, "fetch-depth": "1", "persist-credentials": "false", "clean": "true", "set-safe-directory": "true"},
+		{"fetch-depth": "0"},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)

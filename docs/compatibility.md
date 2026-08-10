@@ -106,7 +106,7 @@ service.
 | Dockerfile actions | Supported subset | Only compiler-verified local or public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
-| `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and shallow fetch are supported. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
+| `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and fetch depth 1 or 0 are supported. Depth 0 fetches all branch and tag history while retaining the exact event SHA. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
 | `actions/upload-artifact` | Supported subset | The audited v4 and v7 commits are adapted in ZIP mode. They support bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
@@ -247,8 +247,9 @@ semantics when Buildkite has not supplied them.
 ### Checkout starts clean
 
 Generated jobs skip Buildkite's default checkout and allocate a fresh Actions
-workspace. A supported `actions/checkout` step performs a shallow checkout of
-the event repository at the exact event SHA. Compilation automatically adds
+workspace. A supported `actions/checkout` step checks out the event repository
+at the exact event SHA, using GitHub's default depth 1 or explicit
+`fetch-depth: 0` for all branch and tag history. Compilation automatically adds
 `provider-token-read` only to a job containing the compiler-verified checkout
 adapter with its bounded inputs.
 

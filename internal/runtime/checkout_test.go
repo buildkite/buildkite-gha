@@ -163,6 +163,28 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	}
 }
 
+func TestCheckoutFetchDepth(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		name   string
+		inputs map[string]string
+		want   string
+	}{
+		{name: "default shallow", want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
+		{name: "explicit shallow", inputs: map[string]string{"fetch-depth": "1"}, want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
+		{
+			name: "all branches and tags", inputs: map[string]string{"Fetch-Depth": "0"},
+			want: "fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +" + sha + ":refs/buildkite-gha/event",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := strings.Join(checkoutFetchArgs(test.inputs, sha), " "); got != test.want {
+				t.Fatalf("checkoutFetchArgs() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
