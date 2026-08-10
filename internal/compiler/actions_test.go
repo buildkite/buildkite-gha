@@ -106,7 +106,7 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 			"owner/javascript":          remote("owner/javascript", "node24"),
 		},
 		commits: map[string]string{
-			"actions/checkout":          strings.Repeat("b", 40),
+			"actions/checkout":          actionintegration.CheckoutV4Commit,
 			"actions/upload-artifact":   actionintegration.UploadArtifactCommit,
 			"actions/download-artifact": actionintegration.DownloadArtifactCommit,
 			"actions/cache":             actionintegration.CacheCommit,
@@ -693,19 +693,19 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	options := Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	}
 	compile := func(with string) ([]plan.Job, error) {
 		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
-		}
-		options := Options{
-			EventTrust: EventUntrusted,
-			Runners: RunnerPolicy{
-				Labels:          map[string]string{"ubuntu-latest": "hosted"},
-				UntrustedQueues: []string{"hosted"},
-			},
-			ResolveActions: true,
-			ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 		}
 		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase4-test", testDistributionDigest, options)
 	}
@@ -742,6 +742,32 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 				t.Fatalf("CompilePlansWithOptions() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestCheckoutAdapterCommitBoundary(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
+	for version, commit := range map[string]string{
+		"v4":     actionintegration.CheckoutV4Commit,
+		"v5":     actionintegration.CheckoutV5Commit,
+		"v6":     actionintegration.CheckoutV6Commit,
+		"v7.0.0": actionintegration.CheckoutV7InitialCommit,
+		"v7.0.1": actionintegration.CheckoutV7Commit,
+	} {
+		t.Run(version, func(t *testing.T) {
+			actionSource := &fakeActionSource{root: remote, commit: commit, calls: map[string]int{}}
+			_, locks, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@" + version})
+			if err != nil || len(locks) != 1 || locks[0].Commit != commit {
+				t.Fatalf("compileActionLocks() locks = %#v, error = %v", locks, err)
+			}
+		})
+	}
+
+	unknown := strings.Repeat("0", 40)
+	actionSource := &fakeActionSource{root: remote, commit: unknown, calls: map[string]int{}}
+	if _, _, _, _, err := compileActionLocks(context.Background(), workspace, actionSource, []string{"actions/checkout@v7"}); err == nil || !strings.Contains(err.Error(), "does not admit") {
+		t.Fatalf("unknown checkout commit error = %v", err)
 	}
 }
 

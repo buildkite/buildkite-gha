@@ -106,7 +106,7 @@ service.
 | Dockerfile actions | Supported subset | Only compiler-verified local or public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
-| `actions/checkout` | Supported subset | The `github.com` event repository, exact event SHA, workspace root, and fetch depth 1 or 0 are supported. Depth 0 fetches all branch and tag history while retaining the exact event SHA. The fetch automatically uses Buildkite's repository-provider Git credential helper when the job has those credentials enabled and is anonymous otherwise. Alternate repositories/refs, submodules, LFS, persisted credentials, and arbitrary checkout inputs are not supported. |
+| `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
 | `actions/upload-artifact` | Supported subset | The audited v4 and v7 commits are adapted in ZIP mode. They support bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
@@ -244,14 +244,87 @@ For pull requests, the plugin uses the exact Buildkite commit and a
 `refs/pull/<number>/head` compatibility ref. It does not claim GitHub's merge-ref
 semantics when Buildkite has not supplied them.
 
-### Checkout starts clean
+### `actions/checkout` native adapter
+
+The compiler resolves mutable action references before selection and records the
+exact commit and source-tree digest in the plan. Repository identity selects the
+checkout integration, but the native adapter is admitted only when the resolved
+commit is in this audited allowlist (snapshot 2026-08-10):
+
+| Upstream major | Audited major-tag commit | Metadata and native decision |
+| --- | --- | --- |
+| v1 | [`50fbc622fc4ef5163becd7fab6573eac35f8462e`](https://github.com/actions/checkout/blob/50fbc622fc4ef5163becd7fab6573eac35f8462e/action.yml) | **Not supported.** Legacy `runs.plugin: checkout`, no JavaScript lifecycle or outputs, and an unlimited-history default do not match this adapter. |
+| v2 | [`0717577d45739eb3c851188b29f50ed6c0b2194e`](https://github.com/actions/checkout/blob/0717577d45739eb3c851188b29f50ed6c0b2194e/action.yml) | **Not supported.** Node 12 main/post action, no outputs, and an older input surface. |
+| v3 | [`a37ce9120846195fa4ece8f58b268e6043cb2f26`](https://github.com/actions/checkout/blob/a37ce9120846195fa4ece8f58b268e6043cb2f26/action.yml) | **Not supported.** Node 16 main/post action and no `ref`/`commit` outputs. |
+| v4 | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/blob/11d5960a326750d5838078e36cf38b85af677262/action.yml) | **Supported subset.** Node 20, `dist/index.js` main/post, no pre, `ref` and `commit` outputs. |
+| v5 | [`fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09`](https://github.com/actions/checkout/blob/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09/action.yml) | **Supported subset.** Same public contract as v4 with Node 24. |
+| v6 | [`d23441a48e516b6c34aea4fa41551a30e30af803`](https://github.com/actions/checkout/blob/d23441a48e516b6c34aea4fa41551a30e30af803/action.yml) | **Supported subset.** Node 24; upstream moved persisted credentials to a temporary file and conditional includes, but persistence is not implemented here. |
+| v7 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml) | **Supported subset.** Node 24 ESM implementation with the same public inputs, main/post entrypoint, and outputs as current v6. |
+| v7 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/blob/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/action.yml) | **Supported subset.** The v7.0.0-era pin used by the OSS corpus. v7.0.1's default-self-checkout guard bypass, explicit-ref parsing, and cleanup hardening do not alter this bounded native result. |
+
+The upstream metadata surface evolved as follows. “Unset” means the manifest has
+no default; it is not the same as a declared empty string.
+
+| Majors | Input/default and lifecycle changes |
+| --- | --- |
+| v1 | Declares `repository`, `ref`, `token`, `clean: true`, `submodules`, `lfs`, `fetch-depth`, and `path`; all except `clean` are unset (the depth description says unlimited). Uses the runner `checkout` plugin and has no outputs or action lifecycle entrypoints. |
+| v2 | Changes the default depth to `1`; defaults `repository` to `${{ github.repository }}`, `token` to `${{ github.token }}`, `ssh-strict`, `persist-credentials`, `clean`, and `set-safe-directory` to true, and `lfs`, `submodules`, and `allow-unsafe-pr-checkout` to false. Adds unset `ssh-key` and `ssh-known-hosts`. Uses Node 12 main/post with no pre or outputs. |
+| v3 | Retains v2 and adds `sparse-checkout: null`, `sparse-checkout-cone-mode: true`, `fetch-tags: false`, and unset `github-server-url`. Uses Node 16 main/post with no pre or outputs. |
+| v4 | Adds `ssh-user: git`, `filter: null`, and `show-progress: true`; adds `ref` and `commit` outputs and moves to Node 20. |
+| v5-v7 | Retain the current v4 public inputs, defaults, outputs, and main/post shape with no pre. v5-v7 use Node 24; v6 isolates persisted credentials under runner temp, and v7 migrates the implementation to ESM. |
+
+Major tags are mutable. A tag such as `actions/checkout@v7` works only while it
+resolves to an allowlisted commit; a moved tag or arbitrary future commit is
+rejected until its exact source and metadata are audited. v1-v3 are explicitly
+unsupported rather than silently replaced with different native semantics.
+
+All supported commits declare the following current v4-v7 inputs. Input names
+are case-insensitive and case-colliding duplicates are rejected. GitHub Actions
+boolean spellings (`true`, `True`, `TRUE` and corresponding false forms) are
+accepted where shown. The compiler validates admitted static values, and the
+runtime repeats validation after expression evaluation. A dynamic value cannot
+widen the event repository, SHA, or credential boundary. Checkout input
+expressions must currently resolve during compilation to an admitted literal;
+otherwise compilation fails closed.
+
+| Input | Admitted values | Native decision |
+| --- | --- | --- |
+| `repository` | omitted, or the event `owner/repo` (case-insensitive) | Alternate repositories and an explicit empty value are rejected. |
+| `ref` | omitted, empty, or the exact lowercase 40-hex event SHA | Branches, tags, other SHAs, and SHA-256 object IDs are rejected. Checkout is always detached at the event SHA. |
+| `token` | omitted only | Explicit values, including empty, are rejected. The upstream `${{ github.token }}` default is not used. |
+| `ssh-key`, `ssh-known-hosts` | omitted or empty | Non-empty SSH configuration is rejected; no SSH transport is attempted. |
+| `ssh-strict` | omitted or true | Default-equivalent only. |
+| `ssh-user` | omitted or `git` | Default-equivalent only. |
+| `persist-credentials` | omitted or false | Credentials are never persisted. This intentionally differs from upstream's `true` default. |
+| `path` | omitted or empty | Only the workspace root is supported. |
+| `clean` | omitted or true | The workspace must already be empty. Existing files are rejected, not reset or deleted. |
+| `filter`, `sparse-checkout` | omitted or empty | Partial and sparse clones are rejected. |
+| `sparse-checkout-cone-mode` | omitted or true | Accepted only as an inert default while sparse checkout is absent. |
+| `fetch-depth` | omitted, `1`, or `0` | Default/`1` fetches only the exact SHA with depth 1. `0` fetches all heads, tags, and an explicit exact-event refspec before detached checkout. Other values are rejected rather than normalized. |
+| `fetch-tags` | omitted, true, or false | Default false suppresses tags for depth 1. True adds an explicit tag refspec. Depth 0 always includes tags. |
+| `show-progress` | omitted, true, or false | Defaults to true and controls `git fetch --progress`. |
+| `lfs` | omitted or false | LFS is not installed or fetched. |
+| `submodules` | omitted or false | `true` and `recursive` are rejected. See the product decision below. |
+| `set-safe-directory` | omitted or true | Accepted as default-equivalent; the adapter uses isolated Git config and does not mutate the user's global `safe.directory`. |
+| `github-server-url` | omitted, empty, or `https://github.com` | GitHub Enterprise Server and alternate hosts are rejected. |
+| `allow-unsafe-pr-checkout` | omitted or false | Alternate fork repository/ref selection is already impossible; true is rejected. |
+
+The adapter does not execute upstream's Node main/post lifecycle. It initializes
+an isolated Git repository, disables system/global Git config and hooks for its
+commands, fetches over public HTTPS, and verifies `.git/HEAD` is the exact event
+SHA. It emits the upstream v4+ `ref` and `commit` step outputs from the immutable
+event. An omitted or empty `ref` outputs the event ref; an explicitly supplied
+event SHA outputs an empty `ref`, matching upstream's commit classification. It
+does not emit matcher commands or post state, configure credentials
+for later steps, clean an existing checkout, choose a local branch, fall back to
+the REST archive API, or modify global safe-directory configuration.
 
 Generated jobs skip Buildkite's default checkout and allocate a fresh Actions
-workspace. A supported `actions/checkout` step checks out the event repository
-at the exact event SHA, using GitHub's default depth 1 or explicit
-`fetch-depth: 0` for all branch and tag history. Compilation automatically adds
-`provider-token-read` only to a job containing the compiler-verified checkout
-adapter with its bounded inputs.
+workspace. Compilation adds `provider-token-read` only after the root checkout
+lock passes the commit and input boundaries. At runtime the same commit and
+evaluated-input checks run again before Git or credentials are used.
+
+#### Credentials and submodules remain narrow by design
 
 At runtime, the fetch uses Buildkite's native
 `buildkite-agent git-credentials-helper` when
@@ -274,6 +347,16 @@ This checkout path does not populate
 `GITHUB_TOKEN` or `github.token`, use workflow `permissions`, enable private
 actions, or add support for alternate repositories or refs. The deprecated
 `--private-checkout` option is temporarily accepted as a no-op for compatibility.
+
+Public-HTTPS submodules are deliberately **not** implemented. An honest bounded
+implementation would need to validate every `.gitmodules` URL and path before
+Git follows it, distinguish direct from recursive updates, revalidate nested
+manifests, prevent symlink/path escapes, preserve depth 1/0 semantics, and ensure
+the event-repository helper is never offered to submodule hosts or paths. Git's
+ordinary recursive update performs network access before that complete policy
+can be established. Rather than broaden credential authority or special-case
+the jq corpus, both `submodules: true` and `submodules: recursive` fail closed;
+public, private, relative, and SSH submodules are all unsupported.
 
 ### Effective permissions provide a scoped workflow token
 

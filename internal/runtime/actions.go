@@ -60,20 +60,26 @@ func usesCheckoutAdapter(lock plan.ActionLock) bool {
 	return descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA
 }
 
-func jobUsesCheckoutAdapter(job plan.Job) bool {
+func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 	locks := make(map[string]plan.ActionLock, len(job.Actions))
 	for _, lock := range job.Actions {
+		if usesCheckoutAdapter(lock) {
+			if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
+				return false, err
+			}
+		}
 		locks[lock.ID] = lock
 	}
+	found := false
 	for _, step := range job.Steps {
 		if step.Action == nil {
 			continue
 		}
 		if lock, ok := locks[step.Action.Lock]; ok && usesCheckoutAdapter(lock) {
-			return true
+			found = true
 		}
 	}
-	return false
+	return found, nil
 }
 
 func usesUploadArtifactAdapter(lock plan.ActionLock) bool {
@@ -119,6 +125,11 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	}
 	if entry.duplicate || entry.lock.ID != selector.Lock {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
+	}
+	if usesCheckoutAdapter(entry.lock) {
+		if err := actionintegration.ValidateCheckoutCommit(entry.lock.Commit); err != nil {
+			return metadata.Metadata{}, plan.ActionLock{}, err
+		}
 	}
 	if usesUploadArtifactAdapter(entry.lock) {
 		if err := actionintegration.ValidateUploadArtifactCommit(entry.lock.Commit); err != nil {

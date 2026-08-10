@@ -37,6 +37,16 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 	if err != nil {
 		return source.Resolved{}, source.Materialized{}, err
 	}
+	identity := actionintegration.Identity{
+		Source:     "github",
+		Repository: strings.ToLower(ref.Owner + "/" + ref.Repository),
+		Path:       ref.Path,
+	}
+	if descriptor, _ := actionintegration.Lookup(identity); descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
+		if err := actionintegration.ValidateCheckoutCommit(strings.ToLower(r.Commit)); err != nil {
+			return source.Resolved{}, source.Materialized{}, err
+		}
+	}
 	m, err := s.Store.Materialize(ctx, r)
 	return r, m, err
 }
@@ -282,6 +292,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
+		if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
+			return "", plan.ActionLock{}, "", "", err
+		}
+	}
 	if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 		if err := actionintegration.ValidateUploadArtifactCommit(lock.Commit); err != nil {
 			return "", plan.ActionLock{}, "", "", err
