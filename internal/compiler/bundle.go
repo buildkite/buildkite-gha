@@ -113,6 +113,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
 		GroupLabel:         options.GroupLabel,
+		RuntimeImage:       options.RuntimeImage,
 		ConcurrencyGate:    concurrencyGate,
 		Jobs:               jobs,
 	})

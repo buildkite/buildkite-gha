@@ -704,7 +704,7 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	redactor := &cliRedactor{}
 	var warnings bytes.Buffer
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", "", authentication); err != nil {
+	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", "", "", authentication); err != nil {
 		t.Fatal(err)
 	}
 	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
@@ -782,6 +782,37 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	}
 	if planCount != 3 {
 		t.Fatalf("uploaded plan count = %d, want 3", planCount)
+	}
+}
+
+func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "runtime-image-importer")
+	t.Setenv(runtimeImageEnvironment, image)
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Image   string `yaml:"image"`
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatalf("uploaded pipeline YAML: %v", err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
+	}
+	for _, step := range pipeline.Steps {
+		if step.Image != image || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("runtime image step = %#v", step)
+		}
 	}
 }
 
@@ -2428,8 +2459,14 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
-	if _, _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
+	}
+	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("runJobArgs() error = %v, want duplicate hosted tool cache error", err)
+	}
+	if planPath, resultPath, hostedToolCache, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || planPath != "plan.json" || resultPath != "result.json" || !hostedToolCache {
+		t.Fatalf("runJobArgs() = %q, %q, %t, %v", planPath, resultPath, hostedToolCache, err)
 	}
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)

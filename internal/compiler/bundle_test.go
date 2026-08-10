@@ -75,6 +75,29 @@ func TestCompileBundlePreservesExplicitQueuePolicy(t *testing.T) {
 	}
 }
 
+func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	options := defaultOptions()
+	options.RuntimeImage = image
+	bundle, err := CompileBundleWithOptions("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Image   string `yaml:"image"`
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Image != image || !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
+		t.Fatalf("runtime image pipeline = %#v", document.Steps)
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {

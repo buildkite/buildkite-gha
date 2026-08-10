@@ -2622,8 +2622,9 @@ them in the phase that first needs the capability:
    webhooks directly, and whether a small Buildkite platform API is missing.
 2. Phase 5 uses direct Hosted Agent execution. Exact-commit build 102 proved
    the local `default` Docker driver and queue prerequisites; build 136 proved
-   the complete container runtime. A compatibility image remains deferred until
-   tool-cache differences demonstrate a concrete need.
+   the complete container runtime. Importers can now opt generated jobs into an
+   immutable toolchain-enabled image; the default image and fresh job-private
+   tool cache remain unchanged when no image is selected.
 3. Phase 4 will set the customer-beta event and expression subset from the
    hosted differential corpus.
 4. Phase 6 will define Cursor Origin checkout, event, pull-request, Job OIDC,
