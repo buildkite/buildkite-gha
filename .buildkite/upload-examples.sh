@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if (( $# > 1 )); then
-  echo 'usage: .buildkite/upload-examples.sh [basic|artifacts|advanced]' >&2
+  echo 'usage: .buildkite/upload-examples.sh [basic|artifacts|advanced|nodejs-concurrency]' >&2
   exit 2
 fi
 
@@ -40,6 +40,8 @@ steps:
             value: "artifacts"
           - label: "Advanced delivery"
             value: "advanced"
+          - label: "Node.js concurrency"
+            value: "nodejs-concurrency"
 
   - label: ":pipeline: Load example workflow"
     key: "example-loader"
@@ -63,6 +65,9 @@ case "$example" in
     ;;
   advanced)
     workflow=".github/workflows/example-advanced.yml"
+    ;;
+  nodejs-concurrency)
+    workflow=".github/workflows/example-nodejs-concurrency.yml"
     ;;
   *)
     echo "unknown example: $example" >&2
