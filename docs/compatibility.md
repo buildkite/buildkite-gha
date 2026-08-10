@@ -118,7 +118,7 @@ service.
 
 | GitHub Actions area | Status | Current boundary |
 | --- | --- | --- |
-| Public GitHub repositories | Supported subset | Public event-repository checkout and anonymous public GitHub actions are supported. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
+| Public GitHub repositories | Supported subset | Public event-repository checkout and public GitHub actions are supported within the source-authentication boundary above. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
 | Private repositories | Supported subset | The event repository can be checked out when Buildkite supplies repository-provider Git credentials to the job and its backend authorizes the concrete repository URL. Alternate repositories, private actions, and private reusable workflows are not supported. |
 | `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. The runtime does not inject it into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |

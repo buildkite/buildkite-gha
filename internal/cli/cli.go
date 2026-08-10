@@ -1211,6 +1211,9 @@ func (a *actionSourceAuthentication) option(repository string) actionsource.Opti
 }
 
 func (a *actionSourceAuthentication) token(ctx context.Context, repository string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if a.provider == nil {
 		a.warnAnonymousFallback("job-scoped GitHub source authentication is unavailable")
 		return "", nil
@@ -1220,12 +1223,18 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
 		a.warnAnonymousFallback("could not mint a job-scoped GitHub source token")
 		return "", nil
 	}
 	if err := a.redactor.AddRedaction(ctx, token); err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
 		}
 		a.warnAnonymousFallback("could not register the job-scoped GitHub source token with the Buildkite Agent redactor")
 		return "", nil

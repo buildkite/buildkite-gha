@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -200,7 +199,6 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 		{name: "metadata", path: "/repos/actions/checkout", wantStatus: http.StatusOK},
 		{name: "tag", path: "/repos/actions/checkout/git/ref/tags/v4", wantStatus: http.StatusOK},
 		{name: "commit", path: "/repos/actions/checkout/commits/" + commit, wantStatus: http.StatusOK},
-		{name: "tarball", path: "/repos/actions/checkout/tarball/" + commit, wantStatus: http.StatusFound},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com"+test.path, nil)
@@ -230,12 +228,6 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 					t.Fatalf("GitHub public repository metadata visibility = %q, error = %v", repository.Visibility, err)
 				}
 				return
-			}
-			if test.name == "tarball" {
-				location, err := url.Parse(response.Header.Get("Location"))
-				if err != nil || location.Scheme != "https" || location.Hostname() != "codeload.github.com" {
-					t.Fatalf("GitHub tarball redirect = %q, error = %v", response.Header.Get("Location"), err)
-				}
 			}
 		})
 	}

@@ -112,7 +112,7 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 	writeAction(t, fixture, "")
 	digest := digestTree(t, fixture)
 	archive := githubActionArchive(t)
-	var apiRequests, archiveRequests int
+	var apiRequests, archiveRequests, tokenProvisions int
 	apiServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		apiRequests++
 		http.Error(w, "GitHub REST must not be used by runtime exact-commit materialization", http.StatusInternalServerError)
@@ -129,7 +129,10 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 		_, _ = w.Write(archive)
 	}))
 	defer codeloadServer.Close()
-	store, err := source.NewStore(t.TempDir(), codeloadServer.Client(), source.WithTestEndpoints(apiServer.URL, codeloadServer.URL), source.WithScopedGitHubToken(token, "pipeline/repo"))
+	store, err := source.NewStore(t.TempDir(), codeloadServer.Client(), source.WithTestEndpoints(apiServer.URL, codeloadServer.URL), source.WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+		tokenProvisions++
+		return token, nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,8 +147,8 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 	if _, _, err := resolver.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err != nil {
 		t.Fatal(err)
 	}
-	if apiRequests != 0 || archiveRequests != 1 {
-		t.Fatalf("API/archive requests = %d / %d, want 0 / 1", apiRequests, archiveRequests)
+	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
+		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
 	}
 }
 

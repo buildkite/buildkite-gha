@@ -638,31 +638,39 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 	}
 
 	for _, test := range []struct {
-		name      string
-		provider  *cliWorkflowTokenProvider
-		redactor  *cliRedactor
-		cancelled bool
+		name          string
+		provider      *cliWorkflowTokenProvider
+		redactor      *cliRedactor
+		cancelContext bool
+		wantContext   bool
 	}{
-		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("unavailable")}, redactor: &cliRedactor{}},
-		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("unavailable")}},
-		{name: "cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, cancelled: true},
+		{name: "unavailable", redactor: &cliRedactor{}},
+		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("secret backend details")}, redactor: &cliRedactor{}},
+		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("secret backend details")}},
+		{name: "pre-cancelled while unavailable", redactor: &cliRedactor{}, cancelContext: true, wantContext: true},
+		{name: "mint cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, wantContext: true},
+		{name: "redaction cancellation", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.Canceled}, wantContext: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var warnings bytes.Buffer
 			ctx := context.Background()
-			if test.cancelled {
+			if test.cancelContext {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			gotToken, err := (&actionSourceAuthentication{provider: test.provider, redactor: test.redactor, warnings: &warnings}).token(ctx, "buildkite/buildkite-gha")
-			if test.cancelled {
+			authentication := &actionSourceAuthentication{redactor: test.redactor, warnings: &warnings}
+			if test.provider != nil {
+				authentication.provider = test.provider
+			}
+			gotToken, err := authentication.token(ctx, "buildkite/buildkite-gha")
+			if test.wantContext {
 				if !errors.Is(err, context.Canceled) || gotToken != "" || warnings.Len() != 0 {
 					t.Fatalf("token/error/warnings = %q / %v / %q", gotToken, err, warnings.String())
 				}
 			} else if err != nil || gotToken != "" {
 				t.Fatalf("token/error = %q / %v, want anonymous fallback", gotToken, err)
-			} else if !strings.Contains(warnings.String(), "resolving mutable public action references anonymously") || strings.Contains(warnings.String(), token) || strings.Contains(warnings.String(), "unavailable") {
+			} else if !strings.Contains(warnings.String(), "resolving mutable public action references anonymously") || strings.Contains(warnings.String(), token) || strings.Contains(warnings.String(), "backend details") {
 				t.Fatalf("fallback warning = %q, want sanitized observable warning", warnings.String())
 			}
 		})

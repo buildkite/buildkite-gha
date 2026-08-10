@@ -126,19 +126,6 @@ func defaults() config {
 // never be populated from workflow input.
 type Option func(*config) error
 
-// WithScopedGitHubToken authenticates requests to the configured GitHub API
-// origin, except requests to the private-capable repository that scoped the
-// credential. The token is never sent to an archive redirect target.
-func WithScopedGitHubToken(token, repository string) Option {
-	return func(c *config) error {
-		if token == "" || !validRepository(repository) {
-			return fmt.Errorf("invalid scoped GitHub credential")
-		}
-		c.credential = &scopedCredential{repository: strings.ToLower(repository), token: token}
-		return nil
-	}
-}
-
 // WithScopedGitHubTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
 // Returning an empty token selects anonymous resolution. Full lowercase SHAs

@@ -103,7 +103,9 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 			defer ts.Close()
 			opts := []Option{WithTestEndpoints(ts.URL)}
 			if tt.token != "" {
-				opts = append(opts, WithScopedGitHubToken(tt.token, tt.tokenRepository))
+				opts = append(opts, WithScopedGitHubTokenProvider(tt.tokenRepository, func(context.Context) (string, error) {
+					return tt.token, nil
+				}))
 			}
 			resolver, err := NewResolver(ts.Client(), opts...)
 			if err != nil {
@@ -528,6 +530,7 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	const token = "test-token"
 	var apiRequests int
 	var archiveRequests int
+	var tokenProvisions int
 	archiveServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		archiveRequests++
 		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
@@ -546,15 +549,18 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	defer apiServer.Close()
 	ref, _ := Parse("o/r@v1")
 	resolved := Resolved{Reference: ref, Commit: testSHA}
-	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, archiveServer.URL), WithScopedGitHubToken(token, "pipeline/repo"))
+	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, archiveServer.URL), WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+		tokenProvisions++
+		return token, nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Materialize(context.Background(), resolved); err != nil {
 		t.Fatal(err)
 	}
-	if apiRequests != 0 || archiveRequests != 1 {
-		t.Fatalf("API/archive requests = %d / %d, want 0 / 1", apiRequests, archiveRequests)
+	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
+		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
 	}
 }
 
@@ -576,7 +582,9 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 			_, _ = w.Write(archive)
 		}))
 		defer server.Close()
-		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL), WithScopedGitHubToken("test-token", "pipeline/repo"))
+		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL), WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+			return "test-token", nil
+		}))
 		if err != nil {
 			t.Fatal(err)
 		}
