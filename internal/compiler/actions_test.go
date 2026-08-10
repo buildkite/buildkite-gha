@@ -357,7 +357,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenWriteCapabilitySources, []string{"workflow-permissions"}) {
+	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
 		t.Fatalf("effective action default token authorization = %#v", bundle.Plans)
 	}
 
@@ -377,15 +377,30 @@ jobs:
 		t.Fatalf("overridden action default minted a token: %#v", plans)
 	}
 
-	_, err = compile(`on: push
+	plans, err = compile(`on: push
 jobs:
   token:
     runs-on: ubuntu-latest
     steps:
       - uses: ./.github/actions/token
 `)
-	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no explicit effective permissions") {
-		t.Fatalf("CompilePlansWithOptions() error = %v, want explicit permission rejection", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+		t.Fatalf("default action token plan = %#v", plans)
+	}
+
+	_, err = compile(`on: push
+permissions: {}
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+`)
+	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
+		t.Fatalf("CompilePlansWithOptions() error = %v, want empty permission rejection", err)
 	}
 }
 

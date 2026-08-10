@@ -66,7 +66,7 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 
 func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository string, permissions map[string]string) (string, error) {
 	if !validWorkflowTokenPermissions(permissions) {
-		return "", fmt.Errorf("GitHub workflow token requires valid explicit permissions")
+		return "", fmt.Errorf("GitHub workflow token requires valid effective permissions")
 	}
 	return c.mint(ctx, repository, permissions, "workflow")
 }

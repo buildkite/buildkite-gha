@@ -254,11 +254,13 @@ job's Agent credential is not placed in plans.
 
 A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
-`github.token`. A workflow must declare an explicit, non-empty permission
-mapping and either statically reference that exact secret or invoke an action
-whose effective default statically references the token. The compiler emits the
-API-normalized permission map into a v6 plan, adds `provider-token-write`, and
-records same-process `workflow-permissions` provenance. Upload admission accepts
+`github.token`. An omitted permission mapping receives the product's narrow
+`contents: read` default; an explicit mapping must remain non-empty after `none`
+entries are removed. The workflow must either statically reference that exact
+secret or invoke an action whose effective default statically references the
+token. The compiler emits the API-normalized permission map into a v6 plan,
+adds `provider-token-write`, and records same-process `effective-permissions`
+provenance. Upload admission accepts
 only that exact compiler provenance. A serialized plan cannot self-authorize
 the capability.
 
@@ -267,8 +269,8 @@ permission map. It validates both independently, masks the returned token, and
 requires Agent redaction registration before making the synthetic secret
 available to expression evaluation. Job-level permissions replace workflow
 defaults; flattened local reusable workflows can only narrow caller authority.
-Permission aliases, implicit defaults, empty grants, and `id-token` fail
-closed. `github.token` is exposed only while evaluating effective action
+Permission aliases, empty grants, and `id-token` fail closed. `github.token` is
+exposed only while evaluating effective action
 metadata input defaults; workflow-authored references and automatic ambient
 `GITHUB_TOKEN` environment injection remain unsupported. As on GitHub Runner,
 an action that receives the token may explicitly propagate it to later steps

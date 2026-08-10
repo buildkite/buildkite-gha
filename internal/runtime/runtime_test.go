@@ -2043,8 +2043,6 @@ func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
 	workflow := []byte(`on: push
-permissions:
-  contents: read
 jobs:
   token:
     runs-on: ubuntu-latest
@@ -2144,8 +2142,8 @@ runs:
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if provider.calls != 1 || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
-		t.Fatalf("token handling = provider calls %d, redactions %#v", provider.calls, redactor.values)
+	if provider.calls != 1 || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !reflect.DeepEqual(redactor.values, []string{"ghs_scoped_action_default"}) {
+		t.Fatalf("token handling = provider calls %d, permissions %#v, redactions %#v", provider.calls, provider.permissions, redactor.values)
 	}
 	if result.Env["GITHUB_TOKEN"] != "***" || result.Env["GITHUB_SHA"] != "action-sha" || result.Env["RUNNER_TEMP"] != "/action-temp" || strings.Contains(logs.String(), "ghs_scoped_action_default") || !strings.Contains(logs.String(), "exported token: ***") {
 		t.Fatalf("exported workflow token leaked: result = %#v, logs = %q", result, logs.String())

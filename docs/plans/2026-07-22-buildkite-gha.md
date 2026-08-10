@@ -1970,7 +1970,7 @@ the narrowest available boundary:
   repository-provider Git helper when the job enables it and anonymous Git
   otherwise, plus future Cursor Origin provider adapters;
 - compiler-admitted workflow token requests for the pipeline's exact GitHub
-  repository and explicit permission map, authorized and bounded by the
+  repository and effective permission map, authorized and bounded by the
   current-job endpoint's server-side repository and permission policy;
 - step summaries and annotations.
 
@@ -2633,13 +2633,15 @@ them in the phase that first needs the capability:
    using Buildkite defaults must independently provide suitable whole-job
    isolation. Phases 6 and 9 still own authorization and queue policy for
    protected Docker capabilities and privileged workloads.
-6. The narrow token contract is now defined for explicit
+6. The narrow token contract is now defined for static
    `secrets.GITHUB_TOKEN` references and effective action metadata input
-   defaults that reference `github.token`, with non-empty permission maps and
-   exact event-repository binding. Workflow-authored `github.token`, ambient
+   defaults that reference `github.token`, with a narrow `contents:read` product
+   default when permissions are omitted, non-empty effective permission maps,
+   and exact event-repository binding. Workflow-authored `github.token`, ambient
    `GITHUB_TOKEN`, broader provider authority, and event-provenance policy remain
    Phase 6 work. The runtime-internal `contents:read` checkout credential
-   remains separate; tokenless workflows remain the default.
+   remains separate; jobs that do not effectively consume the workflow token
+   remain tokenless.
 
 ## Historical first product milestone (landed)
 

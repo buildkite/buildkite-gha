@@ -86,7 +86,7 @@ service.
 | Timeouts and `continue-on-error` | Supported subset | Literal step/job timeouts up to 360 minutes and step-level `continue-on-error` are supported. Expression-valued settings and job-level `continue-on-error` are not supported. |
 | Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting entries instead of replacing GitHub's pending entry. Workflow-level literal `cancel-in-progress: true` emits a warning but does not cancel; job-level true and expression-valued cancellation are not supported. |
 | Local reusable workflows | Supported subset | Statically resolvable `./.github/workflows/...` calls, typed static inputs, nesting, caller-visible aggregate results, and declared outputs mapped directly from `jobs.<job>.outputs.<name>` are supported. Literal/compound output mappings, call-level conditions, call secrets, remote source, dynamic paths/inputs/matrices, and called-workflow top-level concurrency are not supported. |
-| `permissions` | Supported subset | Explicit canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN` or an effective action metadata input default that statically references `github.token`; job permissions replace workflow permissions and local reusable workflows may narrow them. Implicit defaults, `{}`, `read-all`, `write-all`, and `id-token` do not grant authority. |
+| `permissions` | Supported subset | Canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN` or an effective action metadata input default that statically references `github.token`. Omitted permissions use the product's narrow `contents: read` default; explicit job permissions replace workflow permissions and local reusable workflows may only narrow them. `{}`, maps containing only `none`, `read-all`, `write-all`, and `id-token` do not grant authority. |
 | Job and service containers | Not admitted | Literal Linux container images, environment, ports, persistent job containers, and services are implemented and runtime-proven. Production `hosted-tokenless` upload rejects job/service-container provenance. Credentials, volumes, arbitrary options, private images, and privileged containers are not supported. |
 | Dynamic graph expansion | Not supported | Matrices or `needs` derived from runtime outputs and other runtime-created jobs are rejected. |
 | Deployment environments and approvals | Not supported | Environment secrets, protection rules, reviewers, and deployment approval/state parity are not implemented. |
@@ -120,7 +120,7 @@ service.
 | --- | --- | --- |
 | Public GitHub repositories | Supported subset | Public event-repository checkout and public GitHub actions are supported within the source-authentication boundary above. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
 | Private repositories | Supported subset | The event repository can be checked out when Buildkite supplies repository-provider Git credentials to the job and its backend authorizes the concrete repository URL. Alternate repositories, private actions, and private reusable workflows are not supported. |
-| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has a non-empty explicit permission map and the organization enables the job-bound token service. The runtime does not inject it into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
+| `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has non-empty effective permissions and the organization enables the job-bound token service. Omitted permissions use the product's narrow `contents: read` default. The runtime does not inject the token into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
 | Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
 | `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` remain unavailable. An action may explicitly export its input as `GITHUB_TOKEN` for later steps through `GITHUB_ENV`; an explicitly supplied action input, including an empty value, suppresses its metadata default. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
@@ -274,13 +274,13 @@ This checkout path does not populate
 actions, or add support for alternate repositories or refs. The deprecated
 `--private-checkout` option is temporarily accepted as a no-op for compatibility.
 
-### Explicit permissions provide a scoped workflow token
+### Effective permissions provide a scoped workflow token
 
 A job that statically references `${{ secrets.GITHUB_TOKEN }}`, or uses an
 action with an effective metadata input default that statically references
 `${{ github.token }}`, receives one short-lived GitHub installation token for
-the exact event repository when it also has a non-empty, explicit `permissions`
-mapping:
+the exact event repository. An omitted `permissions` block uses the product's
+narrow `contents: read` default; an explicit non-empty map replaces that default:
 
 ```yaml
 permissions:
@@ -298,9 +298,10 @@ jobs:
 Workflow permissions apply to jobs that omit job permissions. A job-level
 mapping replaces the workflow-level mapping rather than merging with it. Local
 reusable workflows inherit the caller's effective permissions and can only
-narrow them. `none` removes a permission. Omitted permissions, `{}`,
-`read-all`, `write-all`, and `id-token` do not produce a token; a static
-token reference without a non-empty effective mapping fails compilation.
+narrow them. `none` removes a permission. Explicit `{}` and maps containing
+only `none` do not produce a token; `read-all`, `write-all`, and `id-token` are
+unsupported. A static token reference without a non-empty effective mapping
+fails compilation.
 
 The compiler normalizes names such as `pull-requests` to the Agent API's
 `pull_requests`, emits the exact map into a v6 plan, and records same-process

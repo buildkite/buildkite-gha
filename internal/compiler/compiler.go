@@ -440,7 +440,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				if referencesGitHubTokenSecret {
 					reference = "secrets.GITHUB_TOKEN"
 				}
-				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references %s but has no explicit effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
+				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 			}
 			permissions := make(map[string]string, len(instance.Permissions))
 			for name, access := range instance.Permissions {
@@ -451,7 +451,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				jobSchema = plan.SchemaV6
 			}
 			capabilities = append(capabilities, "provider-token-write")
-			authorization.ProviderTokenWriteCapabilitySources = []string{"workflow-permissions"}
+			authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 		}
 		if instance.Queue == "" {
 			jobSchema = plan.SchemaV7
