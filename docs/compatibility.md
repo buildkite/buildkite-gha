@@ -552,8 +552,8 @@ ZIP reader allocates its entry table and rejects multi-disk, ZIP64, malformed,
 ambiguous-end-record, forged-count, undeclared-entry, and out-of-bounds
 directories. ZIP admission then allows only
 regular stored/deflated members, at most 10,000 entries, 1 GiB archive and
-aggregate expanded size, a 1,000:1 per-member compression ratio, 4,096-byte
-member paths, and 256 path components. Empty names,
+aggregate expanded size, 4,096-byte member paths, and 256 path components.
+Empty names,
 duplicates (including case-folded and file/child path collisions), traversal,
 absolute/drive/UNC paths, control characters, invalid UTF-8, directory entries, symlinks,
 recognized special-file encodings, and unsupported compression methods fail

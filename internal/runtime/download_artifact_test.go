@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -86,6 +87,29 @@ func testDownloadZIP(t *testing.T, names ...string) (string, int64, string) {
 	return filename, int64(len(b)), "sha256:" + hex.EncodeToString(sum[:])
 }
 
+func verifyDownloadDigest(ctx context.Context, filename, digest string, size int64) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	err = verifyDownloadDigestFile(ctx, f, digest, size)
+	return errors.Join(err, f.Close())
+}
+
+func extractDownloadZIP(ctx context.Context, filename, workspace, destination string, expectedCount int) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	err = extractDownloadZIPFile(ctx, f, info.Size(), workspace, destination, expectedCount)
+	return errors.Join(err, f.Close())
+}
+
 func TestDownloadArtifactExactNeedAndDirectExtraction(t *testing.T) {
 	archive, size, digest := testDownloadZIP(t, "nested/result.txt")
 	store := &downloadStore{archive: archive}
@@ -147,6 +171,42 @@ func TestDownloadArtifactSupportsAuditedCommitsAndNonASCIIExactName(t *testing.T
 				t.Fatalf("default download-path = %q, want %q", result.Outputs["download-path"], want)
 			}
 		})
+	}
+}
+
+func TestNativeArtifactRoundTripTrimsNameAndAcceptsHighCompression(t *testing.T) {
+	uploadWorkspace := t.TempDir()
+	contents := make([]byte, 2<<20)
+	if err := os.WriteFile(filepath.Join(uploadWorkspace, "zeros.bin"), contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	uploader := &captureArtifactUploader{}
+	uploadRunner := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	upload, err := uploadRunner.runUploadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), uploadWorkspace, map[string]string{"name": " payload ", "path": "zeros.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(upload.Artifacts) != 1 || upload.Artifacts[0].Name != "payload" || len(uploader.uploads) != 1 {
+		t.Fatalf("normalized upload = %#v, captures = %#v", upload, uploader.uploads)
+	}
+	archive := filepath.Join(t.TempDir(), "artifact.zip")
+	if err := os.WriteFile(archive, uploader.uploads[0].data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record := upload.Artifacts[0]
+	artifact := plan.NeedArtifact{
+		Name: record.Name, ID: record.ID, Path: record.Path, Digest: record.Digest,
+		Size: record.Size, FileCount: record.FileCount,
+		Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"},
+	}
+	downloadWorkspace := t.TempDir()
+	_, err = (Runner{Artifacts: &downloadStore{archive: archive}}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), downloadWorkspace, map[string]plan.Need{"producer": {Artifacts: []plan.NeedArtifact{artifact}}}, actionintegration.DownloadArtifactV801Commit, map[string]string{"name": " payload "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(downloadWorkspace, "zeros.bin"))
+	if err != nil || !bytes.Equal(got, contents) {
+		t.Fatalf("high-compression roundtrip bytes = %d, error = %v", len(got), err)
 	}
 }
 
@@ -227,7 +287,7 @@ func TestDownloadArtifactRejectsUnsafeZIPAndDigest(t *testing.T) {
 	}
 }
 
-func TestDownloadArtifactRejectsRawCorruptDuplicateAndHighRatioArchivesWithoutDestinationMutation(t *testing.T) {
+func TestDownloadArtifactRejectsRawCorruptAndDuplicateArchivesWithoutDestinationMutation(t *testing.T) {
 	workspace := t.TempDir()
 	for _, test := range []struct {
 		name      string
@@ -279,25 +339,6 @@ func TestDownloadArtifactRejectsRawCorruptDuplicateAndHighRatioArchivesWithoutDe
 			}
 			return name
 		}, fileCount: 2},
-		{name: "compression ratio", archive: func(t *testing.T) string {
-			name := filepath.Join(t.TempDir(), "ratio.zip")
-			out, err := os.Create(name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			zw := zip.NewWriter(out)
-			member, err := zw.Create("zeros")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := member.Write(make([]byte, 2<<20)); err != nil {
-				t.Fatal(err)
-			}
-			if err := errors.Join(zw.Close(), out.Close()); err != nil {
-				t.Fatal(err)
-			}
-			return name
-		}, fileCount: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(workspace, strings.ReplaceAll(test.name, " ", "-"))

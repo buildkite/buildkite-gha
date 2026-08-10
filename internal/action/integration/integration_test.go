@@ -117,6 +117,7 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 		inputs map[string]string
 	}{
 		{UploadArtifactCommit, map[string]string{"path": "payload/result.txt"}},
+		{UploadArtifactCommit, map[string]string{"name": " payload ", "path": "payload/result.txt"}},
 		{UploadArtifactV5Commit, map[string]string{"path": "./payload/result.txt"}},
 		{UploadArtifactV6Commit, map[string]string{"path": "payload/", "name": "${{ github.sha }}", "retention-days": "0"}},
 		{UploadArtifactCommit, map[string]string{

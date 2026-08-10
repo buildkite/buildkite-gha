@@ -72,7 +72,7 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 	}
 	o := uploadOptions{name: "artifact", noFiles: "warn", level: 6}
 	if v, ok := values["name"]; ok {
-		o.name = v
+		o.name = strings.TrimSpace(v)
 	}
 	if err := actionintegration.ValidateUploadArtifactName(o.name); err != nil {
 		return o, err

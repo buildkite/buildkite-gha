@@ -28,8 +28,6 @@ type downloadMember struct {
 	size int64
 }
 
-const maxDownloadCompressionRatio = 1_000
-
 func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
@@ -127,15 +125,6 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	return result, nil
 }
 
-func verifyDownloadDigest(ctx context.Context, filename, digest string, size int64) error {
-	f, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	err = verifyDownloadDigestFile(ctx, f, digest, size)
-	return errors.Join(err, f.Close())
-}
-
 func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, size int64) error {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
@@ -152,20 +141,6 @@ func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, si
 		return err
 	}
 	return ctx.Err()
-}
-
-func extractDownloadZIP(ctx context.Context, filename, workspace, destination string, expectedCount int) error {
-	f, err := os.Open(filename)
-	if err != nil {
-		return fmt.Errorf("open artifact ZIP: %w", err)
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("stat artifact ZIP: %w", err)
-	}
-	err = extractDownloadZIPFile(ctx, f, info.Size(), workspace, destination, expectedCount)
-	return errors.Join(err, f.Close())
 }
 
 func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspace, destination string, expectedCount int) error {
@@ -206,9 +181,6 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 		}
 		if f.UncompressedSize64 > uint64(transport.MaxResultArtifactSizeBytes) || expanded > transport.MaxResultArtifactSizeBytes-int64(f.UncompressedSize64) {
 			return fmt.Errorf("artifact expanded bytes exceed 1 GiB")
-		}
-		if f.UncompressedSize64 > 0 && (f.CompressedSize64 == 0 || f.UncompressedSize64 > f.CompressedSize64*maxDownloadCompressionRatio) {
-			return fmt.Errorf("artifact ZIP member %q exceeds compression ratio limit", name)
 		}
 		expanded += int64(f.UncompressedSize64)
 		seen[name], folded[foldedName] = true, true
@@ -368,7 +340,7 @@ func installDownloadMembers(ctx context.Context, workspace, staging, destination
 
 func installDownloadMembersAt(ctx context.Context, stagingFD, destinationFD int, members []downloadMember) error {
 	for _, member := range members {
-		if err := preflightDownloadMemberAt(destinationFD, member.name, false); err != nil {
+		if err := preflightDownloadMemberAt(destinationFD, member.name); err != nil {
 			return err
 		}
 	}
@@ -398,11 +370,11 @@ func installDownloadMembersAt(ctx context.Context, stagingFD, destinationFD int,
 	return ctx.Err()
 }
 
-func preflightDownloadMemberAt(root int, name string, createParents bool) error {
+func preflightDownloadMemberAt(root int, name string) error {
 	directory, base := path.Split(name)
-	parent, err := openDownloadDirectoryAt(root, strings.TrimSuffix(directory, "/"), createParents)
+	parent, err := openDownloadDirectoryAt(root, strings.TrimSuffix(directory, "/"), false)
 	if err != nil {
-		if !createParents && errors.Is(err, unix.ENOENT) {
+		if errors.Is(err, unix.ENOENT) {
 			return nil
 		}
 		return err
