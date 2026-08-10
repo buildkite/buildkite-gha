@@ -15,13 +15,13 @@ The initial ten cases deliberately mix outcomes:
 
 | Case | Ecosystem/shape | Exact GitHub run | Current boundary |
 | --- | --- | --- | --- |
-| `urfave-cli-lint` | Go setup and third-party lint action | [Success](https://github.com/urfave/cli/actions/runs/29794452917) | Setup action's compound token default blocks profile evaluation. |
-| `fastify-markdown-lint` | Small Node lint job with pinned actions | — | Setup action's compound token default blocks profile evaluation. |
-| `prettier-lint` | Larger Yarn, cache, condition, and concurrency workflow | [Success](https://github.com/prettier/prettier/actions/runs/31316608109) | Setup action's compound token default blocks profile evaluation. |
+| `urfave-cli-lint` | Go setup and third-party lint action | [Success](https://github.com/urfave/cli/actions/runs/29794452917) | Admitted by profile evaluation; runtime remains unproven. |
+| `fastify-markdown-lint` | Small Node lint job with pinned actions | — | Admitted by profile evaluation; runtime remains unproven. |
+| `prettier-lint` | Larger Yarn, cache, condition, and concurrency workflow | [Success](https://github.com/prettier/prettier/actions/runs/31316608109) | Admitted with ignored concurrency-cancellation behavior; runtime remains unproven. |
 | `bat-changelog` | Pull-request shell and output workflow | — | Admitted; runtime needs a faithful real PR event. |
-| `p-map-main` | Two-entry Node matrix | [Success](https://github.com/sindresorhus/p-map/actions/runs/29779845179) | Setup action's compound token default blocks profile evaluation. |
-| `fzf-linux` | Go, Ruby, multiple shells, and host package setup | [Success](https://github.com/junegunn/fzf/actions/runs/31253573599) | Setup action's compound token default blocks profile evaluation; checkout also requests full history. |
-| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Artifact action commit is outside the audited adapter. |
+| `p-map-main` | Two-entry Node matrix | [Success](https://github.com/sindresorhus/p-map/actions/runs/29779845179) | Admitted by profile evaluation; runtime remains unproven. |
+| `fzf-linux` | Go, Ruby, multiple shells, and host package setup | [Success](https://github.com/junegunn/fzf/actions/runs/31253573599) | Admitted; checkout's requested full history is supported. Runtime remains unproven. |
+| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Checkout requests unsupported submodules and fails closed. |
 | `go-task-ci` | Five-job Go matrix | [Success](https://github.com/go-task/task/actions/runs/31330279154) | Compound concurrency expression is unsupported. |
 | `gum-build` | Remote reusable workflow | — | Remote reuse and runtime secret forwarding are unsupported. |
 | `just-ci` | Rust and a mixed-OS matrix | [Success](https://github.com/casey/just/actions/runs/31140381397) | Non-Linux runner rows are unsupported. |

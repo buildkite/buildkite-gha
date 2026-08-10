@@ -133,23 +133,55 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err != nil || strings.TrimSpace(string(head)) != job.Event.SHA {
 		return result, fmt.Errorf("%s did not produce exact detached SHA %s", adapter, job.Event.SHA)
 	}
-	result.Outputs["ref"] = job.Event.Ref
+	result.Outputs["ref"] = checkoutRefOutput(inputs, job.Event.Ref)
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
 }
 
-func checkoutFetchArgs(inputs map[string]string, sha string) []string {
+func checkoutRefOutput(inputs map[string]string, eventRef string) string {
 	for name, value := range inputs {
-		if strings.EqualFold(name, "fetch-depth") && value == "0" {
-			return []string{
-				"fetch", "--no-tags", "--prune", "--no-recurse-submodules", "origin",
-				"+refs/heads/*:refs/remotes/origin/*",
-				"+refs/tags/*:refs/tags/*",
-				"+" + sha + ":refs/buildkite-gha/event",
-			}
+		if strings.EqualFold(name, "ref") && value != "" {
+			return ""
 		}
 	}
-	return []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", sha}
+	return eventRef
+}
+
+func checkoutFetchArgs(inputs map[string]string, sha string) []string {
+	progress := true
+	fetchTags := false
+	depth := "1"
+	for name, value := range inputs {
+		switch {
+		case strings.EqualFold(name, "fetch-depth"):
+			depth = value
+		case strings.EqualFold(name, "fetch-tags"):
+			fetchTags = checkoutInputTrue(value)
+		case strings.EqualFold(name, "show-progress"):
+			progress = checkoutInputTrue(value)
+		}
+	}
+	args := []string{"fetch", "--no-tags", "--no-recurse-submodules"}
+	if progress {
+		args = append(args, "--progress")
+	}
+	if depth == "0" {
+		return append(args,
+			"--prune", "origin",
+			"+refs/heads/*:refs/remotes/origin/*",
+			"+refs/tags/*:refs/tags/*",
+			"+"+sha+":refs/buildkite-gha/event",
+		)
+	}
+	args = append(args, "--depth=1", "origin", sha)
+	if fetchTags {
+		args = append(args, "+refs/tags/*:refs/tags/*")
+	}
+	return args
+}
+
+func checkoutInputTrue(value string) bool {
+	return value == "true" || value == "True" || value == "TRUE"
 }
 
 func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, fetchArgs []string) error {

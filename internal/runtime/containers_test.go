@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
@@ -1124,7 +1125,7 @@ func TestActionContainerMountsNativeAdapterDoesNotResolveMise(t *testing.T) {
 	job := jobContainerPlan(t, workspace, []plan.Step{{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v4", Action: &plan.ActionSelector{Lock: lockID}}})
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
-		Commit: strings.Repeat("a", 40), SourceDigest: digest,
+		Commit: actionintegration.CheckoutV4Commit, SourceDigest: digest,
 	}}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
 	actions := newActionLockResolver(job, workspace, materializer)
@@ -1200,7 +1201,7 @@ esac
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
 		},
 		Actions: []plan.ActionLock{
-			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: strings.Repeat("b", 40), SourceDigest: remoteDigest},
+			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v4", Commit: actionintegration.CheckoutV4Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: digestTree(t, localFixture)},
 		},
 		RequiresMise: &requiresMise,

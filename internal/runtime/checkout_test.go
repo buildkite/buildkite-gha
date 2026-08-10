@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -95,7 +98,7 @@ esac
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
 		},
 		Actions: []plan.ActionLock{
-			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: strings.Repeat("b", 40), SourceDigest: remoteDigest},
+			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: localDigest},
 		},
 	}
@@ -115,7 +118,7 @@ esac
 	for _, required := range []string{
 		"init --template= .",
 		"remote add origin https://github.com/buildkite/buildkite-gha.git",
-		"fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha,
+		"fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha,
 		"checkout --detach " + sha,
 	} {
 		if !strings.Contains(log, required) {
@@ -129,12 +132,22 @@ esac
 		t.Fatalf("checkout HEAD = %q, %v", got, err)
 	}
 
-	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
-	secondWorkspace := t.TempDir()
-	secondLog := filepath.Join(filepath.Dir(gitLog), "tampered.log")
-	if err := os.Rename(gitLog, secondLog); err != nil {
+	job.Actions[0].Commit = strings.Repeat("0", 40)
+	unknownWorkspace := t.TempDir()
+	previousLog := filepath.Join(filepath.Dir(gitLog), "successful.log")
+	if err := os.Rename(gitLog, previousLog); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
+		t.Fatalf("unknown checkout commit error = %v", err)
+	}
+	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
+		t.Fatalf("Git ran before unknown checkout commit rejection: %v", err)
+	}
+
+	job.Actions[0].Commit = actionintegration.CheckoutV7Commit
+	job.Actions[0].SourceDigest = "sha256:" + strings.Repeat("0", 64)
+	secondWorkspace := t.TempDir()
 	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, secondWorkspace); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("tampered checkout lock error = %v", err)
 	}
@@ -170,11 +183,13 @@ func TestCheckoutFetchDepth(t *testing.T) {
 		inputs map[string]string
 		want   string
 	}{
-		{name: "default shallow", want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
-		{name: "explicit shallow", inputs: map[string]string{"fetch-depth": "1"}, want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
+		{name: "default shallow with progress", want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha},
+		{name: "explicit shallow", inputs: map[string]string{"fetch-depth": "1"}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha},
+		{name: "shallow tags", inputs: map[string]string{"fetch-tags": "TRUE"}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha + " +refs/tags/*:refs/tags/*"},
+		{name: "progress disabled", inputs: map[string]string{"show-progress": "false"}, want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
 		{
 			name: "all branches and tags", inputs: map[string]string{"Fetch-Depth": "0"},
-			want: "fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +" + sha + ":refs/buildkite-gha/event",
+			want: "fetch --no-tags --no-recurse-submodules --progress --prune origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +" + sha + ":refs/buildkite-gha/event",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -183,6 +198,87 @@ func TestCheckoutFetchDepth(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckoutRefOutput(t *testing.T) {
+	eventRef := "refs/heads/main"
+	sha := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		name   string
+		inputs map[string]string
+		want   string
+	}{
+		{name: "omitted", want: eventRef},
+		{name: "explicit empty", inputs: map[string]string{"REF": ""}, want: eventRef},
+		{name: "explicit SHA", inputs: map[string]string{"ref": sha}, want: ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := checkoutRefOutput(test.inputs, eventRef); got != test.want {
+				t.Fatalf("checkoutRefOutput() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
+	sourceRoot := t.TempDir()
+	runTestGit(t, sourceRoot, "init", "--initial-branch=main")
+	runTestGit(t, sourceRoot, "config", "user.name", "buildkite-gha test")
+	runTestGit(t, sourceRoot, "config", "user.email", "test@example.invalid")
+	var commits []string
+	for i, contents := range []string{"first\n", "second\n", "third\n"} {
+		if err := os.WriteFile(filepath.Join(sourceRoot, "payload.txt"), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runTestGit(t, sourceRoot, "add", "payload.txt")
+		runTestGit(t, sourceRoot, "commit", "-m", fmt.Sprintf("commit %d", i+1))
+		commits = append(commits, strings.TrimSpace(runTestGit(t, sourceRoot, "rev-parse", "HEAD")))
+	}
+	runTestGit(t, sourceRoot, "tag", "old", commits[0])
+	runTestGit(t, sourceRoot, "tag", "tip", commits[2])
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runTestGit(t, "", "clone", "--bare", sourceRoot, remote)
+
+	for _, test := range []struct {
+		name       string
+		inputs     map[string]string
+		wantCount  string
+		wantTagTip bool
+	}{
+		{name: "depth one exact detached SHA", wantCount: "1"},
+		{name: "depth zero history and tags", inputs: map[string]string{"fetch-depth": "0", "show-progress": "false"}, wantCount: "2", wantTagTip: true},
+		{name: "shallow explicit tags", inputs: map[string]string{"fetch-tags": "true", "show-progress": "false"}, wantCount: "1", wantTagTip: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			runTestGit(t, workspace, "init", "--initial-branch=main")
+			runTestGit(t, workspace, "remote", "add", "origin", remote)
+			runTestGit(t, workspace, checkoutFetchArgs(test.inputs, commits[1])...)
+			runTestGit(t, workspace, "checkout", "--detach", commits[1])
+			if got := strings.TrimSpace(runTestGit(t, workspace, "rev-parse", "HEAD")); got != commits[1] {
+				t.Fatalf("HEAD = %s, want exact event SHA %s", got, commits[1])
+			}
+			if got := strings.TrimSpace(runTestGit(t, workspace, "rev-list", "--count", "HEAD")); got != test.wantCount {
+				t.Fatalf("reachable commit count = %s, want %s", got, test.wantCount)
+			}
+			_, err := exec.Command("git", "-C", workspace, "show-ref", "--verify", "--quiet", "refs/tags/tip").CombinedOutput()
+			if (err == nil) != test.wantTagTip {
+				t.Fatalf("tip tag present = %t, want %t (error %v)", err == nil, test.wantTagTip, err)
+			}
+		})
+	}
+}
+
+func runTestGit(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	if directory != "" {
+		args = append([]string{"-C", directory}, args...)
+	}
+	output, err := exec.Command("git", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
 }
 
 func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T) {
@@ -539,7 +635,7 @@ fi
 		},
 		Actions: []plan.ActionLock{
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
-			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: strings.Repeat("c", 40), SourceDigest: remoteDigest},
+			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 		},
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
@@ -604,6 +700,23 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	job.RequiredCapabilities = []string{"provider-token-read"}
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "restricted to the verified checkout adapter") {
 		t.Fatalf("ordinary provider-token-read error = %v", err)
+	}
+}
+
+func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T) {
+	validID, unknownID := "a-0000000000000001", "a-0000000000000002"
+	job := plan.Job{
+		Steps: []plan.Step{
+			{Kind: "uses", Action: &plan.ActionSelector{Lock: validID}},
+			{Kind: "uses", Action: &plan.ActionSelector{Lock: unknownID}},
+		},
+		Actions: []plan.ActionLock{
+			{ID: validID, Source: "github", Repository: "actions/checkout", Commit: actionintegration.CheckoutV7Commit},
+			{ID: unknownID, Source: "github", Repository: "actions/checkout", Commit: strings.Repeat("0", 40)},
+		},
+	}
+	if found, err := validateJobCheckoutAdapters(job); err == nil || found || !strings.Contains(err.Error(), "does not admit") {
+		t.Fatalf("validateJobCheckoutAdapters() = %t, %v, want fail-closed rejection", found, err)
 	}
 }
 

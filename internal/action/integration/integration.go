@@ -34,6 +34,15 @@ const (
 	// AdapterDownloadArtifactBuildkite extracts one producer-attributed native
 	// archive without using the GitHub Actions artifact service.
 	AdapterDownloadArtifactBuildkite Adapter = "download-artifact-buildkite-v1"
+	// CheckoutV4Commit through CheckoutV7Commit are the current audited major
+	// release implementations. CheckoutV7InitialCommit is retained because it
+	// is pinned by the OSS compatibility corpus; its later v7.0.1 changes do
+	// not affect the adapter's bounded exact-event-SHA operation.
+	CheckoutV4Commit        = "11d5960a326750d5838078e36cf38b85af677262"
+	CheckoutV5Commit        = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
+	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
+	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 	// UploadArtifactCommit and UploadArtifactV7Commit are the audited upstream
 	// implementations whose ZIP-mode semantics this adapter implements. Raw v7
 	// uploads remain explicitly unsupported by ValidateUploadArtifactInputs.
@@ -80,6 +89,33 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
+}
+
+var checkoutCommits = map[string]string{
+	CheckoutV4Commit:        "v4",
+	CheckoutV5Commit:        "v5",
+	CheckoutV6Commit:        "v6",
+	CheckoutV7InitialCommit: "v7.0.0",
+	CheckoutV7Commit:        "v7.0.1",
+}
+
+// ValidateCheckoutCommit rejects semantic drift from the audited upstream
+// manifests and implementations. Mutable references are resolved before this
+// check, so a moved major tag must be deliberately audited and added here.
+func ValidateCheckoutCommit(commit string) error {
+	if _, ok := checkoutCommits[commit]; !ok {
+		return fmt.Errorf("actions/checkout native adapter does not admit resolved commit %q; supported commits are %s", commit, strings.Join(sortedCheckoutCommits(), ", "))
+	}
+	return nil
+}
+
+func sortedCheckoutCommits() []string {
+	commits := make([]string, 0, len(checkoutCommits))
+	for commit, version := range checkoutCommits {
+		commits = append(commits, version+" ("+commit+")")
+	}
+	sort.Strings(commits)
+	return commits
 }
 
 // ValidateUploadArtifactCommit rejects semantic drift from the audited action.
@@ -276,11 +312,11 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "ref":
-			if value == sha {
+			if value == "" || value == sha {
 				continue
 			}
 		case "persist-credentials":
-			if value == "false" {
+			if uploadArtifactFalse(value) {
 				continue
 			}
 		case "fetch-depth":
@@ -288,11 +324,35 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "clean", "set-safe-directory":
-			if value == "true" {
+			if uploadArtifactTrue(value) {
+				continue
+			}
+		case "lfs", "submodules", "allow-unsafe-pr-checkout":
+			if uploadArtifactFalse(value) {
+				continue
+			}
+		case "fetch-tags", "show-progress":
+			if uploadArtifactBoolean(value) {
+				continue
+			}
+		case "ssh-key", "ssh-known-hosts", "path", "filter", "sparse-checkout":
+			if value == "" {
+				continue
+			}
+		case "ssh-strict", "sparse-checkout-cone-mode":
+			if uploadArtifactTrue(value) {
+				continue
+			}
+		case "ssh-user":
+			if value == "git" {
+				continue
+			}
+		case "github-server-url":
+			if value == "" || value == "https://github.com" {
 				continue
 			}
 		}
-		return fmt.Errorf("explicit input %q is unsupported (including empty values); Phase 6 is required", name)
+		return fmt.Errorf("explicit input %q value is unsupported; Phase 6 is required", name)
 	}
 	return nil
 }

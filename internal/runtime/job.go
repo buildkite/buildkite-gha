@@ -160,7 +160,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 	if job.HasCapability("provider-token-read") {
-		if !jobUsesCheckoutAdapter(job) {
+		usesCheckout, err := validateJobCheckoutAdapters(job)
+		if err != nil {
+			return JobResult{}, fmt.Errorf("provider-token-read checkout preflight: %w", err)
+		}
+		if !usesCheckout {
 			return JobResult{}, fmt.Errorf("provider-token-read capability is restricted to the verified checkout adapter")
 		}
 		if r.RepositoryCredentials != nil {

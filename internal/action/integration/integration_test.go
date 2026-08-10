@@ -68,6 +68,17 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 	}
 }
 
+func TestCheckoutCommitsAreExact(t *testing.T) {
+	for _, commit := range []string{CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
+		if err := ValidateCheckoutCommit(commit); err != nil {
+			t.Fatalf("audited commit %s rejected: %v", commit, err)
+		}
+	}
+	if err := ValidateCheckoutCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) {
+		t.Fatalf("unrecognized checkout commit error = %v", err)
+	}
+}
+
 func TestCacheCommitIsExactV6(t *testing.T) {
 	if err := ValidateCacheCommit(CacheCommit); err != nil {
 		t.Fatal(err)
@@ -136,7 +147,15 @@ func TestValidateCheckoutInputs(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	for _, inputs := range []map[string]string{
 		nil,
-		{"repository": "BUILDKITE/BUILDKITE-GHA", "ref": sha, "fetch-depth": "1", "persist-credentials": "false", "clean": "true", "set-safe-directory": "true"},
+		{
+			"repository": "BUILDKITE/BUILDKITE-GHA", "ref": sha, "fetch-depth": "1",
+			"persist-credentials": "FALSE", "clean": "True", "set-safe-directory": "TRUE",
+			"ssh-key": "", "ssh-known-hosts": "", "ssh-strict": "true", "ssh-user": "git",
+			"path": "", "filter": "", "sparse-checkout": "", "sparse-checkout-cone-mode": "true",
+			"fetch-tags": "true", "show-progress": "False", "lfs": "false", "submodules": "FALSE",
+			"github-server-url": "https://github.com", "allow-unsafe-pr-checkout": "false",
+		},
+		{"ref": "", "github-server-url": ""},
 		{"fetch-depth": "0"},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
@@ -149,7 +168,15 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"foreign repository":   {"repository": "other/repository"},
 		"foreign ref":          {"ref": strings.Repeat("b", 40)},
 		"submodules":           {"submodules": "true"},
+		"recursive submodules": {"submodules": "recursive"},
 		"path":                 {"path": "nested"},
+		"filter":               {"filter": "blob:none"},
+		"sparse checkout":      {"sparse-checkout": "src"},
+		"lfs":                  {"lfs": "true"},
+		"fetch depth":          {"fetch-depth": "2"},
+		"ssh key":              {"ssh-key": "key"},
+		"GHES":                 {"github-server-url": "https://github.example"},
+		"unknown":              {"future-input": "value"},
 		"persist credentials":  {"persist-credentials": "true"},
 		"case-colliding names": {"Repository": repository, "repository": repository},
 	} {
