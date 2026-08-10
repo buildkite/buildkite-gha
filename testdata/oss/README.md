@@ -7,12 +7,15 @@ that were not written for this project.
 
 Each manifest entry pins the source repository commit and workflow path. The
 harness fetches that exact commit anonymously into a temporary directory; it
-does not vendor third-party source or execute repository code. Action references
-remain exactly as the upstream workflow declared them, including mutable tags.
-Profile checks against mutable tags are intentionally observational: the
-harness asserts the resulting compatibility boundary, not the resolved action
-commit. A tag movement that preserves that boundary is not reported. Hosted
-runtime comparisons must separately retain the immutable resolved action locks.
+clears ambient Git credentials, configuration, proxies, hooks, filters, and
+transport overrides, then verifies the checked-out workflow bytes against the
+pinned Git blob. It does not vendor third-party source or execute repository
+code. Action references remain exactly as the upstream workflow declared them,
+including mutable tags. Profile checks against mutable tags are intentionally
+observational: the harness asserts the resulting compatibility boundary, not
+the resolved action commit. A tag movement that preserves that boundary is not
+reported. Hosted runtime comparisons must separately retain the immutable
+resolved action locks.
 
 The initial ten cases deliberately mix outcomes:
 

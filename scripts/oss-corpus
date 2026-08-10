@@ -109,9 +109,9 @@ git_command() {
   local name
   while IFS= read -r name; do
     case "$name" in
-      GIT_CONFIG_* | GIT_TRACE* | GIT_CURL_VERBOSE | GIT_ALTERNATE_OBJECT_DIRECTORIES | GIT_COMMON_DIR | \
-        GIT_DIR | GIT_INDEX_FILE | GIT_OBJECT_DIRECTORY | GIT_WORK_TREE | \
-        GIT_TEMPLATE_DIR | GIT_ASKPASS | SSH_ASKPASS | GIT_SSH | GIT_SSH_COMMAND | GIT_EXEC_PATH)
+      GIT_* | HTTP_PROXY | HTTPS_PROXY | ALL_PROXY | NO_PROXY | \
+        http_proxy | https_proxy | all_proxy | no_proxy | \
+        CURL_CA_BUNDLE | SSL_CERT_FILE | SSL_CERT_DIR)
         unset_environment+=(-u "$name")
         ;;
     esac
@@ -126,7 +126,16 @@ git_command() {
     GIT_ASKPASS=/bin/false \
     SSH_ASKPASS=/bin/false \
     GIT_SSH_COMMAND='ssh -oBatchMode=yes' \
-    git -c credential.helper= -c http.extraheader= -c core.hooksPath=/dev/null "$@"
+    git \
+      -c protocol.allow=never \
+      -c protocol.https.allow=always \
+      -c http.sslVerify=true \
+      -c core.attributesFile=/dev/null \
+      -c core.hooksPath=/dev/null \
+      -c credential.helper= \
+      -c http.extraheader= \
+      -c submodule.recurse=false \
+      "$@"
 }
 
 make_event() {
@@ -219,6 +228,15 @@ for id in "${case_ids[@]}"; do
   }
   [[ -f "$repo/$workflow" && ! -L "$repo/$workflow" ]] || {
     echo "$id: workflow is missing, not regular, or a symbolic link: $workflow" >&2
+    exit 1
+  }
+  workflow_blob="$(git_command -C "$repo" rev-parse "$commit:$workflow")"
+  [[ "$(git_command -C "$repo" cat-file -t "$workflow_blob")" == blob ]] || {
+    echo "$id: pinned workflow object is not a Git blob: $workflow" >&2
+    exit 1
+  }
+  [[ "$(git_command -C "$repo" hash-object --no-filters -- "$workflow")" == "$workflow_blob" ]] || {
+    echo "$id: checked-out workflow bytes differ from the pinned Git blob: $workflow" >&2
     exit 1
   }
 
