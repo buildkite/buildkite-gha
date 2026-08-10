@@ -274,17 +274,17 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if root == "" {
 			continue
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.Contains(root, "\\") || strings.Contains(root, "{") || strings.Contains(root, "}") || !filepath.IsLocal(root) || path.Clean(root) != root {
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}()`) || !filepath.IsLocal(root) || path.Clean(root) != root {
 			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
 		}
-		if strings.ContainsAny(root, "*?[") {
+		if strings.Contains(root, "*") {
 			directory, pattern := path.Split(root)
 			directory = strings.TrimSuffix(directory, "/")
 			if directory == "" {
 				directory = "."
 			}
-			if strings.ContainsAny(directory, "*?[") {
-				return nil, fmt.Errorf("path %q uses a glob outside its final component; Phase 6 is required", root)
+			if strings.Contains(directory, "*") || strings.Contains(pattern, "**") {
+				return nil, fmt.Errorf("path %q uses an unsupported recursive or non-final glob; Phase 6 is required", root)
 			}
 			if _, err := path.Match(pattern, "probe"); err != nil {
 				return nil, fmt.Errorf("path %q has an invalid glob: %w", root, err)

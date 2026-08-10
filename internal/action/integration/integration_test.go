@@ -114,6 +114,10 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	rejected := map[string]map[string]string{
 		"missing path":        nil,
 		"recursive glob":      {"path": "payload/**/*.log"},
+		"question glob":       {"path": "tests/?.log"},
+		"character class":     {"path": "tests/[!a].log"},
+		"extglob":             {"path": "tests/+(a|b).log"},
+		"glob comment":        {"path": "#tests/*.log"},
 		"unclean path":        {"path": "./payload"},
 		"too many roots":      {"path": strings.Repeat("payload\n", MaxUploadArtifactRoots+1)},
 		"bad retention":       {"path": "payload", "retention-days": "-1"},
@@ -138,6 +142,9 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 	if err := ValidateEvaluatedUploadArtifactInputs(UploadArtifactV7Commit, map[string]string{"path": "${{ still.unresolved }}"}); err == nil {
 		t.Fatal("runtime accepted an unevaluated path expression")
+	}
+	if err := ValidateEvaluatedUploadArtifactInputs(UploadArtifactV7Commit, map[string]string{"path": "#tests/*.log"}); err == nil {
+		t.Fatal("runtime accepted an evaluated upstream glob comment as a literal path")
 	}
 }
 

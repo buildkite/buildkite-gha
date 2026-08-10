@@ -285,13 +285,13 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 		}
 		before := len(files)
 		literalRoot := root
-		if strings.ContainsAny(root, "*?[") {
+		if strings.Contains(root, "*") {
 			literalRoot = filepath.Dir(root)
 		}
 		if err := rejectUploadSymlinkComponents(ctx, workspace, literalRoot); err != nil {
 			return nil, err
 		}
-		if strings.ContainsAny(root, "*?[") {
+		if strings.Contains(root, "*") {
 			directory, pattern := filepath.Split(root)
 			if directory == "" {
 				directory = "."
