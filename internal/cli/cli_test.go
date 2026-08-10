@@ -1662,9 +1662,9 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "verified permissions", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"workflow-permissions"}}},
+		{name: "verified permissions", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}},
 		{name: "missing provenance", wantError: true},
-		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"workflow-permissions", "step-input"}}, wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}

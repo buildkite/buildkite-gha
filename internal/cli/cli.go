@@ -1341,7 +1341,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "provider-token-write" {
-				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"workflow-permissions"}) {
+				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
 					return fmt.Errorf("job %q requires provider-token-write without compiler-verified workflow permission provenance", artifact.Job.Workflow.LogicalJobID)
 				}
 				continue

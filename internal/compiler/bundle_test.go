@@ -455,7 +455,7 @@ jobs:
 	if !reflect.DeepEqual(token.Job.RequiredSecrets, []string{"OTHER"}) || !reflect.DeepEqual(token.Job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {
 		t.Fatalf("token secret boundary = names %#v capabilities %#v", token.Job.RequiredSecrets, token.Job.RequiredCapabilities)
 	}
-	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"workflow-permissions"}) {
+	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
 		t.Fatalf("token authorization = %#v", token.Authorization)
 	}
 	if jobs["tokenless"].Job.GitHubToken != nil || jobs["tokenless"].Job.HasCapability("provider-token-write") {
@@ -463,12 +463,27 @@ jobs:
 	}
 }
 
-func TestCompileBundleGitHubTokenRequiresExplicitEffectivePermissions(t *testing.T) {
-	for _, permissions := range []string{"", "permissions: {}\n", "permissions:\n  contents: none\n"} {
+func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) {
+	source := []byte("on: push\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0]
+	if job.Job.GitHubToken == nil || !reflect.DeepEqual(job.Job.GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+		t.Fatalf("default GitHub workflow token plan = %#v", job.Job)
+	}
+	if !reflect.DeepEqual(job.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
+		t.Fatalf("default token authorization = %#v", job.Authorization)
+	}
+}
+
+func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
+	for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
 		source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
 		_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
-		if err == nil || !strings.Contains(err.Error(), "references secrets.GITHUB_TOKEN but has no explicit effective permissions") {
-			t.Fatalf("CompileBundle() error = %v, want explicit permission rejection", err)
+		if err == nil || !strings.Contains(err.Error(), "references secrets.GITHUB_TOKEN but has no effective permissions") {
+			t.Fatalf("CompileBundle() error = %v, want empty permission rejection", err)
 		}
 	}
 }

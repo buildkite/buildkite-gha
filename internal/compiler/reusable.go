@@ -282,6 +282,9 @@ func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, b
 		declared = workflowDefault
 	}
 	if !bounded {
+		if declared == nil {
+			return defaultGitHubTokenPermissions()
+		}
 		return clonePermissions(declared)
 	}
 	if declared == nil {
@@ -302,6 +305,12 @@ func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, b
 		effective.Scopes[name] = access
 	}
 	return effective
+}
+
+func defaultGitHubTokenPermissions() *workflow.Permissions {
+	// Provide the narrow permission needed by setup actions without inheriting
+	// unobservable organization or repository settings that may grant writes.
+	return &workflow.Permissions{Scopes: map[string]string{"contents": "read"}}
 }
 
 func clonePermissions(in *workflow.Permissions) *workflow.Permissions {

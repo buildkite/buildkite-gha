@@ -25,6 +25,9 @@ func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 2, Column: 1}}
 	caller := &workflow.Permissions{Scopes: map[string]string{"contents": "read", "pull-requests": "write"}, Span: span}
 	callee := &workflow.Permissions{Scopes: map[string]string{"contents": "write", "issues": "write", "pull-requests": "read"}, Span: span}
+	if inherited := effectivePermissions(nil, nil, nil, false); !reflect.DeepEqual(inherited.Scopes, map[string]string{"contents": "read"}) {
+		t.Fatalf("root default permissions = %#v", inherited)
+	}
 	effective := effectivePermissions(callee, nil, caller, true)
 	want := map[string]string{"contents": "read", "pull-requests": "read"}
 	if !reflect.DeepEqual(effective.Scopes, want) {
@@ -35,6 +38,58 @@ func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
 	}
 	if unbounded := effectivePermissions(callee, caller, nil, false); !reflect.DeepEqual(unbounded.Scopes, callee.Scopes) {
 		t.Fatalf("root job permissions = %#v, want job replacement %#v", unbounded, callee)
+	}
+}
+
+func TestCompilePlansBoundsNestedReusableWorkflowDefaultPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
+permissions:
+  contents: write
+  issues: write
+  packages: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n '${{ secrets.GITHUB_TOKEN }}'
+`)
+
+	plans, err := CompilePlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) {
+		t.Fatalf("nested reusable token plan = %#v", plans)
+	}
+
+	emptyRepository := t.TempDir()
+	emptyCaller := writeWorkflow(t, emptyRepository, "caller.yml", `on: push
+jobs:
+  delegated:
+    permissions: {}
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, emptyRepository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n '${{ secrets.GITHUB_TOKEN }}'
+`)
+	_, err = CompilePlans(emptyCaller, readFile(t, emptyCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
+		t.Fatalf("explicit empty reusable call permissions error = %v", err)
 	}
 }
 

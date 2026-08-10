@@ -41,7 +41,8 @@ type Concurrency struct {
 }
 
 // Permissions is an explicitly declared GitHub token permission set. Omitted
-// permissions remain nil so compilation never invents default authority.
+// permissions remain nil so the compiler can distinguish them from an explicit
+// empty permission map when applying its narrow product default.
 type Permissions struct {
 	Scopes map[string]string `json:"scopes"`
 	Span   Span              `json:"span"`
