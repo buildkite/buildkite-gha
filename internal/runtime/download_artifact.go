@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -154,27 +155,16 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 	if len(z.File) != expectedCount || len(z.File) > transport.MaxResultArtifactFileCount {
 		return fmt.Errorf("artifact ZIP file count mismatch")
 	}
-	seen, folded := map[string]bool{}, map[string]bool{}
-	parents, foldedParents := map[string]bool{}, map[string]bool{}
 	members := make([]downloadMember, 0, len(z.File))
+	foldedNames := make([]string, 0, len(z.File))
 	var expanded int64
 	for _, f := range z.File {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		name := f.Name
-		if !validArtifactMember(name) || seen[name] || folded[strings.ToLower(name)] {
-			return fmt.Errorf("unsafe or duplicate artifact ZIP member %q", name)
-		}
-		foldedName := strings.ToLower(name)
-		if parents[name] || foldedParents[foldedName] {
-			return fmt.Errorf("artifact ZIP member %q collides with another member path", name)
-		}
-		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
-			if seen[parent] || folded[strings.ToLower(parent)] {
-				return fmt.Errorf("artifact ZIP member %q collides with another member path", name)
-			}
-			parents[parent], foldedParents[strings.ToLower(parent)] = true, true
+		if !validArtifactMember(name) {
+			return fmt.Errorf("unsafe artifact ZIP member %q", name)
 		}
 		if f.Method != zip.Store && f.Method != zip.Deflate || !f.Mode().IsRegular() || f.FileInfo().IsDir() {
 			return fmt.Errorf("artifact ZIP member %q is not a supported regular file", name)
@@ -183,8 +173,15 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 			return fmt.Errorf("artifact expanded bytes exceed 1 GiB")
 		}
 		expanded += int64(f.UncompressedSize64)
-		seen[name], folded[foldedName] = true, true
+		foldedNames = append(foldedNames, strings.ToLower(name))
 		members = append(members, downloadMember{file: f, name: name, size: int64(f.UncompressedSize64)})
+	}
+	sort.Strings(foldedNames)
+	for i := 1; i < len(foldedNames); i++ {
+		previous, current := foldedNames[i-1], foldedNames[i]
+		if current == previous || strings.HasPrefix(current, previous+"/") {
+			return fmt.Errorf("duplicate or colliding artifact ZIP member paths")
+		}
 	}
 	workspaceRoot, err := os.OpenRoot(workspace)
 	if err != nil {
