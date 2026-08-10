@@ -2,12 +2,16 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
@@ -156,5 +160,75 @@ func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WorkflowToken() error = %v, want cancellation", err)
+	}
+}
+
+func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
+	if os.Getenv("BUILDKITE_GHA_LIVE_REQUIRED") != "1" {
+		t.Skip("set BUILDKITE_GHA_LIVE_REQUIRED=1 to verify job-scoped public GitHub access")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+		Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:    os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")}).AddRedaction(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	const commit = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+	for _, test := range []struct {
+		name       string
+		path       string
+		wantStatus int
+	}{
+		{name: "metadata", path: "/repos/actions/checkout", wantStatus: http.StatusOK},
+		{name: "tag", path: "/repos/actions/checkout/git/ref/tags/v4", wantStatus: http.StatusOK},
+		{name: "commit", path: "/repos/actions/checkout/commits/" + commit, wantStatus: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com"+test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("Accept", "application/vnd.github+json")
+			request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			if response.StatusCode != test.wantStatus {
+				t.Fatalf("GitHub public %s request returned HTTP %d", test.name, response.StatusCode)
+			}
+			if test.name == "metadata" {
+				limit, err := strconv.Atoi(response.Header.Get("X-RateLimit-Limit"))
+				if err != nil || limit <= 60 {
+					t.Fatalf("GitHub public metadata request rate limit = %q, want authenticated budget", response.Header.Get("X-RateLimit-Limit"))
+				}
+				var repository struct {
+					Visibility string `json:"visibility"`
+				}
+				if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&repository); err != nil || repository.Visibility != "public" {
+					t.Fatalf("GitHub public repository metadata visibility = %q, error = %v", repository.Visibility, err)
+				}
+				return
+			}
+		})
 	}
 }

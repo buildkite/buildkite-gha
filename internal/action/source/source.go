@@ -23,13 +23,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	defaultAPI   = "https://api.github.com"
-	manifestName = "manifest-v1.json"
+	defaultAPI      = "https://api.github.com"
+	defaultCodeload = "https://codeload.github.com"
+	manifestName    = "manifest-v1.json"
 )
 
 var (
@@ -106,35 +108,79 @@ func (*NotPublicError) Error() string { return "GitHub action was not found or i
 
 type config struct {
 	api                                 *url.URL
+	codeload                            *url.URL
 	finalHosts                          map[string]bool
+	credential                          *scopedCredential
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
 }
 
 func defaults() config {
-	u, _ := url.Parse(defaultAPI)
-	return config{u, map[string]bool{"codeload.github.com": true}, 100 << 20, 512 << 20, 100 << 20, 50000, 4096, 255}
+	api, _ := url.Parse(defaultAPI)
+	codeload, _ := url.Parse(defaultCodeload)
+	return config{api: api, codeload: codeload, finalHosts: map[string]bool{"codeload.github.com": true}, maxCompressed: 100 << 20, maxExpanded: 512 << 20, maxFile: 100 << 20, maxEntries: 50000, maxPath: 4096, maxSegment: 255}
 }
 
 // Option configures trusted process-level limits or test endpoints. Options must
 // never be populated from workflow input.
 type Option func(*config) error
 
-// WithTestEndpoints replaces the API base and permitted archive final hosts.
-// It exists for hermetic tests; production callers should use defaults.
-func WithTestEndpoints(apiBase string, archiveFinalHosts ...string) Option {
+// WithScopedGitHubTokenProvider authenticates mutable-ref API requests using a
+// credential provisioned at the first such request and cached for this client.
+// Returning an empty token selects anonymous resolution. Full lowercase SHAs
+// never invoke the provider.
+func WithScopedGitHubTokenProvider(repository string, provider func(context.Context) (string, error)) Option {
+	return func(c *config) error {
+		if provider == nil || !validRepository(repository) {
+			return fmt.Errorf("invalid scoped GitHub credential provider")
+		}
+		c.credential = &scopedCredential{repository: strings.ToLower(repository), provider: provider}
+		return nil
+	}
+}
+
+func validRepository(repository string) bool {
+	parts := strings.Split(repository, "/")
+	return len(parts) == 2 && ownerRE.MatchString(parts[0]) && repoRE.MatchString(parts[1]) && !strings.HasSuffix(parts[1], ".git")
+}
+
+type scopedCredential struct {
+	repository string
+	provider   func(context.Context) (string, error)
+	once       sync.Once
+	token      string
+	err        error
+}
+
+func (c *scopedCredential) provision(ctx context.Context) error {
+	if c == nil || c.provider == nil {
+		return nil
+	}
+	c.once.Do(func() { c.token, c.err = c.provider(ctx) })
+	return c.err
+}
+
+// WithTestEndpoints replaces the API base and, when supplied, the direct
+// codeload base. It exists for hermetic tests; production callers should use
+// defaults.
+func WithTestEndpoints(apiBase string, codeloadBase ...string) Option {
 	return func(c *config) error {
 		u, err := url.Parse(apiBase)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
 			return fmt.Errorf("invalid API base")
 		}
 		c.api = u
-		if len(archiveFinalHosts) > 0 {
-			c.finalHosts = map[string]bool{}
-			for _, h := range archiveFinalHosts {
-				c.finalHosts[strings.ToLower(h)] = true
+		if len(codeloadBase) > 1 {
+			return fmt.Errorf("only one codeload base may be specified")
+		}
+		if len(codeloadBase) == 1 {
+			archive, err := url.Parse(codeloadBase[0])
+			if err != nil || archive.Scheme != "https" || archive.Host == "" || archive.User != nil || archive.RawQuery != "" || archive.Fragment != "" {
+				return fmt.Errorf("invalid codeload base")
 			}
+			c.codeload = archive
+			c.finalHosts = map[string]bool{strings.ToLower(archive.Host): true}
 		}
 		return nil
 	}
@@ -151,9 +197,8 @@ func WithLimits(compressed, expanded, perFile int64, entries int) Option {
 	}
 }
 
-// Resolver resolves public GitHub references without credentials. An injected
-// client must be credential-free; production callers should pass nil. Requests
-// also discard the client's cookie jar and strip credential headers.
+// Resolver resolves public GitHub references, optionally using a credential
+// only for GitHub API requests. Requests discard the client's cookie jar.
 type Resolver struct {
 	client *http.Client
 	cfg    config
@@ -187,7 +232,15 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	}
 	ref = parsed
 	if shaRE.MatchString(ref.Ref) {
-		return r.resolveCommit(ctx, ref)
+		return Resolved{Reference: ref, Commit: ref.Ref}, nil
+	}
+	if err := r.cfg.credential.provision(ctx); err != nil {
+		return Resolved{}, err
+	}
+	if r.cfg.credential != nil && r.cfg.credential.token != "" {
+		if err := ensurePublic(ctx, r.client, r.cfg, ref); err != nil {
+			return Resolved{}, err
+		}
 	}
 	for _, kind := range []string{"tags", "heads"} {
 		var v struct {
@@ -220,9 +273,6 @@ func (r *Resolver) resolveCommit(ctx context.Context, ref Reference) (Resolved, 
 	}
 	if !shaRE.MatchString(v.SHA) {
 		return Resolved{}, fmt.Errorf("GitHub returned malformed commit SHA")
-	}
-	if shaRE.MatchString(ref.Ref) && v.SHA != ref.Ref {
-		return Resolved{}, fmt.Errorf("GitHub resolved exact commit %s to different commit %s", ref.Ref, v.SHA)
 	}
 	return Resolved{Reference: ref, Commit: v.SHA}, nil
 }
@@ -265,13 +315,16 @@ func apiURL(base *url.URL, parts ...string) *url.URL {
 	return &u
 }
 func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
-	u := apiURL(r.cfg.api, parts...)
+	return githubAPIGet(ctx, r.client, r.cfg, parts, out)
+}
+func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []string, out any) error {
+	u := apiURL(cfg.api, parts...)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return err
 	}
-	setHeaders(req)
-	c := *r.client
+	setAPIHeaders(req, scopedToken(cfg, parts))
+	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := c.Do(req)
@@ -301,6 +354,31 @@ func (r *Resolver) get(ctx context.Context, parts []string, out any) error {
 	}
 	return nil
 }
+func ensurePublic(ctx context.Context, client *http.Client, cfg config, ref Reference) error {
+	var repository struct {
+		Private    *bool   `json:"private"`
+		Visibility *string `json:"visibility"`
+	}
+	if err := githubAPIGet(ctx, client, cfg, repoParts(ref), &repository); err != nil {
+		return err
+	}
+	if repository.Private == nil || repository.Visibility == nil {
+		return fmt.Errorf("malformed GitHub API response: repository visibility is missing")
+	}
+	if *repository.Private || *repository.Visibility != "public" {
+		return &NotPublicError{}
+	}
+	return nil
+}
+func scopedToken(cfg config, parts []string) string {
+	if cfg.credential == nil {
+		return ""
+	}
+	if len(parts) >= 3 && parts[0] == "repos" && strings.EqualFold(parts[1]+"/"+parts[2], cfg.credential.repository) {
+		return ""
+	}
+	return cfg.credential.token
+}
 func rateLimitError(resp *http.Response, body []byte) error {
 	if resp.StatusCode != 429 && (resp.StatusCode != 403 || (resp.Header.Get("X-RateLimit-Remaining") != "0" && !strings.Contains(strings.ToLower(string(body)), "rate limit"))) {
 		return nil
@@ -315,17 +393,20 @@ func rateLimitError(resp *http.Response, body []byte) error {
 	}
 	return &RateLimitError{reset}
 }
-func setHeaders(r *http.Request) {
+func setAPIHeaders(r *http.Request, token string) {
 	r.Header.Del("Authorization")
 	r.Header.Del("Cookie")
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
 	r.Header.Set("User-Agent", "buildkite-gha-action-source/1")
 	r.Header.Set("Accept", "application/vnd.github+json")
 	r.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 }
 
-// Store downloads and atomically caches repositories. A Store must not be
-// shared by mutually untrusted processes writing the same cache root. An
-// injected client must be credential-free; production callers should pass nil.
+// Store downloads exact public commits directly from codeload and atomically
+// caches them. A Store must not be shared by mutually untrusted processes
+// writing the same cache root.
 type Store struct {
 	root   string
 	client *http.Client
@@ -434,12 +515,17 @@ func selected(tree, p string) (string, error) {
 }
 
 func (s *Store) downloadExtract(ctx context.Context, r Resolved, dst string) error {
-	u := apiURL(s.cfg.api, repoParts(r.Reference, "tarball", r.Commit)...)
+	u := apiURL(s.cfg.codeload, r.Reference.Owner, r.Reference.Repository, "tar.gz", r.Commit)
+	if !validArchiveURL(u, s.cfg.finalHosts) {
+		return fmt.Errorf("archive URL denied")
+	}
 	req, e := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if e != nil {
 		return e
 	}
-	setHeaders(req)
+	req.Header.Del("Authorization")
+	req.Header.Del("Cookie")
+	req.Header.Set("User-Agent", "buildkite-gha-action-source/1")
 	c := *s.client
 	c.Jar = nil
 	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {

@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
@@ -587,6 +588,151 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
+	}
+}
+
+func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *testing.T) {
+	const token = "ghs_job_scoped"
+	provider := &cliWorkflowTokenProvider{token: token}
+	redactor := &cliRedactor{}
+	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor}
+	option := authentication.option("buildkite/buildkite-gha")
+	if option == nil || provider.calls != 0 || len(redactor.values) != 0 {
+		t.Fatalf("authentication = option %v, provider %#v, redactions %#v", option != nil, provider, redactor.values)
+	}
+
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			t.Errorf("Authorization = %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Path == "/repos/o/r" {
+			_, _ = io.WriteString(w, `{"private":false,"visibility":"public"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+	}))
+	defer server.Close()
+	resolver, err := actionsource.NewResolver(server.Client(), option, actionsource.WithTestEndpoints(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact, err := actionsource.Parse("o/r@0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), exact); err != nil || requests != 0 || provider.calls != 0 || len(redactor.values) != 0 {
+		t.Fatalf("exact Resolve() error/requests/provider/redactions = %v / %d / %d / %#v", err, requests, provider.calls, redactor.values)
+	}
+	ref, err := actionsource.Parse("o/r@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !slices.Equal(redactor.values, []string{token}) {
+		t.Fatalf("Resolve() error/requests = %v / %d", err, requests)
+	}
+	second, _ := actionsource.Parse("o/r@v2")
+	if _, err := resolver.Resolve(context.Background(), second); err != nil || provider.calls != 1 || !slices.Equal(redactor.values, []string{token}) {
+		t.Fatalf("second Resolve() error/provider/redactions = %v / %d / %#v", err, provider.calls, redactor.values)
+	}
+
+	for _, test := range []struct {
+		name          string
+		provider      *cliWorkflowTokenProvider
+		redactor      *cliRedactor
+		cancelContext bool
+		wantContext   bool
+	}{
+		{name: "unavailable", redactor: &cliRedactor{}},
+		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("secret backend details")}, redactor: &cliRedactor{}},
+		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("secret backend details")}},
+		{name: "mint client timeout", provider: &cliWorkflowTokenProvider{err: context.DeadlineExceeded}, redactor: &cliRedactor{}},
+		{name: "redaction client timeout", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.DeadlineExceeded}},
+		{name: "pre-cancelled while unavailable", redactor: &cliRedactor{}, cancelContext: true, wantContext: true},
+		{name: "mint cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, wantContext: true},
+		{name: "redaction cancellation", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.Canceled}, wantContext: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var warnings bytes.Buffer
+			ctx := context.Background()
+			if test.cancelContext {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			authentication := &actionSourceAuthentication{redactor: test.redactor, warnings: &warnings}
+			if test.provider != nil {
+				authentication.provider = test.provider
+			}
+			gotToken, err := authentication.token(ctx, "buildkite/buildkite-gha")
+			if test.wantContext {
+				if !errors.Is(err, context.Canceled) || gotToken != "" || warnings.Len() != 0 {
+					t.Fatalf("token/error/warnings = %q / %v / %q", gotToken, err, warnings.String())
+				}
+			} else if err != nil || gotToken != "" {
+				t.Fatalf("token/error = %q / %v, want anonymous fallback", gotToken, err)
+			} else if !strings.Contains(warnings.String(), "resolving mutable public action references anonymously") || strings.Contains(warnings.String(), token) || strings.Contains(warnings.String(), "backend details") {
+				t.Fatalf("fallback warning = %q, want sanitized observable warning", warnings.String())
+			}
+		})
+	}
+}
+
+func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "local.yml")
+	actionPath := filepath.Join(root, ".github", "actions", "local")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowSource := []byte("on: push\njobs:\n  local:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n")
+	if err := os.WriteFile(workflowPath, workflowSource, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &cliWorkflowTokenProvider{token: "must-not-be-minted"}
+	redactor := &cliRedactor{}
+	var warnings bytes.Buffer
+	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
+	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", "", authentication); err != nil {
+		t.Fatal(err)
+	}
+	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
+		t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+	}
+}
+
+func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testing.T) {
+	t.Setenv("GH_TOKEN", "ignored")
+	t.Setenv("GITHUB_TOKEN", "ignored")
+	t.Setenv("BUILDKITE_GHA_GITHUB_TOKEN", "ignored")
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", "")
+	t.Setenv("BUILDKITE_JOB_ID", "")
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
+	var warnings bytes.Buffer
+	authentication := jobScopedActionSourceAuthentication(&warnings)
+	token, err := authentication.token(context.Background(), "buildkite/buildkite-gha")
+	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
+		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
+	}
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	if authentication := jobScopedActionSourceAuthentication(io.Discard); authentication.provider == nil {
+		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }
 
@@ -1692,6 +1838,31 @@ type cliCaptureRunner struct {
 	dataByPath     map[string][]byte
 	uploaded       map[string][]byte
 	contextErrors  []error
+}
+
+type cliWorkflowTokenProvider struct {
+	token       string
+	err         error
+	repository  string
+	permissions map[string]string
+	calls       int
+}
+
+func (p *cliWorkflowTokenProvider) WorkflowToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+	p.calls++
+	p.repository = repository
+	p.permissions = permissions
+	return p.token, p.err
+}
+
+type cliRedactor struct {
+	values []string
+	err    error
+}
+
+func (r *cliRedactor) AddRedaction(_ context.Context, value string) error {
+	r.values = append(r.values, value)
+	return r.err
 }
 
 func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []string, stdin []byte) ([]byte, error) {

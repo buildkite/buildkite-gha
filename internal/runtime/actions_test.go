@@ -1,10 +1,15 @@
 package runtime
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +103,82 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
 	}
+}
+
+func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T) {
+	const token = "must-not-be-sent"
+	commit := strings.Repeat("a", 40)
+	fixture := t.TempDir()
+	writeAction(t, fixture, "")
+	digest := digestTree(t, fixture)
+	archive := githubActionArchive(t)
+	var apiRequests, archiveRequests, tokenProvisions int
+	apiServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		apiRequests++
+		http.Error(w, "GitHub REST must not be used by runtime exact-commit materialization", http.StatusInternalServerError)
+	}))
+	defer apiServer.Close()
+	codeloadServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		archiveRequests++
+		if r.URL.Path != "/owner/repo/tar.gz/"+commit {
+			t.Errorf("codeload path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			t.Errorf("codeload credentials = Authorization %q, Cookie %q", r.Header.Get("Authorization"), r.Header.Get("Cookie"))
+		}
+		_, _ = w.Write(archive)
+	}))
+	defer codeloadServer.Close()
+	store, err := source.NewStore(t.TempDir(), codeloadServer.Client(), source.WithTestEndpoints(apiServer.URL, codeloadServer.URL), source.WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+		tokenProvisions++
+		return token, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{
+		RequiredCapabilities: []string{"network"},
+		Actions: []plan.ActionLock{{
+			ID: "lock", Source: "github", Repository: "owner/repo",
+			RequestedRef: "v1", Commit: commit, SourceDigest: digest,
+		}},
+	}
+	resolver := newActionLockResolver(job, "", store)
+	if _, _, err := resolver.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err != nil {
+		t.Fatal(err)
+	}
+	if apiRequests != 0 || archiveRequests != 1 || tokenProvisions != 0 {
+		t.Fatalf("API/archive/token-provision requests = %d / %d / %d, want 0 / 1 / 0", apiRequests, archiveRequests, tokenProvisions)
+	}
+}
+
+func githubActionArchive(t *testing.T) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	gz := gzip.NewWriter(&compressed)
+	tw := tar.NewWriter(gz)
+	for _, entry := range []struct {
+		name string
+		body string
+	}{
+		{name: "root/action.yml", body: "name: test\nruns:\n  using: node20\n  main: index.js\n"},
+		{name: "root/index.js", body: "ok\n"},
+	} {
+		body := []byte(entry.body)
+		if err := tw.WriteHeader(&tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
 }
 
 func TestActionLockResolverWorkspaceLazyAndReverified(t *testing.T) {
