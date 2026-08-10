@@ -410,6 +410,51 @@ jobs:
 	})
 }
 
+func TestUploadRejectsUnsupportedEffectiveActionInputDefaultBeforeBuildkiteCalls(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
+	actionRoot := filepath.Join(root, ".github", "actions", "complex-default")
+	if err := os.MkdirAll(actionRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/complex-default\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "action.yml"), []byte(`name: complex default
+inputs:
+  token:
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+runs:
+  using: node24
+  main: main.js
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionRoot, "main.js"), []byte("console.log('must not run')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "action-default-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, want := range []string{`compile action "./.github/actions/complex-default"`, `action input "token" default`, "requires a direct context reference"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("unsupported action default made Buildkite calls: %#v", runner.commands)
+	}
+}
+
 func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
