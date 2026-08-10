@@ -176,7 +176,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 		n.native = true
 		return n, nil
 	}
-	if runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
+	if runtime == metadata.RuntimeNode16 || runtime == metadata.RuntimeNode20 || runtime == metadata.RuntimeNode24 {
 		b.requiresMise = true
 	}
 	for _, capability := range runtime.RequiredCapabilities() {

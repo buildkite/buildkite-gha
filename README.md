@@ -144,7 +144,9 @@ for limits and failure behavior.
 As a quick screen, the plugin path is a good fit for workflows built from:
 
 - Linux Bash and `sh` steps;
-- JavaScript, composite, local, and anonymous public actions;
+- JavaScript, composite, local, and anonymous public actions. `node16` actions
+  run on exact managed Node 16.20.2 and produce one end-of-job deprecation
+  warning naming the invoked actions;
 - supported local and public Dockerfile actions;
 - static matrices, ordinary `needs` and outputs, and local reusable workflows
   with statically resolved inputs, caller-visible results, and directly mapped
