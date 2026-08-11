@@ -69,6 +69,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 const (
 	resultPublicationTimeout                    = 10 * time.Second
 	legacyRuntimeQueue                          = "hosted"
+	pluginWorkflowEnvironment                   = "BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW"
 	targetQueueEnvironment                      = "BUILDKITE_GHA_TARGET_QUEUE"
 	runtimeImageEnvironment                     = "BUILDKITE_GHA_RUNTIME_IMAGE"
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
@@ -111,6 +112,8 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 		}
 		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
 		return 0
+	case "plugin":
+		return plugin(args[1:], stdout, stderr, version, agentRunner)
 	default:
 		if _, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
@@ -134,6 +137,39 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 
 		return usageError(stderr, "unknown command %q", args[0])
 	}
+}
+
+func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) int {
+	if len(args) != 0 {
+		return usageError(stderr, "plugin does not accept arguments")
+	}
+	workflowPath := os.Getenv(pluginWorkflowEnvironment)
+	if strings.TrimSpace(workflowPath) == "" {
+		return usageError(stderr, "plugin: %s is required", pluginWorkflowEnvironment)
+	}
+	if err := normalizePluginCommit(context.Background(), os.Getenv, os.Setenv, runner); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
+		return 1
+	}
+	return upload([]string{workflowPath}, stdout, stderr, version, transport.Agent{Runner: runner})
+}
+
+func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
+	if validBuildkiteCommit(getenv("BUILDKITE_COMMIT")) {
+		return nil
+	}
+	output, err := runner.Run(ctx, "", "git", []string{"rev-parse", "HEAD"}, nil)
+	if err != nil {
+		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: %w", err)
+	}
+	commit := strings.TrimSpace(string(output))
+	if !validBuildkiteCommit(commit) {
+		return fmt.Errorf("resolve BUILDKITE_COMMIT from checked-out HEAD: git returned an invalid commit")
+	}
+	if err := setenv("BUILDKITE_COMMIT", commit); err != nil {
+		return fmt.Errorf("set resolved BUILDKITE_COMMIT: %w", err)
+	}
+	return nil
 }
 
 func help(args []string, stdout, stderr io.Writer) int {
