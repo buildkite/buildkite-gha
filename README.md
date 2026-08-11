@@ -303,8 +303,8 @@ too.
 
 - [GitHub Actions compatibility and behavior differences](docs/compatibility.md)
 - [Direct CLI use](docs/cli.md)
+- [Security model and operator responsibilities](docs/security.md)
 - [Development, smoke tests, and releases](docs/development.md)
-- [Active product and implementation plan](docs/plans/2026-07-22-buildkite-gha.md)
 - [Architecture decisions](docs/architecture/)
 
 Use `buildkite-gha help`, `buildkite-gha help <command>`, or

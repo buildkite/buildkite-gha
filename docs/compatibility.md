@@ -10,9 +10,6 @@ it as unsupported. GitHub's
 describes the original syntax; this page describes the subset that runs on
 Buildkite.
 
-The [active plan](plans/2026-07-22-buildkite-gha.md) contains future work and
-implementation notes. It is not a support promise.
-
 ## Support matrix
 
 | Status | Meaning |
