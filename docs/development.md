@@ -111,5 +111,3 @@ The task runs `check`, chooses the next conventional-commit-derived `v0` tag, an
 
 - [Compatibility reference](compatibility.md)
 - [Security model](security.md)
-- [Parser and runner dependency decision](architecture/0001-upstream-actions-reuse.md)
-- [Protected-capability boundary](architecture/0003-protected-capability-control-plane.md)

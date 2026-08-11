@@ -95,7 +95,6 @@ See the [security model](docs/security.md) before enabling managed repository ac
 - [CLI guide](docs/cli.md)
 - [Security model](docs/security.md)
 - [Development and releases](docs/development.md)
-- [Architecture decisions](docs/architecture/)
 
 Use `buildkite-gha help`, `buildkite-gha help <command>`, or `buildkite-gha --version` for the installed command surface.
 

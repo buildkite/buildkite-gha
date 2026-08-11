@@ -61,5 +61,3 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
     ```
 
 1. Keep unsupported secrets, private actions, OIDC, and protected queues out of imported workflows.
-
-Broader protected capabilities require the Buildkite-owned policy boundary in [ADR 0003](architecture/0003-protected-capability-control-plane.md). Repository configuration alone cannot authorize them.
