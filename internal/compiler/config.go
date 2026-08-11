@@ -8,7 +8,6 @@ import (
 )
 
 var queuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
-var stepKeyNamespacePattern = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
 // EventTrust is the compiler's authenticated classification of an event.
 type EventTrust string
@@ -55,10 +54,6 @@ type Options struct {
 	// RuntimeImage selects one immutable image for generated workflow jobs. It
 	// affects pipeline placement only, not compiler IR or plans.
 	RuntimeImage string
-	// StepKeyNamespace deterministically separates generated keys when several
-	// workflows are compiled into one Buildkite pipeline. Empty preserves the
-	// legacy single-workflow keys.
-	StepKeyNamespace string
 }
 
 func defaultOptions() Options {
@@ -81,9 +76,6 @@ func (options Options) validate() error {
 	}
 	if !options.ResolveActions && options.ActionSource != nil {
 		return fmt.Errorf("action source configuration requires ResolveActions")
-	}
-	if options.StepKeyNamespace != "" && !stepKeyNamespacePattern.MatchString(options.StepKeyNamespace) {
-		return fmt.Errorf("step key namespace %q must be 16 lowercase hexadecimal characters", options.StepKeyNamespace)
 	}
 	if len(options.Runners.Labels) == 0 {
 		return fmt.Errorf("runner policy requires at least one label mapping")

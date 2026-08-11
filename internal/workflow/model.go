@@ -18,7 +18,6 @@ type Span struct {
 // Workflow is the actionlint-independent syntax needed by the Phase 0 compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
-	Triggers                []Trigger             `json:"triggers,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
 	Permissions             *Permissions          `json:"permissions,omitempty"`
 	Concurrency             *Concurrency          `json:"concurrency,omitempty"`
@@ -29,53 +28,6 @@ type Workflow struct {
 	RequiredCallSecrets     []string              `json:"required_call_secrets,omitempty"`
 	Callable                bool                  `json:"callable,omitempty"`
 	Jobs                    []Job                 `json:"jobs"`
-}
-
-// ReusableOnly reports whether the workflow can only be invoked through
-// workflow_call and must not become a directly runnable aggregate group.
-func (w Workflow) ReusableOnly() bool {
-	if len(w.Triggers) == 0 {
-		return false
-	}
-	for _, trigger := range w.Triggers {
-		if trigger.Event != "workflow_call" {
-			return false
-		}
-	}
-	return true
-}
-
-// Trigger is one configured entry in the workflow's on section. Slice fields
-// are nil when omitted and non-nil when explicitly configured (including an
-// empty list), which is significant for GitHub's defaults.
-type Trigger struct {
-	Event          string           `json:"event"`
-	Types          []string         `json:"types,omitempty"`
-	Branches       []string         `json:"branches,omitempty"`
-	BranchesIgnore []string         `json:"branches_ignore,omitempty"`
-	Tags           []string         `json:"tags,omitempty"`
-	TagsIgnore     []string         `json:"tags_ignore,omitempty"`
-	Paths          []string         `json:"paths,omitempty"`
-	PathsIgnore    []string         `json:"paths_ignore,omitempty"`
-	Workflows      []string         `json:"workflows,omitempty"`
-	Schedules      []Schedule       `json:"schedules,omitempty"`
-	Dispatch       *DispatchTrigger `json:"dispatch,omitempty"`
-}
-
-type Schedule struct{ Cron, Timezone string }
-
-// DispatchTrigger retains workflow_dispatch configuration for later adapters.
-type DispatchTrigger struct {
-	Inputs []DispatchInput `json:"inputs,omitempty"`
-}
-
-type DispatchInput struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	Required    bool     `json:"required,omitempty"`
-	Default     string   `json:"default,omitempty"`
-	Type        string   `json:"type,omitempty"`
-	Options     []string `json:"options,omitempty"`
 }
 
 // Concurrency is the supported subset of a GitHub Actions concurrency group.
