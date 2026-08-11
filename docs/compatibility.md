@@ -61,9 +61,13 @@ Steps remain inside one job because they share a workspace, environment files, a
 | `run-name` | ➖ Accepted, no effect | Buildkite names the build. The value is not retained. |
 | `on` | ➖ Accepted, no effect for build creation | Configure push, pull request, branch, tag, schedule, and manual triggers in Buildkite. |
 
+A workflow name is retained in generated work:
+
 ```yaml
 name: CI
 ```
+
+The trigger declaration is accepted, but Buildkite controls when a build starts:
 
 ```yaml
 on:
@@ -98,7 +102,7 @@ The plugin derives `pull_request` for pull request builds and `push` for other b
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
-Called workflow:
+The called workflow declares its inputs and outputs:
 
 ```yaml
 on:
@@ -121,7 +125,7 @@ jobs:
         run: echo "value=app-${{ inputs.target }}" >> "$GITHUB_OUTPUT"
 ```
 
-Caller:
+The caller passes a static input:
 
 ```yaml
 jobs:
@@ -134,6 +138,8 @@ jobs:
 ### Permissions
 
 **🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an action input default references `github.token`.
+
+A workflow-level permissions map can request repository access:
 
 ```yaml
 permissions:
@@ -155,6 +161,8 @@ The `read-all` and `write-all` values, the `id-token` permission, and noncanonic
 | `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level. Only `bash` and `sh` are supported. Host jobs default to `bash`; job containers default to `sh`. |
 | `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
+A job-level value overrides the same workflow-level environment variable:
+
 ```yaml
 env:
   GOFLAGS: -mod=readonly
@@ -164,6 +172,8 @@ jobs:
     env:
       GOFLAGS: -race
 ```
+
+Workflow-level run defaults set the shell and working directory:
 
 ```yaml
 defaults:
@@ -175,6 +185,8 @@ defaults:
 ### Concurrency
 
 **🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+
+A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
 ```yaml
 concurrency:
@@ -209,11 +221,15 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `environment` | ➖ Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
 | `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
+Job names can interpolate matrix values:
+
 ```yaml
 jobs:
   test:
     name: Test Go ${{ matrix.go }}
 ```
+
+A job can depend on another job by ID:
 
 ```yaml
 jobs:
@@ -223,13 +239,19 @@ jobs:
     needs: build
 ```
 
+Runner labels can resolve from a matrix value:
+
 ```yaml
 runs-on: ${{ matrix.os }}
 ```
 
+A job-level condition can combine a branch check with status:
+
 ```yaml
 if: github.ref == 'refs/heads/main' && success()
 ```
+
+Job outputs can pass a step output to a dependent job:
 
 ```yaml
 jobs:
@@ -260,6 +282,8 @@ Runner labels are compatibility labels, not image selection. The selected Buildk
 | `include`, `exclude` | 🟡 Supported subset | Static combinations. |
 | `max-parallel` | 🟡 Supported subset | Literal value. |
 | `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
+
+A strategy can combine parallelism, static matrix values, and exclusions:
 
 ```yaml
 strategy:
@@ -292,6 +316,8 @@ The underlying subset accepts literal public image names, environment maps, and 
 | `continue-on-error` | ✅ Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 
+A step can continue after failure and expose its outcome to a later condition:
+
 ```yaml
 - id: test
   run: go test ./...
@@ -305,6 +331,8 @@ The underlying subset accepts literal public image names, environment maps, and 
 
 **🟡 Supported subset.** Commands run in Linux `bash` or `sh` within the workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
 
+A shell step can specify its shell and workspace-relative working directory:
+
 ```yaml
 - name: Test
   shell: bash
@@ -313,6 +341,8 @@ The underlying subset accepts literal public image names, environment maps, and 
 ```
 
 A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and action `entrypoint` or `args` overrides are rejected.
+
+Action steps can call public and local actions:
 
 ```yaml
 - uses: actions/checkout@v7
@@ -326,6 +356,8 @@ A `uses` step may call a supported local or public action. Action inputs under `
 
 **✅ Supported.** The `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls are supported. At most ten background steps run at once inside a job. Use `wait: <id>` for selected steps, `wait-all:` for all active work, or `parallel:` for a fixed group.
 
+Background work can be canceled by step ID:
+
 ```yaml
 steps:
   - id: server
@@ -336,6 +368,8 @@ steps:
 
   - cancel: server
 ```
+
+A parallel group runs a fixed set of child steps together:
 
 ```yaml
 steps:
@@ -386,6 +420,8 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 ### Runtime interpolation
 
 Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. General operators and functions are not supported inside interpolated strings.
+
+A runtime interpolation can read a verified upstream output directly:
 
 ```yaml
 run: echo "${{ needs.build.outputs.image }}"
@@ -542,6 +578,8 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 ### GitHub token
 
 **🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
+
+A job can request a token for a pull request comment:
 
 ```yaml
 permissions:
