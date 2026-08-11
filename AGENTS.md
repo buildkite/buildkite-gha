@@ -1,5 +1,15 @@
 # AGENTS.md
 
+## Documentation
+
+Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blob/main/styleguides/writing-style.md). Use GitHub-flavored Markdown in this repository.
+
+- Use the fewest words that preserve meaning. Prefer examples and tables to long explanations.
+- Write directly, in active voice, with sentence-case headings.
+- Describe current behavior. Keep plans and remaining work in Linear.
+- State each fact once, then link to its source of truth. `README.md` is the overview; `docs/compatibility.md` owns supported behavior; the CLI, security, and development guides own their respective details.
+- Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
+
 ## Cursor Cloud specific instructions
 
 This is a single Go CLI product (`buildkite-gha`). There are **no long-running
