@@ -30,6 +30,13 @@ type downloadMember struct {
 	size int64
 }
 
+type downloadStage struct {
+	root        *os.Root
+	members     []downloadMember
+	memberIndex map[string]int
+	foldedNames map[string]string
+}
+
 func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProcessor, workspace string, needs map[string]plan.Need, commit string, inputs map[string]string) (result Result, returnErr error) {
 	result = newResult()
 	defer func() { returnErr = processor.scrubError(returnErr) }()
@@ -116,11 +123,24 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	remainingFiles := transport.MaxResultArtifactFileCount
 	remainingArchiveBytes := transport.MaxResultArtifactSizeBytes
 	remainingExpandedBytes := transport.MaxResultArtifactSizeBytes
+	staging, stagingRoot, err := openDownloadStaging(resolvedWorkspace)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		_ = stagingRoot.Close()
+		_ = os.RemoveAll(staging)
+	}()
+	stage := &downloadStage{
+		root:        stagingRoot,
+		memberIndex: make(map[string]int),
+		foldedNames: make(map[string]string),
+	}
 	for _, artifact := range matches {
 		if artifact.FileCount <= 0 || artifact.Size <= 0 || artifact.FileCount > remainingFiles || artifact.Size > remainingArchiveBytes {
 			return result, fmt.Errorf("matched artifacts exceed aggregate download limits")
 		}
-		expanded, err := r.downloadNeedArtifact(ctx, artifact, resolvedWorkspace, destinationRelative, remainingExpandedBytes)
+		expanded, err := r.downloadNeedArtifact(ctx, artifact, stage, remainingExpandedBytes)
 		if err != nil {
 			return result, err
 		}
@@ -128,11 +148,15 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 		remainingArchiveBytes -= artifact.Size
 		remainingExpandedBytes -= expanded
 	}
+	sort.Slice(stage.members, func(i, j int) bool { return downloadPathLess(stage.members[i].name, stage.members[j].name) })
+	if err := installDownloadMembers(ctx, resolvedWorkspace, staging, destinationRelative, stage.members); err != nil {
+		return result, err
+	}
 	result.Outputs["download-path"] = absDestination
 	return result, nil
 }
 
-func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArtifact, workspace, destination string, expandedLimit int64) (int64, error) {
+func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArtifact, stage *downloadStage, expandedLimit int64) (int64, error) {
 	temporary, err := os.MkdirTemp("", "buildkite-gha-download-")
 	if err != nil {
 		return 0, err
@@ -181,7 +205,7 @@ func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArti
 	if err != nil {
 		return 0, err
 	}
-	if err := extractDownloadZIPFile(ctx, archive, artifact.Size, workspace, destination, artifact.FileCount); err != nil {
+	if err := stageDownloadZIPFile(ctx, archive, artifact.Size, artifact.FileCount, stage); err != nil {
 		return 0, err
 	}
 	return expanded, nil
@@ -224,6 +248,44 @@ func verifyDownloadDigestFile(ctx context.Context, f *os.File, digest string, si
 }
 
 func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspace, destination string, expectedCount int) error {
+	staging, stagingRoot, err := openDownloadStaging(workspace)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = stagingRoot.Close()
+		_ = os.RemoveAll(staging)
+	}()
+	stage := &downloadStage{
+		root:        stagingRoot,
+		memberIndex: make(map[string]int),
+		foldedNames: make(map[string]string),
+	}
+	if err := stageDownloadZIPFile(ctx, f, size, expectedCount, stage); err != nil {
+		return err
+	}
+	return installDownloadMembers(ctx, workspace, staging, destination, stage.members)
+}
+
+func openDownloadStaging(workspace string) (string, *os.Root, error) {
+	workspaceRoot, err := os.OpenRoot(workspace)
+	if err != nil {
+		return "", nil, fmt.Errorf("open download workspace: %w", err)
+	}
+	defer func() { _ = workspaceRoot.Close() }()
+	staging, err := os.MkdirTemp(workspace, ".buildkite-gha-extract-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create artifact staging directory: %w", err)
+	}
+	stagingRoot, err := workspaceRoot.OpenRoot(filepath.Base(staging))
+	if err != nil {
+		_ = os.RemoveAll(staging)
+		return "", nil, fmt.Errorf("open artifact staging directory: %w", err)
+	}
+	return staging, stagingRoot, nil
+}
+
+func stageDownloadZIPFile(ctx context.Context, f *os.File, size int64, expectedCount int, stage *downloadStage) error {
 	if err := preflightZIPDirectory(f, size); err != nil {
 		return fmt.Errorf("preflight artifact ZIP: %w", err)
 	}
@@ -262,28 +324,31 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 			return fmt.Errorf("duplicate or colliding artifact ZIP member paths")
 		}
 	}
-	workspaceRoot, err := os.OpenRoot(workspace)
-	if err != nil {
-		return fmt.Errorf("open download workspace: %w", err)
+	allFoldedNames := make([]string, 0, len(stage.foldedNames)+len(members))
+	for folded := range stage.foldedNames {
+		allFoldedNames = append(allFoldedNames, folded)
 	}
-	defer func() { _ = workspaceRoot.Close() }()
-	staging, err := os.MkdirTemp(workspace, ".buildkite-gha-extract-")
-	if err != nil {
-		return fmt.Errorf("create artifact staging directory: %w", err)
+	for _, member := range members {
+		folded := strings.ToLower(member.name)
+		if existing, ok := stage.foldedNames[folded]; ok && existing != member.name {
+			return fmt.Errorf("duplicate or colliding matched artifact member paths")
+		}
+		if _, ok := stage.foldedNames[folded]; !ok {
+			allFoldedNames = append(allFoldedNames, folded)
+		}
 	}
-	defer func() { _ = os.RemoveAll(staging) }()
-	stagingName := filepath.Base(staging)
-	stagingRoot, err := workspaceRoot.OpenRoot(stagingName)
-	if err != nil {
-		return fmt.Errorf("open artifact staging directory: %w", err)
+	sort.Slice(allFoldedNames, func(i, j int) bool { return downloadPathLess(allFoldedNames[i], allFoldedNames[j]) })
+	for i := 1; i < len(allFoldedNames); i++ {
+		if strings.HasPrefix(allFoldedNames[i], allFoldedNames[i-1]+"/") {
+			return fmt.Errorf("duplicate or colliding matched artifact member paths")
+		}
 	}
-	defer func() { _ = stagingRoot.Close() }()
 	for _, member := range members {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if dir := path.Dir(member.name); dir != "." {
-			if err := stagingRoot.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
+			if err := stage.root.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
 				return err
 			}
 		}
@@ -291,7 +356,14 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 		if err != nil {
 			return err
 		}
-		out, err := stagingRoot.OpenFile(filepath.FromSlash(member.name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644)
+		flags := os.O_WRONLY | os.O_CREATE | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+		index, replace := stage.memberIndex[member.name]
+		if replace {
+			flags |= os.O_TRUNC
+		} else {
+			flags |= os.O_EXCL
+		}
+		out, err := stage.root.OpenFile(filepath.FromSlash(member.name), flags, 0o644)
 		if err != nil {
 			_ = in.Close()
 			return fmt.Errorf("open staged artifact member %q: %w", member.name, err)
@@ -307,11 +379,16 @@ func extractDownloadZIPFile(ctx context.Context, f *os.File, size int64, workspa
 		if n != member.size {
 			return fmt.Errorf("artifact ZIP member %q size mismatch", member.name)
 		}
+		installed := downloadMember{name: member.name, size: member.size}
+		stage.foldedNames[strings.ToLower(member.name)] = member.name
+		if replace {
+			stage.members[index] = installed
+		} else {
+			stage.memberIndex[member.name] = len(stage.members)
+			stage.members = append(stage.members, installed)
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return installDownloadMembers(ctx, workspace, staging, destination, members)
+	return ctx.Err()
 }
 
 func downloadPathLess(left, right string) bool {

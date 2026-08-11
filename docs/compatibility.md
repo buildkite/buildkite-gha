@@ -719,7 +719,9 @@ effective retention control are unsupported.
 
 Artifacts must come from verified direct `needs` producers. Exact-name lookup
 must find one unique artifact; a bounded pattern may select and deterministically
-merge multiple distinct names. Artifact ID, all-artifact, cross-run,
+merge multiple distinct names. When artifacts contain the same exact member
+path, the later artifact by name wins. All matched archives are validated and
+staged before the destination is changed. Artifact ID, all-artifact, cross-run,
 cross-repository, raw, REST, and non-merged pattern modes are unsupported.
 
 Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP

@@ -82,6 +82,10 @@ func (s *downloadStore) DownloadArtifact(ctx context.Context, path, destination,
 }
 
 func testDownloadZIP(t *testing.T, names ...string) (string, int64, string) {
+	return testDownloadZIPPayload(t, "payload", names...)
+}
+
+func testDownloadZIPPayload(t *testing.T, payload string, names ...string) (string, int64, string) {
 	t.Helper()
 	filename := filepath.Join(t.TempDir(), "artifact.zip")
 	f, err := os.Create(filename)
@@ -94,7 +98,7 @@ func testDownloadZIP(t *testing.T, names ...string) (string, int64, string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.Write([]byte("payload")); err != nil {
+		if _, err := w.Write([]byte(payload)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -268,6 +272,46 @@ func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
 	if result.Outputs["download-path"] != want {
 		t.Fatalf("download-path = %q, want %q", result.Outputs["download-path"], want)
 	}
+}
+
+func TestDownloadArtifactPatternStagesCompleteMergeBeforeDestinationMutation(t *testing.T) {
+	firstArchive, firstSize, firstDigest := testDownloadZIPPayload(t, "first", "result.xml")
+	secondArchive, secondSize, secondDigest := testDownloadZIPPayload(t, "second", "result.xml")
+	firstPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("4", 64) + ".zip"
+	secondPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("5", 64) + ".zip"
+	first := plan.NeedArtifact{Name: "results-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	second := plan.NeedArtifact{Name: "results-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	needs := map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{second, first}}}
+	inputs := map[string]string{"pattern": "results-*", "path": "merged", "merge-multiple": "true"}
+
+	t.Run("later artifact name wins overlapping member", func(t *testing.T) {
+		workspace := t.TempDir()
+		store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
+		if _, err := (Runner{Artifacts: store}).runDownloadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, needs, actionintegration.DownloadArtifactV5Commit, inputs); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(filepath.Join(workspace, "merged", "result.xml")); err != nil || string(got) != "second" {
+			t.Fatalf("overlapping merged member = %q, %v", got, err)
+		}
+	})
+
+	t.Run("invalid later artifact leaves destination untouched", func(t *testing.T) {
+		workspace := t.TempDir()
+		invalid := second
+		invalid.Digest = "sha256:" + strings.Repeat("0", 64)
+		store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
+		_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+			context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+			map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{invalid, first}}},
+			actionintegration.DownloadArtifactV5Commit, inputs,
+		)
+		if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+			t.Fatalf("invalid later artifact error = %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(workspace, "merged")); !os.IsNotExist(err) {
+			t.Fatalf("failed fan-in mutated destination: %v", err)
+		}
+	})
 }
 
 func TestDownloadArtifactPatternRejectsDuplicateNamesAcrossNeeds(t *testing.T) {
