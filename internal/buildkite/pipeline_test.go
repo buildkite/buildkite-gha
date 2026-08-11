@@ -550,7 +550,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			t.Fatalf("hosted smoke loader uploads %s %d times:\n%s", fragment, count, hosted.command)
 		}
 	}
-	if strings.Contains(hosted.command, "numbered cache roundtrip") {
+	if strings.Contains(hosted.command, "cache-roundtrip") {
 		t.Fatalf("hosted smoke loader includes the retired targeted cache proof:\n%s", hosted.command)
 	}
 	if strings.Contains(hosted.command, "--replace") {
