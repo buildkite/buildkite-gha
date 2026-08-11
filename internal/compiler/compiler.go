@@ -152,7 +152,7 @@ func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
 func Validate(path string, source []byte) (Report, error) {
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
-		return Report{}, err
+		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
 	options := defaultOptions()
 	event := Event{
@@ -163,6 +163,7 @@ func Validate(path string, source []byte) (Report, error) {
 	}
 	context := compileContext(event, nil, path, parsed.Name)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	instances, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, expandErr); err != nil {
 		return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, err
@@ -179,10 +180,12 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // runner policy without producing compiler output.
 func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
 	if err := options.validate(); err != nil {
-		return Report{}, err
+		return Report{}, processingFinding(StageExpressions, CodeExpressionInvalid, "environment", err)
 	}
 	parsed, parseErr := workflow.Parse(path, source)
+	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
 	event, eventErr := parseEvent(eventSource)
+	eventErr = processingFinding(StageEventValidation, CodeEventInvalid, "environment", eventErr)
 	if parseErr != nil || eventErr != nil {
 		if parsed == nil {
 			return Report{}, errors.Join(parseErr, eventErr)
@@ -192,6 +195,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	instances, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, expandErr); err != nil {
 		return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, err
@@ -330,7 +334,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		if lockActions && len(actionRefs) != 0 {
 			compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, actionRefs, actionInputs)
 			if err != nil {
-				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err))
 			}
 			selectors := compiledActions.selectors
 			locks := compiledActions.locks
@@ -346,13 +350,13 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
 				lock, ok := locksByID[selector.Lock]
 				if !ok {
-					return nil, nil, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
+					return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock))
 				}
 				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 				if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
 					if err := actionintegration.ValidateCheckoutInputs(instance.Steps[stepIndex].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						return nil, nil, planConstructionFinding(instance, fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err))
 					}
 					capabilities = append(capabilities, "provider-token-read")
 					authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
@@ -360,17 +364,17 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
 					if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						return nil, nil, planConstructionFinding(instance, fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err))
 					}
 				}
 				if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
 					if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
 						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						return nil, nil, planConstructionFinding(instance, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err))
 					}
 					if len(instance.NeedGroups) == 0 {
 						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
+						return nil, nil, planConstructionFinding(instance, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column))
 					}
 				}
 			}
@@ -388,12 +392,12 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			var err error
 			capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
 			if err != nil {
-				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err))
 			}
 		}
 		if instance.Container != nil || len(instance.Services) != 0 {
 			if len(actionRefs) != 0 && !lockActions {
-				return nil, nil, fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
+				return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID))
 			}
 			if jobSchema != plan.SchemaV7 {
 				jobSchema = plan.SchemaV4
@@ -413,12 +417,12 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
 			dependencies := instance.NeedGroups[logicalNeed]
 			if len(dependencies) > plan.MaxNeedProducers {
-				return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
+				return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers))
 			}
 			for _, dependency := range dependencies {
 				digest, ok := planDigests[dependency]
 				if !ok {
-					return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+					return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency))
 				}
 				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
 			}
@@ -441,7 +445,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		}
 		secrets, err := requiredSecrets(instance)
 		if err != nil {
-			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err))
 		}
 		var githubToken *plan.GitHubToken
 		referencesGitHubTokenSecret := slices.Contains(secrets, "GITHUB_TOKEN")
@@ -454,7 +458,7 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 				if referencesGitHubTokenSecret {
 					reference = "secrets.GITHUB_TOKEN"
 				}
-				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
+				return nil, nil, planConstructionFinding(instance, fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference))
 			}
 			permissions := make(map[string]string, len(instance.Permissions))
 			for name, access := range instance.Permissions {
@@ -521,11 +525,11 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 			job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
 		}
 		if err := job.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, planConstructionFinding(instance, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err))
 		}
 		encoded, err := plan.Encode(job)
 		if err != nil {
-			return nil, nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
+			return nil, nil, planConstructionFinding(instance, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err))
 		}
 		digest := sha256.Sum256(encoded)
 		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
@@ -533,6 +537,14 @@ func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, 
 		authorizations = append(authorizations, authorization)
 	}
 	return plans, authorizations, nil
+}
+
+func planConstructionFinding(instance JobInstance, err error) error {
+	return &ProcessingFinding{
+		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
+		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
+	}
 }
 
 func requiredSecrets(instance JobInstance) ([]string, error) {
@@ -590,20 +602,21 @@ func planSpan(span workflow.Span) plan.Span {
 
 func compile(path string, source, eventSource []byte, options Options) (IR, error) {
 	if err := options.validate(); err != nil {
-		return IR{}, err
+		return IR{}, processingFinding(StageExpressions, CodeExpressionInvalid, "environment", err)
 	}
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
-		return IR{}, err
+		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
 	event, err := parseEvent(eventSource)
 	if err != nil {
-		return IR{}, err
+		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
 	context := compileContext(event, vars, path, parsed.Name)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	jobs, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
@@ -707,7 +720,7 @@ func canonicalWorkflowName(path string) string {
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
 	resolved, err := resolveReusableWorkflows(path, source, parsed)
 	if err != nil {
-		return nil, err
+		return nil, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))
@@ -718,7 +731,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
-			diagnostics = append(diagnostics, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID)))
+			diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, "", "", 0, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))))
 			continue
 		}
 		jobs[job.ID] = job
@@ -732,7 +745,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	}
 	order, err := topologicalOrder(path, jobs)
 	if err != nil {
-		diagnostics = append(diagnostics, err)
+		diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err))
 		order = sortedKeys(jobs)
 	}
 
@@ -742,7 +755,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		job := jobs[id]
 		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
 		if matrixErr != nil {
-			diagnostics = append(diagnostics, matrixErr)
+			diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourcePaths[id], 0, 0, job.ID, "", "", 0, matrixErr))
 			failedMatrices[id] = true
 			continue
 		}
@@ -761,22 +774,22 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
-				diagnostics = append(diagnostics, err)
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, err))
 				continue
 			}
 			labels, err := resolveRunsOn(job, context, matrix)
 			if err != nil {
-				diagnostics = append(diagnostics, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, "", "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())))
 				continue
 			}
 			queue, err := options.Runners.resolve(labels, options.EventTrust)
 			if err != nil {
-				diagnostics = append(diagnostics, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, "", "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())))
 				continue
 			}
 			concurrencyGroup, err := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
 			if err != nil {
-				diagnostics = append(diagnostics, err)
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, err))
 				continue
 			}
 			if concurrencyGroup != "" {
@@ -784,11 +797,11 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
-				diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err)))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
 				continue
 			}
 			if existingJob, exists := instanceKeys[key]; exists {
-				diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob)))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))))
 				continue
 			}
 			instanceKeys[key] = job.ID
@@ -827,7 +840,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				}
 				sort.Strings(members)
 				if len(members) == 0 {
-					diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need)))
+					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))))
 					continue
 				}
 				if instance.NeedGroups == nil {
@@ -843,11 +856,11 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					for _, output := range binding.outputs {
 						producers := byLogicalID[output.member]
 						if len(producers) == 0 {
-							diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member))
+							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)))
 							continue
 						}
 						if len(projected)+len(producers) > plan.MaxNeedOutputs {
-							diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs))
+							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)))
 							continue
 						}
 						for _, producer := range producers {
@@ -872,7 +885,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		}
 		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
 			position := job.Concurrency.Span.Start
-			diagnostics = append(diagnostics, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel"))
+			diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, "", "", 0, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")))
 		}
 	}
 
@@ -918,17 +931,17 @@ func permissionScopes(permissions *workflow.Permissions) map[string]string {
 
 func supported(path string, job workflow.Job) error {
 	if job.Reusable != nil {
-		return jobError(path, job, "internal error: unresolved reusable-workflow job")
+		return attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "internal error: unresolved reusable-workflow job"))
 	}
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
-		return jobError(path, job, "runs-on must resolve statically")
+		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for _, step := range job.Steps {
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {
-				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
+				return attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column, job.ID, "", "", 0, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID)))
 			}
 			ids[id] = struct{}{}
 		}

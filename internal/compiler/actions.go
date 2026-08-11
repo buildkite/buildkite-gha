@@ -85,23 +85,35 @@ type actionRequirements struct {
 // validateActionResolutions resolves each independent root invocation before
 // plan construction. It deliberately aggregates failures while sharing one
 // immutable source snapshot; no plan can be emitted unless every root passes.
-func validateActionResolutions(ctx context.Context, ir IR, options Options) error {
+func validateActionResolutions(ctx context.Context, ir IR, options Options) (ProcessingEvidence, error) {
 	actionSource := newMemoizedActionSource(options.ActionSource)
+	evidence := ProcessingEvidence{ActionResolutionComplete: true}
 	var diagnostics []error
 	for _, instance := range ir.Jobs {
 		for i, step := range instance.Steps {
-			if step.Kind != "uses" || (!options.ResolveActions && !strings.HasPrefix(step.Uses, "./")) {
+			if step.Kind != "uses" {
+				continue
+			}
+			if !options.ResolveActions && !strings.HasPrefix(step.Uses, "./") {
+				evidence.ActionResolutionComplete = false
 				continue
 			}
 			_, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, []string{step.Uses}, []map[string]string{step.With})
+			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil}
+			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
 				continue
 			}
 			position := step.Span.Start
-			diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err))
+			diagnostics = append(diagnostics, &ProcessingFinding{
+				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
+				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
+				Job: instance.LogicalJobID, Instance: instance.Key, Action: step.Uses, Step: i + 1,
+				Err: fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
+			})
 		}
 	}
-	return errors.Join(diagnostics...)
+	return evidence, errors.Join(diagnostics...)
 }
 
 // compileActionLocks builds one shared action DAG for all roots. Selectors are

@@ -11,16 +11,16 @@ import (
 )
 
 const (
-	stageWorkflowParsing = "workflow-parsing"
-	stageEventValidation = "event-validation"
-	stageGraph           = "static-graph-construction"
-	stageMatrix          = "matrix-expansion"
-	stageExpressions     = "expression-validation"
-	stageDiscovery       = "action-discovery"
-	stageResolution      = "action-resolution"
-	stagePlans           = "job-plan-construction"
-	stageAdmission       = "hosted-profile-admission"
-	stagePipeline        = "pipeline-generation"
+	stageWorkflowParsing = string(compiler.StageWorkflowParsing)
+	stageEventValidation = string(compiler.StageEventValidation)
+	stageGraph           = string(compiler.StageGraph)
+	stageMatrix          = string(compiler.StageMatrix)
+	stageExpressions     = string(compiler.StageExpressions)
+	stageDiscovery       = string(compiler.StageDiscovery)
+	stageResolution      = string(compiler.StageResolution)
+	stagePlans           = string(compiler.StagePlans)
+	stageAdmission       = string(compiler.StageAdmission)
+	stagePipeline        = string(compiler.StagePipeline)
 )
 
 var locatedDiagnosticPattern = regexp.MustCompile(`^(.+):(\d+):(\d+): (.*)$`)
@@ -70,10 +70,7 @@ func initialProcessingReport(path, profile string, eventEvaluated bool, report c
 		out.Compile.Result = "incompatible"
 		failed := map[string]bool{}
 		for _, err := range flattenErrors(processingErr) {
-			stage, code, category := classifyProcessingError(err)
-			if len(report.ParsedJobs) == 0 && stage != stageEventValidation {
-				stage, category = stageWorkflowParsing, "syntax"
-			}
+			stage, code, category := processingErrorDetails(err, stageGraph, compiler.CodeGraphInvalid, "compatibility")
 			failed[stage] = true
 			out.Diagnostics = append(out.Diagnostics, diagnosticFromError(path, stage, code, category, err))
 		}
@@ -108,26 +105,13 @@ func setInitialStageResults(report *compatibility.ProcessingReport, eventEvaluat
 }
 
 func addProcessingFailure(report *compatibility.ProcessingReport, path, stage, code, category string, err error) {
-	report.SetStage(stage, compatibility.Failed)
-	if stage == stageResolution && category == "action-resolution" {
-		markActions(report, compatibility.Passed)
-	}
 	for _, item := range flattenErrors(err) {
-		diagnostic := diagnosticFromError(path, stage, code, category, item)
+		itemStage, itemCode, itemCategory := processingErrorDetails(item, stage, code, category)
+		report.SetStage(itemStage, compatibility.Failed)
+		diagnostic := diagnosticFromError(path, itemStage, itemCode, itemCategory, item)
 		report.Diagnostics = append(report.Diagnostics, diagnostic)
 	}
 	markFailedJobs(report)
-	for i := range report.Actions {
-		if stage != stageResolution {
-			continue
-		}
-		for _, diagnostic := range report.Diagnostics {
-			jobMatches := diagnostic.Job == "" || actionJobMatches(*report, report.Actions[i].Job, diagnostic.Job)
-			if jobMatches && ((diagnostic.Action != "" && diagnostic.Action == report.Actions[i].Reference) || (diagnostic.Action == "" && strings.Contains(diagnostic.Message, report.Actions[i].Reference))) {
-				report.Actions[i].Result = compatibility.Failed
-			}
-		}
-	}
 }
 
 func markFailedJobs(report *compatibility.ProcessingReport) {
@@ -141,64 +125,50 @@ func markFailedJobs(report *compatibility.ProcessingReport) {
 		if report.Jobs[i].Instance == "" && failed[report.Jobs[i].ID] {
 			report.Jobs[i].Result = compatibility.Failed
 		}
-	}
-}
-
-func actionJobMatches(report compatibility.ProcessingReport, instance, logical string) bool {
-	for _, job := range report.Jobs {
-		if job.Instance == instance {
-			return job.ID == logical
+		for _, diagnostic := range report.Diagnostics {
+			if diagnostic.Level == "error" && diagnostic.Stage == stagePlans && diagnostic.Instance == report.Jobs[i].Instance && diagnostic.Instance != "" {
+				report.Jobs[i].Result = compatibility.Failed
+			}
 		}
 	}
-	return false
 }
 
-func markActions(report *compatibility.ProcessingReport, result string) {
-	for i := range report.Actions {
-		report.Actions[i].Result = result
-	}
-}
-
-func allLocalActions(actions []compatibility.ActionResult) bool {
-	for _, action := range actions {
-		if !strings.HasPrefix(action.Reference, "./") {
-			return false
+func applyProcessingEvidence(report *compatibility.ProcessingReport, evidence compiler.ProcessingEvidence) {
+	resolutionFailed := false
+	for _, evaluation := range evidence.Actions {
+		if !evaluation.Passed {
+			resolutionFailed = true
+		}
+		for i := range report.Actions {
+			if report.Actions[i].Job != evaluation.Instance || report.Actions[i].Step != evaluation.Step || report.Actions[i].Reference != evaluation.Reference {
+				continue
+			}
+			if evaluation.Passed {
+				report.Actions[i].Result = compatibility.Passed
+			} else {
+				report.Actions[i].Result = compatibility.Failed
+			}
 		}
 	}
-	return true
-}
-
-func markLaterPrerequisites(report *compatibility.ProcessingReport, failedStage string, hosted bool) {
-	if failedStage == stagePlans || failedStage == stageAdmission || failedStage == stagePipeline {
+	if resolutionFailed {
+		report.SetStage(stageResolution, compatibility.Failed)
+	} else if evidence.ActionResolutionComplete {
 		report.SetStage(stageResolution, compatibility.Passed)
-		markActions(report, compatibility.Passed)
 	}
-	if failedStage == stageAdmission || failedStage == stagePipeline {
+	if evidence.PlansConstructed {
 		report.SetStage(stagePlans, compatibility.Passed)
 	}
-	if hosted && failedStage == stagePipeline {
-		report.SetStage(stageAdmission, compatibility.Passed)
-		report.Admission.Result = "admitted"
-	}
-}
-
-func laterProcessingFailure(err error) (stage, code, category string) {
-	message := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(message, "runner label"), strings.Contains(message, "untrusted event cannot"), strings.Contains(message, "runs-on"), strings.Contains(message, "condition"), strings.Contains(message, "expression"):
-		return stageExpressions, "E_COMPILE", "compatibility"
-	case strings.Contains(message, "emit buildkite pipeline"), strings.Contains(message, "pipeline requires"), strings.Contains(message, "invalid compiler step"):
-		return stagePipeline, "E_PIPELINE_GENERATION", "compatibility"
-	case strings.Contains(message, "action"), strings.Contains(message, "source store"), strings.Contains(message, "workflow path must identify a repository root"):
-		return stageResolution, "E_ACTION_RESOLUTION", "action-resolution"
-	default:
-		return stagePlans, "E_PLAN_CONSTRUCTION", "compatibility"
+	if evidence.PipelineGenerated {
+		report.SetStage(stagePipeline, compatibility.Passed)
 	}
 }
 
 func flattenErrors(err error) []error {
 	if err == nil {
 		return nil
+	}
+	if _, ok := err.(*compiler.ProcessingFinding); ok {
+		return []error{err}
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		var out []error
@@ -207,30 +177,34 @@ func flattenErrors(err error) []error {
 		}
 		return out
 	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		nested := flattenErrors(wrapped.Unwrap())
+		for _, item := range nested {
+			if _, structured := item.(*compiler.ProcessingFinding); structured {
+				return nested
+			}
+		}
+	}
 	return []error{err}
 }
 
-func classifyProcessingError(err error) (stage, code, category string) {
-	message := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(message, "parse workflow yaml"), strings.Contains(message, "actionlint"), strings.Contains(message, "could not parse as yaml"), strings.Contains(message, "yaml syntax"):
-		return stageWorkflowParsing, "E_COMPILE", "syntax"
-	case strings.Contains(message, "event snapshot"):
-		return stageEventValidation, "E_COMPILE", "environment"
-	case strings.Contains(message, "matrix"):
-		return stageMatrix, "E_COMPILE", "compatibility"
-	case strings.Contains(message, "condition"), strings.Contains(message, "expression"), strings.Contains(message, "concurrency group"), strings.Contains(message, "runs-on"):
-		return stageExpressions, "E_COMPILE", "compatibility"
-	case strings.Contains(message, "needs unknown"), strings.Contains(message, "job graph"), strings.Contains(message, "reusable workflow"), strings.Contains(message, "flattened job"):
-		return stageGraph, "E_COMPILE", "compatibility"
-	default:
-		return stageGraph, "E_COMPILE", "compatibility"
+func processingErrorDetails(err error, fallbackStage, fallbackCode, fallbackCategory string) (stage, code, category string) {
+	if finding, ok := err.(*compiler.ProcessingFinding); ok {
+		return string(finding.Stage), finding.Code, finding.Category
 	}
+	return fallbackStage, fallbackCode, fallbackCategory
 }
 
 func diagnosticFromError(defaultPath, stage, code, category string, err error) compatibility.Diagnostic {
 	message := err.Error()
 	location := (*compatibility.SourceLocation)(nil)
+	var finding *compiler.ProcessingFinding
+	if structured, ok := err.(*compiler.ProcessingFinding); ok {
+		finding = structured
+		if finding.Path != "" {
+			location = sourceLocation(finding.Path, finding.Line, finding.Column)
+		}
+	}
 	if match := locatedDiagnosticPattern.FindStringSubmatch(message); match != nil {
 		line, lineErr := strconv.Atoi(match[2])
 		column, columnErr := strconv.Atoi(match[3])
@@ -243,19 +217,29 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) c
 		Level: "error", Code: code, Category: category, Stage: stage,
 		Message: message, Location: location,
 	}
+	if finding != nil {
+		diagnostic.Job = finding.Job
+		diagnostic.Instance = finding.Instance
+		diagnostic.Action = finding.Action
+		diagnostic.Step = finding.Step
+	}
 	if diagnostic.Location == nil && defaultPath != "" && stage != stageEventValidation {
 		diagnostic.Location = sourceLocation(defaultPath, 1, 1)
 	}
-	if start := strings.Index(message, `job "`); start >= 0 {
-		rest := message[start+len(`job "`):]
-		if end := strings.Index(rest, `"`); end >= 0 {
-			diagnostic.Job = rest[:end]
+	if diagnostic.Job == "" {
+		if start := strings.Index(message, `job "`); start >= 0 {
+			rest := message[start+len(`job "`):]
+			if end := strings.Index(rest, `"`); end >= 0 {
+				diagnostic.Job = rest[:end]
+			}
 		}
 	}
-	if start := strings.Index(message, `action "`); start >= 0 {
-		rest := message[start+len(`action "`):]
-		if end := strings.Index(rest, `"`); end >= 0 {
-			diagnostic.Action = rest[:end]
+	if diagnostic.Action == "" {
+		if start := strings.Index(message, `action "`); start >= 0 {
+			rest := message[start+len(`action "`):]
+			if end := strings.Index(rest, `"`); end >= 0 {
+				diagnostic.Action = rest[:end]
+			}
 		}
 	}
 	return diagnostic

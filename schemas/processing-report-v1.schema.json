@@ -106,7 +106,9 @@
         "message": {"type": "string", "minLength": 1, "maxLength": 16384},
         "location": {"$ref": "#/$defs/location"},
         "job": {"type": "string", "minLength": 1, "maxLength": 255},
-        "action": {"type": "string", "minLength": 1, "maxLength": 1024}
+        "instance": {"type": "string", "minLength": 1, "maxLength": 255},
+        "action": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "step": {"type": "integer", "minimum": 1}
       }
     }
   }

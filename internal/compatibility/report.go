@@ -40,7 +40,9 @@ type Diagnostic struct {
 	Message  string          `json:"message"`
 	Location *SourceLocation `json:"location,omitempty"`
 	Job      string          `json:"job,omitempty"`
+	Instance string          `json:"instance,omitempty"`
 	Action   string          `json:"action,omitempty"`
+	Step     int             `json:"step,omitempty"`
 }
 
 // ProcessingStage is one required workflow-processing boundary.
@@ -192,7 +194,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	out := diagnostics[:1]
 	for _, diagnostic := range diagnostics[1:] {
 		previous := out[len(out)-1]
-		if previous.Level == diagnostic.Level && previous.Code == diagnostic.Code && previous.Category == diagnostic.Category && previous.Stage == diagnostic.Stage && previous.Message == diagnostic.Message && previous.Job == diagnostic.Job && previous.Action == diagnostic.Action && sameLocation(previous.Location, diagnostic.Location) {
+		if previous.Level == diagnostic.Level && previous.Code == diagnostic.Code && previous.Category == diagnostic.Category && previous.Stage == diagnostic.Stage && previous.Message == diagnostic.Message && previous.Job == diagnostic.Job && previous.Instance == diagnostic.Instance && previous.Action == diagnostic.Action && previous.Step == diagnostic.Step && sameLocation(previous.Location, diagnostic.Location) {
 			continue
 		}
 		out = append(out, diagnostic)
@@ -275,8 +277,14 @@ func textDiagnosticMetadata(diagnostic Diagnostic) string {
 	if diagnostic.Job != "" {
 		fields = append(fields, "job="+diagnostic.Job)
 	}
+	if diagnostic.Instance != "" {
+		fields = append(fields, "instance="+diagnostic.Instance)
+	}
 	if diagnostic.Action != "" {
 		fields = append(fields, "action="+diagnostic.Action)
+	}
+	if diagnostic.Step != 0 {
+		fields = append(fields, fmt.Sprintf("step=%d", diagnostic.Step))
 	}
 	if len(fields) == 0 {
 		return ""

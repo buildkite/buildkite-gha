@@ -931,6 +931,11 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", "", nil)
+		applyProcessingEvidence(&processingReport, preflight.Bundle.Processing)
+		if preflight.Admitted {
+			processingReport.SetStage(stageAdmission, compatibility.Passed)
+			processingReport.Admission.Result = "admitted"
+		}
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
@@ -938,24 +943,37 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			}
 			var failure *hostedTokenlessFailure
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
-				profileReport := compatibility.ProfileBlocked(workflowPath, profile, report.LogicalJobs, report.Instances, profileErr)
-				if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
+				addProcessingFailure(&processingReport, workflowPath, stageAdmission, "E_PROFILE", "admission", profileErr)
+				processingReport.Admission.Result = "not-admitted"
+				processingReport.Result = "not-admitted"
+				if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
 					_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 				}
 				return 1
 			}
-			code := "E_PROFILE_EVALUATION"
+			code := compiler.CodeActionResolution
+			stage := stageResolution
+			category := "action-resolution"
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
 				code = "E_ENVIRONMENT"
 			}
-			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, code, profileErr)
-			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
+			addProcessingFailure(&processingReport, workflowPath, stage, code, category, profileErr)
+			processingReport.Result = "indeterminate"
+			if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
 		}
-		profileReport := compatibility.Admitted(workflowPath, profile, report.LogicalJobs, report.Instances, preflight.HasActions)
-		if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
+		processingReport.SetStage(stageAdmission, compatibility.Passed)
+		processingReport.Admission.Result = "admitted"
+		if preflight.HasActions {
+			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
+				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: stageAdmission,
+				Message: "resolved action metadata cannot prove that arbitrary action code is independent of GitHub-only runtime services",
+			})
+		}
+		processingReport.Result = "admitted"
+		if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			return 1
 		}
@@ -1063,14 +1081,23 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
+		applyProcessingEvidence(&processingReport, bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline
 		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+		addProcessingFailure(&processingReport, workflowPath, stagePlans, compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.Result = "incompatible"
+		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 		return 1
 	}
+	if format == "ir-json" {
+		processingReport.Result = "compilable"
+	} else {
+		processingReport.Result = "compilable"
+	}
+	_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 	writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
 	if _, err := stdout.Write(result); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
@@ -1172,6 +1199,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 type hostedTokenlessCompilation struct {
 	Bundle     compiler.Bundle
 	HasActions bool
+	Admitted   bool
 }
 
 type hostedTokenlessFailureKind string
@@ -1314,15 +1342,15 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	}
 	bundle, err := compiler.CompileBundleContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options)
 	if err != nil {
-		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
+		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
+		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
 	}
 	if !hasActions && bundleUsesActions(bundle) {
-		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
+		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
-	return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, nil
+	return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {

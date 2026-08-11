@@ -758,6 +758,13 @@ error so standard output remains the requested IR or pipeline. Upload writes
 the report into the importer log before artifact or pipeline upload. A failure
 in any required stage is fail-closed: no partial plans or pipeline are emitted.
 
+Stage failures use stable, stage-specific codes such as
+`E_WORKFLOW_SYNTAX`, `E_EVENT_INVALID`, `E_GRAPH_INVALID`,
+`E_MATRIX_INVALID`, `E_EXPRESSION_INVALID`, `E_ACTION_RESOLUTION`,
+`E_PLAN_CONSTRUCTION`, and `E_PIPELINE_GENERATION`. Environment and hosted
+admission failures use `E_ENVIRONMENT` and `E_PROFILE`. Action diagnostics also
+identify the exact expanded instance and step when that invocation is known.
+
 ### Event snapshots
 
 `compile` and profile validation take an explicit, bounded event snapshot:
