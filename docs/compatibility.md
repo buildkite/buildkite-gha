@@ -61,6 +61,16 @@ Steps remain inside one job because they share a workspace, environment files, a
 | `run-name` | Accepted, no effect | Buildkite names the build. The value is not retained. |
 | `on` | Accepted, no effect for build creation | Configure push, pull request, branch, tag, schedule, and manual triggers in Buildkite. |
 
+```yaml
+name: CI
+```
+
+```yaml
+on:
+  push:
+    branches: [main]
+```
+
 The plugin derives `pull_request` for pull request builds and `push` for other builds. Scheduled and manual Buildkite builds therefore use push semantics. Direct CLI callers may supply another event name through an [event snapshot](cli.md#provide-an-event-snapshot). The `on.workflow_call` key is the exception: it defines the interface for a local reusable workflow.
 
 ### Reusable workflows
@@ -88,9 +98,48 @@ The following behavior is unsupported:
 
 Job-level `uses`, `with`, and `secrets` follow these boundaries.
 
+Called workflow:
+
+```yaml
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+    outputs:
+      image:
+        value: ${{ jobs.build.outputs.image }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.value }}
+    steps:
+      - id: image
+        run: echo "value=app-${{ inputs.target }}" >> "$GITHUB_OUTPUT"
+```
+
+Caller:
+
+```yaml
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      target: production
+```
+
 ### Permissions
 
 Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an action input default references `github.token`.
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+```
 
 Supported values are `read`, `write`, and `none`. Supported names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `models`, `packages`, `pages`, `pull-requests`, `repository-projects`, `security-events`, and `statuses`. The `models` permission is read-only. The other names support `read` and `write`.
 
@@ -106,9 +155,36 @@ The `read-all` and `write-all` values, the `id-token` permission, and noncanonic
 | `defaults.run.shell` | Supported subset | Supported at workflow and job level. Only `bash` and `sh` are supported. Host jobs default to `bash`; job containers default to `sh`. |
 | `defaults.run.working-directory` | Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
+```yaml
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  test:
+    env:
+      GOFLAGS: -race
+```
+
+```yaml
+defaults:
+  run:
+    shell: bash
+    working-directory: ./src
+```
+
 ### Concurrency
 
 A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+jobs:
+  deploy:
+    concurrency: deploy-${{ matrix.target }}
+```
 
 Buildkite queues every waiting entry. It does not replace GitHub's existing pending entry. The `queue` key is unsupported.
 
@@ -133,6 +209,45 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `environment` | Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
 | `snapshot` | Accepted, no effect | Custom image creation is not implemented. |
 
+```yaml
+jobs:
+  test:
+    name: Test Go ${{ matrix.go }}
+```
+
+```yaml
+jobs:
+  build:
+    # ...
+  test:
+    needs: build
+```
+
+```yaml
+runs-on: ${{ matrix.os }}
+```
+
+```yaml
+if: github.ref == 'refs/heads/main' && success()
+```
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.value }}
+    steps:
+      - id: image
+        run: echo "value=app:latest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ needs.build.outputs.image }}"
+```
+
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
 
 Runner labels are compatibility labels, not image selection. The selected Buildkite agent must provide the tools the workflow uses. Windows, macOS, and arm64 labels are unsupported.
@@ -145,6 +260,17 @@ Runner labels are compatibility labels, not image selection. The selected Buildk
 | `include`, `exclude` | Supported subset | Static combinations. |
 | `max-parallel` | Supported subset | Literal value. |
 | `fail-fast` | Accepted, no effect | A failed matrix entry does not cancel its siblings. |
+
+```yaml
+strategy:
+  max-parallel: 2
+  matrix:
+    go: ["1.25", "1.26"]
+    os: [ubuntu-22.04, ubuntu-24.04]
+    exclude:
+      - go: "1.25"
+        os: ubuntu-24.04
+```
 
 A job may expand to at most 256 instances. Matrices derived from `needs` or `steps` are unsupported.
 
@@ -166,15 +292,57 @@ The underlying subset accepts literal public image names, environment maps, and 
 | `continue-on-error` | Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
 | `timeout-minutes` | Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 
+```yaml
+- id: test
+  run: go test ./...
+  continue-on-error: true
+
+- if: steps.test.outcome == 'failure'
+  run: ./scripts/report-failure
+```
+
 ### Commands and actions
 
 Commands run in Linux `bash` or `sh` within the workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
 
+```yaml
+- name: Test
+  shell: bash
+  working-directory: ./src
+  run: go test ./...
+```
+
 A `uses` step may call a supported local or public action. Action inputs under `with` may use supported direct interpolation. `docker://` actions and action `entrypoint` or `args` overrides are rejected.
+
+```yaml
+- uses: actions/checkout@v7
+
+- uses: ./.github/actions/build
+  with:
+    target: production
+```
 
 ### Background and parallel steps
 
 The `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls are supported. At most ten background steps run at once inside a job. Use `wait: <id>` for selected steps, `wait-all:` for all active work, or `parallel:` for a fixed group.
+
+```yaml
+steps:
+  - id: server
+    run: ./scripts/start-server
+    background: true
+
+  - run: ./scripts/test
+
+  - cancel: server
+```
+
+```yaml
+steps:
+  - parallel:
+      - run: ./scripts/lint
+      - run: ./scripts/test
+```
 
 Outputs, environment changes, and failures become visible at the covering wait. Remaining work is joined before post-action cleanup. These controls are not supported inside a composite action.
 
@@ -218,6 +386,10 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 ### Runtime interpolation
 
 Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. General operators and functions are not supported inside interpolated strings.
+
+```yaml
+run: echo "${{ needs.build.outputs.image }}"
+```
 
 At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repository`, and `github.sha` are retained. `github.event` is unavailable.
 
@@ -371,6 +543,19 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
 
+```yaml
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment "$PR_NUMBER" --body "Checks passed"
+```
+
 Job binding does not establish fork or actor trust. If untrusted sources can edit workflows, they can request write permissions. Restrict write tokens with Buildkite pipeline and organization policy.
 
 The token is not added to the initial job environment. The `github.token` value is available only while evaluating an effective action metadata input default. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` are unsupported.
@@ -421,13 +606,13 @@ By default, `RUNNER_TOOL_CACHE` points to a fresh job-private directory. An oper
 
 Check syntax and static graph construction without an event:
 
-```bash
+```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
 Apply the same profile as production upload:
 
-```bash
+```sh
 buildkite-gha validate \
   --profile hosted-tokenless \
   --event-path .buildkite/events/current.json \

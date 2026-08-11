@@ -66,13 +66,13 @@ Some features support a limited subset or behave differently on Buildkite. Check
 
 Check syntax and the static job graph without contacting Buildkite or executing workflow code:
 
-```bash
+```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
 To resolve public actions and apply the production upload policy, provide an event snapshot:
 
-```bash
+```sh
 buildkite-gha validate \
   --profile hosted-tokenless \
   --event-path .buildkite/events/current.json \

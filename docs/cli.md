@@ -14,13 +14,13 @@ Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requi
 
 Validate syntax and the static graph:
 
-```bash
+```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
 Resolve actions and apply production policy:
 
-```bash
+```sh
 buildkite-gha validate \
   --profile hosted-tokenless \
   --event-path .buildkite/events/current.json \
@@ -64,7 +64,7 @@ The snapshot is compatibility data, not authorization.
 
 Render Buildkite pipeline YAML:
 
-```bash
+```sh
 buildkite-gha compile \
   --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
@@ -72,7 +72,7 @@ buildkite-gha compile \
 
 Inspect compiler IR:
 
-```bash
+```sh
 buildkite-gha compile \
   --event-path .buildkite/events/current.json \
   --format ir-json \
@@ -85,7 +85,7 @@ buildkite-gha compile \
 
 `upload` is the public in-build command for custom importers:
 
-```bash
+```sh
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
@@ -105,7 +105,7 @@ Raw webhook data is not retained in generated plans or pipeline YAML and cannot 
 
 The command uploads the exact executable and content-addressed plans before running:
 
-```bash
+```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
 ```
 

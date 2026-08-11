@@ -53,7 +53,7 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
 1. Keep Git and the job image patched.
 1. Validate before upload:
 
-    ```bash
+    ```sh
     buildkite-gha validate \
       --profile hosted-tokenless \
       --event-path event.json \

@@ -4,14 +4,14 @@
 
 The repository pins Go, Node, lint, and release tools with `mise`:
 
-```bash
+```sh
 mise trust mise.toml
 mise install
 ```
 
 `mise.lock` lets locked CI jobs install tools without release API discovery. When tool versions change, regenerate it with `mise` 2026.5.12 or newer:
 
-```bash
+```sh
 mise lock --platform linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-x64,macos-arm64,windows-x64
 ```
 
@@ -19,7 +19,7 @@ mise lock --platform linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos
 
 Run the same aggregate gate as CI:
 
-```bash
+```sh
 mise run check
 ```
 
@@ -27,7 +27,7 @@ mise run check
 
 Useful focused tasks are:
 
-```bash
+```sh
 mise run build
 mise run test
 mise run test:race
@@ -41,7 +41,7 @@ mise run release:check
 
 `mise run smoke:local` is network-free. It validates the smoke inventory and compiles each workflow twice. A pass proves deterministic compilation, not runtime behavior.
 
-```bash
+```sh
 mise run smoke:profile
 ```
 
@@ -53,7 +53,7 @@ Every normal Buildkite build runs repository checks and executes the basic examp
 
 Run the complete hosted smoke suite for a pushed commit with:
 
-```bash
+```sh
 commit=$(git rev-parse HEAD)
 test ${#commit} -eq 40
 bk build create --pipeline buildkite/buildkite-gha \
@@ -65,7 +65,7 @@ This suite covers shell jobs, concurrent steps, public and Dockerfile actions, c
 
 Some Buildkite APIs are advisory, so a passing job does not prove that the result was persisted. Check those results independently after the build:
 
-```bash
+```sh
 scripts/verify-summary-annotation <build-number> <commit>
 scripts/verify-workflow-annotations <build-number> <commit>
 scripts/verify-upload-artifact <build-number> <commit>
@@ -76,7 +76,7 @@ scripts/verify-artifact-roundtrip <build-number> <commit>
 
 Run the examples through the released plugin and its normal release installer:
 
-```bash
+```sh
 commit=$(git rev-parse HEAD)
 bk build create --pipeline buildkite/buildkite-gha \
   --branch "$(git branch --show-current)" --commit "$commit" \
@@ -87,7 +87,7 @@ Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer wor
 
 For a side-by-side GitHub Actions and Buildkite UX check, run:
 
-```bash
+```sh
 scripts/compare-example basic
 scripts/compare-example artifacts
 scripts/compare-example advanced
@@ -99,7 +99,7 @@ The branch must be pushed, and its remote commit must match `HEAD`. Use `--githu
 
 From a clean, up-to-date `main`, run:
 
-```bash
+```sh
 mise run release
 ```
 
