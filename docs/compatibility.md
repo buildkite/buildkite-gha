@@ -8,31 +8,31 @@ GitHub Actions syntax changes over time. If a feature is not listed here, treat 
 
 | Status | Meaning |
 | --- | --- |
-| Supported | Available through the production plugin path. |
-| Supported subset | Available within the limits shown here. |
-| Accepted, no effect | Validation accepts the syntax, but it does not change the build. |
-| Not available in production | The compiler or runtime supports it, but production upload blocks it. |
-| Unsupported | Rejected or outside the compatibility contract. |
+| ✅ **Supported** | Available through the production plugin path. |
+| 🟡 **Supported subset** | Available within the limits shown here. |
+| ➖ **Accepted, no effect** | Validation accepts the syntax, but it does not change the build. |
+| 🚧 **Not available in production** | The compiler or runtime supports it, but production upload blocks it. |
+| ❌ **Unsupported** | Rejected or outside the compatibility contract. |
 
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
-| [Workflow and job names](#workflow-syntax) | Supported subset | `name` and job names are retained. `run-name` has no effect. |
-| [Triggers and filters under `on`](#names-and-triggers) | Accepted, no effect | Buildkite creates and filters builds. Local `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. These labels do not provide GitHub image parity. |
-| [Jobs and dependencies](#job-configuration) | Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
-| [Matrix strategies](#matrix-strategies) | Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | Supported subset | Linux `bash` and `sh`. |
-| [Conditions and expressions](#expressions-and-contexts) | Supported subset | Boolean and equality conditions and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
-| [Actions](#actions) | Supported subset | Local and public JavaScript, composite, and verified Dockerfile actions. |
-| [Checkout, artifacts, and cache](#actions) | Supported subset | Only the audited versions and modes listed below. |
-| [`GITHUB_TOKEN`](#github-token) | Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
-| [Other workflow secrets](#other-secrets-and-oidc) | Not available in production | Production upload rejects ordinary secret requirements. |
-| [Job and service containers](#containers-and-services) | Not available in production | A bounded container subset exists, but production upload rejects it. |
-| [Environments and snapshots](#job-configuration) | Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
-| [OIDC](#other-secrets-and-oidc) | Unsupported | GitHub-compatible OIDC is outside the initial release. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | Unsupported | Windows, macOS, Linux arm64, GitHub Enterprise Server, and other providers are outside the initial release. |
-| [Other GitHub services](#github-services) | Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
+| [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
+| [Triggers and filters under `on`](#names-and-triggers) | ➖ Accepted, no effect | Buildkite creates and filters builds. Local `workflow_call` is supported for composition. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. These labels do not provide GitHub image parity. |
+| [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
+| [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux `bash` and `sh`. |
+| [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions and direct references to selected contexts. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript, composite, and verified Dockerfile actions. |
+| [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
+| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
+| [Other workflow secrets](#other-secrets-and-oidc) | 🚧 Not available in production | Production upload rejects ordinary secret requirements. |
+| [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
+| [Environments and snapshots](#job-configuration) | ➖ Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
+| [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, macOS, Linux arm64, GitHub Enterprise Server, and other providers are outside the initial release. |
+| [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
 ## How workflows run on Buildkite
 
@@ -57,9 +57,9 @@ Steps remain inside one job because they share a workspace, environment files, a
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `name` | Supported | Available as `github.workflow` and used to name generated work. |
-| `run-name` | Accepted, no effect | Buildkite names the build. The value is not retained. |
-| `on` | Accepted, no effect for build creation | Configure push, pull request, branch, tag, schedule, and manual triggers in Buildkite. |
+| `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
+| `run-name` | ➖ Accepted, no effect | Buildkite names the build. The value is not retained. |
+| `on` | ➖ Accepted, no effect for build creation | Configure push, pull request, branch, tag, schedule, and manual triggers in Buildkite. |
 
 ```yaml
 name: CI
@@ -75,9 +75,9 @@ The plugin derives `pull_request` for pull request builds and `push` for other b
 
 ### Reusable workflows
 
-The caller and called workflow must be in the same repository and commit.
+**🟡 Supported subset.** The caller and called workflow must be in the same repository and commit.
 
-Supported behavior includes:
+**✅ Supported:**
 
 - Local `./.github/workflows/...` paths.
 - `boolean`, `number`, and `string` inputs.
@@ -87,7 +87,7 @@ Supported behavior includes:
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
 
-The following behavior is unsupported:
+**❌ Unsupported:**
 
 - Remote or dynamic workflow paths.
 - Call-level `if`.
@@ -133,7 +133,7 @@ jobs:
 
 ### Permissions
 
-Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an action input default references `github.token`.
+**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an action input default references `github.token`.
 
 ```yaml
 permissions:
@@ -151,9 +151,9 @@ The `read-all` and `write-all` values, the `id-token` permission, and noncanonic
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `env` | Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
-| `defaults.run.shell` | Supported subset | Supported at workflow and job level. Only `bash` and `sh` are supported. Host jobs default to `bash`; job containers default to `sh`. |
-| `defaults.run.working-directory` | Supported subset | Supported at workflow and job level for workspace-relative paths. |
+| `env` | 🟡 Supported subset | Workflow, job, and step maps use normal precedence; the most specific value wins. Individual values may use supported interpolation. An entire map cannot be expression-valued. |
+| `defaults.run.shell` | 🟡 Supported subset | Supported at workflow and job level. Only `bash` and `sh` are supported. Host jobs default to `bash`; job containers default to `sh`. |
+| `defaults.run.working-directory` | 🟡 Supported subset | Supported at workflow and job level for workspace-relative paths. |
 
 ```yaml
 env:
@@ -174,7 +174,7 @@ defaults:
 
 ### Concurrency
 
-A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
 
 ```yaml
 concurrency:
@@ -198,16 +198,16 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `name` | Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
-| `needs` | Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | Supported subset | Accepts `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04`. Static expressions may resolve to an accepted label or list whose labels map to the same Buildkite queue. |
-| `if` | Supported subset | Runs before the job starts. See [Conditions](#conditions). |
-| `outputs` | Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
-| `env`, `defaults.run` | Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
-| `timeout-minutes` | Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
-| `continue-on-error` | Unsupported | Validation rejects the job-level key. Step-level `continue-on-error` is supported. |
-| `environment` | Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
-| `snapshot` | Accepted, no effect | Custom image creation is not implemented. |
+| `name` | ✅ Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
+| `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
+| `runs-on` | 🟡 Supported subset | Accepts `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04`. Static expressions may resolve to an accepted label or list whose labels map to the same Buildkite queue. |
+| `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
+| `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
+| `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
+| `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
+| `continue-on-error` | ❌ Unsupported | Validation rejects the job-level key. Step-level `continue-on-error` is supported. |
+| `environment` | ➖ Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
+| `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
 ```yaml
 jobs:
@@ -256,10 +256,10 @@ Runner labels are compatibility labels, not image selection. The selected Buildk
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `matrix` | Supported subset | Literal rows or compile-time `github`, `event`, `vars`, and `fromJSON` values. |
-| `include`, `exclude` | Supported subset | Static combinations. |
-| `max-parallel` | Supported subset | Literal value. |
-| `fail-fast` | Accepted, no effect | A failed matrix entry does not cancel its siblings. |
+| `matrix` | 🟡 Supported subset | Literal rows or compile-time `github`, `event`, `vars`, and `fromJSON` values. |
+| `include`, `exclude` | 🟡 Supported subset | Static combinations. |
+| `max-parallel` | 🟡 Supported subset | Literal value. |
+| `fail-fast` | ➖ Accepted, no effect | A failed matrix entry does not cancel its siblings. |
 
 ```yaml
 strategy:
@@ -276,7 +276,7 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 ### Containers and services
 
-Job `container` and `services` are not available in production. The compiler and runtime support a bounded Linux subset, but the `hosted-tokenless` profile rejects it before upload.
+**🚧 Not available in production.** The compiler and runtime support a bounded Linux subset for job `container` and `services`, but the `hosted-tokenless` profile rejects it before upload.
 
 The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
 
@@ -286,11 +286,11 @@ The underlying subset accepts literal public image names, environment maps, and 
 
 | Key | Status | Behavior |
 | --- | --- | --- |
-| `name`, `id` | Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
-| `if` | Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
-| `env` | Supported subset | Values override job and workflow values and may use supported direct interpolation. |
-| `continue-on-error` | Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
-| `timeout-minutes` | Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
+| `name`, `id` | ✅ Supported | Use `id` to read outputs or target background work. IDs must be unique within a job. |
+| `if` | 🟡 Supported subset | May use step status, step outputs, `env`, and service ports in addition to job-condition contexts. |
+| `env` | 🟡 Supported subset | Values override job and workflow values and may use supported direct interpolation. |
+| `continue-on-error` | ✅ Supported | A failure records `outcome: failure` and `conclusion: success`, then the job continues. |
+| `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 
 ```yaml
 - id: test
@@ -303,7 +303,7 @@ The underlying subset accepts literal public image names, environment maps, and 
 
 ### Commands and actions
 
-Commands run in Linux `bash` or `sh` within the workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
+**🟡 Supported subset.** Commands run in Linux `bash` or `sh` within the workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
 
 ```yaml
 - name: Test
@@ -324,7 +324,7 @@ A `uses` step may call a supported local or public action. Action inputs under `
 
 ### Background and parallel steps
 
-The `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls are supported. At most ten background steps run at once inside a job. Use `wait: <id>` for selected steps, `wait-all:` for all active work, or `parallel:` for a fixed group.
+**✅ Supported.** The `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls are supported. At most ten background steps run at once inside a job. Use `wait: <id>` for selected steps, `wait-all:` for all active work, or `parallel:` for a fixed group.
 
 ```yaml
 steps:
@@ -348,17 +348,17 @@ Outputs, environment changes, and failures become visible at the covering wait. 
 
 ### Environment files
 
-The runtime supports `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`. Multiline values are supported. `NODE_OPTIONS` cannot be set through `GITHUB_ENV`.
+**✅ Supported.** The runtime supports `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_STATE`, and `GITHUB_STEP_SUMMARY`. Multiline values are supported. `NODE_OPTIONS` cannot be set through `GITHUB_ENV`.
 
 ### Workflow commands
 
 | Command | Status | Behavior |
 | --- | --- | --- |
-| `add-mask`, `stop-commands` | Supported | Standard command behavior. |
-| `warning`, `error` | Supported | Creates Buildkite annotations. |
-| `group`, `endgroup` | Supported | Creates linear log sections. |
-| Debug and matcher commands | Accepted, no effect | Consumed without presentation behavior. |
-| `notice`, command echo control, other legacy commands | Unsupported | Not implemented. |
+| `add-mask`, `stop-commands` | ✅ Supported | Standard command behavior. |
+| `warning`, `error` | ✅ Supported | Creates Buildkite annotations. |
+| `group`, `endgroup` | ✅ Supported | Creates linear log sections. |
+| Debug and matcher commands | ➖ Accepted, no effect | Consumed without presentation behavior. |
+| `notice`, command echo control, other legacy commands | ❌ Unsupported | Not implemented. |
 
 Step summaries become job-scoped Buildkite annotations and require Buildkite agent v3.112 or newer. The total job summary is limited to 1 MiB.
 
@@ -372,14 +372,14 @@ Job and step `if` conditions support literals; `!`, `&&`, `||`, `==`, and `!=`; 
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
-| `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | Yes | Yes |
-| `needs.<job>.result`, `needs.<job>.outputs.<name>` | Yes | Yes |
-| `vars.<name>`, `matrix.<name>` | Yes | Yes |
-| `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | No | Yes |
-| `env.<name>` | No | Yes |
-| `job.services.<service>.ports[<port>]` | No | Yes |
-| `github.event.*` | Compile time only | Compile time only |
-| `secrets` and other contexts | No | No |
+| `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
+| `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
+| `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
+| `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
+| `env.<name>` | ❌ No | ✅ Yes |
+| `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
+| `github.event.*` | 🟡 Compile time only | 🟡 Compile time only |
+| `secrets` and other contexts | ❌ No | ❌ No |
 
 An event-backed condition is evaluated from the immutable event snapshot before runtime validation. Every branch is validated before evaluation, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A condition that cannot be fully resolved at compile time cannot carry `github.event` into the runtime.
 
@@ -403,13 +403,13 @@ Matrices, runner labels, names, concurrency groups, and event-backed conditions 
 
 | Action type | Status | Boundary |
 | --- | --- | --- |
-| Local `./...` action | Supported subset | Source tree is digest-locked and reverified. |
-| Public `owner/repo[/path]@ref` action | Supported subset | Resolved to an exact commit and digest. |
-| Private action | Unsupported | No private action source access. |
-| JavaScript action | Supported | Declares `node16`, `node20`, or `node24`. |
-| Composite action | Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`. |
-| Dockerfile action | Supported subset | Verified local or public Dockerfile action. |
-| `docker://` action | Unsupported | Rejected during validation. |
+| Local `./...` action | 🟡 Supported subset | Source tree is digest-locked and reverified. |
+| Public `owner/repo[/path]@ref` action | 🟡 Supported subset | Resolved to an exact commit and digest. |
+| Private action | ❌ Unsupported | No private action source access. |
+| JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
+| Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`. |
+| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action. |
+| `docker://` action | ❌ Unsupported | Rejected during validation. |
 
 Mutable public refs are resolved during upload, then locked to a commit. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
 
@@ -425,7 +425,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-Only these resolved `actions/checkout` commits are admitted:
+**🟡 Supported subset.** Only these resolved `actions/checkout` commits are admitted:
 
 | Release | Commit |
 | --- | --- |
@@ -468,7 +468,7 @@ Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout, G
 
 ### Upload artifact action
 
-These root `actions/upload-artifact` actions use a native Buildkite ZIP adapter:
+**🟡 Supported subset.** These root `actions/upload-artifact` actions use a native Buildkite ZIP adapter:
 
 | Release | Commit |
 | --- | --- |
@@ -479,13 +479,13 @@ These root `actions/upload-artifact` actions use a native Buildkite ZIP adapter:
 
 | Input | Supported values |
 | --- | --- |
-| `name` | Supported; defaults to `artifact`. |
+| `name` | ✅ Supported; defaults to `artifact`. |
 | `path` | Required; literal files or directories, or bounded `*`, `?`, character-class, and `**` file globs. |
 | `if-no-files-found` | `warn`, `error`, or `ignore`. |
 | `retention-days` | Nonnegative integer; advisory only. |
 | `compression-level` | `0` through `9`. |
 | `overwrite` | Omitted or `false`. |
-| `include-hidden-files` | Supported. |
+| `include-hidden-files` | ✅ Supported. |
 | `archive` | v7.0.1 only; omitted or `true`. |
 
 Unsupported path forms include exclusions, symlinks, absolute paths, traversal, braces, extglobs, leading glob comments, and special files. At most 32 path roots may be selected. Hidden path segments remain excluded unless explicitly enabled.
@@ -496,7 +496,7 @@ The adapter sets `artifact-id` and `artifact-digest`. The `artifact-url` output 
 
 ### Download artifact action
 
-These root `actions/download-artifact` actions use the same producer-bound ZIP mode:
+**🟡 Supported subset.** These root `actions/download-artifact` actions use the same producer-bound ZIP mode:
 
 | Release | Commit |
 | --- | --- |
@@ -522,7 +522,7 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-Only `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) is admitted. Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service. v4, v5, and unknown v6 commits are unsupported.
+**🟡 Supported subset.** Only `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) is admitted. Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service. v4, v5, and unknown v6 commits are unsupported.
 
 JavaScript and Docker actions with compatible bundled cache clients, such as `actions/setup-go`, also receive job-bound cache-v2 credentials when the service is available. Ordinary `run` steps and native action adapters do not.
 
@@ -532,16 +532,16 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 | Source | Status | Boundary |
 | --- | --- | --- |
-| Public GitHub event repository | Supported | No additional boundary. |
-| Private GitHub event repository | Supported subset | Buildkite must authorize repository-provider Git credentials. |
-| Alternate repository in `actions/checkout` | Unsupported | Not available. |
-| Public GitHub action | Supported subset | Subject to the action boundaries above. |
-| Private action or reusable workflow | Unsupported | Not available. |
-| GitHub Enterprise Server or another provider | Unsupported | Not available. |
+| Public GitHub event repository | ✅ Supported | No additional boundary. |
+| Private GitHub event repository | 🟡 Supported subset | Buildkite must authorize repository-provider Git credentials. |
+| Alternate repository in `actions/checkout` | ❌ Unsupported | Not available. |
+| Public GitHub action | 🟡 Supported subset | Subject to the action boundaries above. |
+| Private action or reusable workflow | ❌ Unsupported | Not available. |
+| GitHub Enterprise Server or another provider | ❌ Unsupported | Not available. |
 
 ### GitHub token
 
-A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
 
 ```yaml
 permissions:
@@ -562,13 +562,13 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Other secrets and OIDC
 
-The production profile rejects ordinary workflow secrets, although the compiler and runtime define an explicit boundary for them. Reusable workflow secret mappings and environment secrets are also unavailable. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere. `GITHUB_TOKEN` continues to use its separate permission-scoped contract regardless of action input optionality.
+**🚧 Not available in production.** The production profile rejects ordinary workflow secrets, although the compiler and runtime define an explicit boundary for them. Reusable workflow secret mappings and environment secrets are also unavailable. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere. `GITHUB_TOKEN` continues to use its separate permission-scoped contract regardless of action input optionality.
 
-GitHub-compatible OIDC and `id-token` are unsupported and not implemented.
+**❌ Unsupported.** GitHub-compatible OIDC and `id-token` are not implemented.
 
 ### GitHub services
 
-GitHub services are unsupported beyond the integrations listed above. An action's runtime may still require unsupported GitHub services. Buildkite provides no GitHub Artifact, OIDC, Packages, Releases, Checks, or deployment service emulation beyond the documented integrations.
+**❌ Unsupported beyond the integrations listed above.** An action's runtime may still require unsupported GitHub services. Buildkite provides no GitHub Artifact, OIDC, Packages, Releases, Checks, or deployment service emulation beyond the documented integrations.
 
 ## Runtime behavior and limits
 
