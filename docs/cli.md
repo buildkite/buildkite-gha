@@ -112,10 +112,10 @@ Event source precedence is:
 3. a reduced snapshot derived from `BUILDKITE_*` variables when no linked
    webhook is available.
 
-An explicit event path never reads Buildkite metadata. A malformed or
-unreadable linked webhook stops upload rather than falling back. Buildkite's
-repository mapping, commit, and ref remain authoritative for the workload being
-run.
+An explicit event path never reads Buildkite metadata. Webhook metadata must be
+one valid JSON object no larger than 25 MiB. Malformed, unreadable, or oversized
+data stops upload rather than falling back. Buildkite's repository mapping,
+commit, and ref remain authoritative for the workload being run.
 
 Raw webhook data is not retained in generated plans or pipeline YAML and cannot
 grant queues, secrets, or tokens.

@@ -172,6 +172,8 @@ are:
 `deployments`, `discussions`, `issues`, `models`, `packages`, `pages`,
 `pull-requests`, `repository-projects`, `security-events`, and `statuses`.
 
+`models` is read-only. The other names support `read` and `write`.
+
 An omitted map defaults to `contents: read` when a token is needed. A job map
 replaces the workflow map; it does not merge with it. A called workflow may
 only narrow its caller's permissions.
@@ -406,7 +408,7 @@ and service ports in addition to job-condition contexts.
   run: go test ./...
   continue-on-error: true
 
-- if: failure() && steps.test.outcome == 'failure'
+- if: steps.test.outcome == 'failure'
   run: ./scripts/report-failure
 ```
 
@@ -568,7 +570,7 @@ Values derived from runtime `needs` or `steps` are unsupported.
 | Public `owner/repo[/path]@ref` action | Supported subset | Resolved to an exact commit and digest. |
 | Private action | Unsupported | No private action source access. |
 | JavaScript action | Supported | `node16`, `node20`, or `node24` declaration. |
-| Composite action | Supported subset | Nested shell and local action steps; `bash` or `sh` for `run`. |
+| Composite action | Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`. |
 | Dockerfile action | Supported subset | Verified local or public Dockerfile action. |
 | `docker://` action | Unsupported | Rejected during validation. |
 
@@ -576,8 +578,10 @@ Mutable public refs are resolved during upload, then locked to a commit. Exact
 lowercase commit SHAs need no GitHub API lookup. Complete source trees are
 verified again at runtime.
 
-Nested action calls inside a composite action must be local. Dockerfile actions
-cannot request credentials, volumes, arbitrary options, or privileged mode.
+Nested calls from a repository-local composite must be local. Public composites
+may call local children or other public actions; every child is resolved and
+locked. Dockerfile actions cannot request credentials, volumes, arbitrary
+options, or privileged mode.
 
 ### JavaScript runtimes
 
@@ -740,6 +744,10 @@ jobs:
 
 The Buildkite organization must enable the job-bound token service. Buildkite's
 server-side repository and permission policy remains the authority.
+
+Job binding does not establish fork or actor trust. If untrusted sources can
+edit workflows, they can request write permissions. Restrict write tokens with
+Buildkite pipeline and organization policy.
 
 The token is not added to the initial job environment. `github.token` is
 available only while evaluating an effective action metadata input default.
