@@ -136,6 +136,12 @@ func (r *ProcessingReport) Finalize() {
 			r.Status = Passed
 		}
 	}
+	for _, diagnostic := range r.Diagnostics {
+		if diagnostic.Level == "error" {
+			r.Status = Failed
+			break
+		}
+	}
 	if r.Result == NotEvaluated {
 		r.Result = r.Status
 	}
@@ -214,7 +220,7 @@ func WriteProcessing(w io.Writer, format string, report ProcessingReport) error 
 	report.Finalize()
 	switch format {
 	case "text":
-		if _, err := fmt.Fprintf(w, "Schema: %s\nWorkflow: %s\nResult: %s\nStatus: %s\n", report.Schema, report.Workflow, report.Result, report.Status); err != nil {
+		if _, err := fmt.Fprintf(w, "Schema: %s\nWorkflow: %s\nResult: %s\nStatus: %s\nLogical jobs: %d\nInstances: %d\nCompile: %s\nAdmission: %s\n", report.Schema, report.Workflow, report.Result, report.Status, report.LogicalJobs, report.Instances, report.Compile.Result, report.Admission.Result); err != nil {
 			return err
 		}
 		if report.Profile != "" {

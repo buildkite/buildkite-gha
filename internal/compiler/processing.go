@@ -44,6 +44,7 @@ type ProcessingFinding struct {
 	Instance string
 	Action   string
 	Step     int
+	Message  string
 	Err      error
 }
 
@@ -101,11 +102,20 @@ type ActionEvaluation struct {
 	Passed    bool
 }
 
+// JobEvaluation records whether plan construction ran for one instance.
+type JobEvaluation struct {
+	Instance  string
+	Job       string
+	Evaluated bool
+	Passed    bool
+}
+
 // ProcessingEvidence records facts learned before bundle construction stops.
 // It is returned on both success and failure.
 type ProcessingEvidence struct {
 	ActionResolutionComplete bool
 	Actions                  []ActionEvaluation
+	Plans                    []JobEvaluation
 	PlansConstructed         bool
 	PipelineGenerated        bool
 }

@@ -125,6 +125,32 @@ func addProcessingFailure(report *compatibility.ProcessingReport, path, stage, c
 	markFailedJobs(report)
 }
 
+func addEnvironmentFailure(report *compatibility.ProcessingReport, message string) {
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Code: "E_ENVIRONMENT", Category: "environment", Message: message,
+	})
+}
+
+func environmentProcessingReport(path, profile, message string) compatibility.ProcessingReport {
+	report := compatibility.NewProcessingReport(path, profile)
+	report.Result = "indeterminate"
+	addEnvironmentFailure(&report, message)
+	return report
+}
+
+func eventInputProcessingReport(path, profile string, source []byte, message string) compatibility.ProcessingReport {
+	validation, validationErr := compiler.Validate(path, source)
+	report := initialProcessingReport(path, profile, false, validation, validationErr)
+	if validationErr != nil {
+		report.Result = "incompatible"
+	} else {
+		report.Result = "indeterminate"
+		report.Compile.Result = compatibility.NotEvaluated
+	}
+	addEnvironmentFailure(&report, message)
+	return report
+}
+
 func markFailedJobs(report *compatibility.ProcessingReport) {
 	failed := map[string]bool{}
 	for _, diagnostic := range report.Diagnostics {
@@ -137,7 +163,7 @@ func markFailedJobs(report *compatibility.ProcessingReport) {
 			report.Jobs[i].Result = compatibility.Failed
 		}
 		for _, diagnostic := range report.Diagnostics {
-			if diagnostic.Level == "error" && diagnostic.Stage == stagePlans && diagnostic.Instance == report.Jobs[i].Instance && diagnostic.Instance != "" {
+			if diagnostic.Level == "error" && diagnostic.Instance == report.Jobs[i].Instance && diagnostic.Instance != "" && diagnostic.Stage != stageResolution {
 				report.Jobs[i].Result = compatibility.Failed
 			}
 		}
@@ -165,6 +191,21 @@ func applyProcessingEvidence(report *compatibility.ProcessingReport, evidence co
 		report.SetStage(stageResolution, compatibility.Failed)
 	} else if evidence.ActionResolutionComplete {
 		report.SetStage(stageResolution, compatibility.Passed)
+	}
+	for _, evaluation := range evidence.Plans {
+		for i := range report.Jobs {
+			if report.Jobs[i].Instance != evaluation.Instance || evaluation.Instance == "" {
+				continue
+			}
+			switch {
+			case !evaluation.Evaluated:
+				report.Jobs[i].Result = compatibility.NotEvaluated
+			case evaluation.Passed:
+				report.Jobs[i].Result = compatibility.Passed
+			default:
+				report.Jobs[i].Result = compatibility.Failed
+			}
+		}
 	}
 	if evidence.PlansConstructed {
 		report.SetStage(stagePlans, compatibility.Passed)
@@ -212,16 +253,21 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) c
 	var finding *compiler.ProcessingFinding
 	if structured, ok := err.(*compiler.ProcessingFinding); ok {
 		finding = structured
+		if finding.Message != "" {
+			message = finding.Message
+		}
 		if finding.Path != "" {
 			location = sourceLocation(finding.Path, finding.Line, finding.Column)
 		}
 	}
-	if match := locatedDiagnosticPattern.FindStringSubmatch(message); match != nil {
-		line, lineErr := strconv.Atoi(match[2])
-		column, columnErr := strconv.Atoi(match[3])
-		if lineErr == nil && columnErr == nil {
-			location = sourceLocation(match[1], line, column)
-			message = match[4]
+	if finding == nil || finding.Message == "" {
+		if match := locatedDiagnosticPattern.FindStringSubmatch(message); match != nil {
+			line, lineErr := strconv.Atoi(match[2])
+			column, columnErr := strconv.Atoi(match[3])
+			if lineErr == nil && columnErr == nil {
+				location = sourceLocation(match[1], line, column)
+				message = match[4]
+			}
 		}
 	}
 	diagnostic := compatibility.Diagnostic{

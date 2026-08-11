@@ -110,6 +110,9 @@ func TestWriteProfileReportsStagesWithoutOverclaimingRuntime(t *testing.T) {
 
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "hosted-tokenless")
+	report.LogicalJobs = 1
+	report.Instances = 1
+	report.Compile.Result = "incompatible"
 	for _, stage := range report.Stages[:6] {
 		report.SetStage(stage.ID, Passed)
 	}
@@ -168,6 +171,10 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		"Logical jobs: 1",
+		"Instances: 1",
+		"Compile: incompatible",
+		"Admission: not-evaluated",
 		"Workflow parsing: passed",
 		"Immutable action resolution: failed",
 		"Job-plan construction: not-evaluated",

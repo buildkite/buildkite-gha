@@ -109,7 +109,8 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Action: step.Uses, Step: i + 1,
-				Err: fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
+				Message: "action could not be resolved or validated",
+				Err:     fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
 			})
 		}
 	}

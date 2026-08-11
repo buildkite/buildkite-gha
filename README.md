@@ -214,6 +214,10 @@ Schema: buildkite-gha/processing-report/v1
 Workflow: .github/workflows/ci.yml
 Result: compilable
 Status: passed
+Logical jobs: 2
+Instances: 3
+Compile: compilable
+Admission: not-evaluated
 ✓ 2 logical jobs and 3 static instances compile
 - Workflow parsing: passed
 - Event validation: not-evaluated

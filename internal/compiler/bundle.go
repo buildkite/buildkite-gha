@@ -79,9 +79,10 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 	if err != nil {
 		return bundle, err
 	}
-	plans, authorizations, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	plans, authorizations, planEvaluations, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	bundle.Processing.Plans = planEvaluations
 	if err != nil {
-		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", err)
+		return bundle, err
 	}
 	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
 		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))

@@ -891,6 +891,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	}
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
+		report := environmentProcessingReport(workflowPath, profile, "workflow input could not be read")
+		_ = compatibility.WriteProcessing(stdout, format, report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 		return 1
 	}
@@ -898,6 +900,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if eventPath != "" {
 		event, err = os.ReadFile(eventPath)
 		if err != nil {
+			report := eventInputProcessingReport(workflowPath, profile, source, "event input could not be read")
+			_ = compatibility.WriteProcessing(stdout, format, report)
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 			return 1
 		}
@@ -909,21 +913,20 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	} else {
 		report, err = compiler.ValidateEvent(workflowPath, source, event)
 	}
+	processingReport := initialProcessingReport(workflowPath, profile, eventPath != "", report, err)
 	if err != nil {
-		if profile == "" {
-			if writeErr := compatibility.Write(stdout, format, compatibility.Blocked(workflowPath, err)); writeErr != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
-			}
-		} else if writeErr := compatibility.WriteProfile(stdout, format, compatibility.ProfileCompileBlocked(workflowPath, profile, err)); writeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
+		processingReport.Result = "incompatible"
+		if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
 		}
 		return 1
 	}
 	if profile != "" {
 		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
-			profileReport := compatibility.ProfileNotEvaluated(workflowPath, profile, report.LogicalJobs, report.Instances, "E_ENVIRONMENT", executableErr)
-			if writeErr := compatibility.WriteProfile(stdout, format, withCompilerWarnings(profileReport, workflowPath, report.Warnings)); writeErr != nil {
+			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+			processingReport.Result = "indeterminate"
+			if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
 			}
 			return 1
@@ -951,13 +954,11 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 				}
 				return 1
 			}
-			code := compiler.CodeActionResolution
-			stage := stageResolution
-			category := "action-resolution"
 			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
-				code = "E_ENVIRONMENT"
+				addEnvironmentFailure(&processingReport, "hosted workflow-processing environment could not be initialized")
+			} else {
+				addProcessingFailure(&processingReport, workflowPath, stageResolution, compiler.CodeActionResolution, "action-resolution", profileErr)
 			}
-			addProcessingFailure(&processingReport, workflowPath, stage, code, category, profileErr)
 			processingReport.Result = "indeterminate"
 			if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
@@ -979,30 +980,12 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		return 0
 	}
-	compatibilityReport := compatibility.Compilable(workflowPath, report.LogicalJobs, report.Instances)
-	compatibilityReport.Diagnostics = append(compatibilityReport.Diagnostics, compilerWarningDiagnostics(workflowPath, report.Warnings)...)
-	if err := compatibility.Write(stdout, format, compatibilityReport); err != nil {
+	processingReport.Result = "compilable"
+	if err := compatibility.WriteProcessing(stdout, format, processingReport); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
 		return 1
 	}
 	return 0
-}
-
-func withCompilerWarnings(report compatibility.ProfileReport, path string, warnings []compiler.Warning) compatibility.ProfileReport {
-	report.Diagnostics = append(compilerWarningDiagnostics(path, warnings), report.Diagnostics...)
-	return report
-}
-
-func compilerWarningDiagnostics(path string, warnings []compiler.Warning) []compatibility.Diagnostic {
-	diagnostics := make([]compatibility.Diagnostic, len(warnings))
-	for i, warning := range warnings {
-		diagnostics[i] = compatibility.Diagnostic{
-			Level:   "warning",
-			Code:    warning.Code,
-			Message: fmt.Sprintf("%s:%d:%d: %s", path, warning.Line, warning.Column, warning.Message),
-		}
-	}
-	return diagnostics
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, format, profile string, err error) {
@@ -1054,12 +1037,25 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	}
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
+		report := environmentProcessingReport(workflowPath, "", "workflow input could not be read")
+		_ = compatibility.WriteProcessing(stderr, "text", report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
 		return 1
 	}
 	event, err := os.ReadFile(eventPath)
 	if err != nil {
+		report := eventInputProcessingReport(workflowPath, "", source, "event input could not be read")
+		_ = compatibility.WriteProcessing(stderr, "text", report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+		return 1
+	}
+	validation, validationErr := compiler.ValidateEvent(workflowPath, source, event)
+	processingReport := initialProcessingReport(workflowPath, "", true, validation, validationErr)
+	if validationErr != nil {
+		processingReport.Result = "incompatible"
+		if writeErr := compatibility.WriteProcessing(stderr, "text", processingReport); writeErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write report: %v\n", writeErr)
+		}
 		return 1
 	}
 	var result []byte
@@ -1077,7 +1073,9 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	} else {
 		digest, digestErr := executableDigest()
 		if digestErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", digestErr)
+			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+			processingReport.Result = "indeterminate"
+			_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
@@ -1131,6 +1129,8 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	workflowSource, err := os.ReadFile(workflowPath)
 	if err != nil {
+		report := environmentProcessingReport(workflowPath, hostedTokenlessProfile, "workflow input could not be read")
+		_ = compatibility.WriteProcessing(stderr, "text", report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
@@ -1156,20 +1156,53 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		}
 	}
 	if err != nil {
+		report := eventInputProcessingReport(workflowPath, hostedTokenlessProfile, workflowSource, "event input could not be acquired")
+		_ = compatibility.WriteProcessing(stderr, "text", report)
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
+	validation, validationErr := compiler.ValidateEvent(workflowPath, workflowSource, eventSource)
+	processingReport := initialProcessingReport(workflowPath, hostedTokenlessProfile, true, validation, validationErr)
+	if validationErr != nil {
+		processingReport.Result = "incompatible"
+		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 		return 1
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+		processingReport.Result = "indeterminate"
+		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 		return 1
 	}
 	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, runtimeImage, jobScopedActionSourceAuthentication(stderr))
+	applyProcessingEvidence(&processingReport, preflight.Bundle.Processing)
+	if preflight.Admitted {
+		processingReport.SetStage(stageAdmission, compatibility.Passed)
+		processingReport.Admission.Result = "admitted"
+	}
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		var failure *hostedTokenlessFailure
+		if errors.As(err, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
+			addProcessingFailure(&processingReport, workflowPath, stageAdmission, "E_PROFILE", "admission", err)
+			processingReport.Admission.Result = "not-admitted"
+			processingReport.Result = "not-admitted"
+		} else {
+			if errors.As(err, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
+				addEnvironmentFailure(&processingReport, "hosted workflow-processing environment could not be initialized")
+			} else {
+				addProcessingFailure(&processingReport, workflowPath, stageResolution, compiler.CodeActionResolution, "action-resolution", err)
+			}
+			processingReport.Result = "indeterminate"
+		}
+		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
 		return 1
 	}
 	bundle := preflight.Bundle
+	processingReport.SetStage(stageAdmission, compatibility.Passed)
+	processingReport.Admission.Result = "admitted"
+	processingReport.Result = "admitted"
+	_ = compatibility.WriteProcessing(stdout, "text", processingReport)
 	writeCompilerWarnings(stderr, "upload", workflowPath, bundle.IR.Warnings)
 	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
@@ -1340,12 +1373,16 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		options.ResolveActions = true
 		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
 	}
-	bundle, err := compiler.CompileBundleContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, options)
+	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
 	if err != nil {
 		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
 		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
+	}
+	bundle, err = compiler.GenerateBundlePipeline(bundle, distributionDigest, importerStep, options)
+	if err != nil {
+		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
 	if !hasActions && bundleUsesActions(bundle) {
 		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
@@ -1354,44 +1391,64 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
+	instances := make(map[string]compiler.JobInstance, len(bundle.IR.Jobs))
+	for _, instance := range bundle.IR.Jobs {
+		instances[instance.Key] = instance
+	}
+	var diagnostics []error
+	addFailure := func(artifact compiler.PlanArtifact, message string, err error) {
+		finding := &compiler.ProcessingFinding{
+			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
+			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
+			Message: message, Err: err,
+		}
+		if instance, ok := instances[artifact.Job.Target.StepKey]; ok {
+			finding.Path = instance.SourcePath
+			finding.Line = instance.Source.Start.Line
+			finding.Column = instance.Source.Start.Column
+		}
+		diagnostics = append(diagnostics, finding)
+	}
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					return fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID)
+					addFailure(artifact, "job or service containers are not admitted by the hosted profile", fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID))
+					continue
 				}
-				return fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID)
+				addFailure(artifact, "docker capability lacks compiler-verified action provenance", fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID))
+				continue
 			}
 			if capability == "provider-token-read" {
 				if !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
-					return fmt.Errorf("job %q requires provider-token-read without compiler-verified checkout provenance", artifact.Job.Workflow.LogicalJobID)
+					addFailure(artifact, "provider token read capability lacks compiler-verified checkout provenance", fmt.Errorf("job %q requires provider-token-read without compiler-verified checkout provenance", artifact.Job.Workflow.LogicalJobID))
 				}
 				continue
 			}
 			if capability == "provider-token-write" {
 				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
-					return fmt.Errorf("job %q requires provider-token-write without compiler-verified workflow permission provenance", artifact.Job.Workflow.LogicalJobID)
+					addFailure(artifact, "provider token write capability lacks compiler-verified permission provenance", fmt.Errorf("job %q requires provider-token-write without compiler-verified workflow permission provenance", artifact.Job.Workflow.LogicalJobID))
 				}
 				continue
 			}
 			if capability != "network" && capability != "docker" {
-				return fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability)
+				addFailure(artifact, fmt.Sprintf("capability %q is unavailable to the hosted profile", capability), fmt.Errorf("job %q requires capability %q, unavailable to unprivileged upload", artifact.Job.Workflow.LogicalJobID, capability))
 			}
 		}
 		for _, action := range artifact.Job.Actions {
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
 			if descriptor.Service == actionintegration.ServiceCache {
 				if err := actionintegration.ValidateCacheCommit(action.Commit); err != nil {
-					return fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err)
+					addFailure(artifact, "cache action version is not admitted by the hosted profile", fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
 				}
 				continue
 			}
 			if descriptor.Service != "" {
-				return fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service)
+				addFailure(artifact, "action requires a service unavailable to the hosted profile", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service))
 			}
 		}
 	}
-	return nil
+	return errors.Join(diagnostics...)
 }
 
 func irUsesActions(ir compiler.IR) bool {
