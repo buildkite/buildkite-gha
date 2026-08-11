@@ -1220,7 +1220,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			if err != nil {
 				return result, err
 			}
-			return r.runUploadArtifact(ctx, processor, workspace, inputs)
+			return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
 		}
 		if usesDownloadArtifactAdapter(lock) {
 			inputs, err := evaluateMap(step.With, eval)

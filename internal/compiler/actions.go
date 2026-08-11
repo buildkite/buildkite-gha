@@ -242,6 +242,12 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 		if child == nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q is missing", i+1, step.Uses)
 		}
+		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: child.lock.Source, Repository: child.lock.Repository, Path: child.lock.Path})
+		if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+			if err := actionintegration.ValidateUploadArtifactInputs(child.lock.Commit, step.With); err != nil {
+				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
+			}
+		}
 		childRequirements, err := child.inspectInvocation(step.With)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)

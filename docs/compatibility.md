@@ -107,7 +107,7 @@ service.
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
 | `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
-| `actions/upload-artifact` | Supported subset | The audited v4 and v7 commits are adapted in ZIP mode. They support bounded literal files/directories, ZIP compression 0–9, hidden-file selection, and exact no-file behavior. Globs, exclusions, symlinks, retention, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
+| `actions/upload-artifact` | Supported subset | Exactly v4.6.2, v5.0.0, v6.0.0, and v7.0.1 are adapted at the immutable commits listed below, root entrypoint only and ZIP mode only. Bounded literal paths and final-component file globs, ZIP compression 0–9, hidden-file selection, no-file behavior, and advisory `retention-days` are supported. Recursive globs, exclusions, symlinks, effective retention control, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Only the audited v4.3.0 commit is adapted. One exact literal name from verified direct `needs` can be extracted to a clean workspace-relative path. IDs, patterns, all-artifact, merge, cross-run, and cross-repository modes are not supported. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
 | Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
@@ -415,37 +415,88 @@ to the service's repository and permission policy.
 
 ### Artifact uploads use bounded native storage
 
-The producer-side adapter recognizes only the audited commits
-`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`
-(v4) and
-`actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`
-(v7). It verifies the immutable action source and metadata, then replaces the
-whole upstream JavaScript lifecycle with a Buildkite Agent artifact upload. A
-mutable v4 or v7 reference is accepted only when resolution produces one of
-those audited commits.
+The native bridge was audited against these official immutable releases and
+their committed metadata and source:
 
-The supported inputs are `name`, `path`, `if-no-files-found`,
-`include-hidden-files`, `compression-level`, explicit `overwrite: false`, and
-explicit `archive: true`. `path` accepts at most 32 clean, workspace-relative,
-newline-separated literal files or directories. Globs, exclusions, path
-expressions, symlinks, non-regular files, more than 10,000 selected files, more
-than 1 GiB of source or archive bytes, retention controls, overwrite, and raw
-uploads fail explicitly. Hidden path segments are excluded by default.
+| Upstream release | Immutable commit | Metadata/runtime | Bundled artifact client | Native decision |
+| --- | --- | --- | --- | --- |
+| [`v4.6.2`](https://github.com/actions/upload-artifact/releases/tag/v4.6.2) | [`ea165f8d65b6e75b540449e92b4886f43607fa02`](https://github.com/actions/upload-artifact/tree/ea165f8d65b6e75b540449e92b4886f43607fa02) | Root [`action.yml`](https://github.com/actions/upload-artifact/blob/ea165f8d65b6e75b540449e92b4886f43607fa02/action.yml) uses Node 20 and `dist/upload/index.js`; [`merge/action.yml`](https://github.com/actions/upload-artifact/blob/ea165f8d65b6e75b540449e92b4886f43607fa02/merge/action.yml) uses Node 20 and `../dist/merge/index.js`. | `@actions/artifact` 2.3.2 | Root upload is native in the bounded ZIP subset below. Merge requires the unavailable GitHub Artifact service and production admission rejects it. |
+| [`v5.0.0`](https://github.com/actions/upload-artifact/releases/tag/v5.0.0) | [`330a01c490aca151604b8cf639adc76d48f6c5d4`](https://github.com/actions/upload-artifact/tree/330a01c490aca151604b8cf639adc76d48f6c5d4) | Root [`action.yml`](https://github.com/actions/upload-artifact/blob/330a01c490aca151604b8cf639adc76d48f6c5d4/action.yml) uses Node 20 and `dist/upload/index.js`; [`merge/action.yml`](https://github.com/actions/upload-artifact/blob/330a01c490aca151604b8cf639adc76d48f6c5d4/merge/action.yml) uses Node 20 and `../dist/merge/index.js`. | `@actions/artifact` 4.0.0 | Root upload retains the v4 input/output and ZIP search contract and is native in the bounded subset below. Merge remains rejected. |
+| [`v6.0.0`](https://github.com/actions/upload-artifact/releases/tag/v6.0.0) | [`b7c566a772e6b6bfb58ed0dc250532a479d7789f`](https://github.com/actions/upload-artifact/tree/b7c566a772e6b6bfb58ed0dc250532a479d7789f) | Root [`action.yml`](https://github.com/actions/upload-artifact/blob/b7c566a772e6b6bfb58ed0dc250532a479d7789f/action.yml) uses Node 24 and `dist/upload/index.js`; [`merge/action.yml`](https://github.com/actions/upload-artifact/blob/b7c566a772e6b6bfb58ed0dc250532a479d7789f/merge/action.yml) uses Node 24 and `../dist/merge/index.js`. | `@actions/artifact` 5.0.1 | Root upload retains the v4/v5 input/output and ZIP search contract and is native in the bounded subset below. Merge remains rejected. |
+| [`v7.0.1`](https://github.com/actions/upload-artifact/releases/tag/v7.0.1) | [`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`](https://github.com/actions/upload-artifact/tree/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a) | Root [`action.yml`](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml) uses Node 24 and `dist/upload/index.js`; [`merge/action.yml`](https://github.com/actions/upload-artifact/blob/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/merge/action.yml) uses Node 24 and `../dist/merge/index.js`. The package is ESM. | `@actions/artifact` 6.2.0 | Root upload is native only with `archive` omitted or true. Direct/raw mode and merge fail closed. |
+| [`v7.0.0`](https://github.com/actions/upload-artifact/releases/tag/v7.0.0) | [`bbbca2ddaa5d8feaa63e36b76fdaad77386f024f`](https://github.com/actions/upload-artifact/tree/bbbca2ddaa5d8feaa63e36b76fdaad77386f024f) | First Node 24/ESM release with direct upload. | Not relied upon | Not admitted. |
 
-The action exposes `artifact-id` as an opaque positive decimal adapter identity
-and `artifact-digest` as the bare SHA-256 of the stored ZIP, matching the useful
-shape of the upstream outputs. `artifact-url` is not fabricated because a
-GitHub run-scoped URL does not exist. The authoritative terminal result binds
-the ID and digest to the native Buildkite path, archive size, file count, and
-producer. The consumer recognizes only
+Mutable `@v4` through `@v7` references are accepted only while resolution
+produces the corresponding audited commit above. Every other old, future, or
+unknown commit is rejected before a native lock is created and rechecked at
+runtime. The exact source tree digest, metadata, declared runtime, and
+entrypoints are still verified even though the adapter replaces the whole
+upstream JavaScript lifecycle. The four admitted root actions declare the same
+v4 input/output surface; only v7 adds `archive`.
+
+The root upload input decisions are:
+
+| Input | Upstream version/default | Native decision |
+| --- | --- | --- |
+| `name` | v4-v7; `artifact` | Supported after expression evaluation. Explicit empty, invalid upstream characters, invalid UTF-8, and names over 255 bytes fail. Names are unique case-insensitively within a job and at most 64 artifacts may be published. |
+| `path` | v4-v7; required; upstream `@actions/glob` supports multiline globs/exclusions/comments and follows symlinks | Required. At most 32 newline-separated, workspace-relative literal files/directories or final-component `*` file globs such as `tests/*.log`. A leading `./` is normalized; a trailing `/` is preserved as directory-only intent, so `file/` is a no-match rather than selecting `file`. `..` components, `?`, character classes, globstar, braces, extglobs, recursive/directory globs, exclusions, leading glob comments, absolute paths, backslashes, symlinks, and special files fail closed. Expressions are admitted statically and the evaluated value is revalidated and normalized at runtime. |
+| `if-no-files-found` | v4-v7; `warn` | `warn`, `error`, and `ignore` are supported exactly; other spellings fail. |
+| `retention-days` | v4-v7; omitted or `0` uses repository settings | A non-negative integer, including `0`, is accepted as advisory compatibility. The runtime always emits a warning because Buildkite, not this action, controls effective artifact retention. Invalid or negative values fail. |
+| `compression-level` | v4-v7; `6` | Levels 0–9 are supported. Level 0 creates a stored ZIP; it is not raw upload. Other values fail. |
+| `overwrite` | v4-v7; `false` | Omitted or GitHub-toolkit boolean false only. True fails because this bridge does not perform GitHub's delete-before-upload behavior. Duplicate case-insensitive names also fail rather than overwrite. |
+| `include-hidden-files` | v4-v7; `false` | Supported with GitHub-toolkit boolean spellings (`true`, `True`, `TRUE`, and false equivalents). Hidden path segments are excluded by default. |
+| `archive` | v7 only; `true` | Omitted or true only at the v7.0.1 commit. Supplying it to v4-v6 fails as a version mismatch. False is not approximated: upstream requires exactly one selected file, ignores `name`, derives the artifact name from the file, and uses the v7 direct-upload protocol. |
+| Any other or case-duplicate input | Version-specific | Rejected. Input names are compared case-insensitively. |
+
+Scalar inputs follow upstream trimming before validation. Omitted values use the
+defaults above; explicit empty values do not silently become defaults. Runtime
+expressions use the normal supported expression contexts and are checked again
+after evaluation, so an expression cannot introduce an unsafe path, raw mode,
+overwrite, or an invalid value.
+
+For matched paths, one selected directory becomes the archive root; one
+selected file uses its parent; and multiple matched roots use their common
+ancestor. A bounded file glob uses its literal parent as the root. Empty and
+unmatched directories are omitted and do not widen the archive root.
+Files are sorted lexically and ZIP headers use fixed timestamps and modes, so
+identical inputs and compression levels produce deterministic bytes. Selection
+and archive writing reject case-colliding member names, source replacement,
+type/size/modification races detected around the read, more than 10,000 files,
+more than 1 GiB of selected source bytes, and a final ZIP over 1 GiB. Unlike
+upstream, symlinks are rejected rather than followed, and consumer-unsafe ZIP
+member names are rejected.
+
+All four audited roots declare `artifact-id`, `artifact-url`, and
+`artifact-digest`. The bridge emits `artifact-id` as an opaque positive decimal
+native identity and `artifact-digest` as the bare SHA-256 of the exact stored
+ZIP. It deliberately leaves `artifact-url` unset: a GitHub run-scoped artifact
+URL does not exist and is never fabricated. The authoritative terminal result
+binds the ID and `sha256:` digest to the Buildkite artifact path, archive size,
+file count, and producer job. Failed, cancelled, or no-file uploads publish no
+action artifact record; job terminal publication still follows the normal
+bounded result-manifest path.
+
+The upstream `merge` variant is not a ZIP concatenation operation: it lists
+current-run artifacts, filters with a pattern, downloads/extracts them, can use
+separate directories, re-uploads a merged ZIP, and can delete its inputs. Its
+`name`, `pattern`, `separate-directories`, `retention-days`,
+`compression-level`, `delete-merged`, and `include-hidden-files` contract and
+all three outputs depend on the GitHub Artifact service. It therefore remains
+outside the native bridge and fails production admission rather than being
+silently approximated. The v7 merge entrypoint has no raw mode.
+
+The consumer recognizes only
 `actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093`.
 It scans only verified manifests from direct `needs`, requires one
 exact-name match, downloads by the bound producer job UUID,
 and verifies size and SHA-256 before preflighting and extracting the bounded
 ZIP. Omitted `path` means workspace root; `download-path` is absolute. Digest
 mismatch is fatal (stricter than upstream). GitHub URLs and metadata are not
-fabricated. Exact-commit Buildkite build 270 and its independent artifact
-observation prove the producer-to-two-consumer roundtrip contract.
+fabricated. This native handling is an interim, bounded bridge; the parallel
+Results ArtifactService work is intended to let stock upstream JavaScript use
+its protocol rather than expanding this adapter into a protocol emulator.
+Exact-commit Buildkite build 270 and its independent artifact observation prove
+the producer-to-two-consumer roundtrip contract.
 
 ### Actions use the standard cache-v2 protocol
 

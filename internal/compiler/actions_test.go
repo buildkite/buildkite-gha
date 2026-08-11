@@ -145,6 +145,25 @@ func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testi
 	}
 }
 
+func TestCompileActionInvocationsValidatesNestedUploadArtifact(t *testing.T) {
+	workspace, upload := t.TempDir(), t.TempDir()
+	writeAction(t, upload, "", "name: upload artifact\nruns:\n  using: node20\n  main: index.js\n")
+	source := classifiedActionSource{
+		roots:   map[string]string{"actions/upload-artifact": upload},
+		commits: map[string]string{"actions/upload-artifact": actionintegration.UploadArtifactCommit},
+	}
+
+	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: payload\n        overwrite: true\n")
+	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
+		t.Fatalf("nested literal validation error = %v", err)
+	}
+
+	writeAction(t, workspace, "parent", "name: parent\ninputs:\n  path:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: ${{ inputs.path }}\n")
+	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
+		t.Fatalf("nested expression was not deferred to runtime: %v", err)
+	}
+}
+
 func TestCompileActionLocksLocalAndDedup(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "js", "name: js\nruns:\n  using: node20\n  main: index.js\n")
@@ -860,15 +879,35 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network"}) {
 		t.Fatalf("upload-artifact v7 plans = %#v", plans)
 	}
+	for version, commit := range map[string]string{
+		"v5.0.0": actionintegration.UploadArtifactV5Commit,
+		"v6.0.0": actionintegration.UploadArtifactV6Commit,
+	} {
+		if _, err := compile(commit, "        with:\n          name: ${{ github.sha }}\n          path: ./payload/result.txt\n          retention-days: '0'\n"); err != nil {
+			t.Fatalf("audited %s ZIP upload rejected: %v", version, err)
+		}
+	}
 	if _, err := compile(actionintegration.UploadArtifactV7Commit, "        with:\n          path: payload/result.txt\n          archive: false\n"); err == nil || !strings.Contains(err.Error(), `input "archive" may only be omitted or true`) {
 		t.Fatalf("upload-artifact v7 raw mode error = %v", err)
 	}
+	for version, commit := range map[string]string{
+		"v4": actionintegration.UploadArtifactCommit,
+		"v5": actionintegration.UploadArtifactV5Commit,
+		"v6": actionintegration.UploadArtifactV6Commit,
+	} {
+		if _, err := compile(commit, "        with:\n          path: payload/result.txt\n          archive: true\n"); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+			t.Fatalf("upload-artifact %s archive input error = %v", version, err)
+		}
+	}
+	if _, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          path: tests/*.log\n          retention-days: '7'\n"); err != nil {
+		t.Fatalf("bounded glob and advisory retention rejected: %v", err)
+	}
 
 	for name, input := range map[string]string{
-		"missing path": "          name: payload\n",
-		"glob":         "          path: payload/**\n",
-		"retention":    "          path: payload\n          retention-days: '1'\n",
-		"overwrite":    "          path: payload\n          overwrite: true\n",
+		"missing path":   "          name: payload\n",
+		"recursive glob": "          path: payload/**/*.log\n",
+		"bad retention":  "          path: payload\n          retention-days: '-1'\n",
+		"overwrite":      "          path: payload\n          overwrite: true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.UploadArtifactCommit, "        with:\n"+input)
@@ -878,8 +917,33 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		})
 	}
 
-	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
+	if _, err := compile(strings.Repeat("b", 40), "        with:\n          path: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV5Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV6Commit) || !strings.Contains(err.Error(), actionintegration.UploadArtifactV7Commit) {
 		t.Fatalf("unsupported upload-artifact commit error = %v", err)
+	}
+
+	matrixWorkflow := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix:\n        mode: [production, test]\n    steps:\n      - uses: actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit + "\n        if: matrix.mode == 'test'\n        with:\n          name: ${{ github.sha }}\n          path: ./artifacts.tar.gz\n          retention-days: '0'\n")
+	if err := os.WriteFile(workflowPath, matrixWorkflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plans, err = CompilePlansWithOptions(workflowPath, matrixWorkflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatalf("conditional v6 matrix upload rejected: %v", err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("conditional v6 matrix produced %d plans, want 2", len(plans))
+	}
+	for _, job := range plans {
+		if job.Steps[0].Condition != "matrix.mode == 'test'" || job.Steps[0].With["name"] != "${{ github.sha }}" || job.Steps[0].With["path"] != "./artifacts.tar.gz" || job.Actions[0].Commit != actionintegration.UploadArtifactV6Commit {
+			t.Fatalf("conditional v6 matrix plan = %#v", job)
+		}
 	}
 }
 

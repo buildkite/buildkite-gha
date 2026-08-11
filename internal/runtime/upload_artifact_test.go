@@ -7,10 +7,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -19,6 +21,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
+	"github.com/buildkite/buildkite-gha/internal/transport"
 )
 
 type capturedArtifactUpload struct {
@@ -30,6 +33,10 @@ type capturedArtifactUpload struct {
 type captureArtifactUploader struct {
 	uploads []capturedArtifactUpload
 	err     error
+}
+
+func (r Runner) runUploadArtifact(ctx context.Context, processor *commandProcessor, workspace string, inputs map[string]string) (Result, error) {
+	return r.runUploadArtifactCommit(ctx, processor, workspace, actionintegration.UploadArtifactCommit, inputs)
 }
 
 func (u *captureArtifactUploader) DownloadArtifact(context.Context, string, string, string) error {
@@ -59,7 +66,7 @@ func TestUploadArtifactArchiveAndOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(uploader.uploads) != 1 || result.Outputs["artifact-id"] == "" || len(result.Outputs["artifact-digest"]) != 64 || len(result.Artifacts) != 1 {
+	if len(uploader.uploads) != 1 || result.Outputs["artifact-id"] == "" || len(result.Outputs["artifact-digest"]) != 64 || result.Outputs["artifact-url"] != "" || len(result.Artifacts) != 1 {
 		t.Fatalf("unexpected upload result: %#v, uploads %#v", result, uploader.uploads)
 	}
 	upload := uploader.uploads[0]
@@ -77,6 +84,150 @@ func TestUploadArtifactArchiveAndOutputs(t *testing.T) {
 	want := map[string]string{"nested/result.txt": "nested", "visible.txt": "hello"}
 	if !reflect.DeepEqual(entries, want) {
 		t.Fatalf("archive entries = %#v, want %#v", entries, want)
+	}
+}
+
+func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload", "versioned")
+	for _, test := range []struct {
+		name   string
+		commit string
+		inputs map[string]string
+	}{
+		{name: "v4.6.2 defaults", commit: actionintegration.UploadArtifactCommit, inputs: map[string]string{"path": "payload"}},
+		{name: "v5.0.0 defaults", commit: actionintegration.UploadArtifactV5Commit, inputs: map[string]string{"path": "./payload"}},
+		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "./payload", "retention-days": "0"}},
+		{name: "v7.0.1 ZIP", commit: actionintegration.UploadArtifactV7Commit, inputs: map[string]string{"path": "payload", "archive": " true ", "name": "v7"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uploader := &captureArtifactUploader{}
+			r := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+			result, err := r.runUploadArtifactCommit(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, test.commit, test.inputs)
+			if err != nil || len(uploader.uploads) != 1 || len(result.Artifacts) != 1 || result.Outputs["artifact-id"] == "" || result.Outputs["artifact-digest"] == "" || result.Outputs["artifact-url"] != "" {
+				t.Fatalf("runtime matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
+			}
+			reader, err := zip.NewReader(bytes.NewReader(uploader.uploads[0].data), int64(len(uploader.uploads[0].data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(reader.File) != 1 || reader.File[0].Method != zip.Deflate {
+				t.Fatalf("default ZIP entries = %#v", reader.File)
+			}
+		})
+	}
+
+	r := Runner{Artifacts: &captureArtifactUploader{}, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifactCommit(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, actionintegration.UploadArtifactCommit, map[string]string{"path": "payload", "archive": "true"}); err == nil || !strings.Contains(err.Error(), "only in actions/upload-artifact v7") {
+		t.Fatalf("runtime v4 archive mismatch error = %v", err)
+	}
+}
+
+func TestUploadArtifactBoundedGlobAndAdvisoryRetention(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "tests/first.log", "first")
+	writeFixtureFile(t, workspace, "tests/second.txt", "second")
+	writeFixtureFile(t, workspace, "tests/.hidden.log", "hidden")
+	var stdout bytes.Buffer
+	uploader := &captureArtifactUploader{}
+	r := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	result, err := r.runUploadArtifact(context.Background(), newCommandProcessor(&stdout, io.Discard), workspace, map[string]string{
+		"path": "tests/*.log", "retention-days": "7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, map[string]string{"first.log": "first"}) {
+		t.Fatalf("archive entries = %#v", got)
+	}
+	if !strings.Contains(stdout.String(), "retention-days: 7 is advisory") || len(result.Artifacts) != 1 {
+		t.Fatalf("retention warning = %q, result = %#v", stdout.String(), result)
+	}
+
+	if err := os.Mkdir(filepath.Join(workspace, "tests", "directory.log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.runUploadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{
+		"path": "tests/*.log", "name": "directory-match",
+	}); err == nil || !strings.Contains(err.Error(), "may match only regular files") {
+		t.Fatalf("directory glob error = %v", err)
+	}
+}
+
+func TestUploadArtifactNormalizesFailurePathDirectories(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "log/test.log", "log")
+	writeFixtureFile(t, workspace, "tmp/capybara/failure.png", "screenshot")
+	for _, test := range []struct {
+		name, path string
+		want       map[string]string
+	}{
+		{name: "logs", path: "log/", want: map[string]string{"test.log": "log"}},
+		{name: "screenshots", path: "tmp/capybara/", want: map[string]string{"failure.png": "screenshot"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			uploader := &captureArtifactUploader{}
+			r := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+			_, err := r.runUploadArtifactCommit(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, actionintegration.UploadArtifactV6Commit, map[string]string{
+				"name": test.name, "path": test.path,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("archive entries = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+
+	writeFixtureFile(t, workspace, "report.txt", "not a directory")
+	uploader := &captureArtifactUploader{}
+	r := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifactCommit(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, actionintegration.UploadArtifactV6Commit, map[string]string{
+		"name": "directory-only", "path": "report.txt/", "if-no-files-found": "error",
+	}); err == nil || !strings.Contains(err.Error(), "No files were found") || len(uploader.uploads) != 0 {
+		t.Fatalf("trailing-slash file match error = %v, uploads = %d", err, len(uploader.uploads))
+	}
+}
+
+func TestUploadArtifactZIPIsDeterministicAtSupportedCompressionLevels(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload/a.txt", strings.Repeat("compressible", 100))
+	writeFixtureFile(t, workspace, "payload/b.txt", "second")
+	files, err := collectUploadFiles(context.Background(), workspace, []string{"payload"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, level := range []int{0, 1, 6, 9} {
+		t.Run(strconv.Itoa(level), func(t *testing.T) {
+			first, second := filepath.Join(t.TempDir(), "first.zip"), filepath.Join(t.TempDir(), "second.zip")
+			firstDigest, firstSize, err := writeUploadZIP(context.Background(), first, workspace, files, level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondDigest, secondSize, err := writeUploadZIP(context.Background(), second, workspace, files, level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			firstBytes, _ := os.ReadFile(first)
+			secondBytes, _ := os.ReadFile(second)
+			if firstDigest != secondDigest || firstSize != secondSize || !bytes.Equal(firstBytes, secondBytes) {
+				t.Fatalf("level %d ZIP changed across identical writes", level)
+			}
+			reader, err := zip.NewReader(bytes.NewReader(firstBytes), int64(len(firstBytes)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMethod := uint16(zip.Deflate)
+			if level == 0 {
+				wantMethod = zip.Store
+			}
+			for _, file := range reader.File {
+				if file.Method != wantMethod {
+					t.Fatalf("level %d ZIP method = %d, want %d", level, file.Method, wantMethod)
+				}
+			}
+		})
 	}
 }
 
@@ -185,6 +336,27 @@ func TestUploadArtifactNoFilesModes(t *testing.T) {
 	_, _, commandErrors, _ := processor.workflowCommandAnnotations()
 	if !strings.Contains(commandErrors, message) || stdout.String() != "error: "+message+"\n" {
 		t.Fatalf("error output = %q, annotation = %q", stdout.String(), commandErrors)
+	}
+}
+
+func TestUploadArtifactScrubsExpressionDerivedPathsFromErrors(t *testing.T) {
+	const maskedPath = "runtime-secret-path"
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(maskedPath)
+	r := Runner{artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifact(context.Background(), processor, t.TempDir(), map[string]string{
+		"path": maskedPath, "if-no-files-found": "error",
+	}); err == nil || strings.Contains(err.Error(), maskedPath) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("masked no-file error = %v", err)
+	}
+
+	const quotedMask = `runtime"secret`
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, quotedMask, "masked")
+	processor = newCommandProcessor(io.Discard, io.Discard)
+	processor.addMask(quotedMask)
+	if _, err := r.runUploadArtifact(context.Background(), processor, workspace, map[string]string{"path": quotedMask}); err == nil || strings.Contains(err.Error(), quotedMask) || strings.Contains(err.Error(), `runtime\"secret`) || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("quoted masked path error = %v", err)
 	}
 }
 
@@ -300,6 +472,101 @@ func TestUploadArtifactRejectsFIFOReplacementWithoutBlockingPastCancellation(t *
 	}
 }
 
+func TestUploadArtifactRejectsSameSizeFileReplacement(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload", "before")
+	files, err := collectUploadFiles(context.Background(), workspace, []string{"payload"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixtureFile(t, workspace, "replacement", "after!")
+	if err := os.Rename(filepath.Join(workspace, "replacement"), filepath.Join(workspace, "payload")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := writeUploadZIP(context.Background(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil || !strings.Contains(err.Error(), "changed while archiving") {
+		t.Fatalf("same-size replacement error = %v", err)
+	}
+}
+
+func TestUploadArtifactRejectsSymlinkReplacementToSelectedInode(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload", "selected")
+	files, err := collectUploadFiles(context.Background(), workspace, []string{"payload"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(workspace, "payload"), filepath.Join(workspace, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("moved", filepath.Join(workspace, "payload")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := writeUploadZIP(context.Background(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil {
+		t.Fatal("symlink replacement to the selected inode was followed")
+	}
+}
+
+type cancellationArtifactUploader struct{}
+
+func (cancellationArtifactUploader) DownloadArtifact(context.Context, string, string, string) error {
+	return errors.New("unexpected artifact download")
+}
+
+func (cancellationArtifactUploader) UploadArtifactFrom(ctx context.Context, _, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestUploadArtifactCancellationStopsAgentUpload(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "payload", "upload")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r := Runner{Artifacts: cancellationArtifactUploader{}, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifact(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": "payload"}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("agent upload cancellation = %v", err)
+	}
+	if len(r.artifactRegistry.names) != 0 {
+		t.Fatalf("cancelled upload retained artifact reservation: %#v", r.artifactRegistry.names)
+	}
+}
+
+func TestUploadArtifactSourceBounds(t *testing.T) {
+	workspace := t.TempDir()
+	tooLarge := filepath.Join(workspace, "too-large")
+	file, err := os.Create(tooLarge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(transport.MaxResultArtifactSizeBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectUploadFiles(context.Background(), workspace, []string{"too-large"}, false); err == nil || !strings.Contains(err.Error(), "source bytes exceed") {
+		t.Fatalf("source-size bound error = %v", err)
+	}
+
+	many := t.TempDir()
+	if err := os.Mkdir(filepath.Join(many, "files"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= transport.MaxResultArtifactFileCount; i++ {
+		name := filepath.Join(many, "files", fmt.Sprintf("%05d", i))
+		file, err := os.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := collectUploadFiles(context.Background(), many, []string{"files"}, false); err == nil || !strings.Contains(err.Error(), "more than 10000") {
+		t.Fatalf("file-count bound error = %v", err)
+	}
+}
+
 type readerFunc func([]byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
@@ -357,6 +624,51 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	job.Actions[0].Commit = strings.Repeat("b", 40)
 	if _, err := (Runner{Actions: materializer, Artifacts: &captureArtifactUploader{}}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), actionintegration.UploadArtifactCommit) {
 		t.Fatalf("unsupported runtime commit error = %v", err)
+	}
+}
+
+func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/upload.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: conditional upload proof\n")
+	writeFixtureFile(t, workspace, "artifacts.tar.gz", "archive")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: upload artifact\nruns:\n  using: node24\n  main: dist/upload/index.js\n")
+	writeFixtureFile(t, remote, "dist/upload/index.js", "throw new Error('adapter must not execute upstream JavaScript')\n")
+	digest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const lockID = "a-0000000000000006"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "upload", Kind: "uses", Uses: "actions/upload-artifact@" + actionintegration.UploadArtifactV6Commit,
+		Condition: "matrix.mode == 'test'",
+		With: map[string]string{
+			"name": "${{ github.sha }}", "path": "./artifacts.tar.gz", "retention-days": "0",
+		},
+		Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Event.SHA = strings.Repeat("a", 40)
+	job.Actions = []plan.ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/upload-artifact", RequestedRef: actionintegration.UploadArtifactV6Commit,
+		Commit: actionintegration.UploadArtifactV6Commit, SourceDigest: digest,
+	}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: digest}}
+
+	job.Matrix = map[string]any{"mode": "production"}
+	uploader := &captureArtifactUploader{}
+	result, err := (Runner{Actions: materializer, Artifacts: uploader}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || len(uploader.uploads) != 0 || len(result.Artifacts) != 0 {
+		t.Fatalf("production matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
+	}
+
+	job.Matrix = map[string]any{"mode": "test"}
+	uploader = &captureArtifactUploader{}
+	result, err = (Runner{Actions: materializer, Artifacts: uploader}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || len(uploader.uploads) != 1 || len(result.Artifacts) != 1 || result.Artifacts[0].Name != strings.Repeat("a", 40) {
+		t.Fatalf("test matrix result = %#v, uploads = %d, error = %v", result, len(uploader.uploads), err)
 	}
 }
 

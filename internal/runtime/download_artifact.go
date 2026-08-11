@@ -228,7 +228,7 @@ func extractDownloadZIP(ctx context.Context, filename, workspace, destination st
 }
 
 func validArtifactMember(name string) bool {
-	if name == "" || name == "." || len(name) > actionintegration.MaxUploadArtifactPathBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "\\\x00") || path.Clean(name) != name || strings.HasPrefix(name, "/") {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, "../") || len(name) > actionintegration.MaxUploadArtifactPathBytes || !utf8.ValidString(name) || strings.ContainsAny(name, "\\\x00") || path.Clean(name) != name || strings.HasPrefix(name, "/") {
 		return false
 	}
 	if len(strings.Split(name, "/")) > 256 {
