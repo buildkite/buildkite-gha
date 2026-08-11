@@ -211,7 +211,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		var report compatibility.Report
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -229,7 +229,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 		}
-		var report compatibility.Report
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -242,7 +242,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("profile Run() code = %d, want 1; stderr = %q", code, stderr.String())
 		}
-		var profileReport compatibility.ProfileReport
+		var profileReport compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &profileReport); err != nil {
 			t.Fatal(err)
 		}
@@ -261,7 +261,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if len(runner.commands) != 0 {
 			t.Fatalf("profile validation made Buildkite calls: %#v", runner.commands)
 		}
-		var report compatibility.ProfileReport
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -286,7 +286,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		var report compatibility.ProfileReport
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.Result != "admitted" {
 			t.Fatalf("profile report = %#v, error = %v", report, err)
 		}
@@ -1129,7 +1129,7 @@ jobs:
 		if stderr.Len() != 0 {
 			t.Fatalf("stderr = %q, want empty", stderr.String())
 		}
-		var report compatibility.Report
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -1146,7 +1146,7 @@ jobs:
 		if stderr.Len() != 0 {
 			t.Fatalf("stderr = %q, want empty", stderr.String())
 		}
-		var report compatibility.ProfileReport
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -1223,7 +1223,7 @@ jobs:
 		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		var report compatibility.Report
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -1238,7 +1238,7 @@ jobs:
 		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
-		var report compatibility.ProfileReport
+		var report compatibility.ProcessingReport
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
@@ -1337,7 +1337,7 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
 		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
-	var report compatibility.ProfileReport
+	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
@@ -1370,7 +1370,7 @@ func TestValidateHostedTokenlessProfileRejectsProtectedCapabilityAfterCompile(t 
 	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
 		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 	}
-	var report compatibility.ProfileReport
+	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
