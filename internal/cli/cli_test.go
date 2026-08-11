@@ -214,6 +214,130 @@ func TestRunValidateAndCompile(t *testing.T) {
 	})
 }
 
+func TestProcessingReportAggregatesIndependentErrorsAndRetainsPartialSuccess(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "incompatible.yml")
+	workflow := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        run: true
+  good:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./missing-action
+  bad-matrix:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - run: true
+  bad-condition:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ hashFiles('go.sum') }}
+        run: true
+  bad-runner:
+    runs-on: windows-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != compatibility.Failed || len(report.Stages) != 10 || len(report.Diagnostics) < 3 {
+		t.Fatalf("processing report = %#v", report)
+	}
+	stageResults := map[string]string{}
+	for _, stage := range report.Stages {
+		stageResults[stage.ID] = stage.Result
+	}
+	if stageResults[stageMatrix] != compatibility.Failed || stageResults[stageExpressions] != compatibility.Failed || stageResults[stageResolution] != compatibility.NotEvaluated {
+		t.Fatalf("stage results = %#v", stageResults)
+	}
+	foundGoodInstance := false
+	for _, job := range report.Jobs {
+		if job.ID == "good" && job.Instance != "" && job.Result == compatibility.Passed {
+			foundGoodInstance = true
+		}
+	}
+	if !foundGoodInstance || len(report.Actions) != 1 || report.Actions[0].Reference != "./missing-action" {
+		t.Fatalf("partial jobs/actions = %#v / %#v", report.Jobs, report.Actions)
+	}
+}
+
+func TestCompileReportsActionResolutionFailureWithoutPipeline(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "action.yml")
+	workflow := []byte("on: push\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-one\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-two\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("compile emitted partial pipeline: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"Immutable action resolution: failed",
+		"Job-plan construction: not-evaluated",
+		"Pipeline generation: not-evaluated",
+		"[E_ACTION_RESOLUTION]",
+		"job first/gha-first: passed",
+		"job second/gha-second: passed",
+		"action ./missing-one (job gha-first, step 1): failed",
+		"action ./missing-two (job gha-second, step 1): failed",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "invalid.yml")
+	eventPath := filepath.Join(root, "event.json")
+	if err := os.WriteFile(workflowPath, []byte("jobs: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, []byte("{\"provider\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	results := map[string]string{}
+	for _, stage := range report.Stages {
+		results[stage.ID] = stage.Result
+	}
+	if results[stageWorkflowParsing] != compatibility.Failed || results[stageEventValidation] != compatibility.Failed || results[stageGraph] != compatibility.NotEvaluated {
+		t.Fatalf("stage results = %#v", results)
+	}
+	if len(report.Diagnostics) != 2 || report.Diagnostics[0].Category != "syntax" || report.Diagnostics[1].Category != "environment" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
 func TestWorkflowConcurrencyCancellationWarnsAndRetainsGate(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "concurrency.yml")
 	workflow := []byte(`on: push

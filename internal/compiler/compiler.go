@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -127,6 +128,23 @@ type Report struct {
 	LogicalJobs int
 	Instances   int
 	Warnings    []Warning
+	Jobs        []JobInstance
+	ParsedJobs  []ParsedJob
+}
+
+// ParsedJob is the source identity retained before expansion succeeds.
+type ParsedJob struct {
+	ID     string
+	Path   string
+	Source workflow.Span
+}
+
+func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
+	jobs := make([]ParsedJob, len(parsed.Jobs))
+	for i, job := range parsed.Jobs {
+		jobs[i] = ParsedJob{ID: job.ID, Path: path, Source: job.Span}
+	}
+	return jobs
 }
 
 // Validate parses and validates the supported static graph without requiring an
@@ -144,14 +162,12 @@ func Validate(path string, source []byte) (Report, error) {
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
-	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
-		return Report{}, err
+	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	instances, expandErr := expand(path, source, parsed, context, options)
+	if err := errors.Join(concurrencyErr, expandErr); err != nil {
+		return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, err
 	}
-	instances, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return Report{}, err
-	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -165,24 +181,22 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	if err := options.validate(); err != nil {
 		return Report{}, err
 	}
-	parsed, err := workflow.Parse(path, source)
-	if err != nil {
-		return Report{}, err
-	}
-	event, err := parseEvent(eventSource)
-	if err != nil {
-		return Report{}, err
+	parsed, parseErr := workflow.Parse(path, source)
+	event, eventErr := parseEvent(eventSource)
+	if parseErr != nil || eventErr != nil {
+		if parsed == nil {
+			return Report{}, errors.Join(parseErr, eventErr)
+		}
+		return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, errors.Join(parseErr, eventErr)
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
-	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
-		return Report{}, err
+	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	instances, expandErr := expand(path, source, parsed, context, options)
+	if err := errors.Join(concurrencyErr, expandErr); err != nil {
+		return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, err
 	}
-	instances, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return Report{}, err
-	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Jobs: instances, ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -589,16 +603,10 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
 	context := compileContext(event, vars, path, parsed.Name)
-	workflowConcurrencyGroup, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
-	if err != nil {
-		return IR{}, err
-	}
-	jobs, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return IR{}, err
-	}
+	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	jobs, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
-	return IR{
+	ir := IR{
 		Schema:   schema,
 		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
 		Event:    event,
@@ -609,7 +617,8 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
 		},
 		Jobs: jobs,
-	}, nil
+	}
+	return ir, errors.Join(concurrencyErr, expandErr)
 }
 
 func compilerWarnings(concurrency *workflow.Concurrency) []Warning {
@@ -705,10 +714,12 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
+	var diagnostics []error
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
-			return nil, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))
+			diagnostics = append(diagnostics, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID)))
+			continue
 		}
 		jobs[job.ID] = job
 		sourcePaths[job.ID] = sourced.path
@@ -716,12 +727,26 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourceRoots[job.ID] = sourced.root
 		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
-			return nil, err
+			diagnostics = append(diagnostics, err)
 		}
 	}
 	order, err := topologicalOrder(path, jobs)
 	if err != nil {
-		return nil, err
+		diagnostics = append(diagnostics, err)
+		order = sortedKeys(jobs)
+	}
+
+	matricesByJob := make(map[string][]map[string]any, len(jobs))
+	failedMatrices := make(map[string]bool)
+	for _, id := range order {
+		job := jobs[id]
+		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
+		if matrixErr != nil {
+			diagnostics = append(diagnostics, matrixErr)
+			failedMatrices[id] = true
+			continue
+		}
+		matricesByJob[id] = matrices
 	}
 
 	byLogicalID := make(map[string][]JobInstance, len(jobs))
@@ -729,36 +754,42 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	for _, id := range order {
 		job := jobs[id]
 		jobPath := sourcePaths[id]
-		matrices, err := expandMatrix(jobPath, job, context)
-		if err != nil {
-			return nil, err
+		if failedMatrices[id] {
+			continue
 		}
+		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
-				return nil, err
+				diagnostics = append(diagnostics, err)
+				continue
 			}
 			labels, err := resolveRunsOn(job, context, matrix)
 			if err != nil {
-				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+				diagnostics = append(diagnostics, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()))
+				continue
 			}
 			queue, err := options.Runners.resolve(labels, options.EventTrust)
 			if err != nil {
-				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
+				diagnostics = append(diagnostics, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()))
+				continue
 			}
 			concurrencyGroup, err := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
 			if err != nil {
-				return nil, err
+				diagnostics = append(diagnostics, err)
+				continue
 			}
 			if concurrencyGroup != "" {
 				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
 			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
-				return nil, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))
+				diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err)))
+				continue
 			}
 			if existingJob, exists := instanceKeys[key]; exists {
-				return nil, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))
+				diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob)))
+				continue
 			}
 			instanceKeys[key] = job.ID
 			instance := JobInstance{
@@ -796,7 +827,8 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				}
 				sort.Strings(members)
 				if len(members) == 0 {
-					return nil, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))
+					diagnostics = append(diagnostics, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need)))
+					continue
 				}
 				if instance.NeedGroups == nil {
 					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
@@ -811,10 +843,12 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					for _, output := range binding.outputs {
 						producers := byLogicalID[output.member]
 						if len(producers) == 0 {
-							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)
+							diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member))
+							continue
 						}
 						if len(projected)+len(producers) > plan.MaxNeedOutputs {
-							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)
+							diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs))
+							continue
 						}
 						for _, producer := range producers {
 							projected = append(projected, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
@@ -838,7 +872,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		}
 		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
 			position := job.Concurrency.Span.Start
-			return nil, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")
+			diagnostics = append(diagnostics, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel"))
 		}
 	}
 
@@ -846,7 +880,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	for _, id := range order {
 		instances = append(instances, byLogicalID[id]...)
 	}
-	return instances, nil
+	return instances, errors.Join(diagnostics...)
 }
 
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
@@ -889,9 +923,6 @@ func supported(path string, job workflow.Job) error {
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
 		return jobError(path, job, "runs-on must resolve statically")
 	}
-	if err := supportedConditions(path, job, nil, false); err != nil {
-		return err
-	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for _, step := range job.Steps {
 		if step.ID != "" {
@@ -912,12 +943,13 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 			return expression.ValidateConditionWithMatrix(source, scope, matrix)
 		}
 	}
+	var diagnostics []error
 	if err := validate(job.If, expression.JobCondition); err != nil {
 		position := job.IfSpan.Start
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err))
+		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -929,10 +961,10 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err))
+			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
 		}
 	}
-	return nil
+	return errors.Join(diagnostics...)
 }
 
 func cloneMap(in map[string]string) map[string]string {
