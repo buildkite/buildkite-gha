@@ -435,6 +435,69 @@ func TestDownloadArtifactPreflightsCentralDirectoryBeforeZIPAllocation(t *testin
 	}
 }
 
+func TestDownloadArtifactPreflightRejectsPerEntryZIP64(t *testing.T) {
+	t.Run("sentinel offset", func(t *testing.T) {
+		name, _, _ := testDownloadZIP(t, "result.txt")
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eocd := len(contents) - 22
+		central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
+		if central < 0 || central+46 > eocd || binary.LittleEndian.Uint32(contents[central:]) != 0x02014b50 {
+			t.Fatal("test ZIP central directory is malformed")
+		}
+		binary.LittleEndian.PutUint32(contents[central+42:], 1<<32-1)
+		if err := os.WriteFile(name, contents, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := preflightZIPDirectory(f, int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+			t.Fatalf("per-entry ZIP64 sentinel error = %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("extra field", func(t *testing.T) {
+		name := filepath.Join(t.TempDir(), "zip64-extra.zip")
+		out, err := os.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(out)
+		header := &zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: []byte{0x01, 0x00, 0x00, 0x00}}
+		member, err := zw.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := member.Write([]byte("payload")); err != nil {
+			t.Fatal(err)
+		}
+		if err := errors.Join(zw.Close(), out.Close()); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := f.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := preflightZIPDirectory(f, info.Size()); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+			t.Fatalf("per-entry ZIP64 extra error = %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {
 	name, size, digest := testDownloadZIP(t, "result.txt")
 	f, err := os.Open(name)
