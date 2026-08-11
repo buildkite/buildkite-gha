@@ -97,7 +97,7 @@ func TestUploadArtifactRuntimeVersionMatrix(t *testing.T) {
 	}{
 		{name: "v4.6.2 defaults", commit: actionintegration.UploadArtifactCommit, inputs: map[string]string{"path": "payload"}},
 		{name: "v5.0.0 defaults", commit: actionintegration.UploadArtifactV5Commit, inputs: map[string]string{"path": "./payload"}},
-		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "payload/", "retention-days": "0"}},
+		{name: "v6.0.0 defaults", commit: actionintegration.UploadArtifactV6Commit, inputs: map[string]string{"path": "./payload", "retention-days": "0"}},
 		{name: "v7.0.1 ZIP", commit: actionintegration.UploadArtifactV7Commit, inputs: map[string]string{"path": "payload", "archive": " true ", "name": "v7"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -178,6 +178,15 @@ func TestUploadArtifactNormalizesFailurePathDirectories(t *testing.T) {
 				t.Fatalf("archive entries = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+
+	writeFixtureFile(t, workspace, "report.txt", "not a directory")
+	uploader := &captureArtifactUploader{}
+	r := Runner{Artifacts: uploader, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	if _, err := r.runUploadArtifactCommit(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, actionintegration.UploadArtifactV6Commit, map[string]string{
+		"name": "directory-only", "path": "report.txt/", "if-no-files-found": "error",
+	}); err == nil || !strings.Contains(err.Error(), "No files were found") || len(uploader.uploads) != 0 {
+		t.Fatalf("trailing-slash file match error = %v, uploads = %d", err, len(uploader.uploads))
 	}
 }
 

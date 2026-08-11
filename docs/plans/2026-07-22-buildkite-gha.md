@@ -1388,8 +1388,8 @@ public checkout remains a separate provider integration gate.
   The producer-side artifact slice now recognizes only the audited
   `actions/upload-artifact` v4.6.2, v5.0.0, v6.0.0, and v7.0.1 commits and
   replaces their root ZIP-mode lifecycle with a bounded Buildkite Agent upload.
-  Literal workspace files and directories, normalized safe `./file` and `dir/`
-  spellings, and final-component file globs become an immutable,
+  Literal workspace files and directories, normalized safe `./file` spellings,
+  preserved directory-only `dir/` intent, and final-component file globs become an immutable,
   digest-addressed ZIP; compatible artifact ID and digest outputs
   and the native path, size, and file count are bound into the authoritative
   terminal result manifest. Broader globs, symlinks, overwrite, effective

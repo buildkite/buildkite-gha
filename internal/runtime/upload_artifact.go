@@ -284,6 +284,7 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 			continue
 		}
 		before := len(files)
+		directoryOnly := strings.HasSuffix(root, "/")
 		literalRoot := root
 		if strings.Contains(root, "*") {
 			literalRoot = filepath.Dir(root)
@@ -346,6 +347,9 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("visible symlink %q is unsupported", root)
 		}
+		if directoryOnly && !info.IsDir() {
+			continue
+		}
 		if info.Mode().IsRegular() {
 			if err := add(disk, info); err != nil {
 				return nil, err
@@ -372,6 +376,9 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 			}
 			if i.Mode()&os.ModeSymlink != 0 {
 				return fmt.Errorf("visible symlink %q is unsupported", rel)
+			}
+			if p == disk && directoryOnly && i.Mode().IsRegular() {
+				return nil
 			}
 			if i.IsDir() {
 				return nil

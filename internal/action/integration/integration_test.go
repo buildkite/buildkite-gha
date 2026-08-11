@@ -154,7 +154,7 @@ func TestUploadArtifactPathsNormalizesSafeRelativeSpellings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"artifacts.tar.gz", "log", "tmp/capybara", "reports/test (1).txt"}
+	want := []string{"artifacts.tar.gz", "log/", "tmp/capybara/", "reports/test (1).txt"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("UploadArtifactPaths() = %#v, want %#v", got, want)
 	}

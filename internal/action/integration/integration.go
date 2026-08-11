@@ -293,6 +293,7 @@ func UploadArtifactPaths(value string) ([]string, error) {
 			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
 		}
 		glob := strings.Contains(root, "*")
+		directoryOnly := strings.HasSuffix(root, "/")
 		components := strings.Split(root, "/")
 		for i, component := range components {
 			if component == ".." {
@@ -302,10 +303,13 @@ func UploadArtifactPaths(value string) ([]string, error) {
 				return nil, fmt.Errorf("path %q uses a non-canonical glob; Phase 6 is required", root)
 			}
 		}
-		if glob && strings.HasSuffix(root, "/") {
+		if glob && directoryOnly {
 			return nil, fmt.Errorf("path %q uses an unsupported directory glob; Phase 6 is required", root)
 		}
 		root = path.Clean(root)
+		if directoryOnly {
+			root += "/"
+		}
 		if glob {
 			directory, pattern := path.Split(root)
 			directory = strings.TrimSuffix(directory, "/")
