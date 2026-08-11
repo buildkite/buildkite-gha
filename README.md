@@ -138,7 +138,7 @@ association. Buildkite environment values always define the exact top-level
 repository, SHA, and ref being executed. Every source remains untrusted; raw
 webhook data cannot grant protected capabilities and is not retained in plans
 or pipeline YAML. Stored webhook data has no delivery headers, and GitHub push
-payloads may omit `commits`. See [Event snapshots](docs/compatibility.md#event-snapshots)
+payloads may omit `commits`. See [Event snapshots](docs/cli.md#event-snapshots)
 for limits and failure behavior.
 
 As a quick screen, the plugin path is a good fit for workflows built from:
@@ -195,7 +195,7 @@ It is not currently a fit for workflows that require:
 - Windows or macOS jobs.
 
 The underlying runtime has broader container coverage than the production
-plugin currently exposes. See the [compatibility and CLI guide](docs/compatibility.md)
+plugin currently exposes. See the [compatibility reference](docs/compatibility.md)
 for the exact distinction and intentional behavior differences.
 
 ## Check before running
@@ -301,9 +301,10 @@ too.
 
 ## Documentation
 
-- [Compatibility, behavior differences, and direct CLI use](docs/compatibility.md)
+- [GitHub Actions compatibility and behavior differences](docs/compatibility.md)
+- [Direct CLI use](docs/cli.md)
+- [Security model and operator responsibilities](docs/security.md)
 - [Development, smoke tests, and releases](docs/development.md)
-- [Active product and implementation plan](docs/plans/2026-07-22-buildkite-gha.md)
 - [Architecture decisions](docs/architecture/)
 
 Use `buildkite-gha help`, `buildkite-gha help <command>`, or

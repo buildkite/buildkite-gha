@@ -263,21 +263,20 @@ post-save, and direct-dependent exact hit. The plugin downloads and
 checksum-verifies the public release rather than falling back to a local
 binary.
 
-The phase definitions under `.buildkite/` and the [active
-plan](plans/2026-07-22-buildkite-gha.md#current-progress) document the exact
-coverage, differential oracles, commits, and historical Buildkite evidence.
+The smoke manifest and phase definitions under `.buildkite/` record current
+coverage. Git, pull requests, and Buildkite retain the historical evidence.
 
-## Architecture and plans
+## Architecture and security
 
+- The [security model](security.md) explains the operator-facing trust
+  boundaries.
 - [ADR 0001](architecture/0001-upstream-actions-reuse.md) explains why the
   compiler uses actionlint while act and the official runner remain behavioral
   references.
 - [ADR 0002](architecture/0002-plan-envelope-trust-boundary.md) preserves the
   superseded Phase 0 signing experiment and its conformance history.
-- The [active plan](plans/2026-07-22-buildkite-gha.md) tracks implementation
-  phases, evidence, future UX, and deferred decisions. Current user-facing
-  behavior belongs in the [README](../README.md) and [compatibility
-  guide](compatibility.md), not only in the plan.
+- [ADR 0003](architecture/0003-protected-capability-control-plane.md) proposes
+  the control plane required for broader protected capabilities.
 
 ## Publish a release
 

@@ -82,6 +82,116 @@ func TestUploadHelpFormsMatch(t *testing.T) {
 	}
 }
 
+func TestPluginIsHiddenFromHelp(t *testing.T) {
+	for _, args := range [][]string{{"--help"}, {"help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr, "test-version"); code != 0 {
+			t.Fatalf("Run(%q) code = %d, stderr = %q", args, code, stderr.String())
+		}
+		if strings.Contains(stdout.String(), "plugin") {
+			t.Fatalf("Run(%q) exposed plugin command: %q", args, stdout.String())
+		}
+	}
+
+	for _, args := range [][]string{{"help", "plugin"}, {"plugin", "--help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr, "test-version"); code != 2 {
+			t.Fatalf("Run(%q) code = %d, want 2", args, code)
+		}
+		if stdout.Len() != 0 || strings.Contains(stderr.String(), "buildkite-gha plugin") {
+			t.Fatalf("Run(%q) exposed plugin help: stdout=%q stderr=%q", args, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestPluginRequiresCanonicalWorkflowWithoutSideEffects(t *testing.T) {
+	t.Setenv(pluginWorkflowEnvironment, "")
+	t.Setenv("WORKFLOW", "legacy.yml")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
+		t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), pluginWorkflowEnvironment+" is required") || len(runner.commands) != 0 {
+		t.Fatalf("stderr = %q, commands = %#v", stderr.String(), runner.commands)
+	}
+}
+
+func TestPluginDelegatesCanonicalWorkflowToUpload(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	t.Setenv(pluginWorkflowEnvironment, workflowPath)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "plugin-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+
+	t.Run("uploads through the existing implementation", func(t *testing.T) {
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) == 0 || runner.commands[0].name != "buildkite-agent" || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
+			t.Fatalf("commands = %#v, want upload event acquisition first", runner.commands)
+		}
+		if len(runner.uploaded) != 4 || !strings.Contains(stdout.String(), "Uploaded 3 jobs") {
+			t.Fatalf("uploads = %d, stdout = %q", len(runner.uploaded), stdout.String())
+		}
+	})
+
+	t.Run("propagates upload failure", func(t *testing.T) {
+		runner := &cliCaptureRunner{failAt: 1}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, want 1; stderr = %q", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "injected failure") || len(runner.uploaded) != 0 {
+			t.Fatalf("stderr = %q, uploads = %#v", stderr.String(), runner.uploaded)
+		}
+	})
+}
+
+func TestNormalizePluginCommit(t *testing.T) {
+	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
+	t.Run("preserves valid full commit", func(t *testing.T) {
+		runner := &cliCaptureRunner{}
+		setCalls := 0
+		err := normalizePluginCommit(context.Background(), func(string) string { return fullCommit }, func(string, string) error {
+			setCalls++
+			return nil
+		}, runner)
+		if err != nil || setCalls != 0 || len(runner.commands) != 0 {
+			t.Fatalf("normalizePluginCommit() error = %v, set calls = %d, commands = %#v", err, setCalls, runner.commands)
+		}
+	})
+
+	t.Run("resolves symbolic commit from HEAD", func(t *testing.T) {
+		runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
+		name, value := "", ""
+		err := normalizePluginCommit(context.Background(), func(string) string { return "HEAD" }, func(gotName, gotValue string) error {
+			name, value = gotName, gotValue
+			return nil
+		}, runner)
+		if err != nil || name != "BUILDKITE_COMMIT" || value != fullCommit {
+			t.Fatalf("normalizePluginCommit() = %q, %q, %v", name, value, err)
+		}
+		if len(runner.commands) != 1 || runner.commands[0].name != "git" || !slices.Equal(runner.commands[0].args, []string{"rev-parse", "HEAD"}) {
+			t.Fatalf("commands = %#v, want exact git rev-parse HEAD invocation", runner.commands)
+		}
+	})
+
+	t.Run("propagates resolution failure", func(t *testing.T) {
+		runner := &cliCaptureRunner{gitErr: errors.New("no checkout")}
+		err := normalizePluginCommit(context.Background(), func(string) string { return "HEAD" }, os.Setenv, runner)
+		if err == nil || !strings.Contains(err.Error(), "resolve BUILDKITE_COMMIT from checked-out HEAD: no checkout") {
+			t.Fatalf("normalizePluginCommit() error = %v", err)
+		}
+	})
+}
+
 func TestRunValidateAndCompile(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -2620,6 +2730,8 @@ type cliCaptureRunner struct {
 	failAt         int
 	failMetadata   bool
 	failAnnotation bool
+	gitOutput      []byte
+	gitErr         error
 	webhook        []byte
 	webhookErr     error
 	jobByStep      map[string]string
@@ -2658,6 +2770,9 @@ func (r *cliCaptureRunner) Run(ctx context.Context, dir, name string, args []str
 	r.contextErrors = append(r.contextErrors, ctx.Err())
 	if r.failAt != 0 && len(r.commands) == r.failAt {
 		return nil, errors.New("injected failure")
+	}
+	if name == "git" && slices.Equal(args, []string{"rev-parse", "HEAD"}) {
+		return bytes.Clone(r.gitOutput), r.gitErr
 	}
 	if slices.Equal(args, []string{"meta-data", "get", "buildkite:webhook"}) {
 		if r.webhookErr != nil {
