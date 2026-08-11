@@ -1,90 +1,78 @@
 # Security model
 
 `buildkite-gha` runs workflow steps and third-party actions as native Buildkite
-jobs. Treat that code like any other repository script: it is not made safe by
-using Actions syntax.
+jobs. Actions syntax does not make that code trusted.
 
-The [compatibility reference](compatibility.md) is the source of truth for
-supported features. This page explains the trust boundaries around them.
+The [compatibility reference](compatibility.md) lists supported features. This
+page explains the boundaries operators must provide around them.
 
 ## Isolate the whole job
 
-The runtime does not isolate steps from each other. They share a workspace,
-environment changes, processes, and action lifecycle. A shell step can affect a
-later action, and an action can affect a later shell step.
+Steps share a workspace, environment changes, processes, action state, and the
+job's Buildkite identity. A shell step can affect a later action, and an action
+can affect a later shell step.
 
-Dockerfile actions add packaging, not a security boundary. When a queue uses a
-disposable job VM, that VM—not the action container—is the boundary around the
-Docker daemon and workflow code.
+Dockerfile actions add packaging, not a security boundary. Use a queue with:
 
-Run imported jobs on a queue that provides:
-
-- whole-job isolation;
+- a disposable machine or equivalent whole-job isolation;
 - no ambient protected credentials; and
-- a clean machine for each untrusted job.
+- a clean environment for every untrusted job.
 
-On a persistent self-hosted agent, workflow code can use whatever host resources
-the agent process exposes. Files or processes it leaves behind may affect later
-jobs.
+On a persistent self-hosted agent, workflow code can access exposed host
+resources and leave state that affects later jobs.
 
-## Inputs do not grant authority
+## Repository data is not authority
 
-Workflow files, action metadata, event snapshots, and webhook payloads are
-untrusted inputs. They can request work, queues, and permissions, but are not
-sufficient authority for them. Buildkite configuration and server-side policy
-decide what is allowed.
+Workflow files, action metadata, event snapshots, and job plans are untrusted
+inputs. They may describe work and request permissions. Buildkite configuration
+and server-side policy choose the queue and decide what authority is available.
 
-Content digests and immutable action locks detect changed code. A digest alone
-does not make that code trusted or grant it authority.
+Digests and immutable action locks detect changed code. They do not make code
+trusted or grant credentials.
 
 ## Credential boundaries
 
-| Credential | Supported boundary |
+| Credential | Current boundary |
 | --- | --- |
-| Repository checkout | The verified adapter checks the plan's event repository and exact commit. Buildkite authorizes private repository access. Credentials are not persisted. |
-| `GITHUB_TOKEN` | One short-lived token is requested for the plan's event repository and compiler-resolved permissions. Buildkite independently requires the pipeline repository to match and may deny the request. The token is not initially ambient. |
-| Cache token | Fresh job-bound credentials are minted for each JavaScript or Docker action lifecycle when the cache service is configured. Ordinary shell steps do not receive them. |
+| Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
+| `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and compiler-resolved permissions. Buildkite verifies the repository and may deny the request. The token is not ambient. |
+| Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Rejected by production admission. |
 | GitHub-compatible OIDC | Unsupported. |
 
+An action that receives a credential can use or exfiltrate it. It can also
+export `GITHUB_TOKEN` to later steps through `GITHUB_ENV`. Log masking reduces
+accidental disclosure; it is not access control and does not catch transformed
+values.
+
+If untrusted code can edit a workflow that requests write permissions, it can
+use a token that Buildkite allows. Restrict write permissions with organization
+and pipeline policy.
+
 ### Checkout and submodules
 
-Checked-in `.gitmodules` files may select repositories covered by the job's
-Buildkite managed code access. For GitHub, that can include another repository
-in the same account when the connected GitHub App installation includes it.
-Buildkite authorizes each repository and returns a repository-specific,
-read-only token. The helper is offered only to `github.com`, is scoped by HTTP
-path, and is not persisted. External HTTPS submodules are fetched anonymously;
-SSH and non-HTTPS transports are disabled.
+Buildkite authorizes every managed GitHub repository requested through Git's
+credential protocol. Checked-in `.gitmodules` may select another repository in
+the same GitHub account when the connected App installation includes it. Those
+tokens are repository-specific and read-only. External HTTPS submodules are
+anonymous; SSH and non-HTTPS transports are disabled.
 
-The installed Git executable owns submodule manifest parsing, paths, relative
-URLs, and recursion. Use a current, vendor-supported Git distribution,
-preferably pinned in an immutable job image.
+The credential helper is offered only to `github.com`, uses HTTP-path matching,
+and is not persisted. The installed Git executable owns submodule parsing and
+recursion, so keep it current and preferably pin it in the job image.
 
-Job binding does not prove that a branch, actor, or fork is trusted. If an
-untrusted change can edit a workflow that requests write permissions, that code
-can use the resulting token. Restrict write permissions with Buildkite
-organization and pipeline policy.
-
-An action that receives a credential has the same ability to use or exfiltrate
-it as a shell command in that job. It can also export `GITHUB_TOKEN` to later
-steps through `GITHUB_ENV`. Log masking hides registered literal values; it is
-not access control and cannot detect every encoded or transformed value.
-
-Checkout's command-scoped environment and Git configuration reduce accidental
-credential spread; they do not isolate the helper or Agent identity from a
-hostile concurrent process under the same job identity. Protecting checkout
-credentials from hostile same-job code would require a separate UID, sandbox,
-or pre-job credential broker rather than more `.gitmodules` parsing.
+Command scoping limits accidental spread. It does not stop a hostile concurrent
+process under the same job identity from reaching the Agent or helper. That
+requires a separate UID, sandbox, or pre-job credential broker.
 
 ## Operator checklist
 
 1. Pin a released plugin version.
-2. Use an isolated queue with no ambient credentials.
-3. Treat public actions as third-party code; prefer immutable commit pins.
-4. Restrict repository credentials and write tokens with Buildkite policy.
-5. Keep the queue's Git distribution current and patched.
-6. Validate the production profile before upload:
+2. Run imported jobs on an isolated queue with no ambient credentials.
+3. Treat public actions as third-party code and prefer immutable commit pins.
+4. Restrict managed repository access and write tokens with Buildkite policy.
+5. Keep Git and the job image patched.
+6. Validate before upload:
 
    ```sh
    buildkite-gha validate \
@@ -96,5 +84,6 @@ or pre-job credential broker rather than more `.gitmodules` parsing.
 7. Keep unsupported secrets, private actions, OIDC, and protected queues out of
    imported workflows.
 
-For implementation detail, see the proposed
-[protected-capability control-plane ADR](architecture/0003-protected-capability-control-plane.md).
+Broader protected capabilities require the Buildkite-owned policy boundary in
+[ADR 0003](architecture/0003-protected-capability-control-plane.md); repository
+configuration alone cannot authorize them.
