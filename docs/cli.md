@@ -105,10 +105,10 @@ buildkite-gha upload .github/workflows/ci.yml
 
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
-The GitHub Actions plugin instead invokes the hidden `buildkite-gha plugin`
-entrypoint and supplies the workflow through
-`BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW`. That integration command accepts no
-arguments and is intentionally absent from ordinary CLI help.
+The hidden `buildkite-gha plugin` entrypoint provides the dedicated GitHub
+Actions plugin integration boundary. It reads the workflow from
+`BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW`, accepts no arguments, and is
+intentionally absent from ordinary CLI help.
 
 Event source precedence is:
 
