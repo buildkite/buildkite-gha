@@ -96,15 +96,16 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		return result, fmt.Errorf("%s discover Git: %w", adapter, err)
 	}
 	env := map[string]string{
-		"HOME":                filepath.Join(workspace, ".no-home"),
-		"GIT_CONFIG_NOSYSTEM": "1",
-		"GIT_CONFIG_GLOBAL":   filepath.Join(workspace, ".no-global-gitconfig"),
-		"GIT_TERMINAL_PROMPT": "0",
-		"GIT_ASKPASS":         "",
-		"SSH_ASKPASS":         "",
-		"GIT_SSH_COMMAND":     "ssh -oBatchMode=yes",
+		"HOME":                   filepath.Join(workspace, ".no-home"),
+		"GIT_CONFIG_NOSYSTEM":    "1",
+		"GIT_CONFIG_GLOBAL":      os.DevNull,
+		"GIT_TERMINAL_PROMPT":    "0",
+		"GIT_ASKPASS":            "",
+		"SSH_ASKPASS":            "",
+		"GIT_SSH_COMMAND":        "false",
+		"GIT_PROTOCOL_FROM_USER": "0",
 	}
-	base := []string{"-c", "credential.helper=", "-c", "http.extraheader=", "-c", "core.hooksPath=/dev/null"}
+	base := checkoutGitBaseArgs()
 	run := func(runEnv map[string]string, args ...string) error {
 		if err := r.runStreaming(ctx, processor, workspace, runEnv, git, append(base, args...)...); err != nil {
 			return fmt.Errorf("%s git %s: %w", adapter, args[0], err)
@@ -129,6 +130,12 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err := run(env, "checkout", "--detach", job.Event.SHA); err != nil {
 		return result, err
 	}
+	mode := checkoutSubmoduleMode(inputs)
+	if mode != "" {
+		if err := r.runCheckoutSubmodules(ctx, processor, workspace, git, env, base, checkoutFetchDepth(inputs) != "0", mode == "recursive", credentialed); err != nil {
+			return result, fmt.Errorf("%s submodules: %w", adapter, err)
+		}
+	}
 	head, err := os.ReadFile(filepath.Join(workspace, ".git", "HEAD"))
 	if err != nil || strings.TrimSpace(string(head)) != job.Event.SHA {
 		return result, fmt.Errorf("%s did not produce exact detached SHA %s", adapter, job.Event.SHA)
@@ -136,6 +143,102 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	result.Outputs["ref"] = checkoutRefOutput(inputs, job.Event.Ref)
 	result.Outputs["commit"] = job.Event.SHA
 	return result, nil
+}
+
+func checkoutGitBaseArgs() []string {
+	return []string{
+		"--literal-pathspecs",
+		"-c", "credential.helper=", "-c", "http.extraheader=", "-c", "core.hooksPath=/dev/null",
+		"-c", "http.followRedirects=false",
+		"-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
+		"-c", "protocol.version=2",
+		"-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "-c", "core.commitGraph=false", "-c", "fetch.writeCommitGraph=false",
+	}
+}
+
+func checkoutSubmoduleMode(inputs map[string]string) string {
+	for name, value := range inputs {
+		if strings.EqualFold(name, "submodules") {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "true":
+				return "direct"
+			case "recursive":
+				return "recursive"
+			}
+		}
+	}
+	return ""
+}
+
+func checkoutFetchDepth(inputs map[string]string) string {
+	for name, value := range inputs {
+		if strings.EqualFold(name, "fetch-depth") {
+			return value
+		}
+	}
+	return "1"
+}
+
+type checkoutSubmoduleStatusWriter struct {
+	lines   int
+	invalid string
+}
+
+func (w *checkoutSubmoduleStatusWriter) Write(p []byte) (int, error) {
+	for _, line := range strings.Split(strings.TrimSuffix(string(p), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		w.lines++
+		if w.invalid == "" && (w.lines > 100_000 || line[0] != ' ') {
+			w.invalid = line
+		}
+	}
+	return len(p), nil
+}
+
+func (r Runner) runCheckoutSubmodules(ctx context.Context, processor *commandProcessor, workspace string, git string, env map[string]string, base []string, depthOne, recursive, credentialed bool) error {
+	policy := append(append([]string{}, base...), "-c", "url.https://github.com/.insteadOf=git@github.com:")
+	run := func(withCredentials bool, args ...string) error {
+		if withCredentials {
+			if err := r.runRepositoryProviderCheckoutFetch(ctx, processor, workspace, env, git, policy, args); err != nil {
+				return fmt.Errorf("git %s: %w", args[0], err)
+			}
+			return nil
+		}
+		if err := r.runStreaming(ctx, processor, workspace, env, git, append(policy, args...)...); err != nil {
+			return fmt.Errorf("git %s: %w", args[0], err)
+		}
+		return nil
+	}
+
+	syncArgs := []string{"submodule", "sync"}
+	updateArgs := []string{"submodule", "update", "--init", "--force"}
+	statusArgs := []string{"submodule", "status"}
+	if depthOne {
+		updateArgs = append(updateArgs, "--depth=1")
+	}
+	if recursive {
+		syncArgs = append(syncArgs, "--recursive")
+		updateArgs = append(updateArgs, "--recursive")
+		statusArgs = append(statusArgs, "--recursive")
+	}
+	if err := run(false, syncArgs...); err != nil {
+		return err
+	}
+	if err := run(credentialed, updateArgs...); err != nil {
+		return err
+	}
+
+	status := &checkoutSubmoduleStatusWriter{}
+	statusProcessor := newCommandProcessor(status, processor.stderr)
+	if err := r.runStreaming(ctx, statusProcessor, workspace, env, git, append(policy, statusArgs...)...); err != nil {
+		return fmt.Errorf("git submodule status: %w", err)
+	}
+	if status.invalid != "" {
+		return fmt.Errorf("git submodule status reported invalid state %q", status.invalid)
+	}
+	return nil
 }
 
 func checkoutRefOutput(inputs map[string]string, eventRef string) string {
@@ -184,6 +287,14 @@ func checkoutInputTrue(value string) bool {
 	return value == "true" || value == "True" || value == "TRUE"
 }
 
+func repositoryProviderCheckoutCredentialArgs(base []string, agent string) []string {
+	return append(append([]string(nil), base...),
+		"-c", "credential.https://github.com.useHttpPath=true",
+		"-c", "http.followRedirects=false",
+		"-c", "credential.https://github.com.helper="+agentGitCredentialHelperCommand(agent),
+	)
+}
+
 func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processor *commandProcessor, workspace string, env map[string]string, git string, base, fetchArgs []string) error {
 	credentials := r.RepositoryCredentials
 	if credentials == nil || credentials.Agent == "" || !filepath.IsAbs(credentials.Agent) {
@@ -202,10 +313,7 @@ func (r Runner) runRepositoryProviderCheckoutFetch(ctx context.Context, processo
 	for name, value := range credentials.proxyEnvironment {
 		credentialEnv[name] = value
 	}
-	credentialArgs := append(append([]string(nil), base...),
-		"-c", "credential.useHttpPath=true",
-		"-c", "credential.helper="+agentGitCredentialHelperCommand(credentials.Agent),
-	)
+	credentialArgs := repositoryProviderCheckoutCredentialArgs(base, credentials.Agent)
 	cmd := exec.Command(git, append(credentialArgs, fetchArgs...)...)
 	cmd.Dir = workspace
 	cmd.Env = processEnv(credentialEnv)

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -53,6 +55,7 @@ func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	script := `#!/bin/sh
 set -eu
 test "$GIT_CONFIG_NOSYSTEM" = 1
+test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
 test "$GIT_TERMINAL_PROMPT" = 0
 test -z "$GIT_ASKPASS"
 test -z "${GH_TOKEN:-}"
@@ -68,9 +71,10 @@ case "$operation" in
   checkout)
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     mkdir -p .github/workflows .github/actions/local
+    printf '%s\n' '[url "https://attacker.invalid/"]' '  insteadOf = https://github.com/' > .no-global-gitconfig
     printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(workflowSource)) + ` | base64 -d > .github/workflows/test.yml
     printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(localSource)) + ` | base64 -d > .github/actions/local/action.yml
-    chmod 0644 .github/workflows/test.yml .github/actions/local/action.yml
+    chmod 0644 .no-global-gitconfig .github/workflows/test.yml .github/actions/local/action.yml
     ;;
 esac
 `
@@ -220,6 +224,215 @@ func TestCheckoutRefOutput(t *testing.T) {
 	}
 }
 
+func TestCheckoutSubmoduleInputMode(t *testing.T) {
+	if got := checkoutSubmoduleMode(map[string]string{"SuBmOdUlEs": " ReCuRsIvE "}); got != "recursive" {
+		t.Fatalf("checkoutSubmoduleMode() = %q", got)
+	}
+}
+
+func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "git.log")
+	git := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellTestQuote(logPath) + "\n"
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=1 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
+		t.Fatalf("native submodule command sequence = %q", lines)
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "url.https://github.com/.insteadOf=git@github.com:") {
+			t.Fatalf("command lacks scoped GitHub rewrite: %q", line)
+		}
+		if strings.Contains(line, "credential.helper=!") {
+			t.Fatalf("command contains generic credential helper: %q", line)
+		}
+	}
+}
+
+func TestCheckoutSubmoduleStatusRejectsInvalidStates(t *testing.T) {
+	for _, prefix := range []string{"-", "+", "U"} {
+		t.Run(prefix, func(t *testing.T) {
+			git := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+previous=
+for argument in "$@"; do
+  if [ "$previous" = submodule ] && [ "$argument" = status ]; then
+    printf '%s%s child\n' ` + shellTestQuote(prefix) + ` ` + shellTestQuote(strings.Repeat("a", 40)) + `
+    exit 0
+  fi
+  previous="$argument"
+done
+exit 0
+`
+			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false)
+			if err == nil || !strings.Contains(err.Error(), "invalid state") {
+				t.Fatalf("status prefix %q error = %v", prefix, err)
+			}
+		})
+	}
+}
+
+func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
+	root := t.TempDir()
+	_, grandOID := createNativeSubmoduleRepository(t, root, "grand", "grand.txt", "grand\n", "", "")
+	_, childOID := createNativeSubmoduleRepository(t, root, "child", "child.txt", "child\n", "../grand.git", "deps/grand")
+	_, parentOID := createNativeSubmoduleRepository(t, root, "parent", "parent.txt", "parent\n", "../child.git", "deps/child")
+
+	for _, test := range []struct {
+		name      string
+		recursive bool
+		depthOne  bool
+	}{
+		{name: "direct depth zero"},
+		{name: "recursive depth one", recursive: true, depthOne: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := filepath.Join(t.TempDir(), "parent")
+			runTestGit(t, "", "clone", filepath.Join(root, "parent.git"), workspace)
+			runTestGit(t, workspace, "checkout", "--detach", parentOID)
+			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
+			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
+			if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false); err != nil {
+				t.Fatal(err)
+			}
+			childPath := filepath.Join(workspace, "deps", "child")
+			if got := strings.TrimSpace(runTestGit(t, childPath, "rev-parse", "HEAD")); got != childOID {
+				t.Fatalf("child HEAD = %s, want %s", got, childOID)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, ".git", "modules", "deps", "child", "HEAD")); err != nil {
+				t.Fatalf("native child module layout: %v", err)
+			}
+			grandPath := filepath.Join(childPath, "deps", "grand")
+			if test.recursive {
+				if got := strings.TrimSpace(runTestGit(t, grandPath, "rev-parse", "HEAD")); got != grandOID {
+					t.Fatalf("grandchild HEAD = %s, want %s", got, grandOID)
+				}
+				if _, err := os.Stat(filepath.Join(workspace, ".git", "modules", "deps", "child", "modules", "deps", "grand", "HEAD")); err != nil {
+					t.Fatalf("native nested module layout: %v", err)
+				}
+			} else if _, err := os.Stat(filepath.Join(grandPath, ".git")); !os.IsNotExist(err) {
+				t.Fatalf("direct mode initialized nested child: %v", err)
+			}
+			statusArgs := []string{"submodule", "status"}
+			if test.recursive {
+				statusArgs = append(statusArgs, "--recursive")
+			}
+			for _, line := range strings.Split(strings.TrimSpace(runTestGit(t, workspace, statusArgs...)), "\n") {
+				if line == "" || line[0] == '-' {
+					t.Fatalf("uninitialized status %q", line)
+				}
+			}
+		})
+	}
+}
+
+func createNativeSubmoduleRepository(t *testing.T, root, name, file, contents, childURL, childPath string) (string, string) {
+	t.Helper()
+	work := filepath.Join(root, name+"-work")
+	runTestGit(t, "", "init", "--initial-branch=main", work)
+	runTestGit(t, work, "config", "user.name", "buildkite-gha test")
+	runTestGit(t, work, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(work, file), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runTestGit(t, work, "add", file)
+	if childURL != "" {
+		runTestGit(t, work, "-c", "protocol.file.allow=always", "submodule", "add", childURL, childPath)
+	}
+	runTestGit(t, work, "commit", "-m", "fixture")
+	oid := strings.TrimSpace(runTestGit(t, work, "rev-parse", "HEAD"))
+	bare := filepath.Join(root, name+".git")
+	runTestGit(t, "", "clone", "--bare", work, bare)
+	return bare, oid
+}
+
+func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "helper-ran")
+	agent := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\n: > "+shellTestQuote(marker)+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(git, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("credential helper ran without provider-token-read authority: %v", err)
+	}
+}
+
+func TestCredentialedSubmoduleFetchUsesExactRepositoryAndCommandScopedSecret(t *testing.T) {
+	workspace := t.TempDir()
+	inputLog := filepath.Join(t.TempDir(), "helper-input")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	agentScript := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-secret
+cat > ` + shellTestQuote(inputLog) + `
+printf 'username=token\npassword=repository-secret\n'
+`
+	if err := os.WriteFile(agent, []byte(agentScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git := filepath.Join(t.TempDir(), "git")
+	gitScript := `#!/bin/sh
+set -eu
+helper=
+for argument in "$@"; do
+  case "$argument" in credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;; esac
+done
+test -n "$helper"
+mkdir -p .git
+: > .git/config
+printf 'protocol=https\nhost=github.com\npath=owner/private.git\n\n' | sh -c "$helper get" >/dev/null
+echo job-secret
+`
+	if err := os.WriteFile(git, []byte(gitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
+	if err := runner.runRepositoryProviderCheckoutFetch(context.Background(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.ReadFile(inputLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(input) != "protocol=https\nhost=github.com\npath=owner/private.git\n\n" {
+		t.Fatalf("credential helper input = %q", input)
+	}
+	if strings.Contains(logs.String(), "job-secret") || !strings.Contains(logs.String(), "***") {
+		t.Fatalf("credentialed fetch output was not masked: %q", logs.String())
+	}
+	config, err := os.ReadFile(filepath.Join(workspace, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(config), "credential") || strings.Contains(string(config), agent) {
+		t.Fatalf("credential helper persisted in staged config: %q", config)
+	}
+}
+
 func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 	sourceRoot := t.TempDir()
 	runTestGit(t, sourceRoot, "init", "--initial-branch=main")
@@ -271,14 +484,131 @@ func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 
 func runTestGit(t *testing.T, directory string, args ...string) string {
 	t.Helper()
+	return runTestGitInput(t, directory, nil, args...)
+}
+
+func runTestGitInput(t *testing.T, directory string, input []byte, args ...string) string {
+	t.Helper()
 	if directory != "" {
 		args = append([]string{"-C", directory}, args...)
 	}
-	output, err := exec.Command("git", args...).CombinedOutput()
+	cmd := exec.Command("git", args...)
+	cmd.Stdin = bytes.NewReader(input)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 	return string(output)
+}
+
+func TestCheckoutSubmoduleCancellationCleansNativeUpdateProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	createNativeSubmoduleRepository(t, root, "child", "child.txt", "child\n", "", "")
+	_, parentOID := createNativeSubmoduleRepository(t, root, "parent", "parent.txt", "parent\n", "../child.git", "deps/child")
+	workspace := filepath.Join(t.TempDir(), "parent")
+	runTestGit(t, "", "clone", filepath.Join(root, "parent.git"), workspace)
+	runTestGit(t, workspace, "checkout", "--detach", parentOID)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidFile, updateStarted := filepath.Join(t.TempDir(), "child.pid"), filepath.Join(t.TempDir(), "update-started")
+	wrapper := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+previous=
+for argument in "$@"; do
+  if [ "$previous" = submodule ] && [ "$argument" = update ]; then
+    (trap '' INT TERM; sleep 30) &
+    echo $! > ` + shellTestQuote(pidFile) + `
+    : > ` + shellTestQuote(updateStarted) + `
+    wait
+  fi
+  previous="$argument"
+done
+exec ` + shellTestQuote(realGit) + ` "$@"
+`
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), true, false, false)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(updateStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("submodule update did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("submodule update cancellation error = %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
+		t.Fatalf("update child process %s remains alive", pid)
+	}
+}
+
+func TestCheckoutSubmoduleCancellationCleansNativeStatusProcessGroup(t *testing.T) {
+	pidFile, statusStarted := filepath.Join(t.TempDir(), "child.pid"), filepath.Join(t.TempDir(), "status-started")
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+previous=
+for argument in "$@"; do
+  if [ "$previous" = submodule ] && [ "$argument" = status ]; then
+    (trap '' INT TERM; sleep 30) &
+    echo $! > ` + shellTestQuote(pidFile) + `
+    : > ` + shellTestQuote(statusStarted) + `
+    wait
+  fi
+  previous="$argument"
+done
+exit 0
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, true, false)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(statusStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("submodule status did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("submodule status cancellation error = %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
+		t.Fatalf("status child process %s remains alive", pid)
+	}
 }
 
 func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T) {
@@ -386,8 +716,8 @@ case "$operation" in
     use_http_path=
     for argument in "$@"; do
       case "$argument" in
-        credential.helper=!*) helper="${argument#credential.helper=!}" ;;
-        credential.useHttpPath=true) use_http_path=true ;;
+        credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;;
+        credential.https://github.com.useHttpPath=true) use_http_path=true ;;
       esac
     done
     test -n "$helper"
@@ -458,6 +788,47 @@ func TestAgentGitCredentialHelperCommandQuotesExecutable(t *testing.T) {
 	}
 }
 
+func TestRepositoryProviderCredentialHelperIsGitHubSpecific(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "helper.log")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	script := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+cat > ` + shellTestQuote(marker) + `
+printf 'username=token\npassword=secret\n'
+`
+	if err := os.WriteFile(agent, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(), agent)
+	fill := func(host, path string) error {
+		cmd := exec.Command("git", append(args, "credential", "fill")...)
+		cmd.Env = processEnv(map[string]string{"GIT_TERMINAL_PROMPT": "0"})
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=" + host + "\npath=" + path + "\n\n")
+		return cmd.Run()
+	}
+	if err := fill("github.com", "owner/private.git"); err != nil {
+		t.Fatalf("GitHub credential fill: %v", err)
+	}
+	request, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(request), "path=owner/private.git") {
+		t.Fatalf("helper request = %q", request)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := fill("code.example.org", "owner/public.git"); err == nil {
+		t.Fatal("external host unexpectedly received credentials")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("external host invoked GitHub helper: %v", err)
+	}
+}
+
 func TestRepositoryProviderCheckoutFailsClosedWhenHelperDeniesAccess(t *testing.T) {
 	workspace := t.TempDir()
 	checkoutMarker := filepath.Join(t.TempDir(), "checkout-ran")
@@ -473,7 +844,7 @@ helper=
 for argument in "$@"; do
   case "$argument" in
     init|remote|fetch|checkout) operation="$argument" ;;
-    credential.helper=!*) helper="${argument#credential.helper=!}" ;;
+    credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;;
   esac
 done
 case "$operation" in
@@ -526,7 +897,7 @@ case "$operation" in
   fetch)
     helper=
     for argument in "$@"; do
-      case "$argument" in credential.helper=!*) helper="${argument#credential.helper=!}" ;; esac
+      case "$argument" in credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;; esac
     done
     test -n "$helper"
     credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"

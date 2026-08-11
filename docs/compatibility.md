@@ -609,7 +609,7 @@ unknown commits are unsupported.
 The adapter checks out the event repository at its exact SHA into an empty
 workspace. It uses Buildkite's repository-provider Git credentials when the
 job provides them; otherwise it fetches anonymously. Credentials are scoped to
-the fetch command and are never persisted.
+each verified repository fetch command and are never persisted.
 
 | Input | Supported values |
 | --- | --- |
@@ -626,13 +626,24 @@ the fetch command and are never persisted.
 | `sparse-checkout-cone-mode` | Omitted or true |
 | `fetch-depth` | Omitted, `1`, or `0` |
 | `fetch-tags`, `show-progress` | Omitted, true, or false |
-| `lfs`, `submodules` | Omitted or false |
+| `lfs` | Omitted or false |
+| `submodules` | Omitted, false, true, or recursive; whitespace is trimmed and casing is ignored |
 | `set-safe-directory` | Omitted or true |
 | `github-server-url` | Omitted, empty, or `https://github.com` |
 | `allow-unsafe-pr-checkout` | Omitted or false |
 
-Alternate repositories, branches, tags, SSH, LFS, submodules, sparse checkout,
-GitHub Enterprise Server, and credential persistence are unsupported.
+`false` and omission do not run submodule commands. `true` runs native Git
+for direct children and `recursive` includes nested children. Relative URLs and
+`fetch-depth` follow native Git behavior. Public and private GitHub submodules
+are supported under the job's repository access; external HTTPS submodules are
+anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and
+non-HTTPS transports are unsupported.
+
+See the [security model](security.md#checkout-and-submodules) for the credential,
+Git, and job-isolation boundaries.
+
+Alternate repositories, branches, tags, LFS, sparse checkout, GitHub Enterprise
+Server, and credential persistence remain unsupported.
 
 ### `actions/upload-artifact`
 
