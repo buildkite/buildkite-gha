@@ -91,6 +91,16 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	if len(matches) > transport.MaxResultArtifacts {
 		return result, fmt.Errorf("artifact lookup found %d verified matches, maximum is %d", len(matches), transport.MaxResultArtifacts)
 	}
+	if pattern != "" {
+		names := make(map[string]struct{}, len(matches))
+		for _, artifact := range matches {
+			key := strings.ToLower(artifact.Name)
+			if _, exists := names[key]; exists {
+				return result, fmt.Errorf("artifact pattern matched duplicate artifact names across direct needs")
+			}
+			names[key] = struct{}{}
+		}
+	}
 	if r.Artifacts == nil {
 		return result, fmt.Errorf("native artifact store is not configured")
 	}

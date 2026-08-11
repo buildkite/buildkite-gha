@@ -270,6 +270,31 @@ func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactPatternRejectsDuplicateNamesAcrossNeeds(t *testing.T) {
+	archive, size, digest := testDownloadZIP(t, "result.xml")
+	firstPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("1", 64) + ".zip"
+	secondPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("2", 64) + ".zip"
+	first := plan.NeedArtifact{Name: "junit-xml-25-a", Path: firstPath, Digest: digest, Size: size, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	second := first
+	second.Name = "JUNIT-XML-25-A"
+	second.Path = secondPath
+	second.Producer.JobID = "22222222-2222-4222-8222-222222222222"
+	store := &downloadStore{archives: map[string]string{firstPath: archive, secondPath: archive}}
+
+	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
+		map[string]plan.Need{"first": {Artifacts: []plan.NeedArtifact{first}}, "second": {Artifacts: []plan.NeedArtifact{second}}},
+		actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "*", "merge-multiple": "true"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "duplicate artifact names") || strings.Contains(strings.ToLower(err.Error()), "junit") {
+		t.Fatalf("duplicate pattern match error = %v", err)
+	}
+	if len(store.paths) != 0 {
+		t.Fatalf("duplicate pattern downloaded artifacts: %#v", store.paths)
+	}
+}
+
 func TestDownloadArtifactRejectsMaskedNameWithoutDisclosure(t *testing.T) {
 	const maskedName = "runtime-secret-artifact"
 	processor := newCommandProcessor(io.Discard, io.Discard)

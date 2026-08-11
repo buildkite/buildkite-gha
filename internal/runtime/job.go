@@ -1396,15 +1396,21 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 	compositeProcessEnv["GITHUB_ACTION_PATH"] = actionPath
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
+	inheritedFailure := eval.JobStatus == "failure"
+	inheritedCancelled := eval.JobStatus == "cancelled"
+	inheritedUnsuccessful := inheritedFailure || inheritedCancelled
 	var runErr error
 	for i, step := range action.Runs.Steps {
-		eval.JobStatus = jobStatusValue(runErr != nil, ctx.Err() != nil)
+		failure := inheritedFailure || runErr != nil
+		cancelled := inheritedCancelled || ctx.Err() != nil
+		unsuccessful := inheritedUnsuccessful || runErr != nil
+		eval.JobStatus = jobStatusValue(unsuccessful, cancelled)
 		// GITHUB_ENV effects are visible to subsequent children. Keep this
 		// composite's invocation environment in expression contexts, while
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
-		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: ctx.Err() != nil}
+		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))

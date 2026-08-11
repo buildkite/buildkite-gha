@@ -3908,6 +3908,45 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestNestedCompositePreservesInheritedJobStatus(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	writeFixtureFile(t, workspace, ".github/actions/status/action.yml", `name: Observe status
+inputs:
+  job-status:
+    default: ${{ job.status }}
+runs:
+  using: composite
+  steps:
+    - if: always()
+      shell: sh
+      run: printf '%s' '${{ inputs.job-status }}' > "$STATUS_MARKER"
+`)
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", `name: Outer
+runs:
+  using: composite
+  steps:
+    - if: always()
+      uses: ./.github/actions/status
+`)
+	marker := filepath.Join(workspace, "status")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "fail", Kind: "run", Command: "exit 7"},
+		{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", Condition: "always()"},
+	})
+	job.Env = map[string]string{"STATUS_MARKER": marker}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v; want original step failure", result, err)
+	}
+	status, readErr := os.ReadFile(marker)
+	if readErr != nil || string(status) != "failure" {
+		t.Fatalf("nested action job.status = %q, %v; want failure", status, readErr)
+	}
+}
+
 func TestNestedJavaScriptPostSharesJobLIFORegistry(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
