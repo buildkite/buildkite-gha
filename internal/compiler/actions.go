@@ -165,7 +165,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	requiredSecrets := map[string]bool{}
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i])
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -261,18 +261,21 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
 		names, err := expression.SecretReferences(supplied[suppliedName])
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
 		}
-		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
-		if declared && !input.Required {
-			continue
+		if !workflowAuthored && len(names) != 0 {
+			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", suppliedName)
 		}
+		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
 		for _, name := range names {
+			if declared && !input.Required && name != "GITHUB_TOKEN" {
+				continue
+			}
 			requirements.requiredSecrets[name] = true
 		}
 	}
@@ -310,7 +313,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With)
+		childRequirements, err := child.inspectInvocation(step.With, false)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}

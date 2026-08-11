@@ -777,7 +777,10 @@ unsupported.
 runtime boundary, but the production profile rejects them. Reusable workflow
 secret mappings and environment secrets are also unavailable. Action metadata
 defaults cannot add a secret to the plan; such defaults fail compilation rather
-than becoming an authority source.
+than becoming an authority source. A secret referenced only by a declared
+optional action input does not add a job secret requirement and resolves empty
+unless the same secret is required elsewhere. `GITHUB_TOKEN` continues to use
+its separate permission-scoped contract regardless of action input optionality.
 
 **❌ Unsupported.** GitHub-compatible OIDC and `id-token` are not implemented.
 

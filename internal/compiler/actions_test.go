@@ -255,7 +255,7 @@ runs:
 	}
 }
 
-func TestCompileActionInvocationsRequiresOnlySecretsInRequiredInputs(t *testing.T) {
+func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "secrets", `name: secret inputs
 inputs:
@@ -269,13 +269,38 @@ runs:
 `)
 	compiled, err := compileActionInvocations(
 		context.Background(), workspace, nil, []string{"./secrets"},
-		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}"}},
+		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}"}},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(compiled.requiredSecrets, []string{"REQUIRED_TOKEN"}) {
+	if !reflect.DeepEqual(compiled.requiredSecrets, []string{"GITHUB_TOKEN", "REQUIRED_TOKEN"}) {
 		t.Fatalf("required action secrets = %#v", compiled.requiredSecrets)
+	}
+}
+
+func TestCompileActionInvocationsRejectsSecretAuthorityFromCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ secrets.DEPLOY_KEY }}
+`)
+
+	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./parent"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
+		t.Fatalf("composite metadata secret error = %v", err)
 	}
 }
 
@@ -421,6 +446,24 @@ jobs:
 	}
 	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
 		t.Fatalf("effective action default token authorization = %#v", bundle.Plans)
+	}
+
+	plans, err = compile(`on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) || len(plans[0].RequiredSecrets) != 0 {
+		t.Fatalf("explicit optional action token plan = %#v", plans)
 	}
 
 	plans, err = compile(`on: push
