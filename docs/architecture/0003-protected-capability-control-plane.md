@@ -54,8 +54,9 @@ These job-bound integrations remain separate from a general grant protocol:
 - verified checkout may use Buildkite's Git credential helper;
 - supported `GITHUB_TOKEN` uses may request a repository-scoped token with a
   compiler-resolved permission set; and
-- the audited cache action may receive cache-service credentials for its own
-  lifecycle.
+- when caching is configured, every JavaScript or Docker action lifecycle
+  receives a fresh cache token. This includes compatible clients such as
+  `actions/setup-go`, not only `actions/cache`.
 
 Their server-side repository and permission checks are authoritative. They do
 not prove the full provider event or authorize ordinary workflow secrets,

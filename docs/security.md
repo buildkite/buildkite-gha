@@ -36,7 +36,7 @@ trusted or grant credentials.
 | --- | --- |
 | Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and compiler-resolved permissions. Buildkite verifies the repository and may deny the request. The token is not ambient. |
-| Cache token | A fresh job-bound token is exposed only to the audited cache action lifecycle when the cache service is configured. |
+| Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Rejected by production admission. |
 | GitHub-compatible OIDC | Unsupported. |
 
