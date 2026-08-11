@@ -27,6 +27,8 @@ const (
 	maxChecksums  = 2 << 20
 	maxArchive    = 128 << 20
 	maxVersionOut = 1 << 10
+	textBusyTries = 5
+	textBusyDelay = 10 * time.Millisecond
 )
 
 var versionRE = regexp.MustCompile(`^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
@@ -41,6 +43,7 @@ type config struct {
 	repositoryURL string
 	goos, goarch  string
 	tempDir       string
+	startCommand  func(*exec.Cmd) error
 }
 
 // Run executes the zero-argument stable launcher and returns the process exit code.
@@ -147,12 +150,19 @@ func (c config) run() error {
 		return fmt.Errorf("extract archive: %w", err)
 	}
 	binary := filepath.Join(runDir, "buildkite-gha")
-	cmd := exec.Command(binary, "--version")
-	cmd.Env = c.env
-	var versionOutput boundedBuffer
-	cmd.Stdout = &versionOutput
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil || versionOutput.overflow || versionOutput.String() != "buildkite-gha "+version+"\n" {
+	var versionOutput *boundedBuffer
+	cmd, err := startWithTextBusyRetry(func() *exec.Cmd {
+		versionOutput = new(boundedBuffer)
+		cmd := exec.Command(binary, "--version")
+		cmd.Env = c.env
+		cmd.Stdout = versionOutput
+		cmd.Stderr = io.Discard
+		return cmd
+	}, c.startCommand)
+	if err != nil {
+		return fmt.Errorf("installed binary version verification failed: %w", err)
+	}
+	if err := cmd.Wait(); err != nil || versionOutput.overflow || versionOutput.String() != "buildkite-gha "+version+"\n" {
 		return fmt.Errorf("installed binary version verification failed")
 	}
 	if downloaded {
@@ -161,9 +171,11 @@ func (c config) run() error {
 		}
 	}
 	_, _ = fmt.Fprintln(c.stdout, "~~~ :github: Prepare workflow")
-	cmd = exec.Command(binary, "plugin")
-	cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = c.env, c.stdin, c.stdout, c.stderr
-	return runForwarding(cmd)
+	return runForwarding(func() *exec.Cmd {
+		cmd := exec.Command(binary, "plugin")
+		cmd.Env, cmd.Stdin, cmd.Stdout, cmd.Stderr = c.env, c.stdin, c.stdout, c.stderr
+		return cmd
+	}, c.startCommand)
 }
 
 type boundedBuffer struct {
@@ -181,8 +193,25 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	return written, nil
 }
 
-func runForwarding(cmd *exec.Cmd) error {
-	if err := cmd.Start(); err != nil {
+func startWithTextBusyRetry(newCommand func() *exec.Cmd, start func(*exec.Cmd) error) (*exec.Cmd, error) {
+	if start == nil {
+		start = func(cmd *exec.Cmd) error { return cmd.Start() }
+	}
+	for attempt := range textBusyTries {
+		cmd := newCommand()
+		if err := start(cmd); err == nil {
+			return cmd, nil
+		} else if !errors.Is(err, syscall.ETXTBSY) || attempt == textBusyTries-1 {
+			return nil, err
+		}
+		time.Sleep(textBusyDelay)
+	}
+	panic("unreachable")
+}
+
+func runForwarding(newCommand func() *exec.Cmd, start func(*exec.Cmd) error) error {
+	cmd, err := startWithTextBusyRetry(newCommand, start)
+	if err != nil {
 		return err
 	}
 	sigs := make(chan os.Signal, 2)
@@ -198,7 +227,7 @@ func runForwarding(cmd *exec.Cmd) error {
 			}
 		}
 	}()
-	err := cmd.Wait()
+	err = cmd.Wait()
 	close(done)
 	signal.Stop(sigs)
 	return err

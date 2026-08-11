@@ -172,6 +172,29 @@ func TestLauncherExactExecutionContract(t *testing.T) {
 	}
 }
 
+func TestLauncherRetriesTextBusyExec(t *testing.T) {
+	fixture := newReleaseFixture(t, targetArchive(t, testTarget))
+	c, stdout, _, _ := testConfig(t, fixture, "0.8.0")
+	attempts := map[string]int{}
+	c.startCommand = func(cmd *exec.Cmd) error {
+		argument := cmd.Args[1]
+		attempts[argument]++
+		if (argument == "--version" && attempts[argument] <= 2) || (argument == "plugin" && attempts[argument] == 1) {
+			return syscall.ETXTBSY
+		}
+		return cmd.Start()
+	}
+	if err := c.run(); err != nil {
+		t.Fatal(err)
+	}
+	if attempts["--version"] != 3 || attempts["plugin"] != 2 {
+		t.Fatalf("start attempts = %#v, want 3 version and 2 plugin attempts", attempts)
+	}
+	if !strings.Contains(stdout.String(), "argv=plugin argc=1") {
+		t.Fatalf("plugin did not execute after ETXTBSY retries: %q", stdout.String())
+	}
+}
+
 func TestLauncherLatestResolvesOnceAndIgnoresLegacySelector(t *testing.T) {
 	fixture := newReleaseFixture(t, targetArchive(t, testTarget))
 	c, _, stderr, _ := testConfig(t, fixture, "")

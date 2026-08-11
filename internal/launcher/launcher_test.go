@@ -1,10 +1,13 @@
 package launcher
 
 import (
+	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -102,5 +105,29 @@ func TestRedirectPolicyRestrictsSchemeHostAndPort(t *testing.T) {
 		if policy(req, []*http.Request{{}}) == nil {
 			t.Errorf("policy accepted %q", raw)
 		}
+	}
+}
+
+func TestTextBusyRetryIsBoundedAndErrorSpecific(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		err          error
+		wantAttempts int
+	}{
+		{name: "text busy", err: syscall.ETXTBSY, wantAttempts: textBusyTries},
+		{name: "other error", err: syscall.EACCES, wantAttempts: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			attempts := 0
+			_, err := startWithTextBusyRetry(func() *exec.Cmd { return exec.Command("unused") }, func(*exec.Cmd) error {
+				attempts++
+				return test.err
+			})
+			if !errors.Is(err, test.err) || attempts != test.wantAttempts {
+				t.Fatalf("retry = %v after %d attempts, want %v after %d", err, attempts, test.err, test.wantAttempts)
+			}
+		})
 	}
 }
