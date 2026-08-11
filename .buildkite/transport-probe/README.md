@@ -26,7 +26,7 @@ Install `pipeline.yml` as the pipeline definition and run once normally. Each bi
 
 The producer also prints the disposable `TRANSPORT_PROBE_REDACTION_SECRET` canary. Its log must contain `[REDACTED]` and must not contain the canary value.
 
-The repository's default pipeline loads this probe when the build has `TRANSPORT_PROBE_PROBE=transport`. Supply the remaining values as build environment, including `TRANSPORT_PROBE_LOCAL_CAPABILITIES=["network"]`. Use the exact organization and pipeline UUIDs from the Buildkite API rather than slugs.
+The repository's default pipeline loads this probe when the build has `COMPATIBILITY_PROOF=transport-probe`. Supply the remaining values as build environment, including `TRANSPORT_PROBE_LOCAL_CAPABILITIES=["network"]`. Use the exact organization and pipeline UUIDs from the Buildkite API rather than slugs.
 
 To inspect the exact generated jobs with a read-only REST token:
 

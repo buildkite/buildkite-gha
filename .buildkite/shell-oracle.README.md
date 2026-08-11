@@ -12,10 +12,10 @@ pass the full lowercase commit as the required `source_commit` input. The
 default `target=shell` selects the shell differential oracle.
 
 Create a build on the repository pipeline at that same commit with
-`TRANSPORT_PROBE_PROBE=shell` and `ORACLE_SOURCE_COMMIT` set to the full commit ID. The
-default pipeline loads `.buildkite/shell-oracle.yml`; every oracle step
-verifies its checkout before using the harness, so a branch/commit mismatch
-fails before an observation is accepted.
+`COMPATIBILITY_PROOF=shell-oracle` and `ORACLE_SOURCE_COMMIT` set to the full
+commit ID. The default pipeline loads `.buildkite/shell-oracle.yml`; every
+oracle step verifies its checkout before using the harness, so a branch/commit
+mismatch fails before an observation is accepted.
 
 Record the GitHub run URL, Buildkite build URL, exact commit, fixture commit
 printed by each provider, and normalized output only after both hosted probes
@@ -37,7 +37,8 @@ identical to `testdata/smoke/.github/workflows/concurrent.yml`; the hosted run
 captures its observation and compares it with the expected fixture through the
 same exact materialized commit.
 
-Create a Buildkite build at that commit with `CONCURRENT_PROBE=concurrent` and
-`CONCURRENT_COMMIT` set to the full commit ID. The separate upload importer and
+Create a Buildkite build at that commit with
+`COMPATIBILITY_PROOF=concurrent-steps` and
+`COMPATIBILITY_PROOF_COMMIT=<commit>`. The separate upload importer and
 continuation loader preserve the dynamic-upload ordering invariant, and the
 native continuation waits for the generated terminal observer.
