@@ -1109,7 +1109,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	runnableWorkflowCount := 0
+	uploadableWorkflowCount := 0
 	for i := range workflows {
 		workflows[i].Source, err = os.ReadFile(workflows[i].Path)
 		if err != nil {
@@ -1118,15 +1118,16 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: parse workflow %s: %v\n", workflows[i].CanonicalPath, parseErr)
-			return 1
+			workflows[i].ParseErr = parseErr
+			uploadableWorkflowCount++
+			continue
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
 		if !workflows[i].ReusableOnly {
-			runnableWorkflowCount++
+			uploadableWorkflowCount++
 		}
 	}
-	if runnableWorkflowCount == 0 {
+	if uploadableWorkflowCount == 0 {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow pattern %q matched only reusable workflow_call workflows; there is nothing to upload\n", workflowPattern)
 		return 1
 	}
@@ -1155,6 +1156,11 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	activeEvent, err := compiler.EventName(eventSource)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -1168,12 +1174,30 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		if input.ReusableOnly {
 			continue
 		}
+		if input.ParseErr != nil {
+			displayLabel := input.CanonicalPath + " (" + activeEvent + ")"
+			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
+				CommandSteps: []buildkitepipeline.CommandStep{{
+					Key:       "gha-" + input.Identity + "-parse-error",
+					Label:     ":github: " + displayLabel,
+					CheckName: "Buildkite / " + displayLabel,
+					Command:   "printf '%s\\n' " + buildkitepipeline.ShellQuote(input.ParseErr.Error()) + " >&2\nexit 1",
+					Queue:     targetQueue,
+				}},
+			})
+			jobCount++
+			continue
+		}
 		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, eventSource, version, distributionDigest, importerStep, "", targetQueue, runtimeImage, input.StepKeyNamespace, authentication)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, err)
 			return 1
 		}
 		bundle := preflight.Bundle
+		if bundle.IR.Event.Event != activeEvent {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: compiler event %q does not match active event %q\n", input.CanonicalPath, bundle.IR.Event.Event, activeEvent)
+			return 1
+		}
 		condition, err := buildkitepipeline.TranslateTriggerCondition(bundle.IR.Workflow.Triggers)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: translate workflow triggers: %v\n", input.CanonicalPath, err)
@@ -1239,6 +1263,7 @@ type workflowInput struct {
 	Path, CanonicalPath, Identity, StepKeyNamespace string
 	Source                                          []byte
 	ReusableOnly                                    bool
+	ParseErr                                        error
 }
 
 func expandWorkflowPattern(pattern string) ([]workflowInput, error) {

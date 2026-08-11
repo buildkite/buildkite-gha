@@ -42,9 +42,8 @@ type Pipeline struct {
 	Workflows          []Workflow
 }
 
-// Workflow is one independently conditioned workflow group in an aggregate
-// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate
-// emission.
+// Workflow is one ordered aggregate pipeline entry. It contains either a
+// conditioned group of generated jobs or one top-level direct command step.
 type Workflow struct {
 	GroupLabel      string
 	GroupKey        string
@@ -52,6 +51,17 @@ type Workflow struct {
 	Condition       string
 	ConcurrencyGate *ConcurrencyGate
 	Jobs            []Job
+	CommandSteps    []CommandStep
+}
+
+// CommandStep is an aggregate-only top-level command which runs without
+// generated plan or distribution bootstrap state.
+type CommandStep struct {
+	Key       string
+	Label     string
+	CheckName string
+	Command   string
+	Queue     string
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -121,10 +131,28 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
 	usedDigests := make(map[string]string)
 	for i, workflow := range workflows {
-		if len(workflow.Jobs) == 0 {
+		hasJobs, hasCommandSteps := len(workflow.Jobs) != 0, len(workflow.CommandSteps) != 0
+		if !hasJobs && !hasCommandSteps {
+			if aggregate {
+				return nil, fmt.Errorf("workflow %d requires exactly one of generated jobs or direct command steps", i+1)
+			}
 			return nil, fmt.Errorf("workflow %d requires at least one generated job", i+1)
 		}
-		if aggregate {
+		if hasJobs && hasCommandSteps {
+			return nil, fmt.Errorf("workflow %d cannot mix generated jobs and direct command steps", i+1)
+		}
+		if hasCommandSteps && !aggregate {
+			return nil, fmt.Errorf("workflow %d direct command steps require aggregate emission", i+1)
+		}
+		if hasCommandSteps {
+			if len(workflow.CommandSteps) != 1 {
+				return nil, fmt.Errorf("workflow %d direct mode requires exactly one command step", i+1)
+			}
+			if workflow.GroupLabel != "" || workflow.GroupKey != "" || workflow.CheckName != "" || workflow.Condition != "" || workflow.ConcurrencyGate != nil {
+				return nil, fmt.Errorf("workflow %d direct mode cannot set group metadata or a concurrency gate", i+1)
+			}
+		}
+		if aggregate && !hasCommandSteps {
 			if workflow.GroupLabel == "" {
 				return nil, fmt.Errorf("workflow %d requires a group label", i+1)
 			}
@@ -142,9 +170,13 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			}
 			usedKeys[workflow.GroupKey] = "workflow group"
 		}
-		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
-		if err != nil {
-			return nil, err
+		var jobs []Job
+		if hasJobs {
+			var err error
+			jobs, err = orderJobs(pipeline.CompilerStep, workflow.Jobs)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if err := validateConcurrencyGate(workflow.ConcurrencyGate); err != nil {
 			return nil, err
@@ -158,6 +190,15 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
 			}
 			usedDigests[job.PlanDigest] = job.Key
+		}
+		for _, step := range workflow.CommandSteps {
+			if err := validateCommandStep(step); err != nil {
+				return nil, err
+			}
+			if owner, exists := usedKeys[step.Key]; exists {
+				return nil, fmt.Errorf("direct command step key %q collides with %s", step.Key, owner)
+			}
+			usedKeys[step.Key] = "direct command step"
 		}
 		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != "", Aggregate: aggregate}
 		if workflow.ConcurrencyGate != nil {
@@ -199,6 +240,10 @@ type preparedWorkflow struct {
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string, workflow preparedWorkflow) {
+	if len(workflow.CommandSteps) != 0 {
+		emitDirectCommandStep(out, pipeline.CompilerStep, workflow.CommandSteps[0])
+		return
+	}
 	stepIndent := "  "
 	if workflow.Grouped {
 		groupLabel := workflow.GroupLabel
@@ -245,12 +290,12 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string,
 			"set -euo pipefail",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
 			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
-			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
-			"buildkite-agent artifact download " + shellQuote(planPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
+			"buildkite-agent artifact download " + ShellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + ShellQuote(pipeline.CompilerStep),
+			"buildkite-agent artifact download " + ShellQuote(planPath) + ` "$bootstrap_dir" --step ` + ShellQuote(pipeline.CompilerStep),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
 			"plan=\"$bootstrap_dir/" + planPath + `"`,
 			`actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"`,
-			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
+			"test \"$actual_distribution_digest\" = " + ShellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
 		runJob := `"$distribution" run-job --plan "$plan"`
@@ -305,6 +350,22 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string,
 		}
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
 	}
+}
+
+func emitDirectCommandStep(out *bytes.Buffer, compilerStep string, step CommandStep) {
+	_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(step.Label))
+	_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(step.Key))
+	_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(compilerStep))
+	out.WriteString("    notify:\n")
+	out.WriteString("      - github_check:\n")
+	_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(step.CheckName))
+	_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(step.Command))
+	if step.Queue != "" {
+		out.WriteString("    agents:\n")
+		_, _ = fmt.Fprintf(out, "      queue: %s\n", yamlScalar(step.Queue))
+	}
+	out.WriteString("    checkout:\n")
+	out.WriteString("      skip: true\n")
 }
 
 type dependency struct {
@@ -374,8 +435,28 @@ func uniqueStepKey(base string, used map[string]struct{}) string {
 	}
 }
 
-func shellQuote(value string) string {
+// ShellQuote returns one POSIX shell word which expands to value literally.
+func ShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func validateCommandStep(step CommandStep) error {
+	if !validStepKey(step.Key) {
+		return fmt.Errorf("invalid direct command step key %q", step.Key)
+	}
+	if step.Label == "" {
+		return fmt.Errorf("direct command step %q requires a label", step.Key)
+	}
+	if step.CheckName == "" {
+		return fmt.Errorf("direct command step %q requires a GitHub Check name", step.Key)
+	}
+	if step.Command == "" {
+		return fmt.Errorf("direct command step %q requires a command", step.Key)
+	}
+	if step.Queue != "" && !identifierPattern.MatchString(step.Queue) {
+		return fmt.Errorf("direct command step %q has invalid queue %q", step.Key, step.Queue)
+	}
+	return nil
 }
 
 func orderJobs(compilerStep string, input []Job) ([]Job, error) {
