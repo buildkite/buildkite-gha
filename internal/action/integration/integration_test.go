@@ -58,14 +58,14 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 }
 
 func TestUploadArtifactCommitsAreExact(t *testing.T) {
-	for _, commit := range []string{UploadArtifactCommit, UploadArtifactV7Commit} {
+	for _, commit := range []string{UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit} {
 		if err := ValidateUploadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
 	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
-		if err := ValidateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
-			t.Fatalf("unrecognized commit %s error = %v, want both audited commits", commit, err)
+		if err := ValidateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV5Commit) || !strings.Contains(err.Error(), UploadArtifactV6Commit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
+			t.Fatalf("unrecognized commit %s error = %v, want all audited commits", commit, err)
 		}
 	}
 }
@@ -96,6 +96,8 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 		inputs map[string]string
 	}{
 		{UploadArtifactCommit, map[string]string{"path": "payload/result.txt"}},
+		{UploadArtifactV5Commit, map[string]string{"path": "./payload/result.txt"}},
+		{UploadArtifactV6Commit, map[string]string{"path": "payload/", "name": "${{ github.sha }}", "retention-days": "0"}},
 		{UploadArtifactCommit, map[string]string{
 			"path": "tests/*.log", "retention-days": " 7 ", "if-no-files-found": " warn ",
 			"include-hidden-files": " TRUE ", "compression-level": " 6 ", "overwrite": " false ",
@@ -118,7 +120,6 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 		"character class":     {"path": "tests/[!a].log"},
 		"extglob":             {"path": "tests/+(a|b).log"},
 		"glob comment":        {"path": "#tests/*.log"},
-		"unclean path":        {"path": "./payload"},
 		"too many roots":      {"path": strings.Repeat("payload\n", MaxUploadArtifactRoots+1)},
 		"bad retention":       {"path": "payload", "retention-days": "-1"},
 		"overwrite":           {"path": "payload", "overwrite": "true"},
@@ -145,6 +146,22 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 	}
 	if err := ValidateEvaluatedUploadArtifactInputs(UploadArtifactV7Commit, map[string]string{"path": "#tests/*.log"}); err == nil {
 		t.Fatal("runtime accepted an evaluated upstream glob comment as a literal path")
+	}
+}
+
+func TestUploadArtifactPathsNormalizesSafeRelativeSpellings(t *testing.T) {
+	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"artifacts.tar.gz", "log", "tmp/capybara"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("UploadArtifactPaths() = %#v, want %#v", got, want)
+	}
+	for _, unsafe := range []string{"../outside", "safe/../outside", "/absolute", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log"} {
+		if _, err := UploadArtifactPaths(unsafe); err == nil {
+			t.Fatalf("UploadArtifactPaths(%q) accepted an unsafe path", unsafe)
+		}
 	}
 }
 

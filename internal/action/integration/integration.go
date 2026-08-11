@@ -43,10 +43,13 @@ const (
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
 	CheckoutV7InitialCommit = "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"
 	CheckoutV7Commit        = "3d3c42e5aac5ba805825da76410c181273ba90b1"
-	// UploadArtifactCommit and UploadArtifactV7Commit are the audited upstream
-	// implementations whose ZIP-mode semantics this adapter implements. Raw v7
-	// uploads remain explicitly unsupported by ValidateUploadArtifactInputs.
+	// UploadArtifactCommit through UploadArtifactV7Commit are the audited
+	// upstream implementations whose ZIP-mode semantics this adapter implements.
+	// Raw v7 uploads remain explicitly unsupported by
+	// ValidateUploadArtifactInputs.
 	UploadArtifactCommit   = "ea165f8d65b6e75b540449e92b4886f43607fa02"
+	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
+	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 	DownloadArtifactCommit = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
 	// CacheCommit is the only actions/cache implementation admitted to the
@@ -99,6 +102,13 @@ var checkoutCommits = map[string]string{
 	CheckoutV7Commit:        "v7.0.1",
 }
 
+var uploadArtifactCommits = map[string]string{
+	UploadArtifactCommit:   "v4.6.2",
+	UploadArtifactV5Commit: "v5.0.0",
+	UploadArtifactV6Commit: "v6.0.0",
+	UploadArtifactV7Commit: "v7.0.1",
+}
+
 // ValidateCheckoutCommit rejects semantic drift from the audited upstream
 // manifests and implementations. Mutable references are resolved before this
 // check, so a moved major tag must be deliberately audited and added here.
@@ -120,8 +130,13 @@ func sortedCheckoutCommits() []string {
 
 // ValidateUploadArtifactCommit rejects semantic drift from the audited action.
 func ValidateUploadArtifactCommit(commit string) error {
-	if commit != UploadArtifactCommit && commit != UploadArtifactV7Commit {
-		return fmt.Errorf("actions/upload-artifact native adapter supports only commits %s and %s, resolved %q; Phase 6 is required", UploadArtifactCommit, UploadArtifactV7Commit, commit)
+	if _, ok := uploadArtifactCommits[commit]; !ok {
+		commits := make([]string, 0, len(uploadArtifactCommits))
+		for supported, version := range uploadArtifactCommits {
+			commits = append(commits, version+" ("+supported+")")
+		}
+		sort.Strings(commits)
+		return fmt.Errorf("actions/upload-artifact native adapter does not admit resolved commit %q; supported commits are %s", commit, strings.Join(commits, ", "))
 	}
 	return nil
 }
@@ -274,10 +289,24 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if root == "" {
 			continue
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}()`) || !filepath.IsLocal(root) || path.Clean(root) != root {
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}()`) || !filepath.IsLocal(root) {
 			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
 		}
-		if strings.Contains(root, "*") {
+		glob := strings.Contains(root, "*")
+		components := strings.Split(root, "/")
+		for i, component := range components {
+			if component == ".." {
+				return nil, fmt.Errorf("path %q contains traversal; bounded adapter requires workspace-relative paths", root)
+			}
+			if glob && component == "." && i != 0 {
+				return nil, fmt.Errorf("path %q uses a non-canonical glob; Phase 6 is required", root)
+			}
+		}
+		if glob && strings.HasSuffix(root, "/") {
+			return nil, fmt.Errorf("path %q uses an unsupported directory glob; Phase 6 is required", root)
+		}
+		root = path.Clean(root)
+		if glob {
 			directory, pattern := path.Split(root)
 			directory = strings.TrimSuffix(directory, "/")
 			if directory == "" {

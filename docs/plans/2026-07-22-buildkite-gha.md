@@ -1386,9 +1386,10 @@ public checkout remains a separate provider integration gate.
   and its exact-commit API observation prove both persisted annotations and
   masking, so the distinct checked-in hosted fixture is now `runtime-pass`.
   The producer-side artifact slice now recognizes only the audited
-  `actions/upload-artifact` v4.6.2 and v7.0.1 commits and replaces their root
-  ZIP-mode lifecycle with a bounded Buildkite Agent upload. Literal workspace
-  files and directories and final-component file globs become an immutable,
+  `actions/upload-artifact` v4.6.2, v5.0.0, v6.0.0, and v7.0.1 commits and
+  replaces their root ZIP-mode lifecycle with a bounded Buildkite Agent upload.
+  Literal workspace files and directories, normalized safe `./file` and `dir/`
+  spellings, and final-component file globs become an immutable,
   digest-addressed ZIP; compatible artifact ID and digest outputs
   and the native path, size, and file count are bound into the authoritative
   terminal result manifest. Broader globs, symlinks, overwrite, effective
