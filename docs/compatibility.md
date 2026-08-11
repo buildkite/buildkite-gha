@@ -560,7 +560,10 @@ and SHA-256 digest before parsing the same descriptor; mismatch is always
 fatal. A bounded central-directory scan enforces the entry limit before Go's
 ZIP reader allocates its entry table and rejects multi-disk, ZIP64, malformed,
 ambiguous-end-record, forged-count, undeclared-entry, and out-of-bounds
-directories. ZIP admission then allows only
+directories. It validates matching central and local names, requires disk zero,
+rejects member comments, and bounds each central/local extra area to 64 bytes;
+both central and local ZIP64 sentinels and extra fields fail closed. ZIP
+admission then allows only
 regular stored/deflated members, at most 10,000 entries, 1 GiB archive and
 aggregate expanded size, 4,096-byte member paths, and 256 path components.
 Empty names,

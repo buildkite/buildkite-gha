@@ -8,12 +8,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
@@ -493,6 +495,20 @@ func TestDownloadArtifactPreflightRejectsPerEntryZIP64(t *testing.T) {
 		})
 	}
 
+	t.Run("nonzero disk start", func(t *testing.T) {
+		name, _, _ := testDownloadZIP(t, "result.txt")
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eocd := len(contents) - 22
+		central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
+		binary.LittleEndian.PutUint16(contents[central+34:], 1)
+		if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil {
+			t.Fatal("nonzero per-entry disk accepted")
+		}
+	})
+
 	for _, test := range []struct {
 		name  string
 		extra []byte
@@ -538,6 +554,99 @@ func TestDownloadArtifactPreflightRejectsPerEntryZIP64(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactPreflightRejectsLocalZIP64(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		offset int
+	}{
+		{name: "compressed size", offset: 18},
+		{name: "uncompressed size", offset: 22},
+	} {
+		t.Run(test.name+" sentinel", func(t *testing.T) {
+			name, _, _ := testDownloadZIP(t, "result.txt")
+			contents, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eocd := len(contents) - 22
+			central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
+			local := int(binary.LittleEndian.Uint32(contents[central+42:]))
+			binary.LittleEndian.PutUint32(contents[local+test.offset:], 1<<32-1)
+			if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+				t.Fatalf("local ZIP64 sentinel error = %v", err)
+			}
+		})
+	}
+
+	t.Run("extra field", func(t *testing.T) {
+		name := filepath.Join(t.TempDir(), "local-zip64-extra.zip")
+		out, err := os.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zw := zip.NewWriter(out)
+		member, err := zw.CreateHeader(&zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: []byte{0x01, 0x00, 0x00, 0x00}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := member.Write([]byte("payload")); err != nil {
+			t.Fatal(err)
+		}
+		if err := errors.Join(zw.Close(), out.Close()); err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		eocd := len(contents) - 22
+		central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
+		centralExtra := central + 46 + int(binary.LittleEndian.Uint16(contents[central+28:]))
+		binary.LittleEndian.PutUint16(contents[centralExtra:], 2)
+		if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+			t.Fatalf("local ZIP64 extra error = %v", err)
+		}
+	})
+}
+
+func TestDownloadArtifactPreflightBoundsCentralMetadata(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		header  zip.FileHeader
+		wantErr string
+	}{
+		{name: "oversized member name", header: zip.FileHeader{Name: strings.Repeat("x", actionintegration.MaxUploadArtifactPathBytes+1), Method: zip.Store}, wantErr: "metadata"},
+		{name: "member comment", header: zip.FileHeader{Name: "result.txt", Method: zip.Store, Comment: "comment"}, wantErr: "metadata"},
+		{name: "oversized extra", header: zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: append([]byte{0x02, 0x00, 61, 0x00}, make([]byte, 61)...)}, wantErr: "metadata"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := filepath.Join(t.TempDir(), "metadata.zip")
+			out, err := os.Create(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zw := zip.NewWriter(out)
+			member, err := zw.CreateHeader(&test.header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := member.Write([]byte("payload")); err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(zw.Close(), out.Close()); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("central metadata error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestDownloadArtifactPreflightRejectsEOCDZIP64Forms(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -546,7 +655,7 @@ func TestDownloadArtifactPreflightRejectsEOCDZIP64Forms(t *testing.T) {
 		value  uint32
 	}{
 		{name: "entry count sentinel", offset: 10, width: 2, value: 1<<16 - 1},
-		{name: "directory size Go locator sentinel", offset: 12, width: 4, value: 1<<16 - 1},
+		{name: "directory size with ZIP64 locator", offset: 12, width: 4, value: 1<<16 - 1},
 		{name: "directory size ZIP64 sentinel", offset: 12, width: 4, value: 1<<32 - 1},
 		{name: "directory offset sentinel", offset: 16, width: 4, value: 1<<32 - 1},
 	} {
@@ -562,13 +671,57 @@ func TestDownloadArtifactPreflightRejectsEOCDZIP64Forms(t *testing.T) {
 			} else {
 				binary.LittleEndian.PutUint32(contents[eocd+test.offset:], test.value)
 			}
-			if test.name == "directory size Go locator sentinel" {
-				binary.LittleEndian.PutUint32(contents[eocd-20:], 0x07064b50)
+			if test.name == "directory size with ZIP64 locator" {
+				locator := contents[eocd-20 : eocd]
+				clear(locator)
+				binary.LittleEndian.PutUint32(locator, 0x07064b50)
+				binary.LittleEndian.PutUint32(locator[16:], 1)
 			}
 			if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
 				t.Fatalf("EOCD ZIP64 error = %v", err)
 			}
 		})
+	}
+}
+
+func TestDownloadArtifactPreflightAcceptsOrdinary65535ByteCentralDirectory(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "ordinary-65535.zip")
+	out, err := os.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(out)
+	for i := range 100 {
+		length := 600
+		if i == 99 {
+			length = 635
+		}
+		prefix := fmt.Sprintf("%03d-", i)
+		header := &zip.FileHeader{
+			Name: prefix + strings.Repeat("x", length-len(prefix)), Method: zip.Store,
+			Modified: time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC),
+		}
+		member, err := zw.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := member.Write([]byte("payload")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := errors.Join(zw.Close(), out.Close()); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eocd := len(contents) - 22
+	if got := binary.LittleEndian.Uint32(contents[eocd+12:]); got != 1<<16-1 {
+		t.Fatalf("central directory size = %d, want 65535", got)
+	}
+	if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err != nil {
+		t.Fatalf("ordinary 65,535-byte central directory rejected: %v", err)
 	}
 }
 
@@ -590,14 +743,14 @@ func TestDownloadArtifactPreflightRejectsShortCentralDirectoryResidue(t *testing
 	}
 }
 
-func TestDownloadArtifactPreflightReadsEachExtraAreaOnce(t *testing.T) {
+func TestDownloadArtifactPreflightUsesBoundedMetadataReads(t *testing.T) {
 	name := filepath.Join(t.TempDir(), "many-extras.zip")
 	out, err := os.Create(name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	zw := zip.NewWriter(out)
-	extra := bytes.Repeat([]byte{0x02, 0x00, 0x00, 0x00}, 100)
+	extra := bytes.Repeat([]byte{0x02, 0x00, 0x00, 0x00}, 10)
 	member, err := zw.CreateHeader(&zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: extra})
 	if err != nil {
 		t.Fatal(err)
@@ -616,14 +769,19 @@ func TestDownloadArtifactPreflightReadsEachExtraAreaOnce(t *testing.T) {
 	if err := preflightZIPDirectory(reader, int64(len(contents))); err != nil {
 		t.Fatal(err)
 	}
-	if len(reader.reads) != 3 {
-		t.Fatalf("ReaderAt calls = %#v, want tail, central header, and one complete extra-area read", reader.reads)
+	if len(reader.reads) != 5 {
+		t.Fatalf("ReaderAt calls = %#v, want tail plus bounded central and local header/metadata reads", reader.reads)
 	}
 	eocd := len(contents) - 22
 	central := int64(binary.LittleEndian.Uint32(contents[eocd+16:]))
-	for _, call := range reader.reads[1:] {
+	for _, call := range reader.reads[1:3] {
 		if call.offset < central || call.offset+int64(call.size) > int64(eocd) {
 			t.Fatalf("central-directory read %#v is outside [%d, %d)", call, central, eocd)
+		}
+	}
+	for _, call := range reader.reads[3:] {
+		if call.offset < 0 || call.offset+int64(call.size) > central {
+			t.Fatalf("local-header read %#v is outside [0, %d)", call, central)
 		}
 	}
 }

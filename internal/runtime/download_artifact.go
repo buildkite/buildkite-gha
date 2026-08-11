@@ -257,10 +257,12 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	const (
 		eocdSize      = 22
 		maxZIPComment = 1<<16 - 1
-		maxZIPExtra   = 1<<16 - 1
+		maxZIPExtra   = 64
 		centralHeader = 46
+		localHeader   = 30
 		eocdSignature = 0x06054b50
 		centralSig    = 0x02014b50
+		localSig      = 0x04034b50
 		zip16Sentinel = 1<<16 - 1
 		zip32Sentinel = 1<<32 - 1
 	)
@@ -300,7 +302,7 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	entries := binary.LittleEndian.Uint16(record[10:])
 	centralSize := binary.LittleEndian.Uint32(record[12:])
 	centralOffset := binary.LittleEndian.Uint32(record[16:])
-	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
+	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
 		return fmt.Errorf("multi-disk or ZIP64 artifact is unsupported")
 	}
 	if entries == 0 || int(entries) > transport.MaxResultArtifactFileCount {
@@ -308,11 +310,23 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	}
 	position, end := int64(centralOffset), int64(centralOffset)+int64(centralSize)
 	eocdOffset := size - tailSize + int64(eocd)
+	if centralSize == zip16Sentinel {
+		if eocdOffset < 20 {
+			return fmt.Errorf("artifact ZIP end record is malformed")
+		}
+		var locator [20]byte
+		if _, err := reader.ReadAt(locator[:], eocdOffset-20); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(locator[:]) == 0x07064b50 && binary.LittleEndian.Uint32(locator[4:]) == 0 && binary.LittleEndian.Uint32(locator[16:]) == 1 {
+			return fmt.Errorf("ZIP64 artifact is unsupported")
+		}
+	}
 	if position < 0 || end < position || end != eocdOffset {
 		return fmt.Errorf("artifact ZIP central directory is out of bounds")
 	}
 	count := 0
-	extra := make([]byte, maxZIPExtra)
+	metadata := make([]byte, actionintegration.MaxUploadArtifactPathBytes+maxZIPExtra)
 	for position < end {
 		if end-position < centralHeader {
 			return fmt.Errorf("artifact ZIP central directory is malformed")
@@ -324,34 +338,60 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 		if binary.LittleEndian.Uint32(header[:]) != centralSig {
 			return fmt.Errorf("artifact ZIP central directory is malformed")
 		}
-		if binary.LittleEndian.Uint32(header[20:]) == zip32Sentinel || binary.LittleEndian.Uint32(header[24:]) == zip32Sentinel || binary.LittleEndian.Uint16(header[34:]) == zip16Sentinel || binary.LittleEndian.Uint32(header[42:]) == zip32Sentinel {
+		if binary.LittleEndian.Uint32(header[20:]) == zip32Sentinel || binary.LittleEndian.Uint32(header[24:]) == zip32Sentinel || binary.LittleEndian.Uint16(header[34:]) != 0 || binary.LittleEndian.Uint32(header[42:]) == zip32Sentinel {
 			return fmt.Errorf("ZIP64 artifact member is unsupported")
 		}
 		nameSize := int64(binary.LittleEndian.Uint16(header[28:]))
 		extraSize := int64(binary.LittleEndian.Uint16(header[30:]))
 		commentSize := int64(binary.LittleEndian.Uint16(header[32:]))
-		extraPosition, extraEnd := position+centralHeader+nameSize, position+centralHeader+nameSize+extraSize
-		if extraPosition < position || extraEnd < extraPosition || extraEnd > end {
+		if nameSize > actionintegration.MaxUploadArtifactPathBytes || extraSize > maxZIPExtra || commentSize != 0 {
+			return fmt.Errorf("artifact ZIP central directory metadata exceeds bounds")
+		}
+		metadataPosition, metadataEnd := position+centralHeader, position+centralHeader+nameSize+extraSize
+		if metadataPosition < position || metadataEnd < metadataPosition || metadataEnd > end {
 			return fmt.Errorf("artifact ZIP central directory exceeds bounds")
 		}
-		fields := extra[:extraSize]
-		if extraSize > 0 {
-			if _, err := reader.ReadAt(fields, extraPosition); err != nil {
+		entryMetadata := metadata[:nameSize+extraSize]
+		if len(entryMetadata) > 0 {
+			if _, err := reader.ReadAt(entryMetadata, metadataPosition); err != nil {
 				return err
 			}
 		}
-		for len(fields) > 0 {
-			if len(fields) < 4 {
-				return fmt.Errorf("artifact ZIP central directory extra field is malformed")
+		memberName := string(entryMetadata[:nameSize])
+		if !validArtifactMember(memberName) {
+			return fmt.Errorf("artifact ZIP member name is unsafe")
+		}
+		if err := preflightZIPExtraFields(entryMetadata[nameSize:]); err != nil {
+			return err
+		}
+
+		localOffset := int64(binary.LittleEndian.Uint32(header[42:]))
+		if localOffset < 0 || int64(centralOffset)-localOffset < localHeader {
+			return fmt.Errorf("artifact ZIP local header is out of bounds")
+		}
+		var local [localHeader]byte
+		if _, err := reader.ReadAt(local[:], localOffset); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(local[:]) != localSig || binary.LittleEndian.Uint32(local[18:]) == zip32Sentinel || binary.LittleEndian.Uint32(local[22:]) == zip32Sentinel {
+			return fmt.Errorf("ZIP64 or malformed artifact local header is unsupported")
+		}
+		localNameSize := int64(binary.LittleEndian.Uint16(local[26:]))
+		localExtraSize := int64(binary.LittleEndian.Uint16(local[28:]))
+		if localNameSize > actionintegration.MaxUploadArtifactPathBytes || localExtraSize > maxZIPExtra || int64(centralOffset)-localOffset-localHeader < localNameSize+localExtraSize {
+			return fmt.Errorf("artifact ZIP local header metadata exceeds bounds")
+		}
+		localMetadata := metadata[:localNameSize+localExtraSize]
+		if len(localMetadata) > 0 {
+			if _, err := reader.ReadAt(localMetadata, localOffset+localHeader); err != nil {
+				return err
 			}
-			fieldSize := int(binary.LittleEndian.Uint16(fields[2:]))
-			if fieldSize > len(fields)-4 {
-				return fmt.Errorf("artifact ZIP central directory extra field is malformed")
-			}
-			if binary.LittleEndian.Uint16(fields[:]) == 0x0001 {
-				return fmt.Errorf("ZIP64 artifact member is unsupported")
-			}
-			fields = fields[4+fieldSize:]
+		}
+		if string(localMetadata[:localNameSize]) != memberName {
+			return fmt.Errorf("artifact ZIP local and central names differ")
+		}
+		if err := preflightZIPExtraFields(localMetadata[localNameSize:]); err != nil {
+			return err
 		}
 		position += centralHeader + nameSize + extraSize + commentSize
 		count++
@@ -361,6 +401,23 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	}
 	if position != end || count != int(entries) {
 		return fmt.Errorf("artifact ZIP central directory count mismatch")
+	}
+	return nil
+}
+
+func preflightZIPExtraFields(fields []byte) error {
+	for len(fields) > 0 {
+		if len(fields) < 4 {
+			return fmt.Errorf("artifact ZIP extra field is malformed")
+		}
+		fieldSize := int(binary.LittleEndian.Uint16(fields[2:]))
+		if fieldSize > len(fields)-4 {
+			return fmt.Errorf("artifact ZIP extra field is malformed")
+		}
+		if binary.LittleEndian.Uint16(fields[:]) == 0x0001 {
+			return fmt.Errorf("ZIP64 artifact member is unsupported")
+		}
+		fields = fields[4+fieldSize:]
 	}
 	return nil
 }
