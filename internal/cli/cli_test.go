@@ -476,6 +476,26 @@ func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) 
 	if len(report.Diagnostics) != 2 || report.Diagnostics[0].Category != "syntax" || report.Diagnostics[1].Category != "environment" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
+
+	stdout.Reset()
+	stderr.Reset()
+	validEventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	if code := Run([]string{"validate", "--format", "json", "--event-path", validEventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() with valid event code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	results = map[string]string{}
+	for _, stage := range report.Stages {
+		results[stage.ID] = stage.Result
+	}
+	if results[stageWorkflowParsing] != compatibility.Failed || results[stageEventValidation] != compatibility.Passed || results[stageGraph] != compatibility.NotEvaluated {
+		t.Fatalf("stage results with valid event = %#v", results)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Category != "syntax" {
+		t.Fatalf("diagnostics with valid event = %#v", report.Diagnostics)
+	}
 }
 
 func TestWorkflowConcurrencyCancellationWarnsAndRetainsGate(t *testing.T) {

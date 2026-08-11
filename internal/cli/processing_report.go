@@ -87,12 +87,23 @@ func initialProcessingReport(path, profile string, eventEvaluated bool, report c
 }
 
 func setInitialStageResults(report *compatibility.ProcessingReport, eventEvaluated bool, failed map[string]bool) {
-	order := []string{stageWorkflowParsing, stageEventValidation, stageGraph, stageMatrix, stageExpressions, stageDiscovery}
-	blocked := false
-	for _, stage := range order {
-		if stage == stageEventValidation && !eventEvaluated {
-			continue
+	workflowFailed := failed[stageWorkflowParsing]
+	if workflowFailed {
+		report.SetStage(stageWorkflowParsing, compatibility.Failed)
+	} else {
+		report.SetStage(stageWorkflowParsing, compatibility.Passed)
+	}
+	eventFailed := false
+	if eventEvaluated {
+		eventFailed = failed[stageEventValidation]
+		if eventFailed {
+			report.SetStage(stageEventValidation, compatibility.Failed)
+		} else {
+			report.SetStage(stageEventValidation, compatibility.Passed)
 		}
+	}
+	blocked := workflowFailed || eventFailed
+	for _, stage := range []string{stageGraph, stageMatrix, stageExpressions, stageDiscovery} {
 		if failed[stage] {
 			report.SetStage(stage, compatibility.Failed)
 			blocked = true
