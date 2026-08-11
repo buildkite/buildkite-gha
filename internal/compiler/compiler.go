@@ -223,18 +223,29 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // ValidateEventWithOptions validates the graph against explicit variables and
 // runner policy without producing compiler output.
 func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
+	var optionsErr error
 	if err := options.validate(); err != nil {
-		return Report{}, processingFinding(StageExpressions, CodeExpressionInvalid, "environment", err)
+		optionsErr = &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
 	}
 	parsed, parseErr := workflow.Parse(path, source)
 	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
 	event, eventErr := parseEvent(eventSource)
 	eventErr = processingFinding(StageEventValidation, CodeEventInvalid, "environment", eventErr)
-	if parseErr != nil || eventErr != nil {
+	if parseErr != nil || eventErr != nil || optionsErr != nil {
 		if parsed == nil {
-			return Report{}, errors.Join(parseErr, eventErr)
+			return Report{}, errors.Join(parseErr, eventErr, optionsErr)
 		}
-		return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, errors.Join(parseErr, eventErr)
+		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
+		for _, job := range parsed.Jobs {
+			notEvaluatedJobs[job.ID] = true
+		}
+		return Report{
+			LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed),
+			Warnings: compilerWarnings(parsed.Concurrency), NotEvaluatedJobs: notEvaluatedJobs,
+		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
@@ -676,7 +687,10 @@ func planSpan(span workflow.Span) plan.Span {
 
 func compile(path string, source, eventSource []byte, options Options) (IR, error) {
 	if err := options.validate(); err != nil {
-		return IR{}, processingFinding(StageExpressions, CodeExpressionInvalid, "environment", err)
+		return IR{}, &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
 	}
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
@@ -835,7 +849,15 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		job := jobs[id]
 		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
 		if matrixErr != nil {
-			diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourcePaths[id], 0, 0, job.ID, "", "", 0, matrixErr))
+			line, column := job.Span.Start.Line, job.Span.Start.Column
+			if job.Matrix != nil {
+				line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
+			}
+			diagnostics = append(diagnostics, &ProcessingFinding{
+				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
+				Path: sourcePaths[id], Line: line, Column: column, Job: job.ID,
+				Message: "matrix could not be expanded or validated", Err: matrixErr,
+			})
 			failedMatrices[id] = true
 			failedJobs[id] = true
 			continue

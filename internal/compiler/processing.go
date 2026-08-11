@@ -29,6 +29,7 @@ const (
 	CodeActionResolution   = "E_ACTION_RESOLUTION"
 	CodePlanConstruction   = "E_PLAN_CONSTRUCTION"
 	CodePipelineGeneration = "E_PIPELINE_GENERATION"
+	CodeEnvironment        = "E_ENVIRONMENT"
 )
 
 // ProcessingFinding carries stable attribution independently of its rendered

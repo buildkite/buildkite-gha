@@ -683,6 +683,35 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	}
 }
 
+func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "event-matrix.yml")
+	eventPath := filepath.Join(root, "event.json")
+	workflow := []byte("on: push\njobs:\n  test:\n    strategy:\n      matrix: ${{ github.event.matrix }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"matrix":{"` + sentinel + `":"invalid"}}}`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event payload key: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
 func TestCompileAggregatesIndependentPlanFailuresWithoutPipeline(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "plans.yml")
 	workflow := []byte(`on: push
@@ -1466,8 +1495,16 @@ func TestRunUploadRejectsInvalidTargetQueueEnvironment(t *testing.T) {
 			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code == 0 {
 				t.Fatalf("run() code = 0, want invalid target queue failure")
 			}
-			if len(runner.commands) != 0 || (!strings.Contains(stderr.String(), targetQueueEnvironment) && !strings.Contains(stderr.String(), "runner policy queue")) {
+			if len(runner.commands) != 0 {
 				t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+			}
+			if test.name == "empty" && !strings.Contains(stderr.String(), targetQueueEnvironment) {
+				t.Fatalf("stderr = %q, want environment name", stderr.String())
+			}
+			if test.name == "malformed" {
+				if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] workflow-processing configuration is invalid") || strings.Contains(stderr.String(), "[E_EXPRESSION_INVALID]") || strings.Contains(stderr.String(), test.queue) {
+					t.Fatalf("stderr = %q, want redacted environment diagnostic without expression failure", stderr.String())
+				}
 			}
 		})
 	}

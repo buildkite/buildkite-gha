@@ -110,7 +110,7 @@ func setInitialStageResults(report *compatibility.ProcessingReport, eventEvaluat
 			report.SetStage(stageEventValidation, compatibility.Passed)
 		}
 	}
-	blocked := workflowFailed || eventFailed
+	blocked := workflowFailed || eventFailed || failed[""]
 	for _, stage := range []string{stageGraph, stageMatrix, stageExpressions, stageDiscovery} {
 		if failed[stage] {
 			report.SetStage(stage, compatibility.Failed)
@@ -295,7 +295,7 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) c
 		diagnostic.Action = finding.Action
 		diagnostic.Step = finding.Step
 	}
-	if diagnostic.Location == nil && defaultPath != "" && stage != stageEventValidation {
+	if diagnostic.Location == nil && defaultPath != "" && stage != "" && stage != stageEventValidation {
 		diagnostic.Location = sourceLocation(defaultPath, 1, 1)
 	}
 	if diagnostic.Job == "" {
