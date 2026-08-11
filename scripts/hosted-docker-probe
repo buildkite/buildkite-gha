@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-commit=${BUILDKITE_GHA_PROOF_COMMIT:-${SMOKE_COMMIT:-}}
+commit=${COMPATIBILITY_PROOF_COMMIT:-${SMOKE_COMMIT:-}}
 scripts/verify-source-checkout "$commit"
 
 readonly image_base='busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028'

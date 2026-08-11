@@ -491,40 +491,40 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
 	}
-	if got := steps["shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-oracle.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "shell-oracle"` {
+	if got := steps["shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-oracle.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "shell-oracle"` {
 		t.Fatalf("shell oracle loader = %#v", got)
 	}
-	if got := steps["transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/transport-probe/pipeline.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "transport-probe"` {
+	if got := steps["transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/transport-probe/pipeline.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "transport-probe"` {
 		t.Fatalf("transport probe loader = %#v", got)
 	}
-	if got := steps["shell-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["shell-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Shell upload upload loader = %#v", got)
 	}
-	if got := steps["concurrent-steps-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "concurrent-steps" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["concurrent-steps-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "concurrent-steps" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Concurrent steps upload loader = %#v", got)
 	}
-	if got := steps["public-actions-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "public-actions" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["public-actions-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "public-actions" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Public actions upload loader = %#v", got)
 	}
-	if got := steps["hosted-docker-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "hosted-docker" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["hosted-docker-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "hosted-docker" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Hosted Docker loader = %#v", got)
 	}
-	if got := steps["dockerfile-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "dockerfile-action" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["dockerfile-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "dockerfile-action" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Dockerfile action loader = %#v", got)
 	}
-	if got := steps["container-runtime-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "container-runtime" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["container-runtime-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "container-runtime" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Container runtime loader = %#v", got)
 	}
-	if got := steps["summary-annotation-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "summary-annotation" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["summary-annotation-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "summary-annotation" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Summary annotation annotation loader = %#v", got)
 	}
-	if got := steps["workflow-annotations-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "workflow-annotations" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["workflow-annotations-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "workflow-annotations" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Workflow command annotation loader = %#v", got)
 	}
-	if got := steps["upload-artifact-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["upload-artifact-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Upload-artifact loader = %#v", got)
 	}
-	if got := steps["artifact-roundtrip-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml" || got.condition != `build.env("BUILDKITE_GHA_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"` {
+	if got := steps["artifact-roundtrip-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Artifact roundtrip loader = %#v", got)
 	}
 	hosted := steps["hosted-smoke-loader"]
@@ -534,9 +534,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	for _, required := range []string{
 		`commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"`,
 		`[[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]`,
-		`proof_commit="$${BUILDKITE_GHA_PROOF_COMMIT:-}"`,
+		`proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"`,
 		`[[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]]`,
-		`BUILDKITE_GHA_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT`,
+		`COMPATIBILITY_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"`,
 		`git status --porcelain --untracked-files=all`,
@@ -994,7 +994,7 @@ func TestShellUploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 	}
 	text := string(source)
 	for _, required := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
@@ -1089,7 +1089,7 @@ func TestConcurrentStepsProofPreservesSeparateContinuationLoader(t *testing.T) {
 	}
 	text := string(source)
 	for _, required := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
@@ -1173,7 +1173,7 @@ func TestPublicActionsProofUsesTrustedManagedActionsPath(t *testing.T) {
 		t.Fatalf("Public actions public checkout identity drifted: event=%#v workflow=%s", publicEvent, workflowSource)
 	}
 	for _, required := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
@@ -1264,7 +1264,7 @@ func TestHostedDockerCapabilityProbeContract(t *testing.T) {
 	if len(importer) != 2 || importer[0].Key != "hosted-docker-importer" || importer[1].Key != "hosted-docker-continuation-loader" || fmt.Sprint(importer[1].DependsOn) != "hosted-docker-importer" || !importer[1].AllowDependencyFailure || importer[1].Command != "buildkite-agent pipeline upload .buildkite/hosted-docker-continuation.yml" {
 		t.Fatalf("Hosted Docker importer = %#v", importer)
 	}
-	for _, fragment := range []string{`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+	for _, fragment := range []string{`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`, `git status --porcelain --untracked-files=all`, `pipeline upload --no-interpolation --reject-secrets .buildkite/hosted-docker-probe.yml`} {
 		if !strings.Contains(string(importerBody), fragment) {
 			t.Fatalf("Hosted Docker importer lacks %q", fragment)
@@ -1288,7 +1288,7 @@ func TestHostedDockerCapabilityProbeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(probe)
-	for _, fragment := range []string{"set -euo pipefail", `commit=${BUILDKITE_GHA_PROOF_COMMIT:-${SMOKE_COMMIT:-}}`, `scripts/verify-source-checkout "$commit"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://hosted-docker-server:8080/hosted-docker-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record httpd-applet pass execution-confirmed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
+	for _, fragment := range []string{"set -euo pipefail", `commit=${COMPATIBILITY_PROOF_COMMIT:-${SMOKE_COMMIT:-}}`, `scripts/verify-source-checkout "$commit"`, "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", `buildx inspect default`, `buildx build --builder default --load`, `default-docker-driver`, `127.0.0.1::8080`, `wget -qO- http://hosted-docker-server:8080/hosted-docker-marker`, `/dev/tcp/127.0.0.1/$1`, `trap cleanup EXIT`, `trap - EXIT`, `exit "$final"`, `trap 'exit 130' INT`, `trap 'exit 143' TERM`, `docker container ls --all --quiet`, `--filter "label=${label_key}=${owner}"`, `timeout 30s`, `docker stop --time 5`, `term-observed`, `record httpd-applet pass execution-confirmed`, `record bind-requested fail`, `record signal-stop fail`, `(( probe_failed == 0 ))`, "COPY marker"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("Hosted Docker probe lacks %q", fragment)
 		}
@@ -1308,7 +1308,7 @@ func TestDockerfileActionUploadProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
@@ -1397,7 +1397,7 @@ func TestContainerRuntimeProofContract(t *testing.T) {
 		t.Fatalf("Container runtime continuation loader = %#v", loader)
 	}
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`git status --porcelain --untracked-files=all`,
 		`pipeline upload --no-interpolation --reject-secrets .buildkite/container-runtime-probe.yml`,
@@ -1428,7 +1428,7 @@ func TestContainerRuntimeProofContract(t *testing.T) {
 	text := string(script)
 	for _, fragment := range []string{
 		"set -euo pipefail",
-		`commit=${BUILDKITE_GHA_PROOF_COMMIT:-${SMOKE_COMMIT:-}}`,
+		`commit=${COMPATIBILITY_PROOF_COMMIT:-${SMOKE_COMMIT:-}}`,
 		`scripts/verify-source-checkout "$commit"`,
 		`git status --porcelain --untracked-files=all`,
 		`docker buildx inspect default`,
@@ -1462,7 +1462,7 @@ func TestSummaryAnnotationProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
@@ -1554,7 +1554,7 @@ func TestWorkflowCommandAnnotationProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
@@ -1648,7 +1648,7 @@ func TestUploadArtifactProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,
@@ -1750,7 +1750,7 @@ func TestArtifactRoundtripProofContract(t *testing.T) {
 	}
 	text := string(importerBody)
 	for _, fragment := range []string{
-		`commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
+		`commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"`,
 		`scripts/verify-source-checkout "$$commit"`,
 		`test -z "$$(git status --porcelain --untracked-files=all)"`,
 		`automatic: false`,

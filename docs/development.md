@@ -135,16 +135,16 @@ explicit rather than relying on deployment defaults.
 
 | Coverage | Build environment |
 | --- | --- |
-| Sequential shell and upload | `BUILDKITE_GHA_PROOF=shell-upload`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Concurrent step controls | `BUILDKITE_GHA_PROOF=concurrent-steps`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Public JavaScript/composite actions | `BUILDKITE_GHA_PROOF=public-actions`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Hosted Docker prerequisites | `BUILDKITE_GHA_PROOF=hosted-docker`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Dockerfile action path | `BUILDKITE_GHA_PROOF=dockerfile-action`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Complete container runtime | `BUILDKITE_GHA_PROOF=container-runtime`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Job summary annotation | `BUILDKITE_GHA_PROOF=summary-annotation`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Workflow warning/error annotations | `BUILDKITE_GHA_PROOF=workflow-annotations`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Upload-artifact publication | `BUILDKITE_GHA_PROOF=upload-artifact`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
-| Artifact producer/consumer roundtrip | `BUILDKITE_GHA_PROOF=artifact-roundtrip`, `BUILDKITE_GHA_PROOF_COMMIT=<commit>` |
+| Sequential shell and upload | `COMPATIBILITY_PROOF=shell-upload`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Concurrent step controls | `COMPATIBILITY_PROOF=concurrent-steps`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Public JavaScript/composite actions | `COMPATIBILITY_PROOF=public-actions`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Hosted Docker prerequisites | `COMPATIBILITY_PROOF=hosted-docker`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Dockerfile action path | `COMPATIBILITY_PROOF=dockerfile-action`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Complete container runtime | `COMPATIBILITY_PROOF=container-runtime`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Job summary annotation | `COMPATIBILITY_PROOF=summary-annotation`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Workflow warning/error annotations | `COMPATIBILITY_PROOF=workflow-annotations`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Upload-artifact publication | `COMPATIBILITY_PROOF=upload-artifact`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Artifact producer/consumer roundtrip | `COMPATIBILITY_PROOF=artifact-roundtrip`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After

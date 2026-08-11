@@ -6,7 +6,7 @@ steps:
     key: "hosted-docker-importer"
     command: |
       set -euo pipefail
-      commit="$${BUILDKITE_GHA_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"
+      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"
       scripts/verify-source-checkout "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
       buildkite-agent pipeline upload --no-interpolation --reject-secrets .buildkite/hosted-docker-probe.yml
