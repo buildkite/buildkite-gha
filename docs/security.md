@@ -41,11 +41,25 @@ does not make that code trusted or grant it authority.
 
 | Credential | Supported boundary |
 | --- | --- |
-| Repository checkout | The verified adapter checks the plan's event repository and exact commit. For submodules, checked-in `.gitmodules` files may select same-account sibling repositories; Buildkite's backend authorizes each concrete GitHub repository and mints a repository-specific, read-only token. The helper is offered only to `github.com`, is scoped by HTTP path, and is not persisted. External HTTPS submodules are anonymous. |
+| Repository checkout | The verified adapter checks the plan's event repository and exact commit. Buildkite authorizes private repository access. Credentials are not persisted. |
 | `GITHUB_TOKEN` | One short-lived token is requested for the plan's event repository and compiler-resolved permissions. Buildkite independently requires the pipeline repository to match and may deny the request. The token is not initially ambient. |
 | Cache token | Fresh job-bound credentials are minted for each JavaScript or Docker action lifecycle when the cache service is configured. Ordinary shell steps do not receive them. |
 | Ordinary workflow secrets | Rejected by production admission. |
 | GitHub-compatible OIDC | Unsupported. |
+
+### Checkout and submodules
+
+Checked-in `.gitmodules` files may select repositories covered by the job's
+Buildkite managed code access. For GitHub, that can include another repository
+in the same account when the connected GitHub App installation includes it.
+Buildkite authorizes each repository and returns a repository-specific,
+read-only token. The helper is offered only to `github.com`, is scoped by HTTP
+path, and is not persisted. External HTTPS submodules are fetched anonymously;
+SSH and non-HTTPS transports are disabled.
+
+The installed Git executable owns submodule manifest parsing, paths, relative
+URLs, and recursion. Use a current, vendor-supported Git distribution,
+preferably pinned in an immutable job image.
 
 Job binding does not prove that a branch, actor, or fork is trusted. If an
 untrusted change can edit a workflow that requests write permissions, that code
@@ -59,14 +73,9 @@ not access control and cannot detect every encoded or transformed value.
 
 Checkout's command-scoped environment and Git configuration reduce accidental
 credential spread; they do not isolate the helper or Agent identity from a
-hostile concurrent process under the same job identity. The runtime delegates
-submodule manifest and path safety to the installed Git executable. Use a
-vendor-supported Git distribution with current security patches, preferably
-pinned in an immutable job image. Protecting checkout credentials from hostile
-same-job code would require a separate UID, sandbox, or pre-job credential
-broker rather than more `.gitmodules` parsing. See the
-[`actions/checkout` compatibility boundary](compatibility.md#actionscheckout)
-for the exact transport, submodule, and credential matrix.
+hostile concurrent process under the same job identity. Protecting checkout
+credentials from hostile same-job code would require a separate UID, sandbox,
+or pre-job credential broker rather than more `.gitmodules` parsing.
 
 ## Operator checklist
 
