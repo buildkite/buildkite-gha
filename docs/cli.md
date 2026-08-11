@@ -97,13 +97,18 @@ so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
 ## Upload
 
-`upload` is the in-build command used by the plugin:
+`upload` is the public in-build command for custom importers:
 
 ```sh
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+
+The hidden `buildkite-gha plugin` entrypoint provides the dedicated GitHub
+Actions plugin integration boundary. It reads the workflow from
+`BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW`, accepts no arguments, and is
+intentionally absent from ordinary CLI help.
 
 Event source precedence is:
 
