@@ -1965,18 +1965,6 @@ func TestCompileRejectsInvalidEventSnapshots(t *testing.T) {
 	}
 }
 
-func TestEventNameUsesCanonicalEventParser(t *testing.T) {
-	source := readFile(t, smokePath("events", "push.json"))
-	name, err := EventName(source)
-	if err != nil || name != "push" {
-		t.Fatalf("EventName() = %q, %v, want push", name, err)
-	}
-	invalid := bytes.Replace(source, []byte(`"actor":`), []byte(`"unexpected":true,"actor":`), 1)
-	if _, err := EventName(invalid); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("EventName() invalid snapshot error = %v", err)
-	}
-}
-
 func smokePath(parts ...string) string {
 	return filepath.Join(append([]string{"..", "..", "testdata", "smoke"}, parts...)...)
 }

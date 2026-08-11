@@ -663,16 +663,6 @@ func parseEvent(source []byte) (Event, error) {
 	}, nil
 }
 
-// EventName validates an event snapshot with the compiler's canonical parser
-// and returns its active provider event name.
-func EventName(source []byte) (string, error) {
-	event, err := parseEvent(source)
-	if err != nil {
-		return "", err
-	}
-	return event.Event, nil
-}
-
 func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
 	repository := event.Repository.Owner + "/" + event.Repository.Name
 	if workflowName == "" {
