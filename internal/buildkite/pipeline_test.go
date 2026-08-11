@@ -138,6 +138,140 @@ func TestEmitMergesIntoContainingGroup(t *testing.T) {
 	}
 }
 
+func TestEmitAggregateWorkflowGroups(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{
+			{
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Condition: `build.source_event == "push"`,
+				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("first plan")}},
+			},
+			{
+				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Condition: `build.source == "ui"`,
+				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test", PlanDigest: testDigest("second plan")}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Key       string `yaml:"key"`
+			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
+			Steps     []struct {
+				Key       string     `yaml:"key"`
+				Command   string     `yaml:"command"`
+				Notify    any        `yaml:"notify"`
+				DependsOn *yaml.Node `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 || document.Steps[0].Group != "CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || document.Steps[0].Steps[0].Notify != nil {
+		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
+	}
+	if document.Steps[1].Group != ".github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || document.Steps[1].Steps[0].Notify != nil {
+		t.Fatalf("second aggregate group = %#v\n%s", document.Steps[1], output)
+	}
+	for _, group := range document.Steps {
+		for _, step := range group.Steps {
+			if step.DependsOn != nil {
+				t.Fatalf("dependency-free aggregate child %q emitted depends_on: %#v", step.Key, step.DependsOn)
+			}
+			if strings.Count(step.Command, `--step 'importer'`) != 1 || !strings.Contains(step.Command, `run-job --plan-digest `) || !strings.Contains(step.Command, `--plan-producer 'importer'`) || strings.Contains(step.Command, `artifact download '.buildkite-gha/plans/`) {
+				t.Fatalf("aggregate child %q does not delegate plan acquisition to importer: %q", step.Key, step.Command)
+			}
+		}
+	}
+}
+
+func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{{
+			GroupLabel:      "CI",
+			GroupKey:        "workflow-ci",
+			Condition:       "true",
+			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+			Jobs: []Job{
+				{Key: "producer", Label: "Producer", PlanDigest: testDigest("producer")},
+				{Key: "consumer", Label: "Consumer", PlanDigest: testDigest("consumer"), Dependencies: []string{"producer"}},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type emittedDependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type emittedStep struct {
+		Key       string              `yaml:"key"`
+		DependsOn []emittedDependency `yaml:"depends_on"`
+	}
+	var document struct {
+		Steps []struct {
+			DependsOn string        `yaml:"depends_on"`
+			Steps     []emittedStep `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse aggregate concurrency pipeline: %v\n%s", err, output)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Steps) != 4 {
+		t.Fatalf("aggregate concurrency group = %#v\n%s", document.Steps, output)
+	}
+	openKey, closeKey := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
+	open, producer, consumer, close := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
+	if open.Key != openKey || len(open.DependsOn) != 0 {
+		t.Fatalf("aggregate opening gate = %#v", open)
+	}
+	if producer.Key != "producer" || len(producer.DependsOn) != 1 || producer.DependsOn[0].Step != openKey || producer.DependsOn[0].AllowFailure {
+		t.Fatalf("aggregate producer dependencies = %#v", producer)
+	}
+	if consumer.Key != "consumer" || len(consumer.DependsOn) != 2 || consumer.DependsOn[0].Step != openKey || consumer.DependsOn[0].AllowFailure || consumer.DependsOn[1].Step != "producer" || !consumer.DependsOn[1].AllowFailure {
+		t.Fatalf("aggregate consumer dependencies = %#v", consumer)
+	}
+	if close.Key != closeKey || len(close.DependsOn) != 2 || close.DependsOn[0].Step != "producer" || !close.DependsOn[0].AllowFailure || close.DependsOn[1].Step != "consumer" || !close.DependsOn[1].AllowFailure {
+		t.Fatalf("aggregate closing gate dependencies = %#v", close)
+	}
+	for _, step := range document.Steps[0].Steps {
+		for _, dependency := range step.DependsOn {
+			if dependency.Step == pipeline.CompilerStep {
+				t.Fatalf("aggregate child %q retains importer dependency: %#v", step.Key, step.DependsOn)
+			}
+		}
+	}
+}
+
+func TestEmitAggregateRejectsCrossWorkflowCollisions(t *testing.T) {
+	base := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{
+			{GroupLabel: "One", GroupKey: "workflow-one", Condition: "true", Jobs: []Job{{Key: "shared", Label: "One", PlanDigest: testDigest("one")}}},
+			{GroupLabel: "Two", GroupKey: "workflow-two", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Two", PlanDigest: testDigest("two")}}},
+		},
+	}
+	if _, err := Emit(base); err == nil || !strings.Contains(err.Error(), `generated step key "shared" collides`) {
+		t.Fatalf("duplicate aggregate key error = %v", err)
+	}
+	base.Workflows[1].Jobs[0].Key = "other"
+	base.Workflows[1].Jobs[0].PlanDigest = base.Workflows[0].Jobs[0].PlanDigest
+	if _, err := Emit(base); err == nil || !strings.Contains(err.Error(), "share plan digest") {
+		t.Fatalf("duplicate aggregate plan error = %v", err)
+	}
+}
+
 func TestEmitWrapsJobsInWorkflowConcurrencyGate(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
