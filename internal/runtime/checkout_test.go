@@ -256,7 +256,10 @@ func TestCheckoutSubmoduleMaterializationUsesRealObjectDatabases(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			parentModules := []testGitlink{{name: "child.with.dots", path: "deps/child", url: "https://github.com/owner/child.git", oid: childOID}}
-			parent, parentOID := createSubmoduleFixtureRepository(t, "parent.txt", "parent\n", parentModules)
+			parentRemote, parentOID := createSubmoduleFixtureRepository(t, "parent.txt", "parent\n", parentModules)
+			parent := filepath.Join(t.TempDir(), "parent")
+			runTestGit(t, "", "clone", parentRemote, parent)
+			runTestGit(t, parent, "checkout", "--detach", parentOID)
 			base := checkoutGitBaseArgs()
 			// The production parser has already admitted only github.com URLs. This
 			// test-only routing replaces HTTPS with local bare fixture repositories.
@@ -284,13 +287,46 @@ func TestCheckoutSubmoduleMaterializationUsesRealObjectDatabases(t *testing.T) {
 			if got := strings.TrimSpace(runTestGit(t, childPath, "rev-parse", "HEAD")); got != childOID {
 				t.Fatalf("child HEAD = %s, want %s", got, childOID)
 			}
+			if got := strings.TrimSpace(runTestGit(t, parent, "config", "--local", "--get", "submodule.child.with.dots.url")); got != "https://github.com/owner/child.git" {
+				t.Fatalf("registered child URL = %q", got)
+			}
+			if got := strings.TrimSpace(runTestGit(t, parent, "config", "--local", "--get", "submodule.child.with.dots.active")); got != "true" {
+				t.Fatalf("registered child active = %q", got)
+			}
 			grandPath := filepath.Join(childPath, "deps", "grand")
 			if test.recursive {
 				if got := strings.TrimSpace(runTestGit(t, grandPath, "rev-parse", "HEAD")); got != grandOID {
 					t.Fatalf("grandchild HEAD = %s, want %s", got, grandOID)
 				}
+				if got := strings.TrimSpace(runTestGit(t, childPath, "config", "--local", "--get", "submodule.nested.module.url")); got != "https://github.com/owner/grand.git" {
+					t.Fatalf("registered grandchild URL = %q", got)
+				}
 			} else if _, err := os.Stat(filepath.Join(grandPath, ".git")); !os.IsNotExist(err) {
 				t.Fatalf("direct materialization installed grandchild repository: %v", err)
+			}
+			statusArgs := []string{"submodule", "status"}
+			if test.recursive {
+				statusArgs = append(statusArgs, "--recursive")
+			}
+			status := strings.TrimSuffix(runTestGit(t, parent, statusArgs...), "\n")
+			lines := strings.Split(status, "\n")
+			wantLines := 1
+			if test.recursive {
+				wantLines = 2
+			}
+			if len(lines) != wantLines {
+				t.Fatalf("submodule status lines = %q", lines)
+			}
+			for _, line := range lines {
+				if line == "" || line[0] != ' ' {
+					t.Fatalf("submodule remains uninitialized: %q", line)
+				}
+			}
+			config := runTestGit(t, parent, "config", "--local", "--list") + runTestGit(t, childPath, "config", "--local", "--list")
+			for _, forbidden := range []string{"credential.helper", "extraheader", "job-secret", "repository-secret"} {
+				if strings.Contains(config, forbidden) {
+					t.Fatalf("submodule config retained forbidden value %q: %s", forbidden, config)
+				}
 			}
 		})
 	}
@@ -378,6 +414,8 @@ func TestCheckoutSubmoduleManifestRejectsUntrustedTreesBeforeFetch(t *testing.T)
 		{name: "parent child collision", manifest: valid("one", "deps") + valid("two", "deps/child"), entries: []testIndexEntry{{"160000", "deps", childOID}}},
 		{name: "traversal", manifest: valid("child", "../child")},
 		{name: "absolute", manifest: valid("child", "/child")},
+		{name: "drive absolute", manifest: valid("child", "C:/child")},
+		{name: "drive relative", manifest: valid("child", "C:child")},
 		{name: "backslash", manifest: valid("child", `deps\child`)},
 		{name: "dot git", manifest: valid("child", "deps/.git/child")},
 		{name: "control", manifest: valid("child", "deps/\x01child")},
@@ -422,6 +460,13 @@ func TestCheckoutSubmoduleManifestBounds(t *testing.T) {
 	if _, err := state.manifest(repo, commit, "https://github.com/owner/parent.git"); err == nil || !strings.Contains(err.Error(), "size bounds") {
 		t.Fatalf("oversized manifest error = %v", err)
 	}
+
+	executableManifest := []byte("[submodule \"child\"]\n\tpath = child\n\turl = https://github.com/owner/child.git\n")
+	repo, commit = createManifestFixtureRepository(t, executableManifest, "100755", []testIndexEntry{{"160000", "child", childOID}})
+	state = checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
+	if modules, err := state.manifest(repo, commit, "https://github.com/owner/parent.git"); err != nil || len(modules) != 1 {
+		t.Fatalf("executable regular manifest modules = %#v, error = %v", modules, err)
+	}
 }
 
 func TestCheckoutSubmoduleFetchArgumentsIgnoreParentFetchTags(t *testing.T) {
@@ -448,7 +493,7 @@ func TestCheckoutSubmodulePathValidation(t *testing.T) {
 			t.Fatalf("validateCheckoutSubmodulePath(%q): %v", valid, err)
 		}
 	}
-	for _, invalid := range []string{"", "../child", "/child", "a\\b", "-child", "a/.git/b", "a//b", "a/child."} {
+	for _, invalid := range []string{"", "../child", "/child", "a\\b", "-child", "a/.git/b", "a//b", "a/child.", "C:/child", "c:/child", "C:child", "z:child"} {
 		if err := validateCheckoutSubmodulePath(invalid); err == nil {
 			t.Fatalf("validateCheckoutSubmodulePath(%q) succeeded", invalid)
 		}
@@ -471,6 +516,7 @@ func TestCheckoutSubmodulePathValidation(t *testing.T) {
 
 func TestPublishCheckoutSubmodulesRollsBackEarlierSibling(t *testing.T) {
 	root, staging := t.TempDir(), t.TempDir()
+	runTestGit(t, root, "init")
 	for i := range 2 {
 		if err := os.Mkdir(filepath.Join(staging, fmt.Sprint(i)), 0o700); err != nil {
 			t.Fatal(err)
@@ -479,7 +525,9 @@ func TestPublishCheckoutSubmodulesRollsBackEarlierSibling(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "second"), []byte("collision"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := publishCheckoutSubmodules(context.Background(), root, staging, []checkoutSubmodule{{path: "deps/first"}, {path: "second"}})
+	modules := []checkoutSubmodule{{name: "first", path: "deps/first", url: "https://github.com/owner/first.git"}, {name: "second", path: "second", url: "https://github.com/owner/second.git"}}
+	state := checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
+	err := state.registerAndPublish(root, staging, modules)
 	if err == nil {
 		t.Fatal("publication succeeded despite second destination collision")
 	}
@@ -491,6 +539,14 @@ func TestPublishCheckoutSubmodulesRollsBackEarlierSibling(t *testing.T) {
 	}
 	if info, err := os.Stat(filepath.Join(staging, "0")); err != nil || !info.IsDir() {
 		t.Fatalf("first sibling was not returned to staging: %v", err)
+	}
+	for _, module := range modules {
+		for _, field := range []string{"url", "active"} {
+			cmd := exec.Command("git", "-C", root, "config", "--local", "--get", "submodule."+module.name+"."+field)
+			if err := cmd.Run(); err == nil {
+				t.Fatalf("registration %s.%s remained after publication rollback", module.name, field)
+			}
+		}
 	}
 }
 

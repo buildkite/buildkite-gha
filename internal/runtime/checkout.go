@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
@@ -206,7 +207,11 @@ type checkoutSubmoduleState struct {
 }
 
 func (s *checkoutSubmoduleState) output(dir string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(s.ctx, s.git, append(append([]string{}, s.base...), args...)...)
+	return s.outputContext(s.ctx, dir, args...)
+}
+
+func (s *checkoutSubmoduleState) outputContext(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, s.git, append(append([]string{}, s.base...), args...)...)
 	cmd.Dir, cmd.Env = dir, processEnv(s.env)
 	out, err := cmd.Output()
 	if err != nil {
@@ -290,7 +295,7 @@ func (s *checkoutSubmoduleState) materialize(parent, commit, parentURL string, d
 			}
 		}
 	}
-	return publishCheckoutSubmodules(s.ctx, parent, stageRoot, modules)
+	return s.registerAndPublish(parent, stageRoot, modules)
 }
 
 func checkoutSubmoduleFetchArgs(depthOne bool, oid string) []string {
@@ -299,6 +304,40 @@ func checkoutSubmoduleFetchArgs(depthOne bool, oid string) []string {
 		return append(args, "--depth=1", "origin", oid)
 	}
 	return append(args, "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*", "+"+oid+":refs/buildkite-gha/submodule")
+}
+
+func (s *checkoutSubmoduleState) registerAndPublish(parent, staging string, modules []checkoutSubmodule) (retErr error) {
+	var attempted []string
+	cleanup := func() error {
+		var cleanupErr error
+		for i := len(attempted) - 1; i >= 0; i-- {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), 2*time.Second)
+			_, err := s.outputContext(ctx, parent, "config", "--local", "--unset-all", attempted[i])
+			cancel()
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 5 {
+				err = nil
+			}
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		return cleanupErr
+	}
+	for _, module := range modules {
+		settings := [2]struct{ field, value string }{{"url", module.url}, {"active", "true"}}
+		for _, setting := range settings {
+			key := "submodule." + module.name + "." + setting.field
+			attempted = append(attempted, key)
+			if _, err := s.output(parent, "config", "--local", "--replace-all", key, setting.value); err != nil {
+				return errors.Join(err, cleanup())
+			}
+		}
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, cleanup())
+		}
+	}()
+	return publishCheckoutSubmodules(s.ctx, parent, staging, modules)
 }
 
 func preflightCheckoutSubmoduleDestination(root, relative string) error {
@@ -427,7 +466,7 @@ func (s *checkoutSubmoduleState) manifest(repo, commit, parentURL string) ([]che
 		return nil, fmt.Errorf("ambiguous .gitmodules tree entry")
 	}
 	mode, typ, oid, treePath, ok := parseCheckoutTreeRecord(tree)
-	if !ok || mode != "100644" || typ != "blob" || treePath != ".gitmodules" {
+	if !ok || (mode != "100644" && mode != "100755") || typ != "blob" || treePath != ".gitmodules" {
 		return nil, fmt.Errorf("committed .gitmodules is not a regular blob")
 	}
 	sizeText, err := s.output(repo, "cat-file", "-s", oid)
@@ -578,7 +617,8 @@ func parseCheckoutTreeRecord(record []byte) (mode, typ, oid, name string, ok boo
 }
 
 func validateCheckoutSubmodulePath(value string) error {
-	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.Contains(value, "\\") || strings.HasPrefix(value, "-") || path.IsAbs(value) || filepath.VolumeName(value) != "" || strings.HasPrefix(value, "//") {
+	drivePrefix := len(value) >= 2 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':'
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.Contains(value, "\\") || strings.HasPrefix(value, "-") || path.IsAbs(value) || drivePrefix || filepath.VolumeName(value) != "" || strings.HasPrefix(value, "//") {
 		return errors.New("unsafe submodule path")
 	}
 	parts := strings.Split(value, "/")

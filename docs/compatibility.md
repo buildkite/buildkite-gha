@@ -370,9 +370,12 @@ prompts, redirects, SSH, local/file, `ext`, and all non-HTTPS transports
 disabled. The exact gitlink commit is checked out detached and verified before
 publication. Recursive mode validates the child's committed manifest before
 fetching its children. Staging and command-scoped credentials are removed on
-success, failure, and cancellation. Child repositories intentionally retain an
-embedded `.git` directory rather than upstream's absorbed `.git/modules`
-layout; no credential helper, token, header, or conditional include is retained.
+success, failure, and cancellation. Each validated direct child is registered
+with its canonical URL and `active=true` in the immediate parent's isolated
+local config, so `git submodule status` and recursive status report it as
+initialized. Child repositories intentionally retain an embedded `.git`
+directory rather than upstream's absorbed `.git/modules` layout; no credential
+helper, token, header, or conditional include is retained.
 
 The source-backed contract and deliberate differences are:
 
