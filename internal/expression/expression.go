@@ -45,6 +45,7 @@ type Context struct {
 	Env          map[string]string
 	GitHub       map[string]any
 	Services     map[string]map[string]string
+	JobStatus    string
 }
 
 // StepStatus contains the values exposed for one completed step while
@@ -166,6 +167,16 @@ func ValidateRuntimeTemplate(template string) error {
 // ValidateActionInputDefault verifies the restricted compound expression
 // surface supported only while evaluating action metadata input defaults.
 func ValidateActionInputDefault(template string) error {
+	referencesJobStatus, err := ReferencesJobStatus(template)
+	if err != nil {
+		return err
+	}
+	if referencesJobStatus {
+		root, path, err := ReferencePath(template)
+		if err != nil || !isJobStatusReference(root, path) {
+			return fmt.Errorf("action input default job.status must be one direct expression")
+		}
+	}
 	return visitTemplateExpressions(template, validateActionInputDefaultNode)
 }
 
@@ -178,7 +189,14 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if err != nil {
 			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
 		}
-		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+		if isJobStatusReference(root, path) {
+			return nil
+		}
+		kind := classifyRuntimeReference(root, path)
+		if kind == runtimeReferenceSecret {
+			return fmt.Errorf("action input defaults cannot grant secret authority")
+		}
+		if kind == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
@@ -195,6 +213,15 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 			return err
 		}
 		return validateActionInputDefaultNode(node.Right)
+	case *actionlint.FuncCallNode:
+		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
+			return fmt.Errorf("action input default function %q is unsupported", node.Callee)
+		}
+		root, path, err := referencePath(node.Args[0])
+		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
+			return fmt.Errorf("action input default toJSON requires the complete matrix context")
+		}
+		return nil
 	default:
 		return fmt.Errorf("action input default expression is unsupported")
 	}
@@ -202,7 +229,7 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
 // surface is intentionally limited to literals, github/event/vars/matrix
-// references, and fromJSON applied to one of those values.
+// references, boolean/equality operators, and selected pure functions.
 func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	body, err := expressionBody(expr.Text)
 	if err != nil {
@@ -213,6 +240,24 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
 	return evaluateCompileNode(node, context)
+}
+
+// EvaluateCompileCondition evaluates a condition whose entire value is known
+// while constructing the graph. Callers may fall back to runtime condition
+// handling when this returns an unavailable-context or unsupported error.
+func EvaluateCompileCondition(source string, context CompileContext) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil {
+		return false, err
+	}
+	if empty {
+		return true, nil
+	}
+	value, err := evaluateCompileNode(node, context)
+	if err != nil {
+		return false, err
+	}
+	return actionInputDefaultTruthy(value), nil
 }
 
 // EvaluateCompileTemplate substitutes supported graph-time expressions once.
@@ -247,6 +292,124 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 			return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 		}
 		remaining = remaining[end+len(close):]
+	}
+}
+
+// EvaluateAvailableCompileTemplate folds each graph-time expression that can be
+// resolved independently and preserves expressions that need runtime context.
+func EvaluateAvailableCompileTemplate(template string, context CompileContext) (string, error) {
+	const open = "${{"
+	var evaluated strings.Builder
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			evaluated.WriteString(remaining)
+			return evaluated.String(), nil
+		}
+		evaluated.WriteString(remaining[:start])
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		complete := open + source[:consumed]
+		value, err := EvaluateCompile(Expression{Text: complete}, context)
+		if err != nil {
+			evaluated.WriteString(complete)
+		} else {
+			switch value := value.(type) {
+			case nil:
+			case string:
+				evaluated.WriteString(value)
+			case bool, json.Number, float64, int:
+				_, _ = fmt.Fprint(&evaluated, value)
+			default:
+				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
+			}
+		}
+		remaining = source[consumed:]
+	}
+}
+
+// SubstituteCompileInputs replaces static inputs.<name> references inside
+// expression regions with equivalent GitHub expression literals. Text and
+// string literals outside those references are preserved byte-for-byte.
+func SubstituteCompileInputs(template string, inputs map[string]any) (string, error) {
+	const open = "${{"
+	var substituted strings.Builder
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			substituted.WriteString(remaining)
+			return substituted.String(), nil
+		}
+		substituted.WriteString(remaining[:start+len(open)])
+		source := remaining[start+len(open):]
+		tokens, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		expressionSource := source[:consumed]
+		type replacement struct {
+			start, end int
+			value      string
+		}
+		var replacements []replacement
+		for i := 0; i+2 < len(tokens); i++ {
+			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") || tokens[i+1].Kind != actionlint.TokenKindDot || tokens[i+2].Kind != actionlint.TokenKindIdent {
+				continue
+			}
+			value, ok := findCompileInput(inputs, tokens[i+2].Value)
+			if !ok {
+				continue
+			}
+			literal, err := compileInputLiteral(value)
+			if err != nil {
+				return "", err
+			}
+			replacements = append(replacements, replacement{
+				start: tokens[i].Offset,
+				end:   tokens[i+2].Offset + len(tokens[i+2].Value),
+				value: literal,
+			})
+			i += 2
+		}
+		for i := len(replacements) - 1; i >= 0; i-- {
+			replacement := replacements[i]
+			expressionSource = expressionSource[:replacement.start] + replacement.value + expressionSource[replacement.end:]
+		}
+		substituted.WriteString(expressionSource)
+		remaining = source[consumed:]
+	}
+}
+
+func findCompileInput(inputs map[string]any, target string) (any, bool) {
+	for name, value := range inputs {
+		if strings.EqualFold(name, target) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func compileInputLiteral(value any) (string, error) {
+	switch value := value.(type) {
+	case nil:
+		return "null", nil
+	case bool:
+		return strconv.FormatBool(value), nil
+	case string:
+		return "'" + strings.ReplaceAll(value, "'", "''") + "'", nil
+	case json.Number:
+		return value.String(), nil
+	case int:
+		return strconv.Itoa(value), nil
+	case float64:
+		return strconv.FormatFloat(value, 'g', -1, 64), nil
+	default:
+		return "", fmt.Errorf("compile-time input %T cannot be represented as an expression literal", value)
 	}
 }
 
@@ -355,6 +518,64 @@ func ReferencesGitHubToken(template string) (bool, error) {
 	return found, err
 }
 
+// ReferencesJobStatus reports whether a template statically references
+// job.status.
+func ReferencesJobStatus(template string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+			if !entering || found {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, err := referencePath(node)
+			if err == nil && isJobStatusReference(root, path) {
+				found = true
+			}
+		})
+		return nil
+	})
+	return found, err
+}
+
+// ReferencesGitHubEvent reports whether a condition reads the event payload
+// through github.event. The compiler can fold those conditions before the
+// immutable runtime boundary, which deliberately omits the payload body.
+func ReferencesGitHubEvent(source string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	found := false
+	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
+		if !entering || found {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, path, pathErr := referencePath(node)
+		found = pathErr == nil && strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
+	})
+	return found, nil
+}
+
+// ReferencesStatusFunction reports whether a condition explicitly names one of
+// the status functions that suppress the implicit success guard.
+func ReferencesStatusFunction(source string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	return containsStatusFunction(node), nil
+}
+
 // ConditionUsesContext reports whether a condition references a named context.
 // Conditions may omit the normal ${{ ... }} delimiters.
 func ConditionUsesContext(source, contextName string) (bool, error) {
@@ -392,6 +613,19 @@ func ValidateCondition(source string, scope ConditionScope) error {
 // types against one concrete, statically expanded matrix instance.
 func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map[string]any) error {
 	return validateCondition(source, scope, matrix, true)
+}
+
+// ValidateCompileConditionWithMatrix verifies every branch of an event-backed
+// condition before compile-time evaluation can short-circuit it. It admits the
+// union of compile-time and runtime condition references, while retaining the
+// concrete matrix type checks used by runtime validation.
+func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	context.Matrix = matrix
+	return validateCompileConditionNode(node, scope, context, matrix)
 }
 
 func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
@@ -470,6 +704,90 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 	default:
 		return fmt.Errorf("unsupported condition expression")
 	}
+}
+
+func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+	switch node := node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(root, "github") && len(path) != 0 {
+			if strings.EqualFold(path[0], "event") {
+				return nil
+			}
+			switch strings.ToLower(path[0]) {
+			case "actor", "event_name", "ref", "repository", "repository_owner", "sha", "workflow":
+				if len(path) == 1 {
+					return nil
+				}
+			}
+		}
+		if strings.EqualFold(root, "matrix") && len(path) == 1 {
+			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
+				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
+			}
+		}
+		return validateConditionReference(root, path, scope)
+	case *actionlint.NotOpNode:
+		return validateCompileConditionNode(node.Operand, scope, context, matrix)
+	case *actionlint.LogicalOpNode:
+		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
+			return err
+		}
+		return validateCompileConditionNode(node.Right, scope, context, matrix)
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
+		}
+		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
+			return err
+		}
+		if err := validateCompileConditionNode(node.Right, scope, context, matrix); err != nil {
+			return err
+		}
+		left := compileConditionOperandCategory(node.Left, context, matrix)
+		right := compileConditionOperandCategory(node.Right, context, matrix)
+		if left == "unsupported" || right == "unsupported" {
+			return fmt.Errorf("condition equality uses an unsupported matrix value type")
+		}
+		if left != "unknown" && right != "unknown" && left != right {
+			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
+		}
+		return nil
+	case *actionlint.FuncCallNode:
+		switch {
+		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
+			return nil
+		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1,
+			strings.EqualFold(node.Callee, "startsWith") && len(node.Args) == 2:
+			for _, argument := range node.Args {
+				if err := validateCompileConditionNode(argument, scope, context, matrix); err != nil {
+					return err
+				}
+			}
+			_, err := evaluateCompileNode(node, context)
+			return err
+		default:
+			return fmt.Errorf("condition function %q is unsupported", node.Callee)
+		}
+	default:
+		return fmt.Errorf("unsupported condition expression")
+	}
+}
+
+func compileConditionOperandCategory(node actionlint.ExprNode, context CompileContext, matrix map[string]any) string {
+	if value, err := evaluateCompileNode(node, context); err == nil {
+		return conditionValueCategory(value)
+	}
+	root, _, err := referencePath(node)
+	if err == nil && strings.EqualFold(root, "github") {
+		return "unknown"
+	}
+	return conditionOperandCategory(node, matrix)
 }
 
 func conditionOperandCategory(node actionlint.ExprNode, matrix map[string]any) string {
@@ -869,19 +1187,78 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 			return nil, err
 		}
 		return resolveCompileReference(root, path, context)
-	case *actionlint.FuncCallNode:
-		if !strings.EqualFold(node.Callee, "fromJSON") || len(node.Args) != 1 {
-			return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
-		}
-		value, err := evaluateCompileNode(node.Args[0], context)
+	case *actionlint.NotOpNode:
+		value, err := evaluateCompileNode(node.Operand, context)
 		if err != nil {
 			return nil, err
 		}
-		text, ok := value.(string)
-		if !ok {
-			return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+		return !actionInputDefaultTruthy(value), nil
+	case *actionlint.LogicalOpNode:
+		left, err := evaluateCompileNode(node.Left, context)
+		if err != nil {
+			return nil, err
 		}
-		return decodeJSONValue(text)
+		switch node.Kind {
+		case actionlint.LogicalOpNodeKindAnd:
+			if !actionInputDefaultTruthy(left) {
+				return left, nil
+			}
+			return evaluateCompileNode(node.Right, context)
+		case actionlint.LogicalOpNodeKindOr:
+			if actionInputDefaultTruthy(left) {
+				return left, nil
+			}
+			return evaluateCompileNode(node.Right, context)
+		default:
+			return nil, fmt.Errorf("unsupported compile-time logical operator %s", node.Kind)
+		}
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return nil, fmt.Errorf("unsupported compile-time comparison %s", node.Kind)
+		}
+		left, err := evaluateCompileNode(node.Left, context)
+		if err != nil {
+			return nil, err
+		}
+		right, err := evaluateCompileNode(node.Right, context)
+		if err != nil {
+			return nil, err
+		}
+		equal := actionInputDefaultEqual(left, right)
+		if node.Kind == actionlint.CompareOpNodeKindNotEq {
+			return !equal, nil
+		}
+		return equal, nil
+	case *actionlint.FuncCallNode:
+		switch {
+		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1:
+			value, err := evaluateCompileNode(node.Args[0], context)
+			if err != nil {
+				return nil, err
+			}
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+			}
+			return decodeJSONValue(text)
+		case strings.EqualFold(node.Callee, "startsWith") && len(node.Args) == 2:
+			value, err := evaluateCompileNode(node.Args[0], context)
+			if err != nil {
+				return nil, err
+			}
+			prefix, err := evaluateCompileNode(node.Args[1], context)
+			if err != nil {
+				return nil, err
+			}
+			valueText, valueOK := value.(string)
+			prefixText, prefixOK := prefix.(string)
+			if !valueOK || !prefixOK {
+				return nil, fmt.Errorf("startsWith arguments resolved to %T and %T, want strings", value, prefix)
+			}
+			return strings.HasPrefix(strings.ToLower(valueText), strings.ToLower(prefixText)), nil
+		default:
+			return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
+		}
 	default:
 		return nil, fmt.Errorf("unsupported compile-time expression")
 	}
@@ -1078,7 +1455,17 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	case *actionlint.StringNode:
 		return node.Value, nil
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return evaluateDirectRuntimeNode(node, context)
+		root, path, err := referencePath(node)
+		if err != nil {
+			return nil, err
+		}
+		if isJobStatusReference(root, path) {
+			if context.JobStatus == "" {
+				return nil, fmt.Errorf("expression references unavailable job.status")
+			}
+			return context.JobStatus, nil
+		}
+		return resolveRuntimeReference(root, path, context)
 	case *actionlint.LogicalOpNode:
 		left, err := evaluateActionInputDefaultNode(node.Left, context)
 		if err != nil {
@@ -1116,6 +1503,19 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		default:
 			return nil, fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
 		}
+	case *actionlint.FuncCallNode:
+		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
+			return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
+		}
+		root, path, err := referencePath(node.Args[0])
+		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
+			return nil, fmt.Errorf("action input default toJSON requires the complete matrix context")
+		}
+		value, err := json.MarshalIndent(context.Matrix, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
+		}
+		return string(value), nil
 	default:
 		return nil, fmt.Errorf("action input default expression is unsupported")
 	}
@@ -1283,6 +1683,10 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	default:
 		return runtimeReferenceUnsupported
 	}
+}
+
+func isJobStatusReference(root string, path []string) bool {
+	return len(path) == 1 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "status")
 }
 
 func referenceName(root string, path []string) string {

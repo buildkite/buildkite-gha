@@ -539,15 +539,24 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 	if in == nil {
 		return nil, nil
 	}
-	if in.CancelInProgress != nil && (in.CancelInProgress.Expression != nil || (in.CancelInProgress.Value && jobID != "")) {
+	var cancellationExpression *expression.Expression
+	var cancellationPosition Position
+	if in.CancelInProgress != nil && in.CancelInProgress.Expression != nil {
 		position := in.CancelInProgress.Pos
-		if in.CancelInProgress.Expression != nil {
+		if in.CancelInProgress.Expression.Pos != nil {
 			position = in.CancelInProgress.Expression.Pos
 		}
-		if jobID == "" {
-			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress is unsupported", path, position.Line, position.Col)
+		if jobID != "" {
+			return nil, locatedError(path, position, jobID, "concurrency cancel-in-progress is unsupported")
 		}
-		return nil, locatedError(path, position, jobID, "concurrency cancel-in-progress is unsupported")
+		expr, err := adaptExpression(in.CancelInProgress.Expression)
+		if err != nil {
+			return nil, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress: %w", path, position.Line, position.Col, err)
+		}
+		cancellationExpression = &expr
+		cancellationPosition = Position{Line: position.Line, Column: position.Col}
+	} else if in.CancelInProgress != nil && in.CancelInProgress.Value && jobID != "" {
+		return nil, locatedError(path, in.CancelInProgress.Pos, jobID, "concurrency cancel-in-progress is unsupported")
 	}
 	if in.Group == nil || strings.TrimSpace(in.Group.Value) == "" {
 		position := in.Pos
@@ -556,7 +565,12 @@ func adaptConcurrency(path, jobID string, in *actionlint.Concurrency) (*Concurre
 		}
 		return nil, locatedError(path, position, jobID, "concurrency group must not be empty")
 	}
-	return &Concurrency{Group: in.Group.Value, Span: spanFrom(in.Group.Pos, in.Group.Value)}, nil
+	return &Concurrency{
+		Group:                      in.Group.Value,
+		CancelInProgressExpression: cancellationExpression,
+		CancelInProgressPosition:   cancellationPosition,
+		Span:                       spanFrom(in.Group.Pos, in.Group.Value),
+	}, nil
 }
 
 func adaptPermissions(path string, in *actionlint.Permissions) (*Permissions, error) {

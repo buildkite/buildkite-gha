@@ -710,6 +710,10 @@ func extractTar(r io.Reader, dst string, c config) error {
 	}
 	tr := tar.NewReader(r)
 	seen := map[string]string{}
+	type omittedSymlink struct {
+		path, target string
+	}
+	var symlinks []omittedSymlink
 	root := ""
 	var total int64
 	count := 0
@@ -723,7 +727,7 @@ func extractTar(r io.Reader, dst string, c config) error {
 		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			// archive/tar still exposes legacy xattrs separately from PAX records.
-			if h.Xattrs != nil || !benignPAX(h.PAXRecords) { //nolint:staticcheck
+			if h.Xattrs != nil || h.Linkname != "" || !benignPAX(h.PAXRecords, false) { //nolint:staticcheck
 				return fmt.Errorf("archive extended metadata is not allowed")
 			}
 			continue
@@ -736,7 +740,7 @@ func extractTar(r io.Reader, dst string, c config) error {
 		// removed from PAXRecords, so reject it independently for every type.
 		// Check the deprecated field because callers can construct Header values
 		// with legacy xattrs that are not represented in PAXRecords.
-		if h.Xattrs != nil || h.Linkname != "" || !benignPAX(h.PAXRecords) { //nolint:staticcheck
+		if h.Xattrs != nil || (h.Linkname != "" && h.Typeflag != tar.TypeSymlink) || !benignPAX(h.PAXRecords, h.Typeflag == tar.TypeSymlink) { //nolint:staticcheck
 			return fmt.Errorf("archive extended metadata is not allowed")
 		}
 		name := h.Name
@@ -768,6 +772,18 @@ func extractTar(r io.Reader, dst string, c config) error {
 		if old, ok := seen[fold]; ok {
 			return fmt.Errorf("duplicate or case-colliding archive path %q and %q", old, rel)
 		}
+		for _, link := range symlinks {
+			if strings.HasPrefix(fold, strings.ToLower(link.path)+"/") {
+				return fmt.Errorf("archive entry descends from an omitted symlink")
+			}
+		}
+		if h.Typeflag == tar.TypeSymlink {
+			for oldFold := range seen {
+				if strings.HasPrefix(oldFold, fold+"/") {
+					return fmt.Errorf("omitted symlink is an ancestor of an archive entry")
+				}
+			}
+		}
 		seen[fold] = rel
 		out := filepath.Join(dst, filepath.FromSlash(rel))
 		switch h.Typeflag {
@@ -797,6 +813,12 @@ func extractTar(r io.Reader, dst string, c config) error {
 					}
 				}
 			}
+		case tar.TypeSymlink:
+			target, targetErr := omittedSymlinkTarget(rel, h.Linkname, h.Size, c)
+			if targetErr != nil {
+				return targetErr
+			}
+			symlinks = append(symlinks, omittedSymlink{path: rel, target: target})
 		default:
 			return fmt.Errorf("archive entry type is not allowed")
 		}
@@ -807,18 +829,52 @@ func extractTar(r io.Reader, dst string, c config) error {
 	if root == "" {
 		return fmt.Errorf("empty archive")
 	}
+	for _, link := range symlinks {
+		alias := filepath.Join(dst, filepath.FromSlash(link.path))
+		if _, err := os.Lstat(alias); !os.IsNotExist(err) {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("omitted symlink path was materialized")
+		}
+		target, err := os.Lstat(filepath.Join(dst, filepath.FromSlash(link.target)))
+		if err != nil || !target.Mode().IsRegular() {
+			return fmt.Errorf("omitted symlink target is not an extracted regular file")
+		}
+	}
 	return nil
 }
 
-func benignPAX(records map[string]string) bool {
+func omittedSymlinkTarget(name, linkname string, size int64, c config) (string, error) {
+	if linkname == "" || size != 0 || len(linkname) > c.maxPath || strings.Contains(linkname, "\\") || hasControl(linkname) || path.IsAbs(linkname) {
+		return "", fmt.Errorf("unsafe archive symlink target")
+	}
+	target := path.Clean(path.Join(path.Dir(name), linkname))
+	if target == "." || target == ".." || strings.HasPrefix(target, "../") {
+		return "", fmt.Errorf("archive symlink target escapes root")
+	}
+	for _, part := range strings.Split(target, "/") {
+		if part == "" || part == "." || part == ".." || len(part) > c.maxSegment {
+			return "", fmt.Errorf("unsafe archive symlink target")
+		}
+	}
+	return target, nil
+}
+
+func benignPAX(records map[string]string, allowLinkpath bool) bool {
 	for key := range records {
 		switch key {
 		case "path", "size", "mtime", "comment":
 			// archive/tar has already applied path and size to Header fields;
 			// those resolved fields undergo the normal validation above.
+		case "linkpath":
+			if !allowLinkpath {
+				return false
+			}
 		default:
-			// This rejects linkpath, GNU sparse metadata, SCHILY xattrs, and
-			// all unknown extensions rather than guessing at their semantics.
+			// This rejects linkpath outside a symlink, GNU sparse metadata,
+			// SCHILY xattrs, and all unknown extensions rather than guessing at
+			// their semantics.
 			return false
 		}
 	}

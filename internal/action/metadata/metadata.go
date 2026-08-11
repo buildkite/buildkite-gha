@@ -33,10 +33,11 @@ type Metadata struct {
 
 // Input declares one action input.
 type Input struct {
-	Description        string  `yaml:"description"`
-	DeprecationMessage string  `yaml:"deprecationMessage"`
-	Required           bool    `yaml:"required"`
-	Default            *string `yaml:"default"`
+	Description              string  `yaml:"description"`
+	DeprecationMessage       string  `yaml:"deprecation-message"`
+	LegacyDeprecationMessage string  `yaml:"deprecationMessage"`
+	Required                 bool    `yaml:"required"`
+	Default                  *string `yaml:"default"`
 }
 
 // Output declares one action output.
@@ -174,6 +175,16 @@ func Load(root, path string) (Metadata, error) {
 	if err != nil {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
 	}
+	for name, input := range metadata.Inputs {
+		if input.DeprecationMessage != "" && input.LegacyDeprecationMessage != "" {
+			return Metadata{}, fmt.Errorf("parse action metadata %q: input %q declares both deprecation-message and deprecationMessage", metadataPath, name)
+		}
+		if input.DeprecationMessage == "" {
+			input.DeprecationMessage = input.LegacyDeprecationMessage
+		}
+		input.LegacyDeprecationMessage = ""
+		metadata.Inputs[name] = input
+	}
 	metadata.Outputs, err = lowerNames(metadata.Outputs, "outputs")
 	if err != nil {
 		return Metadata{}, fmt.Errorf("parse action metadata %q: %w", metadataPath, err)
@@ -297,8 +308,10 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 }
 
 // ValidateEntrypoints confines JavaScript lifecycle programs to the verified
-// action source tree and requires each declared entry point to be a regular
-// file. Callers should invoke this after Runtime.
+// source tree and requires each declared entry point to be a regular file.
+// Remote actions may share repository-level build output across action
+// subdirectories; workspace actions bind SourceRoot to the action directory.
+// Callers should invoke this after Runtime.
 func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 	if runtime == RuntimeDocker {
 		if metadata.Runs.Image != "Dockerfile" {
@@ -325,6 +338,10 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 	if metadata.Runs.Main == "" {
 		return fmt.Errorf("JavaScript action has no main entry point")
 	}
+	sourceRoot := metadata.SourceRoot
+	if sourceRoot == "" {
+		sourceRoot = metadata.Path
+	}
 	for _, lifecycle := range []struct{ phase, entry string }{
 		{phase: "pre", entry: metadata.Runs.Pre},
 		{phase: "main", entry: metadata.Runs.Main},
@@ -335,15 +352,34 @@ func (metadata Metadata) ValidateEntrypoints(runtime Runtime) error {
 			continue
 		}
 		clean := path.Clean(entry)
-		if path.IsAbs(entry) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(entry, "\\") {
+		if path.IsAbs(entry) || clean == "." || strings.Contains(entry, "\\") {
 			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
 		}
-		folded := strings.ToLower(clean)
+		candidate := filepath.Join(metadata.Path, filepath.FromSlash(clean))
+		relative, err := filepath.Rel(sourceRoot, candidate)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
+		}
+		folded := strings.ToLower(filepath.ToSlash(relative))
 		if folded == ".git" || strings.HasPrefix(folded, ".git/") {
 			return fmt.Errorf("JavaScript action %s entry point %q is excluded from verified action source", phase, entry)
 		}
-		candidate := filepath.Join(metadata.Path, filepath.FromSlash(clean))
-		info, err := os.Stat(candidate)
+		candidate, err = resolveWithinRoot(sourceRoot, candidate)
+		if err != nil {
+			if strings.Contains(err.Error(), "escapes root") {
+				return fmt.Errorf("JavaScript action %s entry point %q escapes action source", phase, entry)
+			}
+			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
+		}
+		relative, err = filepath.Rel(sourceRoot, candidate)
+		if err != nil {
+			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
+		}
+		folded = strings.ToLower(filepath.ToSlash(relative))
+		if folded == ".git" || strings.HasPrefix(folded, ".git/") {
+			return fmt.Errorf("JavaScript action %s entry point %q is excluded from verified action source", phase, entry)
+		}
+		info, err := os.Lstat(candidate)
 		if err != nil {
 			return fmt.Errorf("JavaScript action %s entry point %q: %w", phase, entry, err)
 		}

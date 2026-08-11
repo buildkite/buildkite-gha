@@ -34,10 +34,11 @@ type Workflow struct {
 // Workflow cancellation is retained for a compatibility warning; generated
 // Buildkite concurrency groups still provide queue semantics only.
 type Concurrency struct {
-	Group                    string   `json:"group"`
-	CancelInProgress         bool     `json:"cancel_in_progress,omitempty"`
-	CancelInProgressPosition Position `json:"-"`
-	Span                     Span     `json:"span"`
+	Group                      string                 `json:"group"`
+	CancelInProgress           bool                   `json:"cancel_in_progress,omitempty"`
+	CancelInProgressExpression *expression.Expression `json:"cancel_in_progress_expression,omitempty"`
+	CancelInProgressPosition   Position               `json:"-"`
+	Span                       Span                   `json:"span"`
 }
 
 // Permissions is an explicitly declared GitHub token permission set. Omitted

@@ -74,12 +74,14 @@ type actionCompilation struct {
 	selectors           []plan.ActionSelector
 	locks               []plan.ActionLock
 	capabilities        []string
+	requiredSecrets     []string
 	requiresMise        bool
 	requiresGitHubToken bool
 }
 
 type actionRequirements struct {
-	githubToken bool
+	githubToken     bool
+	requiredSecrets map[string]bool
 }
 
 // validateActionResolutions resolves each independent root invocation before
@@ -160,19 +162,25 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	}
 	sort.Strings(caps)
 	requiresGitHubToken := false
+	requiredSecrets := map[string]bool{}
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i])
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
 			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
+			for name := range requirements.requiredSecrets {
+				requiredSecrets[name] = true
+			}
 		}
 	}
+	secretNames := sortedKeys(requiredSecrets)
 	return actionCompilation{
 		selectors:           selectors,
 		locks:               locks,
 		capabilities:        caps,
+		requiredSecrets:     secretNames,
 		requiresMise:        b.requiresMise,
 		requiresGitHubToken: requiresGitHubToken,
 	}, nil
@@ -208,6 +216,11 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	m, err := metadata.Load(root, loadPath)
 	if err != nil {
 		return nil, err
+	}
+	if lock.Source == "github" {
+		m.SourceRoot = root
+	} else {
+		m.SourceRoot = m.Path
 	}
 	n.metadata = m
 	runtime, err := m.Runtime()
@@ -248,11 +261,24 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequirements, error) {
-	if n.native {
-		return actionRequirements{}, nil
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool) (actionRequirements, error) {
+	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
+	for _, suppliedName := range sortedKeys(supplied) {
+		names, err := expression.SecretReferences(supplied[suppliedName])
+		if err != nil {
+			return actionRequirements{}, fmt.Errorf("action input %q: %w", suppliedName, err)
+		}
+		if !workflowAuthored && len(names) != 0 {
+			return actionRequirements{}, fmt.Errorf("action input %q: composite action metadata cannot grant secret authority", suppliedName)
+		}
+		input, declared := n.metadata.Inputs[strings.ToLower(suppliedName)]
+		for _, name := range names {
+			if declared && !input.Required && name != "GITHUB_TOKEN" {
+				continue
+			}
+			requirements.requiredSecrets[name] = true
+		}
 	}
-	var requirements actionRequirements
 	for _, name := range sortedKeys(n.metadata.Inputs) {
 		input := n.metadata.Inputs[name]
 		if input.Default == nil || hasActionInput(supplied, name) {
@@ -266,6 +292,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
+	}
+	if n.native {
+		return requirements, nil
 	}
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil
@@ -284,11 +313,14 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With)
+		childRequirements, err := child.inspectInvocation(step.With, false)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}
 		requirements.githubToken = requirements.githubToken || childRequirements.githubToken
+		for name := range childRequirements.requiredSecrets {
+			requirements.requiredSecrets[name] = true
+		}
 	}
 	return requirements, nil
 }

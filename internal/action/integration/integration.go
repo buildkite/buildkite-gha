@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // Identity is the canonical, resolved portion of an action lock used for
@@ -180,8 +182,8 @@ func ValidateCacheCommit(commit string) error {
 	return nil
 }
 
-// ValidateDownloadArtifactInputs implements source-time admission for the
-// common exact-name ZIP subset. Exact names are validated after evaluation by
+// ValidateDownloadArtifactInputs implements source-time admission for exact-name
+// ZIP downloads and bounded pattern merging. Selectors are validated after evaluation by
 // ValidateDownloadArtifactRuntimeInputs.
 func ValidateDownloadArtifactInputs(commit string, inputs map[string]string) error {
 	return validateDownloadArtifactInputs(commit, inputs, true)
@@ -197,7 +199,7 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 	if err := ValidateDownloadArtifactCommit(commit); err != nil {
 		return err
 	}
-	allowed := map[string]bool{"name": true, "path": true, "merge-multiple": true}
+	allowed := map[string]bool{"name": true, "pattern": true, "path": true, "merge-multiple": true}
 	if commit == DownloadArtifactV8Commit || commit == DownloadArtifactV801Commit {
 		allowed["skip-decompress"] = true
 		allowed["digest-mismatch"] = true
@@ -213,22 +215,41 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 			return fmt.Errorf("input %q is unsupported by the bounded download-artifact adapter", name)
 		}
 	}
-	name, ok := inputFold(inputs, "name")
+	name, hasName := inputFold(inputs, "name")
 	name = strings.TrimSpace(name)
 	hasNameExpression := strings.Contains(name, "${{")
-	if !ok || name == "" || hasNameExpression && !allowNameExpression {
+	pattern, hasPattern := inputFold(inputs, "pattern")
+	pattern = strings.TrimSpace(pattern)
+	if hasName == hasPattern {
+		return fmt.Errorf("exactly one of %q or %q is required", "name", "pattern")
+	}
+	if hasName && (name == "" || hasNameExpression && !allowNameExpression) {
 		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
 	}
-	if !hasNameExpression && ValidateUploadArtifactName(name) != nil {
+	if hasName && !hasNameExpression && ValidateUploadArtifactName(name) != nil {
 		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
+	}
+	if hasPattern && (strings.Contains(pattern, "${{") && !allowNameExpression || !strings.Contains(pattern, "${{") && !validDownloadArtifactPattern(pattern)) {
+		return fmt.Errorf("input %q must be a bounded literal artifact-name glob", "pattern")
 	}
 	if value, ok := inputFold(inputs, "path"); ok {
 		if _, err := NormalizeDownloadArtifactPath(value); err != nil {
 			return err
 		}
 	}
-	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
-		return fmt.Errorf("input %q may only be omitted or false; merging multiple artifacts is unsupported", "merge-multiple")
+	merge := false
+	if value, ok := inputFold(inputs, "merge-multiple"); ok {
+		value = strings.TrimSpace(value)
+		merge = uploadArtifactTrue(value)
+		if !merge && !uploadArtifactFalse(value) {
+			return fmt.Errorf("input %q must be a GitHub Actions boolean", "merge-multiple")
+		}
+	}
+	if hasPattern && !merge {
+		return fmt.Errorf("pattern downloads require merge-multiple: true")
+	}
+	if hasName && merge {
+		return fmt.Errorf("exact-name downloads may only omit merge-multiple or set it to false")
 	}
 	if value, ok := inputFold(inputs, "skip-decompress"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q may only be omitted or false; raw downloads are unsupported", "skip-decompress")
@@ -345,6 +366,18 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 	return nil
 }
 
+func validDownloadArtifactPattern(pattern string) bool {
+	if pattern == "" || len(pattern) > MaxUploadArtifactNameBytes || !utf8.ValidString(pattern) || strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\/:<>|{}\r\n") || !strings.ContainsAny(pattern, "*?[") {
+		return false
+	}
+	for _, r := range pattern {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return doublestar.ValidatePattern(pattern)
+}
+
 func uploadArtifactExpression(value string) bool {
 	return strings.Contains(value, "${{")
 }
@@ -375,39 +408,42 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if root == "" {
 			continue
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}`) || uploadArtifactExtglob(root) || !filepath.IsLocal(root) {
-			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
+		if strings.HasPrefix(root, "#") || uploadArtifactExtglob(root) {
+			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires literal glob paths", root)
 		}
-		glob := strings.Contains(root, "*")
-		directoryOnly := strings.HasSuffix(root, "/")
-		components := strings.Split(root, "/")
-		for i, component := range components {
+		for i, component := range strings.Split(filepath.ToSlash(root), "/") {
 			if component == ".." {
 				return nil, fmt.Errorf("path %q contains traversal; bounded adapter requires workspace-relative paths", root)
 			}
-			if glob && component == "." && i != 0 {
-				return nil, fmt.Errorf("path %q uses a non-canonical glob", root)
+			if component == "." && i != 0 {
+				return nil, fmt.Errorf("path %q uses non-canonical components", root)
 			}
 		}
-		if glob && directoryOnly {
+		leadingDot := strings.HasPrefix(root, "./")
+		for strings.HasPrefix(root, "./") {
+			root = strings.TrimPrefix(root, "./")
+		}
+		if leadingDot && strings.ContainsAny(root, "*?[") {
+			return nil, fmt.Errorf("path %q uses a non-canonical glob", root)
+		}
+		directoryOnly := strings.HasSuffix(root, "/")
+		if directoryOnly && strings.ContainsAny(root, "*?[") {
 			return nil, fmt.Errorf("path %q uses an unsupported directory glob", root)
 		}
 		root = path.Clean(root)
-		if directoryOnly {
+		if directoryOnly && root != "." {
 			root += "/"
 		}
-		if glob {
-			directory, pattern := path.Split(root)
-			directory = strings.TrimSuffix(directory, "/")
-			if directory == "" {
-				directory = "."
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.ContainsAny(root, "{}") || strings.Contains(root, "\\") || !filepath.IsLocal(root) || !utf8.ValidString(root) {
+			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
+		}
+		for _, r := range root {
+			if r < 0x20 || r == 0x7f {
+				return nil, fmt.Errorf("path %q contains control characters", root)
 			}
-			if strings.Contains(directory, "*") || strings.Contains(pattern, "**") {
-				return nil, fmt.Errorf("path %q uses an unsupported recursive or non-final glob", root)
-			}
-			if _, err := path.Match(pattern, "probe"); err != nil {
-				return nil, fmt.Errorf("path %q has an invalid glob: %w", root, err)
-			}
+		}
+		if strings.ContainsAny(root, "*?[") && !doublestar.ValidatePattern(root) {
+			return nil, fmt.Errorf("path %q contains an invalid glob pattern", root)
 		}
 		roots = append(roots, root)
 	}
@@ -460,7 +496,7 @@ func Lookup(identity Identity) (Descriptor, bool) {
 }
 
 // ValidateCheckoutInputs enforces the input contract implemented by the
-// tokenless exact-event-SHA checkout adapter.
+// tokenless event-repository checkout adapter.
 func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) error {
 	names := make([]string, 0, len(inputs))
 	for name := range inputs {
@@ -481,7 +517,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "ref":
-			if value == "" || value == sha {
+			if value == "" || validCheckoutSHA(value) || validCheckoutBranch(value) {
 				continue
 			}
 		case "persist-credentials":
@@ -489,7 +525,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "fetch-depth":
-			if value == "0" || value == "1" {
+			if depth, err := strconv.ParseUint(value, 10, 31); err == nil && depth <= 1<<31-1 {
 				continue
 			}
 		case "clean", "set-safe-directory":
@@ -509,7 +545,11 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 			if uploadArtifactBoolean(value) {
 				continue
 			}
-		case "ssh-key", "ssh-known-hosts", "path", "filter", "sparse-checkout":
+		case "path":
+			if value == "" || validCheckoutPath(value) {
+				continue
+			}
+		case "ssh-key", "ssh-known-hosts", "filter", "sparse-checkout":
 			if value == "" {
 				continue
 			}
@@ -529,4 +569,51 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 		return fmt.Errorf("explicit input %q value is unsupported", name)
 	}
 	return nil
+}
+
+func validCheckoutBranch(value string) bool {
+	if strings.HasPrefix(value, "refs/heads/") {
+		value = strings.TrimPrefix(value, "refs/heads/")
+	} else if strings.HasPrefix(value, "refs/") {
+		return false
+	}
+	if value == "" || len(value) > 255 || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "/") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.ContainsAny(value, " ~^:?*[\\") || !utf8.ValidString(value) {
+		return false
+	}
+	if len(value) == 40 || len(value) == 64 {
+		isHex := true
+		for _, r := range strings.ToLower(value) {
+			isHex = isHex && (r >= '0' && r <= '9' || r >= 'a' && r <= 'f')
+		}
+		if isHex {
+			return false
+		}
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." || strings.HasPrefix(segment, ".") || strings.HasSuffix(strings.ToLower(segment), ".lock") {
+			return false
+		}
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validCheckoutSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validCheckoutPath(value string) bool {
+	return len(value) <= 255 && value != "." && value != ".." && !strings.EqualFold(value, ".git") && !strings.Contains(value, "/") && !strings.Contains(value, "\\") && !strings.ContainsAny(value, "\r\n\x00") && filepath.IsLocal(value)
 }

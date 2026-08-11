@@ -230,20 +230,25 @@ func ioString(w http.ResponseWriter, s string) { _, _ = w.Write([]byte(s)) }
 
 func TestExtractRejectsUnsafeArchives(t *testing.T) {
 	c := defaults()
-	c.maxFile, c.maxExpanded, c.maxEntries = 3, 6, 3
+	c.maxFile, c.maxExpanded, c.maxEntries = 3, 6, 4
 	tests := []struct {
 		name    string
 		entries []tar.Header
 	}{
 		{"traversal", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/../x", Typeflag: tar.TypeReg}}},
 		{"link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
+		{"absolute link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "/root/y"}}},
+		{"escaping link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "../../y"}}},
+		{"directory link", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
+		{"link ancestor first", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}, {Name: "root/x/child", Typeflag: tar.TypeReg}}},
+		{"link ancestor last", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/y", Typeflag: tar.TypeReg}, {Name: "root/x/child", Typeflag: tar.TypeReg}, {Name: "root/x", Typeflag: tar.TypeSymlink, Linkname: "y"}}},
 		{"hardlink", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeLink, Linkname: "root/y"}}},
 		{"fifo", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeFifo}}},
 		{"device", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeChar}}},
 		{"duplicate", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeReg}, {Name: "root/X", Typeflag: tar.TypeReg}}},
 		{"mixed roots", []tar.Header{{Name: "one/", Typeflag: tar.TypeDir}, {Name: "two/", Typeflag: tar.TypeDir}}},
 		{"file size", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/x", Typeflag: tar.TypeReg, Size: 4}}},
-		{"count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeDir}, {Name: "root/b", Typeflag: tar.TypeDir}, {Name: "root/c", Typeflag: tar.TypeDir}}},
+		{"count", []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/a", Typeflag: tar.TypeDir}, {Name: "root/b", Typeflag: tar.TypeDir}, {Name: "root/c", Typeflag: tar.TypeDir}, {Name: "root/d", Typeflag: tar.TypeDir}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -251,6 +256,44 @@ func TestExtractRejectsUnsafeArchives(t *testing.T) {
 				t.Fatal("expected rejection")
 			}
 		})
+	}
+}
+
+func TestExtractOmitsSafeRepositorySymlinks(t *testing.T) {
+	orders := [][]tar.Header{
+		{
+			{Name: "root/", Typeflag: tar.TypeDir},
+			{Name: "root/__tests__/data/poetry.lock", Typeflag: tar.TypeReg, Size: 1},
+			{Name: "root/__tests__/data/inner/", Typeflag: tar.TypeDir},
+			{Name: "root/__tests__/data/inner/poetry.lock", Typeflag: tar.TypeSymlink, Linkname: "../poetry.lock"},
+		},
+		{
+			{Name: "root/", Typeflag: tar.TypeDir},
+			{Name: "root/__tests__/data/inner/poetry.lock", Typeflag: tar.TypeSymlink, Linkname: "../poetry.lock"},
+			{Name: "root/__tests__/data/inner/", Typeflag: tar.TypeDir},
+			{Name: "root/__tests__/data/poetry.lock", Typeflag: tar.TypeReg, Size: 1},
+		},
+	}
+	var digests []string
+	for _, entries := range orders {
+		out := filepath.Join(t.TempDir(), "out")
+		if err := extractTar(bytes.NewReader(tarBytes(t, entries)), out, defaults()); err != nil {
+			t.Fatalf("extract symlink archive: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(out, "__tests__", "data", "poetry.lock")); err != nil {
+			t.Fatalf("regular target: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(out, "__tests__", "data", "inner", "poetry.lock")); !os.IsNotExist(err) {
+			t.Fatalf("omitted alias exists: %v", err)
+		}
+		manifest, err := buildManifest(out, defaults(), Reference{Owner: "actions", Repository: "setup-python"}, testSHA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digests = append(digests, manifest.Digest)
+	}
+	if digests[0] != digests[1] {
+		t.Fatalf("omitted symlink changed digest by archive order: %q != %q", digests[0], digests[1])
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -285,56 +287,53 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 		}
 		before := len(files)
 		directoryOnly := strings.HasSuffix(root, "/")
-		literalRoot := root
-		if strings.Contains(root, "*") {
-			literalRoot = filepath.Dir(root)
-		}
-		if err := rejectUploadSymlinkComponents(ctx, workspace, literalRoot); err != nil {
-			return nil, err
-		}
-		if strings.Contains(root, "*") {
-			directory, pattern := filepath.Split(root)
-			if directory == "" {
-				directory = "."
-			}
-			diskDirectory := filepath.Join(workspace, directory)
-			entries, readErr := os.ReadDir(diskDirectory)
-			if os.IsNotExist(readErr) {
-				continue
-			}
-			if readErr != nil {
-				return nil, readErr
-			}
-			for _, entry := range entries {
-				matched, matchErr := filepath.Match(pattern, entry.Name())
-				if matchErr != nil {
-					return nil, matchErr
+		if strings.ContainsAny(root, "*?[") {
+			err := filepath.Walk(workspace, func(disk string, info os.FileInfo, walkErr error) error {
+				if err := ctx.Err(); err != nil {
+					return err
 				}
-				if !matched || (!hidden && hiddenPath(entry.Name())) {
-					continue
+				if walkErr != nil {
+					return walkErr
 				}
-				info, infoErr := entry.Info()
-				if infoErr != nil {
-					return nil, infoErr
+				rel, err := filepath.Rel(workspace, disk)
+				if err != nil {
+					return err
 				}
-				rel := filepath.Join(directory, entry.Name())
+				if rel != "." && hiddenPath(rel) && !hidden {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				matched, err := uploadGlobMatches(root, filepath.ToSlash(rel))
+				if err != nil {
+					return err
+				}
+				if !matched {
+					return nil
+				}
 				if info.Mode()&os.ModeSymlink != 0 {
-					return nil, fmt.Errorf("visible symlink %q is unsupported", rel)
+					return fmt.Errorf("visible symlink %q is unsupported", rel)
 				}
 				if info.IsDir() {
-					return nil, fmt.Errorf("glob %q matched directory %q; bounded adapter globs may match only regular files", root, rel)
+					return nil
 				}
 				if !info.Mode().IsRegular() {
-					return nil, fmt.Errorf("non-regular path %q is unsupported", rel)
+					return fmt.Errorf("non-regular path %q is unsupported", rel)
 				}
-				if err := add(filepath.Join(diskDirectory, entry.Name()), info); err != nil {
-					return nil, err
-				}
+				return add(disk, info)
+			})
+			if err != nil {
+				return nil, err
 			}
 			if len(files) > before {
-				archiveBases = append(archiveBases, filepath.Dir(root))
+				base, _ := doublestar.SplitPattern(root)
+				archiveBases = append(archiveBases, base)
 			}
 			continue
+		}
+		if err := rejectUploadSymlinkComponents(ctx, workspace, root); err != nil {
+			return nil, err
 		}
 		disk := filepath.Join(workspace, root)
 		info, err := os.Lstat(disk)
@@ -424,6 +423,19 @@ func collectUploadFiles(ctx context.Context, workspace string, roots []string, h
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 	return files, nil
+}
+
+func uploadGlobMatches(pattern, relative string) (bool, error) {
+	for candidate := relative; candidate != "."; candidate = path.Dir(candidate) {
+		matched, err := doublestar.Match(pattern, candidate)
+		if err != nil {
+			return false, err
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func rejectUploadSymlinkComponents(ctx context.Context, workspace, relative string) error {

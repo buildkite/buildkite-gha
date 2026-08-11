@@ -19,17 +19,17 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputExpression = regexp.MustCompile(`(?i)\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
 var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}|inputs\.([A-Za-z_][A-Za-z0-9_-]*))\s*$`)
 var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
 var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
-	path         string
-	digest       string
-	root         string
-	needBindings map[string]needBinding
+	path            string
+	digest          string
+	root            string
+	secretAuthority bool
+	needBindings    map[string]needBinding
 }
 
 type needBinding struct {
@@ -57,10 +57,11 @@ type reusableResolution struct {
 type reusableResolver struct {
 	root     string
 	stack    []string
+	context  expression.CompileContext
 	expanded int
 }
 
-func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow) ([]sourcedJob, error) {
+func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext) ([]sourcedJob, error) {
 	digest := "sha256:" + sha256Sum(source)
 	if !hasReusableCall(parsed) {
 		sourcePath := path
@@ -85,7 +86,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, needBindings: bindings}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, secretAuthority: true, needBindings: bindings}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -103,8 +104,8 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 	if err != nil {
 		return nil, err
 	}
-	resolver := reusableResolver{root: root, stack: []string{canonicalPath}}
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, 0)
+	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context}
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
 	return resolution.jobs, err
 }
 
@@ -117,7 +118,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -170,13 +171,13 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, needBindings: needBindings})
+			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, secretAuthority: secretAuthority, needBindings: needBindings})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
 
 		call := job.Reusable
-		if call.Secrets || call.InheritSecrets {
+		if call.Secrets {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secrets are runtime-dependent and unsupported")
 		}
 		if depth >= maxReusableWorkflowDepth {
@@ -221,7 +222,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		var callOutputs []needOutputBinding
 		callNamespaces := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix)
+			callInputs, err := resolveCallInputs(path, job, call, callee, inputs, matrix, resolver.context)
 			if err != nil {
 				return reusableResolution{}, err
 			}
@@ -254,7 +255,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, depth+1)
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				return reusableResolution{}, &ProcessingFinding{
@@ -460,7 +461,7 @@ func namespacedJobID(namespace, id string) string {
 	return namespace + "." + id
 }
 
-func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs, matrix map[string]any) (map[string]any, error) {
+func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs, matrix map[string]any, context expression.CompileContext) (map[string]any, error) {
 	values := make(map[string]any, len(call.Inputs))
 	for _, name := range sortedValueKeys(call.Inputs) {
 		value := call.Inputs[name]
@@ -470,7 +471,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 		resolved := value.Data
 		if text, ok := resolved.(string); ok && strings.Contains(text, "${{") {
 			var err error
-			resolved, err = evaluateStaticCallValue(text, parentInputs, matrix)
+			resolved, err = evaluateStaticCallValue(text, parentInputs, matrix, context)
 			if err != nil {
 				return nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable: %v", name, err))
 			}
@@ -514,7 +515,7 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 	return resolved, nil
 }
 
-func evaluateStaticCallValue(value string, inputs, matrix map[string]any) (any, error) {
+func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
 	if match := staticValueExpression.FindStringSubmatch(value); match != nil {
 		values := inputs
 		if match[1] == "matrix" {
@@ -534,7 +535,11 @@ func evaluateStaticCallValue(value string, inputs, matrix map[string]any) (any, 
 	if hasInputExpression(resolved) {
 		return nil, fmt.Errorf("expression references an unavailable or unsupported input")
 	}
-	return expression.Evaluate(resolved, expression.Context{Matrix: matrix})
+	context.Matrix = matrix
+	if expr, err := expression.Parse(resolved, 1, 1); err == nil {
+		return expression.EvaluateCompile(expr, context)
+	}
+	return expression.EvaluateCompileTemplate(resolved, context)
 }
 
 func containsExpression(value any) bool {
@@ -826,7 +831,7 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
-		return value
+		return replaceStaticInputs(value, inputs)
 	}
 	inputName := match[1]
 	if inputName == "" {
@@ -844,15 +849,14 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 }
 
 func replaceStaticInputs(value string, inputs map[string]any) string {
-	return staticInputExpression.ReplaceAllStringFunc(value, func(match string) string {
-		parts := staticInputExpression.FindStringSubmatch(match)
-		for name, value := range inputs {
-			if strings.EqualFold(name, parts[1]) {
-				return fmt.Sprint(value)
-			}
-		}
-		return match
-	})
+	resolved, err := expression.SubstituteCompileInputs(value, inputs)
+	if err != nil || resolved == value {
+		return value
+	}
+	if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
+		return evaluated
+	}
+	return value
 }
 
 func isRepositoryWorkflowPath(path string) bool {

@@ -160,7 +160,7 @@ func TestParseOwnsWorkflowAndJobConcurrency(t *testing.T) {
 on: push
 concurrency:
   group: workflow-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -173,6 +173,9 @@ jobs:
 	}
 	if parsed.Concurrency == nil || parsed.Concurrency.Group != "workflow-${{ github.ref }}" || parsed.Concurrency.CancelInProgress || parsed.Concurrency.Span.Start.Line != 4 {
 		t.Fatalf("workflow concurrency = %#v", parsed.Concurrency)
+	}
+	if expr := parsed.Concurrency.CancelInProgressExpression; expr == nil || expr.Text != "${{ startsWith(github.ref, 'refs/pull/') }}" || parsed.Concurrency.CancelInProgressPosition.Line != 5 {
+		t.Fatalf("workflow cancellation expression = %#v at %#v", expr, parsed.Concurrency.CancelInProgressPosition)
 	}
 	if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil || parsed.Jobs[0].Concurrency.Group != "deploy" || parsed.Jobs[0].Concurrency.Span.Start.Line != 9 {
 		t.Fatalf("job concurrency = %#v", parsed.Jobs)
@@ -276,11 +279,6 @@ func TestParseRejectsConcurrencyCancellationWithLocation(t *testing.T) {
 			name:   "job-expression",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
 			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
-		},
-		{
-			name:   "workflow-expression",
-			source: "on: push\nconcurrency:\n  group: deploy\n  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\njobs:\n  test: {runs-on: ubuntu-latest, steps: [{run: true}]}\n",
-			want:   "workflow concurrency cancel-in-progress is unsupported",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

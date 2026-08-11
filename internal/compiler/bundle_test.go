@@ -303,6 +303,38 @@ jobs:
 	}
 }
 
+func TestCompileBundleResolvesKafkaWorkflowConcurrency(t *testing.T) {
+	source := []byte(`name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": {"pull_request": {"number": 42}}
+}`)
+	bundle, err := CompileBundle(".github/workflows/ci.yml", source, event, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.IR.Workflow.ConcurrencyGroup != "CI-42" {
+		t.Fatalf("workflow concurrency group = %q, want CI-42", bundle.IR.Workflow.ConcurrencyGroup)
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED" || bundle.IR.Warnings[0].Line != 5 {
+		t.Fatalf("workflow concurrency warnings = %#v", bundle.IR.Warnings)
+	}
+}
+
 func TestCompileRejectsMatrixVaryingConcurrencyWithMaxParallel(t *testing.T) {
 	source := []byte(`on: push
 jobs:

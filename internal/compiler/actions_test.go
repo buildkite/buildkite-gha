@@ -255,6 +255,71 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsScopesWorkflowAuthoredSecretsByInputContract(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "secrets", `name: secret inputs
+inputs:
+  optional:
+    default: ""
+  required:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	compiled, err := compileActionInvocations(
+		context.Background(), workspace, nil, []string{"./secrets"},
+		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(compiled.requiredSecrets, []string{"GITHUB_TOKEN", "REQUIRED_TOKEN"}) {
+		t.Fatalf("required action secrets = %#v", compiled.requiredSecrets)
+	}
+}
+
+func TestCompileActionInvocationsRejectsSecretAuthorityFromCompositeMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "child", `name: child
+inputs:
+  token:
+    required: true
+runs:
+  using: node24
+  main: index.js
+`)
+	writeAction(t, workspace, "parent", `name: parent
+runs:
+  using: composite
+  steps:
+    - uses: ./child
+      with:
+        token: ${{ secrets.DEPLOY_KEY }}
+`)
+
+	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./parent"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
+		t.Fatalf("composite metadata secret error = %v", err)
+	}
+}
+
+func TestCompileActionInvocationsRejectsSecretAuthorityFromMetadataDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "secrets", `name: secret default
+inputs:
+  token:
+    default: ${{ secrets.DEPLOY_KEY }}
+runs:
+  using: node24
+  main: index.js
+`)
+	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./secrets"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "action input defaults cannot grant secret authority") {
+		t.Fatalf("metadata secret default error = %v", err)
+	}
+}
+
 func TestCompileActionInvocationsAcceptsResolvedRemoteConditionalDefaults(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", `name: complex remote default
@@ -381,6 +446,24 @@ jobs:
 	}
 	if len(bundle.Plans) != 1 || !reflect.DeepEqual(bundle.Plans[0].Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
 		t.Fatalf("effective action default token authorization = %#v", bundle.Plans)
+	}
+
+	plans, err = compile(`on: push
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/token
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) || len(plans[0].RequiredSecrets) != 0 {
+		t.Fatalf("explicit optional action token plan = %#v", plans)
 	}
 
 	plans, err = compile(`on: push
@@ -733,6 +816,10 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"",
 		"        with:\n          repository: buildkite/buildkite-gha\n          ref: 1111111111111111111111111111111111111111\n          fetch-depth: '1'\n          persist-credentials: false\n          clean: true\n          set-safe-directory: true\n",
 		"        with:\n          fetch-depth: '0'\n",
+		"        with:\n          fetch-depth: '100'\n",
+		"        with:\n          ref: ${{ github.sha }}\n",
+		"        with:\n          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+		"        with:\n          ref: test-catalog\n          path: test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
 		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
@@ -748,11 +835,11 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	rejected := map[string]string{
 		"token":       "          token: ''\n",
 		"repository":  "          repository: other/repository\n",
-		"ref":         "          ref: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+		"ref":         "          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
 		"ssh-key":     "          ssh-key: key\n",
 		"submodules":  "          submodules: yes\n",
-		"path":        "          path: nested\n",
-		"fetch-depth": "          fetch-depth: '2'\n",
+		"path":        "          path: nested/path\n",
+		"fetch-depth": "          fetch-depth: '-1'\n",
 		"credentials": "          persist-credentials: true\n",
 	}
 	for name, input := range rejected {
@@ -888,6 +975,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 			t.Fatalf("audited %s ZIP upload rejected: %v", version, err)
 		}
 	}
+	if _, err := compile(actionintegration.UploadArtifactCommit, "        with:\n          path: '**/build/**/*.html'\n"); err != nil {
+		t.Fatalf("bounded upload-artifact glob rejected: %v", err)
+	}
 	if _, err := compile(actionintegration.UploadArtifactV7Commit, "        with:\n          path: payload/result.txt\n          archive: false\n"); err == nil || !strings.Contains(err.Error(), `input "archive" may only be omitted or true`) {
 		t.Fatalf("upload-artifact v7 raw mode error = %v", err)
 	}
@@ -905,10 +995,9 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	}
 
 	for name, input := range map[string]string{
-		"missing path":   "          name: payload\n",
-		"recursive glob": "          path: payload/**/*.log\n",
-		"bad retention":  "          path: payload\n          retention-days: '-1'\n",
-		"overwrite":      "          path: payload\n          overwrite: true\n",
+		"missing path":  "          name: payload\n",
+		"bad retention": "          path: payload\n          retention-days: '-1'\n",
+		"overwrite":     "          path: payload\n          overwrite: true\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.UploadArtifactCommit, "        with:\n"+input)
@@ -984,6 +1073,10 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 			t.Fatalf("download-artifact plans for %s = %#v", commit, plans)
 		}
 	}
+	plans, err := compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: 'junit-xml-25-*'\n          path: out\n          merge-multiple: true\n")
+	if err != nil || len(plans) != 2 || plans[1].Actions[0].Commit != actionintegration.DownloadArtifactV5Commit {
+		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
+	}
 
 	for name, with := range map[string]string{
 		"missing name":  "        with:\n          path: out\n",
@@ -1006,7 +1099,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	if _, err := compile(actionintegration.DownloadArtifactCommit, "", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), "direct needs producer") {
 		t.Fatalf("needs-free download-artifact error = %v", err)
 	}
-	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) {
+	if _, err := compile(strings.Repeat("b", 40), "    needs: producer\n", "        with:\n          name: payload\n"); err == nil || !strings.Contains(err.Error(), actionintegration.DownloadArtifactCommit) || !strings.Contains(err.Error(), actionintegration.DownloadArtifactV5Commit) {
 		t.Fatalf("unsupported download-artifact commit error = %v", err)
 	}
 	for name, with := range map[string]string{

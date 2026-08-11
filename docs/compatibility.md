@@ -31,7 +31,7 @@ Buildkite.
 | [Matrix strategies](#job-syntax) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#step-syntax) | 🟡 Supported subset | Linux `bash` and `sh`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions plus direct references to selected contexts. |
-| [Reusable workflows](#onworkflow_call) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. |
+| [Reusable workflows](#onworkflow_call) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript, composite, and verified Dockerfile actions. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github_token) | 🟡 Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
@@ -105,6 +105,8 @@ repository and commit.
 - local `./.github/workflows/...` paths;
 - `boolean`, `number`, and `string` inputs;
 - static input values and defaults;
+- `secrets: inherit` when the called workflow declares no required secrets;
+  nested workflows must inherit again at every call edge;
 - nested calls, up to four levels;
 - caller-visible aggregate results;
 - outputs mapped directly from `jobs.<job>.outputs.<name>`.
@@ -113,7 +115,7 @@ repository and commit.
 
 - remote or dynamic workflow paths;
 - call-level `if`;
-- secrets or `secrets: inherit`;
+- explicit secret mappings or required called-workflow secrets;
 - dynamic inputs or matrices;
 - literal or compound output expressions;
 - top-level concurrency in the called workflow.
@@ -219,7 +221,7 @@ repository-scoped, case-insensitive Buildkite concurrency group.
 ```yaml
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
 jobs:
   deploy:
@@ -227,16 +229,18 @@ jobs:
 ```
 
 Groups may use `vars`, supported `github` fields, static reusable-workflow
-inputs, and concrete matrix values at job level. They cannot use runtime
-`needs` or `strategy` values, operators, or general functions.
+inputs, and concrete matrix values at job level. Boolean and equality
+operators, `fromJSON`, and case-insensitive `startsWith` are supported when the
+whole expression resolves during compilation. Runtime `needs` and `strategy`
+values remain unsupported.
 
 Buildkite queues every waiting entry. It does not replace GitHub's existing
 pending entry. `queue` is unsupported.
 
-Workflow-level literal `cancel-in-progress: true` emits a warning and does not
-cancel. Job-level `true` and all expression-valued cancellation settings are
-rejected. Buildkite's **Cancel Intermediate Builds** and **Skip Intermediate
-Builds** settings can approximate same-branch cancellation.
+Workflow-level literal or expression-resolved `cancel-in-progress: true` emits
+a warning and does not cancel. Job-level cancellation remains unsupported.
+Buildkite's **Cancel Intermediate Builds** and **Skip Intermediate Builds**
+settings can approximate same-branch cancellation.
 
 Cancel the whole Buildkite build rather than one job when a workflow-level
 concurrency gate is active.
@@ -381,8 +385,10 @@ privileged containers are unsupported.
 ### `jobs.<job_id>.uses`, `with`, and `secrets`
 
 **🟡 Supported subset.** See [`on.workflow_call`](#onworkflow_call). Local calls
-and static inputs are supported. Remote calls, call secrets, inherited secrets,
-and call-level conditions are unsupported.
+and static inputs are supported. `secrets: inherit` is accepted when the called
+workflow declares no required secrets, and nested workflows must inherit again
+at every call edge. Remote calls, explicit secret mappings, required
+called-workflow secrets, and call-level conditions are unsupported.
 
 ### `jobs.<job_id>.snapshot`
 
@@ -531,7 +537,14 @@ unsupported.
 | `steps.<id>.outcome`, `conclusion`, and `outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
 | `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
-| `github.event`, `secrets`, and other contexts | ❌ No | ❌ No |
+| `github.event.*` | 🟡 Compile time only | 🟡 Compile time only |
+| `secrets` and other contexts | ❌ No | ❌ No |
+
+An event-backed condition is evaluated from the immutable event snapshot before
+runtime validation. Every branch is validated before evaluation, so
+short-circuiting cannot hide an unsupported function, context, or concrete
+matrix type error. A condition that cannot be fully resolved at compile time
+cannot carry `github.event` into the runtime.
 
 ### Runtime interpolation
 
@@ -551,9 +564,10 @@ available.
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, and concurrency groups may use statically known
-`github`, `event`, `vars`, and matrix values. `fromJSON` is supported for a
-single statically known string.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions
+may use statically known `github`, `event`, `vars`, and matrix values. Boolean
+and equality operators, `fromJSON`, and case-insensitive `startsWith` are
+supported where the complete expression resolves during compilation.
 
 Values derived from runtime `needs` or `steps` are unsupported.
 
@@ -606,25 +620,26 @@ supported. Other Node declarations are rejected.
 Major tags work only while they resolve to one of these commits. v1–v3 and
 unknown commits are unsupported.
 
-The adapter checks out the event repository at its exact SHA into an empty
-workspace. It uses Buildkite's repository-provider Git credentials when the
-job provides them; otherwise it fetches anonymously. Credentials are scoped to
-each verified repository fetch command and are never persisted.
+The adapter checks out a detached commit or static branch from the event
+repository at the workspace root or a clean top-level directory. It uses
+Buildkite's repository-provider Git credentials when the job provides them;
+otherwise it fetches anonymously. Credentials are scoped to the fetch command
+and each verified submodule fetch command, and are never persisted.
 
 | Input | Supported values |
 | --- | --- |
 | `repository` | Omitted, or the event `owner/repo` |
-| `ref` | Omitted, empty, or the exact lowercase event SHA |
+| `ref` | Omitted, empty, a lowercase 40-hex commit, or a static branch in the event repository. A direct `github.sha` or `needs.<job>.outputs.<name>` expression must resolve at runtime to the exact event SHA. |
 | `token` | Omitted only |
 | `ssh-key`, `ssh-known-hosts` | Omitted or empty |
 | `ssh-strict` | Omitted or true |
 | `ssh-user` | Omitted or `git` |
 | `persist-credentials` | Omitted or false |
-| `path` | Omitted or empty; checkout is at the workspace root |
-| `clean` | Omitted or true; the workspace must already be empty |
+| `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory |
+| `clean` | Omitted or true; the root workspace or selected path must be empty or absent |
 | `filter`, `sparse-checkout` | Omitted or empty |
 | `sparse-checkout-cone-mode` | Omitted or true |
-| `fetch-depth` | Omitted, `1`, or `0` |
+| `fetch-depth` | Omitted or a non-negative integer; `0` fetches full history |
 | `fetch-tags`, `show-progress` | Omitted, true, or false |
 | `lfs` | Omitted or false |
 | `submodules` | Omitted, false, true, or recursive; whitespace is trimmed and casing is ignored |
@@ -642,8 +657,9 @@ non-HTTPS transports are unsupported.
 See the [security model](security.md#checkout-and-submodules) for the credential,
 Git, and job-isolation boundaries.
 
-Alternate repositories, branches, tags, LFS, sparse checkout, GitHub Enterprise
-Server, and credential persistence remain unsupported.
+Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout,
+GitHub Enterprise Server, and credential persistence remain unsupported. Commit
+and branch checkouts remain detached and confined to the event repository.
 
 ### `actions/upload-artifact`
 
@@ -659,7 +675,7 @@ Server, and credential persistence remain unsupported.
 | Input | Support |
 | --- | --- |
 | `name` | ✅ Supported; defaults to `artifact` |
-| `path` | Required; literal files, directories, or final-component `*` file globs |
+| `path` | Required; literal files/directories or bounded `*`, `?`, character-class, and `**` file globs |
 | `if-no-files-found` | `warn`, `error`, or `ignore` |
 | `retention-days` | Non-negative integer; advisory only |
 | `compression-level` | 0–9 |
@@ -667,9 +683,10 @@ Server, and credential persistence remain unsupported.
 | `include-hidden-files` | ✅ Supported |
 | `archive` | v7.0.1 only; omitted or true |
 
-Unsupported path forms include recursive globs, exclusions, symlinks, absolute
-paths, traversal, braces, character classes, and directory globs. At most 32
-path roots may be selected.
+Unsupported path forms include exclusions, symlinks, absolute paths, traversal,
+braces, extglobs, leading glob comments, and special files. At most 32 path
+roots may be selected. Hidden path segments remain excluded unless explicitly
+enabled.
 
 An artifact may contain at most 10,000 files and 1 GiB of source data. The ZIP
 must also be no larger than 1 GiB. A job may publish 64 artifacts.
@@ -680,7 +697,7 @@ effective retention control are unsupported.
 
 ### `actions/download-artifact`
 
-**🟡 Supported subset.** These root actions use the same exact-name ZIP mode:
+**🟡 Supported subset.** These root actions use the same producer-bound ZIP mode:
 
 | Release | Commit |
 | --- | --- |
@@ -693,15 +710,19 @@ effective retention control are unsupported.
 
 | Input | Support |
 | --- | --- |
-| `name` | Required exact name; runtime expressions are allowed |
+| `name` | Exact name; mutually exclusive with `pattern`; runtime expressions are allowed |
+| `pattern` | Bounded artifact-name glob; requires `merge-multiple: true`; runtime expressions are allowed |
 | `path` | Optional literal workspace-relative path |
-| `merge-multiple` | Omitted or false |
+| `merge-multiple` | Omitted or false with `name`; required true with `pattern` |
 | v8 `skip-decompress` | Omitted or false |
 | v8 `digest-mismatch` | Omitted or `error` |
 
-The artifact must come from one verified direct `needs` producer and must have
-a unique exact name. Pattern, ID, all-artifact, cross-run, cross-repository,
-raw, REST, and merge modes are unsupported.
+Artifacts must come from verified direct `needs` producers. Exact-name lookup
+must find one unique artifact; a bounded pattern may select and deterministically
+merge multiple distinct names. When artifacts contain the same exact member
+path, the later artifact by name wins. All matched archives are validated and
+staged before the destination is changed. Artifact ID, all-artifact, cross-run,
+cross-repository, raw, REST, and non-merged pattern modes are unsupported.
 
 Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP
 validation failure is fatal. The `download-path` output is supported.
@@ -766,15 +787,21 @@ unsupported.
 
 **🚧 Not available in production.** Ordinary workflow secrets have an explicit
 runtime boundary, but the production profile rejects them. Reusable workflow
-secrets and environment secrets are also unavailable.
+secret mappings and environment secrets are also unavailable. Action metadata
+defaults cannot add a secret to the plan; such defaults fail compilation rather
+than becoming an authority source. A secret referenced only by a declared
+optional action input does not add a job secret requirement and resolves empty
+unless the same secret is required elsewhere. `GITHUB_TOKEN` continues to use
+its separate permission-scoped contract regardless of action input optionality.
 
 **❌ Unsupported.** GitHub-compatible OIDC and `id-token` are not implemented.
 
 ### GitHub services
 
 **❌ Unsupported beyond the integrations listed above.** An action's runtime may
-be supported while a service it calls is not. There is no general GitHub
-Artifact, OIDC, Packages, Releases, Checks, or deployment service emulation.
+still require unsupported GitHub services. There is no GitHub Artifact, OIDC,
+Packages, Releases, Checks, or deployment service emulation beyond the
+integrations documented above.
 
 ## Runtime behavior and limits
 
