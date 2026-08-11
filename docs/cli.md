@@ -6,6 +6,11 @@ The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/githu
 
 Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the matching GitHub [release](https://github.com/buildkite/buildkite-gha/releases). Verify the checksum, then extract `buildkite-gha` to a stable path.
 
+Releases also include the raw Linux amd64 `buildkite-gha-launcher_Linux_x86_64`
+artifact for plugin hooks to pin. The launcher reads
+`BUILDKITE_PLUGIN_GITHUB_ACTIONS_VERSION`, defaulting to `latest`, or accepts an
+exact stable version from `0.8.0` onward.
+
 Jobs with JavaScript actions require `mise` 2026.5.12 or newer. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
 
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.

@@ -13,6 +13,18 @@ builds:
       - -trimpath
     ldflags:
       - -s -w -X main.version={{.Version}}
+  - id: buildkite-gha-launcher-linux
+    main: ./cmd/buildkite-gha-launcher
+    binary: buildkite-gha-launcher
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
 
 archives:
   - id: buildkite-gha
@@ -30,6 +42,10 @@ archives:
           mode: 0644
           owner: root
           group: root
+  - id: buildkite-gha-launcher
+    ids: [buildkite-gha-launcher-linux]
+    formats: [binary]
+    name_template: buildkite-gha-launcher_Linux_x86_64
 
 checksum:
   name_template: checksums.txt

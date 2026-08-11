@@ -37,6 +37,11 @@ mise run smoke:local
 mise run release:check
 ```
 
+GoReleaser publishes the raw Linux amd64
+`buildkite-gha-launcher_Linux_x86_64` asset in `checksums.txt` while preserving
+the existing `buildkite-gha_Linux_x86_64.tar.gz` contents (`LICENSE` and
+`buildkite-gha`).
+
 ### Understand smoke results
 
 `mise run smoke:local` is network-free. It validates the smoke inventory and compiles each workflow twice. A pass proves deterministic compilation, not runtime behavior.
