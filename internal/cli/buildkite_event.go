@@ -30,8 +30,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}
 	sha := getenv("BUILDKITE_COMMIT")
-	decoded, err := hex.DecodeString(sha)
-	if err != nil || len(decoded) != 20 || sha != strings.ToLower(sha) {
+	if !validBuildkiteCommit(sha) {
 		return nil, fmt.Errorf("BUILDKITE_COMMIT must be a full lowercase 40-hex commit, not a symbolic ref")
 	}
 	branch, tag, pullRequest := getenv("BUILDKITE_BRANCH"), getenv("BUILDKITE_TAG"), getenv("BUILDKITE_PULL_REQUEST")
@@ -110,6 +109,11 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		return nil, fmt.Errorf("encode Buildkite compatibility snapshot: %w", err)
 	}
 	return result, nil
+}
+
+func validBuildkiteCommit(commit string) bool {
+	decoded, err := hex.DecodeString(commit)
+	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
 }
 
 // buildkiteWebhookEventSource overlays untrusted trigger data onto the
