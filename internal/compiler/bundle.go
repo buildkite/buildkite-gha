@@ -32,10 +32,9 @@ type PlanAuthorization struct {
 
 // Bundle is the complete deterministic output of static compilation.
 type Bundle struct {
-	IR                IR
-	Plans             []PlanArtifact
-	Pipeline          []byte
-	GeneratedWorkflow buildkitepipeline.Workflow
+	IR       IR
+	Plans    []PlanArtifact
+	Pipeline []byte
 }
 
 // CompileBundle compiles an unattested event snapshot with the fail-closed
@@ -100,11 +99,7 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 			jobs[i].ConcurrencyGroup = buildkiteConcurrencyGroup(ir.Event.Repository, ir.Jobs[i].ConcurrencyGroup)
 		} else if ir.Jobs[i].MaxParallel != nil {
 			jobs[i].Concurrency = *ir.Jobs[i].MaxParallel
-			workflowScope := strings.TrimPrefix(ir.Workflow.Digest, "sha256:")
-			if options.StepKeyNamespace != "" {
-				workflowScope += "/" + options.StepKeyNamespace
-			}
-			jobs[i].ConcurrencyGroup = "buildkite-gha/" + workflowScope + "/" + ir.Jobs[i].LogicalJobID
+			jobs[i].ConcurrencyGroup = "buildkite-gha/" + strings.TrimPrefix(ir.Workflow.Digest, "sha256:") + "/" + ir.Jobs[i].LogicalJobID
 		}
 	}
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
@@ -114,22 +109,18 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 			Queue: jobs[0].Queue,
 		}
 	}
-	generatedWorkflow := buildkitepipeline.Workflow{
-		ConcurrencyGate: concurrencyGate,
-		Jobs:            jobs,
-	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:       compilerStep,
 		DistributionDigest: compilerDistributionDigest,
 		GroupLabel:         options.GroupLabel,
 		RuntimeImage:       options.RuntimeImage,
-		ConcurrencyGate:    generatedWorkflow.ConcurrencyGate,
-		Jobs:               generatedWorkflow.Jobs,
+		ConcurrencyGate:    concurrencyGate,
+		Jobs:               jobs,
 	})
 	if err != nil {
 		return Bundle{}, fmt.Errorf("emit Buildkite pipeline: %w", err)
 	}
-	return Bundle{IR: ir, Plans: artifacts, Pipeline: pipeline, GeneratedWorkflow: generatedWorkflow}, nil
+	return Bundle{IR: ir, Plans: artifacts, Pipeline: pipeline}, nil
 }
 
 func buildkiteConcurrencyGroup(repository Repository, group string) string {
