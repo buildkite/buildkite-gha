@@ -1186,7 +1186,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		generated := bundle.GeneratedWorkflow
 		generated.GroupLabel = label
 		generated.GroupKey = "gha-workflow-" + input.Identity
-		generated.CheckName = "Buildkite / " + label
+		generated.CheckName = "Buildkite / " + label + " (" + bundle.IR.Event.Event + ")"
 		generated.Condition = condition
 		generatedWorkflows = append(generatedWorkflows, generated)
 		planArtifacts = append(planArtifacts, bundle.Plans...)

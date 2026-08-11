@@ -709,7 +709,7 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 		if i >= len(inputs) {
 			t.Fatalf("unexpected aggregate group %d = %#v", i, group)
 		}
-		wantCheckName := "Buildkite / " + wantLabels[i]
+		wantCheckName := "Buildkite / " + wantLabels[i] + " (push)"
 		if group.Group != ":github: "+wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || !strings.Contains(group.Condition, `build.source_event == "push"`) || !strings.Contains(group.Condition, `build.source == "ui"`) || group.DependsOn != "aggregate-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != wantCheckName {
 			t.Fatalf("aggregate group %d = %#v", i, group)
 		}
@@ -806,9 +806,9 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	want := []struct {
 		group, checkName string
 	}{
-		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
-		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
-		{group: ":github: .github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml"},
+		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`},
+		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`},
+		{group: ":github: .github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml (push)"},
 	}
 	if len(pipeline.Steps) != len(want) {
 		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
@@ -822,6 +822,70 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 				t.Fatalf("aggregate group %d child emitted notification or dependency: %#v / %#v", i, step.Notify, step.DependsOn)
 			}
 		}
+	}
+}
+
+func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name, source, githubEvent, wantEvent string
+		eventPath                            string
+		webhook                              []byte
+	}{
+		{name: "push fallback", source: "webhook", wantEvent: "push"},
+		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{}`), wantEvent: "pull_request"},
+		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch"},
+		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch"},
+		{name: "schedule fallback", source: "schedule", wantEvent: "schedule"},
+		{name: "explicit event path precedence", source: "schedule", githubEvent: "pull_request", eventPath: eventPath, wantEvent: "push"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "event-name-importer")
+			t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+			t.Setenv("BUILDKITE_COMMIT", strings.Repeat("a", 40))
+			t.Setenv("BUILDKITE_BRANCH", "main")
+			t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+			t.Setenv("BUILDKITE_SOURCE", test.source)
+			t.Setenv("BUILDKITE_GITHUB_EVENT", test.githubEvent)
+			runner := &cliCaptureRunner{webhook: test.webhook}
+			args := []string{"upload"}
+			if test.eventPath != "" {
+				args = append(args, "--event-path", test.eventPath)
+				runner.webhookErr = errors.New("metadata must not be read with --event-path")
+			}
+			args = append(args, workflowPath)
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			var pipeline struct {
+				Steps []struct {
+					Group  string `yaml:"group"`
+					Notify []struct {
+						GitHubCheck struct {
+							Name string `yaml:"name"`
+						} `yaml:"github_check"`
+					} `yaml:"notify"`
+				} `yaml:"steps"`
+			}
+			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			wantCheckName := "Buildkite / Active event (" + test.wantEvent + ")"
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Active event" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != wantCheckName {
+				t.Fatalf("aggregate event group = %#v, want group %q and check %q", pipeline.Steps, ":github: Active event", wantCheckName)
+			}
+		})
 	}
 }
 
@@ -894,7 +958,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Caller" || pipeline.Steps[0].DependsOn != "reusable-importer" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Caller" || pipeline.Steps[0].DependsOn != "reusable-importer" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
 		t.Fatalf("aggregate reusable pipeline = %#v", pipeline)
 	}
 	compiledReusable := false

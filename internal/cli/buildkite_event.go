@@ -44,6 +44,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 
 	event, ref := "push", ""
+	switch getenv("BUILDKITE_SOURCE") {
+	case "schedule":
+		event = "schedule"
+	case "ui", "api":
+		event = "workflow_dispatch"
+	}
 	payload := map[string]any{}
 	if pullRequest != "" && pullRequest != "false" {
 		number, parseErr := strconv.Atoi(pullRequest)
