@@ -679,8 +679,14 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 			Group     string `yaml:"group"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
-			Steps     []struct {
+			Notify    []struct {
+				GitHubCheck struct {
+					Name string `yaml:"name"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+			Steps []struct {
 				Key       string `yaml:"key"`
+				Notify    any    `yaml:"notify"`
 				DependsOn []struct {
 					Step string `yaml:"step"`
 				} `yaml:"depends_on"`
@@ -693,12 +699,16 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 	wantLabels := []string{"buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
 	seenKeys := make(map[string]bool)
 	for i, group := range pipeline.Steps {
-		if i >= len(inputs) || group.Group != wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || !strings.Contains(group.Condition, `build.source_event == "push"`) || !strings.Contains(group.Condition, `build.source == "ui"`) {
+		if i >= len(inputs) {
+			t.Fatalf("unexpected aggregate group %d = %#v", i, group)
+		}
+		wantCheckName := "Buildkite / " + wantLabels[i]
+		if group.Group != wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || !strings.Contains(group.Condition, `build.source_event == "push"`) || !strings.Contains(group.Condition, `build.source == "ui"`) || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != wantCheckName {
 			t.Fatalf("aggregate group %d = %#v", i, group)
 		}
 		prefix := "gha-" + inputs[i].Identity + "-"
 		for _, step := range group.Steps {
-			if !strings.HasPrefix(step.Key, prefix) || seenKeys[step.Key] {
+			if !strings.HasPrefix(step.Key, prefix) || seenKeys[step.Key] || step.Notify != nil {
 				t.Fatalf("aggregate step key %q, prefix %q, seen %t", step.Key, prefix, seenKeys[step.Key])
 			}
 			seenKeys[step.Key] = true
@@ -728,6 +738,81 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 	}
 	if planCount != 5 {
 		t.Fatalf("aggregate uploaded plans = %d", planCount)
+	}
+}
+
+func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
+	repository := t.TempDir()
+	workflowDirectory := filepath.Join(repository, ".github", "workflows")
+	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runnable := func(name string) string {
+		return name + "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	}
+	sources := map[string]string{
+		"a.yml":        runnable("name: 'Shared \"checks\"'\n"),
+		"b.yml":        runnable("name: 'Shared \"checks\"'\n"),
+		"unnamed.yml":  runnable(""),
+		"reusable.yml": "name: Shared\non: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+	}
+	for name, source := range sources {
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"init", "-q", repository}, {"-C", repository, "add", ".github/workflows"}} {
+		if output, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+	}
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "checks-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group  string `yaml:"group"`
+			Notify []struct {
+				GitHubCheck struct {
+					Name string `yaml:"name"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+			Steps []struct {
+				Notify any `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		group, checkName string
+	}{
+		{group: `Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
+		{group: `Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
+		{group: ".github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml"},
+	}
+	if len(pipeline.Steps) != len(want) {
+		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
+	}
+	for i, group := range pipeline.Steps {
+		if group.Group != want[i].group || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName {
+			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
+		}
+		for _, step := range group.Steps {
+			if step.Notify != nil {
+				t.Fatalf("aggregate group %d has job-level notification: %#v", i, step.Notify)
+			}
+		}
 	}
 }
 
@@ -784,16 +869,22 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group string `yaml:"group"`
+			Group  string `yaml:"group"`
+			Notify []struct {
+				GitHubCheck struct {
+					Name string `yaml:"name"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
 			Steps []struct {
-				Key string `yaml:"key"`
+				Key    string `yaml:"key"`
+				Notify any    `yaml:"notify"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "Caller" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "Caller" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
 		t.Fatalf("aggregate reusable pipeline = %#v", pipeline)
 	}
 	compiledReusable := false
