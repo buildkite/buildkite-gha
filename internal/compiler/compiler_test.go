@@ -1540,6 +1540,52 @@ jobs:
 	}
 }
 
+func TestValidateRetainsDependentCandidateAsNotEvaluatedAfterMatrixFailure(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        run: true
+  upstream:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - run: true
+  downstream:
+    needs: upstream
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	report, err := Validate("failed-prerequisite.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if strings.Contains(err.Error(), "has no expanded instances") {
+		t.Fatalf("Validate() added cascading graph failure: %v", err)
+	}
+	if !report.NotEvaluatedJobs["downstream"] || !report.NotEvaluatedInstances["gha-downstream"] {
+		t.Fatalf("not-evaluated ledger = jobs %#v, instances %#v", report.NotEvaluatedJobs, report.NotEvaluatedInstances)
+	}
+}
+
+func TestParseWorkflowDoesNotEvaluateEventDependentJobs(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.runner }}\n    steps:\n      - run: true\n")
+	report, err := ParseWorkflow("event.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.LogicalJobs != 1 || len(report.ParsedJobs) != 1 || report.ParsedJobs[0].ID != "test" || report.Instances != 0 || len(report.Jobs) != 0 {
+		t.Fatalf("parse report = %#v", report)
+	}
+}
+
 func TestCompilePlansOwnsDeterministicRuntimeInputs(t *testing.T) {
 	path := smokePath(".github", "workflows", "plan-fixture.yml")
 	source := []byte(`name: plan fixture

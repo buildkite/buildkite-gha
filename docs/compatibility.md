@@ -741,6 +741,30 @@ buildkite-gha validate --profile hosted-tokenless \
 Profile validation may access the public network to resolve actions. It does
 not call Buildkite, install Node, or execute workflow code.
 
+`validate`, `compile`, and `upload` use one versioned processing report. It
+always exposes workflow parsing, event validation, static graph construction,
+matrix expansion, expression validation, action discovery, immutable action
+resolution, job-plan construction, hosted-profile admission, and pipeline
+generation. Each stage is `passed`, `failed`, or `not-evaluated`; a downstream
+stage blocked by an earlier failure is never described as failed. Reports also
+retain every safely discovered logical job, expanded instance, and action
+invocation, with stable diagnostic codes, categories, and source locations.
+
+Text and `--format json` validation reports carry the same records. JSON uses
+the `buildkite-gha/processing-report/v1` schema. Reports never include secret
+values, tokens, event payload contents, generated plans, pipelines, or
+downloaded action contents. Compilation writes its text report to standard
+error so standard output remains the requested IR or pipeline. Upload writes
+the report into the importer log before artifact or pipeline upload. A failure
+in any required stage is fail-closed: no partial plans or pipeline are emitted.
+
+Stage failures use stable, stage-specific codes such as
+`E_WORKFLOW_SYNTAX`, `E_EVENT_INVALID`, `E_GRAPH_INVALID`,
+`E_MATRIX_INVALID`, `E_EXPRESSION_INVALID`, `E_ACTION_RESOLUTION`,
+`E_PLAN_CONSTRUCTION`, and `E_PIPELINE_GENERATION`. Environment and hosted
+admission failures use `E_ENVIRONMENT` and `E_PROFILE`. Action diagnostics also
+identify the exact expanded instance and step when that invocation is known.
+
 ### Event snapshots
 
 `compile` and profile validation take an explicit, bounded event snapshot:

@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -52,6 +53,23 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	wantPlans := readFile(t, filepath.Join("testdata", "shell.plans.golden.json"))
 	if !bytes.Equal(encodeGoldenPlans(t, first.Plans), wantPlans) {
 		t.Fatalf("plans changed; update shell.plans.golden.json intentionally")
+	}
+}
+
+func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
+	path := smokePath(".github", "workflows", "shell.yml")
+	options := defaultOptions()
+	bundle, err := CompileBundlePlansContext(context.Background(), path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 3 || len(bundle.Pipeline) != 0 {
+		t.Fatalf("plan-stage bundle has %d plans and %d pipeline bytes", len(bundle.Plans), len(bundle.Pipeline))
+	}
+	options.RuntimeImage = "mutable:latest"
+	failed, err := GenerateBundlePipeline(bundle, testDistributionDigest, "gha-importer", options)
+	if err == nil || len(failed.Pipeline) != 0 || len(failed.Plans) != 3 {
+		t.Fatalf("pipeline generation = %d bytes, %d plans, %v", len(failed.Pipeline), len(failed.Plans), err)
 	}
 }
 

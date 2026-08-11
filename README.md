@@ -210,9 +210,25 @@ For example, a workflow with one producer and a two-entry consumer matrix
 reports:
 
 ```text
+Schema: buildkite-gha/processing-report/v1
 Workflow: .github/workflows/ci.yml
 Result: compilable
+Status: passed
+Logical jobs: 2
+Instances: 3
+Compile: compilable
+Admission: not-evaluated
 ✓ 2 logical jobs and 3 static instances compile
+- Workflow parsing: passed
+- Event validation: not-evaluated
+- Static graph construction: passed
+- Matrix expansion: passed
+- Expression validation: passed
+- Local and public action discovery: passed
+- Immutable action resolution: passed
+- Job-plan construction: not-evaluated
+- Hosted-profile admission: not-evaluated
+- Pipeline generation: not-evaluated
 ```
 
 To also resolve public actions and apply the same policy as the plugin's
@@ -230,6 +246,13 @@ the workflow or prove that arbitrary action code is independent of GitHub-only
 services. Condition preflight validates the supported syntax, functions,
 contexts, and statically known operand types, but cannot prove value-dependent
 runtime behavior. JSON output is available with `--format json`.
+
+Every report includes all ten processing stages with `passed`, `failed`, or
+`not-evaluated`, plus source-located job, matrix-instance, action, and
+diagnostic records. Independent errors are aggregated deterministically.
+`compile` writes the same report to standard error before writing compiler
+output; the Buildkite importer writes it to its job log before upload or exit.
+Any failed required stage suppresses every plan and pipeline artifact.
 
 ## What gets translated?
 

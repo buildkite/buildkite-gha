@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -1157,6 +1158,7 @@ func yamlStepSpan(step, execution *yaml.Node) Span {
 
 func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected []expectedActionlintDiagnostic) error {
 	matched := make([]bool, len(expected))
+	var diagnostics []error
 	for _, actionlintErr := range errs {
 		match := -1
 		for i, diagnostic := range expected {
@@ -1169,15 +1171,15 @@ func filterActionlintDiagnostics(path string, errs []*actionlint.Error, expected
 			matched[match] = true
 			continue
 		}
-		return fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, actionlintErr.Message)
+		diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: %s", path, actionlintErr.Line, actionlintErr.Column, actionlintErr.Message))
 	}
 	for i, ok := range matched {
 		if !ok {
 			diagnostic := expected[i]
-			return fmt.Errorf("%s:%d:%d: actionlint concurrency diagnostic changed; pinned parser contract must be reviewed", path, diagnostic.Position.Line, diagnostic.Position.Column)
+			diagnostics = append(diagnostics, fmt.Errorf("%s:%d:%d: actionlint concurrency diagnostic changed; pinned parser contract must be reviewed", path, diagnostic.Position.Line, diagnostic.Position.Column))
 		}
 	}
-	return nil
+	return errors.Join(diagnostics...)
 }
 
 func validateStepConcurrency(path, jobID string, steps []Step) error {
