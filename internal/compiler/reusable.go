@@ -25,10 +25,11 @@ var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
 	workflow.Job
-	path         string
-	digest       string
-	root         string
-	needBindings map[string]needBinding
+	path            string
+	digest          string
+	root            string
+	secretAuthority bool
+	needBindings    map[string]needBinding
 }
 
 type needBinding struct {
@@ -85,7 +86,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, needBindings: bindings}
+			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, secretAuthority: true, needBindings: bindings}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -104,7 +105,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return nil, err
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context}
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
 	return resolution.jobs, err
 }
 
@@ -117,7 +118,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -170,7 +171,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, needBindings: needBindings})
+			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, secretAuthority: secretAuthority, needBindings: needBindings})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
@@ -254,7 +255,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, depth+1)
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				return reusableResolution{}, &ProcessingFinding{

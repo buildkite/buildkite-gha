@@ -112,6 +112,7 @@ type JobInstance struct {
 	SourceDigest            string                  `json:"source_digest"`
 	RepositoryRoot          string                  `json:"-"`
 	Source                  workflow.Span           `json:"source"`
+	secretAuthority         bool
 }
 
 // NeedOutput selects one caller-visible output from a concrete prerequisite.
@@ -696,6 +697,13 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 	for _, name := range actionRequired {
 		found[name] = name
 	}
+	if !instance.secretAuthority {
+		for name := range found {
+			if name != "GITHUB_TOKEN" {
+				delete(found, name)
+			}
+		}
+	}
 	names := make([]string, 0, len(found))
 	for name := range found {
 		names = append(names, name)
@@ -850,6 +858,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
+	secretAuthorities := make(map[string]bool, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
 	var diagnostics []error
 	failedJobs := make(map[string]bool, len(resolved))
@@ -863,6 +872,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourcePaths[job.ID] = sourced.path
 		sourceDigests[job.ID] = sourced.digest
 		sourceRoots[job.ID] = sourced.root
+		secretAuthorities[job.ID] = sourced.secretAuthority
 		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
 			diagnostics = append(diagnostics, err)
@@ -958,6 +968,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				SourceDigest:            sourceDigests[id],
 				RepositoryRoot:          sourceRoots[id],
 				Source:                  job.Span,
+				secretAuthority:         secretAuthorities[id],
 			}
 			result.candidates = append(result.candidates, candidate)
 

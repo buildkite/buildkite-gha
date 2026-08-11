@@ -106,6 +106,7 @@ repository and commit.
 - `boolean`, `number`, and `string` inputs;
 - static input values and defaults;
 - `secrets: inherit` when the called workflow declares no required secrets;
+  nested workflows must inherit again at every call edge;
 - nested calls, up to four levels;
 - caller-visible aggregate results;
 - outputs mapped directly from `jobs.<job>.outputs.<name>`.
@@ -385,8 +386,9 @@ privileged containers are unsupported.
 
 **🟡 Supported subset.** See [`on.workflow_call`](#onworkflow_call). Local calls
 and static inputs are supported. `secrets: inherit` is accepted when the called
-workflow declares no required secrets. Remote calls, explicit secret mappings,
-required called-workflow secrets, and call-level conditions are unsupported.
+workflow declares no required secrets, and nested workflows must inherit again
+at every call edge. Remote calls, explicit secret mappings, required
+called-workflow secrets, and call-level conditions are unsupported.
 
 ### `jobs.<job_id>.snapshot`
 
