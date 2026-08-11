@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -53,7 +54,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] <workflow-pattern>\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -1495,6 +1496,92 @@ func configuredRunnerPlatform(labels []string, configuredTargets map[string]comp
 	}
 	_, platform, err := supportedRunnerTarget(canonical)
 	return platform, err
+}
+
+type workflowInput struct {
+	Path, CanonicalPath, Identity, StepKeyNamespace string
+	Source                                          []byte
+	ReusableOnly                                    bool
+}
+
+func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
+	patternHasMeta := strings.ContainsAny(pattern, "*?[")
+	if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
+		// An existing path is always literal, even when its filename contains
+		// glob metacharacters. This preserves the pre-pattern CLI contract.
+		patternHasMeta = false
+	}
+	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if rootErr != nil {
+		if !patternHasMeta {
+			if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
+				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+			}
+		}
+		return nil, fmt.Errorf("locate checked-out git repository: %w", rootErr)
+	}
+	root := strings.TrimSpace(string(rootBytes))
+	absolutePattern, err := filepath.Abs(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow pattern %q: %w", pattern, err)
+	}
+	relativePattern, err := filepath.Rel(root, absolutePattern)
+	if err != nil || relativePattern == ".." || strings.HasPrefix(relativePattern, ".."+string(filepath.Separator)) {
+		if !patternHasMeta {
+			if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
+				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+			}
+		}
+		return nil, fmt.Errorf("workflow pattern %q is outside the checked-out git repository", pattern)
+	}
+	pathspecMagic := ":(literal)"
+	if patternHasMeta {
+		pathspecMagic = ":(glob)"
+	}
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--", pathspecMagic+filepath.ToSlash(relativePattern))
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("expand workflow pattern %q against tracked files: %w", pattern, err)
+	}
+	var matches []workflowInput
+	for _, entry := range bytes.Split(output, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		canonical := string(entry)
+		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
+	}
+	if len(matches) == 0 && !patternHasMeta {
+		if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
+			return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("workflow pattern %q matched no tracked files", pattern)
+	}
+	return workflowInputs(matches, patternHasMeta || len(matches) > 1)
+}
+
+func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInput, error) {
+	sort.Slice(matches, func(i, j int) bool { return matches[i].CanonicalPath < matches[j].CanonicalPath })
+	out := matches[:0]
+	identities := make(map[string]string, len(matches))
+	for _, match := range matches {
+		if len(out) != 0 && out[len(out)-1].CanonicalPath == match.CanonicalPath {
+			continue
+		}
+		digest := sha256.Sum256([]byte(match.CanonicalPath))
+		match.Identity = hex.EncodeToString(digest[:8])
+		if other, exists := identities[match.Identity]; exists {
+			return nil, fmt.Errorf("workflow identity collision between %q and %q", other, match.CanonicalPath)
+		}
+		identities[match.Identity] = match.CanonicalPath
+		if namespaceKeys {
+			match.StepKeyNamespace = match.Identity
+		}
+		out = append(out, match)
+	}
+	return out, nil
 }
 
 type hostedTokenlessCompilation struct {

@@ -2249,6 +2249,63 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 }
 
+func TestExpandWorkflowPatternSortsDeduplicatesAndRejectsNoMatch(t *testing.T) {
+	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
+	first, err := expandWorkflowPattern(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := expandWorkflowPattern(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) || len(first) != 4 || !strings.HasSuffix(first[0].CanonicalPath, "/artifact-multi-prefix.yml") || !strings.HasSuffix(first[1].CanonicalPath, "/cache-v6.yml") || !strings.HasSuffix(first[2].CanonicalPath, "/concurrent.yml") || !strings.HasSuffix(first[3].CanonicalPath, "/shell.yml") {
+		t.Fatalf("expanded workflows = %#v and %#v", first, second)
+	}
+	for _, workflow := range first {
+		if workflow.Identity == "" || workflow.StepKeyNamespace != workflow.Identity {
+			t.Fatalf("glob workflow identity = %#v", workflow)
+		}
+	}
+	duplicated, err := workflowInputs([]workflowInput{first[1], first[0], first[1]}, true)
+	if err != nil || len(duplicated) != 2 || duplicated[0].CanonicalPath != first[0].CanonicalPath || duplicated[1].CanonicalPath != first[1].CanonicalPath {
+		t.Fatalf("deduplicated workflows/error = %#v / %v", duplicated, err)
+	}
+	if _, err := expandWorkflowPattern(filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "missing-*.yml")); err == nil || !strings.Contains(err.Error(), "matched no tracked files") {
+		t.Fatalf("no-match error = %v", err)
+	}
+}
+
+func TestExpandWorkflowPatternPreservesLiteralMetacharacterPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow[1].yml")
+	if err := os.WriteFile(path, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputs, err := expandWorkflowPattern(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) != 1 || inputs[0].Path != path || inputs[0].StepKeyNamespace != "" {
+		t.Fatalf("literal metacharacter input = %#v", inputs)
+	}
+}
+
+func TestExpandWorkflowPatternNamespacesLiteralDirectoryMatches(t *testing.T) {
+	directory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
+	inputs, err := expandWorkflowPattern(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) != 9 {
+		t.Fatalf("literal directory matched %d workflows, want 9", len(inputs))
+	}
+	for _, input := range inputs {
+		if input.StepKeyNamespace == "" || input.StepKeyNamespace != input.Identity {
+			t.Fatalf("literal directory workflow is not namespaced: %#v", input)
+		}
+	}
+}
+
 func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *testing.T) {
 	const token = "ghs_job_scoped"
 	provider := &cliWorkflowTokenProvider{token: token}
