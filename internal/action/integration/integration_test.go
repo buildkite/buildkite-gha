@@ -150,15 +150,18 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 }
 
 func TestUploadArtifactPathsNormalizesSafeRelativeSpellings(t *testing.T) {
-	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\n")
+	got, err := UploadArtifactPaths("./artifacts.tar.gz\nlog/\ntmp/capybara/\nreports/test (1).txt\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"artifacts.tar.gz", "log", "tmp/capybara"}
+	want := []string{"artifacts.tar.gz", "log", "tmp/capybara", "reports/test (1).txt"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("UploadArtifactPaths() = %#v, want %#v", got, want)
 	}
-	for _, unsafe := range []string{"../outside", "safe/../outside", "/absolute", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log"} {
+	for _, unsafe := range []string{
+		"../outside", "safe/../outside", "/absolute", `dir\file`, "./tests/**/*.log", "tests/*.log/", "tests/./*.log",
+		"tests/@(a|b).log", "tests/+(a|b).log", "tests/?(a|b).log", "tests/*(a|b).log", "tests/!(a|b).log",
+	} {
 		if _, err := UploadArtifactPaths(unsafe); err == nil {
 			t.Fatalf("UploadArtifactPaths(%q) accepted an unsafe path", unsafe)
 		}

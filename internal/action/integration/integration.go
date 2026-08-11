@@ -289,7 +289,7 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		if root == "" {
 			continue
 		}
-		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}()`) || !filepath.IsLocal(root) {
+		if len(root) > MaxUploadArtifactPathBytes || strings.HasPrefix(root, "!") || strings.HasPrefix(root, "#") || strings.ContainsAny(root, `\\?[]{}`) || uploadArtifactExtglob(root) || !filepath.IsLocal(root) {
 			return nil, fmt.Errorf("path %q is unsafe; bounded adapter requires clean workspace-relative paths", root)
 		}
 		glob := strings.Contains(root, "*")
@@ -328,6 +328,10 @@ func UploadArtifactPaths(value string) ([]string, error) {
 		return nil, fmt.Errorf("input %q has %d roots, maximum is %d", "path", len(roots), MaxUploadArtifactRoots)
 	}
 	return roots, nil
+}
+
+func uploadArtifactExtglob(value string) bool {
+	return strings.Contains(value, "@(") || strings.Contains(value, "+(") || strings.Contains(value, "?(") || strings.Contains(value, "*(") || strings.Contains(value, "!(")
 }
 
 func uploadArtifactBoolean(value string) bool {
