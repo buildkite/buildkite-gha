@@ -78,12 +78,13 @@ type ExecutionBoundary struct {
 
 // WorkflowSource binds the IR to its input workflow bytes.
 type WorkflowSource struct {
-	Path                          string `json:"path"`
-	Name                          string `json:"name,omitempty"`
-	Digest                        string `json:"digest"`
-	ConcurrencyGroup              string `json:"concurrency_group,omitempty"`
-	WorkflowTokenPolicyFilename   string `json:"-"`
-	WorkflowTokenPolicyDiagnostic string `json:"-"`
+	Path                          string             `json:"path"`
+	Name                          string             `json:"name,omitempty"`
+	Digest                        string             `json:"digest"`
+	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
+	Triggers                      []workflow.Trigger `json:"-"`
+	WorkflowTokenPolicyFilename   string             `json:"-"`
+	WorkflowTokenPolicyDiagnostic string             `json:"-"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
@@ -704,7 +705,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	ir := IR{
 		Schema: schema,
 		Workflow: WorkflowSource{
-			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup,
+			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
 			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
 		},
 		Event:    event,
@@ -946,7 +947,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				instanceJob.If = "false"
 				instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 			}
-			key, err := instanceKey(job.ID, matrix)
+			key, err := namespacedInstanceKey(options.StepKeyNamespace, job.ID, matrix)
 			if err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
 				jobFailed = true
@@ -1664,7 +1665,15 @@ func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, erro
 }
 
 func instanceKey(jobID string, matrix map[string]any) (string, error) {
-	prefix := "gha-" + sanitize(jobID)
+	return namespacedInstanceKey("", jobID, matrix)
+}
+
+func namespacedInstanceKey(namespace, jobID string, matrix map[string]any) (string, error) {
+	prefix := "gha-"
+	if namespace != "" {
+		prefix += namespace + "-"
+	}
+	prefix += sanitize(jobID)
 	if len(matrix) == 0 {
 		return prefix, nil
 	}

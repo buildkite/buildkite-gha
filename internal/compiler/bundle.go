@@ -33,10 +33,11 @@ type PlanAuthorization struct {
 
 // Bundle is the complete deterministic output of static compilation.
 type Bundle struct {
-	IR         IR
-	Plans      []PlanArtifact
-	Pipeline   []byte
-	Processing ProcessingEvidence
+	IR                IR
+	Plans             []PlanArtifact
+	Pipeline          []byte
+	GeneratedWorkflow buildkitepipeline.Workflow
+	Processing        ProcessingEvidence
 }
 
 // CompileBundle compiles an unattested event snapshot with the fail-closed
@@ -148,7 +149,11 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			jobs[i].ConcurrencyGroup = buildkiteConcurrencyGroup(ir.Event.Repository, ir.Jobs[i].ConcurrencyGroup)
 		} else if ir.Jobs[i].MaxParallel != nil {
 			jobs[i].Concurrency = *ir.Jobs[i].MaxParallel
-			jobs[i].ConcurrencyGroup = "buildkite-gha/" + strings.TrimPrefix(ir.Workflow.Digest, "sha256:") + "/" + ir.Jobs[i].LogicalJobID
+			workflowScope := strings.TrimPrefix(ir.Workflow.Digest, "sha256:")
+			if options.StepKeyNamespace != "" {
+				workflowScope += "/" + options.StepKeyNamespace
+			}
+			jobs[i].ConcurrencyGroup = "buildkite-gha/" + workflowScope + "/" + ir.Jobs[i].LogicalJobID
 		}
 	}
 	var concurrencyGate *buildkitepipeline.ConcurrencyGate
@@ -158,16 +163,21 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			Queue: jobs[0].Queue,
 		}
 	}
+	generatedWorkflow := buildkitepipeline.Workflow{
+		ConcurrencyGate: concurrencyGate,
+		Jobs:            jobs,
+	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep:    compilerStep,
 		GroupLabel:      options.GroupLabel,
-		ConcurrencyGate: concurrencyGate,
-		Jobs:            jobs,
+		ConcurrencyGate: generatedWorkflow.ConcurrencyGate,
+		Jobs:            generatedWorkflow.Jobs,
 	})
 	if err != nil {
 		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", fmt.Errorf("emit Buildkite pipeline: %w", err))
 	}
 	bundle.Pipeline = pipeline
+	bundle.GeneratedWorkflow = generatedWorkflow
 	bundle.Processing.PipelineGenerated = true
 	return bundle, nil
 }
