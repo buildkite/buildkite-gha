@@ -41,7 +41,7 @@ does not make that code trusted or grant it authority.
 
 | Credential | Supported boundary |
 | --- | --- |
-| Repository checkout | The verified adapter checks the plan's event repository and exact commit. When Buildkite's Git helper is enabled, its backend authorizes the repository. The supported path does not persist the credential. |
+| Repository checkout | The verified adapter checks the plan's event repository and exact commit. For submodules, checked-in `.gitmodules` files may select same-account sibling repositories; Buildkite's backend authorizes each concrete GitHub repository and mints a repository-specific, read-only token. The helper is offered only to `github.com`, is scoped by HTTP path, and is not persisted. External HTTPS submodules are anonymous. |
 | `GITHUB_TOKEN` | One short-lived token is requested for the plan's event repository and compiler-resolved permissions. Buildkite independently requires the pipeline repository to match and may deny the request. The token is not initially ambient. |
 | Cache token | Fresh job-bound credentials are minted for each JavaScript or Docker action lifecycle when the cache service is configured. Ordinary shell steps do not receive them. |
 | Ordinary workflow secrets | Rejected by production admission. |
@@ -57,13 +57,25 @@ it as a shell command in that job. It can also export `GITHUB_TOKEN` to later
 steps through `GITHUB_ENV`. Log masking hides registered literal values; it is
 not access control and cannot detect every encoded or transformed value.
 
+Checkout's command-scoped environment and Git configuration reduce accidental
+credential spread; they do not isolate the helper or Agent identity from a
+hostile concurrent process under the same job identity. The runtime delegates
+submodule manifest and path safety to the installed Git executable. Use a
+vendor-supported Git distribution with current security patches, preferably
+pinned in an immutable job image. Protecting checkout credentials from hostile
+same-job code would require a separate UID, sandbox, or pre-job credential
+broker rather than more `.gitmodules` parsing. See the
+[`actions/checkout` compatibility boundary](compatibility.md#actionscheckout)
+for the exact transport, submodule, and credential matrix.
+
 ## Operator checklist
 
 1. Pin a released plugin version.
 2. Use an isolated queue with no ambient credentials.
 3. Treat public actions as third-party code; prefer immutable commit pins.
 4. Restrict repository credentials and write tokens with Buildkite policy.
-5. Validate the production profile before upload:
+5. Keep the queue's Git distribution current and patched.
+6. Validate the production profile before upload:
 
    ```sh
    buildkite-gha validate \
@@ -72,7 +84,7 @@ not access control and cannot detect every encoded or transformed value.
      .github/workflows/ci.yml
    ```
 
-6. Keep unsupported secrets, private actions, OIDC, and protected queues out of
+7. Keep unsupported secrets, private actions, OIDC, and protected queues out of
    imported workflows.
 
 For implementation detail, see the
