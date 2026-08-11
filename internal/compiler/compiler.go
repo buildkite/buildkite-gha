@@ -808,7 +808,11 @@ func canonicalWorkflowName(path string) string {
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
 	resolved, err := resolveReusableWorkflows(path, source, parsed)
 	if err != nil {
-		return expansionResult{jobs: parsedJobs(path, parsed)}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
+		for _, job := range parsed.Jobs {
+			notEvaluatedJobs[job.ID] = true
+		}
+		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	result := expansionResult{
 		jobs:             processingJobs(path, parsed, resolved),

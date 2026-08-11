@@ -654,6 +654,48 @@ jobs:
 	}
 }
 
+func TestProcessingReportFailsAllInstancesForJobScopedExpressionFailure(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "matrix-concurrency.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      max-parallel: 2
+      matrix:
+        target: [one, two]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ matrix.target }}
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	instances := 0
+	for _, job := range report.Jobs {
+		if job.ID == "test" && job.Instance != "" {
+			instances++
+			if job.Result != compatibility.Failed {
+				t.Fatalf("matrix instance = %#v, want failed", job)
+			}
+		}
+	}
+	if instances != 2 {
+		t.Fatalf("matrix instances = %d, want 2; jobs = %#v", instances, report.Jobs)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "test" || report.Diagnostics[0].Instance != "" {
+		t.Fatalf("diagnostics = %#v, want one job-scoped finding", report.Diagnostics)
+	}
+}
+
 func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	const sentinel = "raw-event-secret-8675309"
 	root := t.TempDir()
@@ -844,6 +886,47 @@ jobs:
 	}
 	if !logicalBad || !instanceBad {
 		t.Fatalf("callee job ledger = %#v", report.Jobs)
+	}
+}
+
+func TestProcessingReportFailsReusableCallerWhenResolutionFails(t *testing.T) {
+	root := t.TempDir()
+	workflowRoot := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowRoot, "caller.yml")
+	calleePath := filepath.Join(workflowRoot, "reusable.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	callee := []byte(`on:
+  workflow_call:
+    outputs:
+      published:
+        value: literal
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(calleePath, callee, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Jobs) != 1 || report.Jobs[0].ID != "delegated" || report.Jobs[0].Result != compatibility.Failed {
+		t.Fatalf("caller job ledger = %#v", report.Jobs)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
 

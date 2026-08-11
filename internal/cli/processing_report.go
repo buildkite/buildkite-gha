@@ -178,7 +178,10 @@ func markFailedJobs(report *compatibility.ProcessingReport) {
 			report.Jobs[i].Result = compatibility.Failed
 		}
 		for _, diagnostic := range report.Diagnostics {
-			if diagnostic.Level == "error" && diagnostic.Instance == report.Jobs[i].Instance && diagnostic.Instance != "" && diagnostic.Stage != stageResolution {
+			if diagnostic.Level != "error" || diagnostic.Stage == stageResolution || report.Jobs[i].Instance == "" {
+				continue
+			}
+			if diagnostic.Instance == report.Jobs[i].Instance || (diagnostic.Instance == "" && diagnostic.Job == report.Jobs[i].ID) {
 				report.Jobs[i].Result = compatibility.Failed
 			}
 		}
