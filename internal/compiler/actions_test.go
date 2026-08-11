@@ -279,6 +279,22 @@ runs:
 	}
 }
 
+func TestCompileActionInvocationsRejectsSecretAuthorityFromMetadataDefaults(t *testing.T) {
+	workspace := t.TempDir()
+	writeAction(t, workspace, "secrets", `name: secret default
+inputs:
+  token:
+    default: ${{ secrets.DEPLOY_KEY }}
+runs:
+  using: node24
+  main: index.js
+`)
+	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./secrets"}, []map[string]string{nil})
+	if err == nil || !strings.Contains(err.Error(), "action input defaults cannot grant secret authority") {
+		t.Fatalf("metadata secret default error = %v", err)
+	}
+}
+
 func TestCompileActionInvocationsAcceptsResolvedRemoteConditionalDefaults(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", `name: complex remote default

@@ -845,6 +845,10 @@ func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {
 	if err := os.WriteFile(name, []byte("replacement"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	expanded, err := downloadZIPExpandedSize(f, size, 1, transport.MaxResultArtifactSizeBytes)
+	if err != nil || expanded != int64(len("payload")) {
+		t.Fatalf("descriptor-pinned expanded size = %d, %v", expanded, err)
+	}
 	workspace := t.TempDir()
 	if err := extractDownloadZIPFile(context.Background(), f, size, workspace, ".", 1); err != nil {
 		t.Fatal(err)

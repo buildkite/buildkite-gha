@@ -917,6 +917,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
+			compileConditionErr := supportedCompileTimeConditions(jobPath, job, context, matrix)
 			instanceJob := resolveCompileTimeConditions(job, context, matrix)
 			conditionValidationJob := instanceJob
 			conditionContext := context
@@ -961,7 +962,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			result.candidates = append(result.candidates, candidate)
 
 			valid := true
-			if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
+			if compileConditionErr != nil {
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
+				valid = false
+			} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 				valid = false
 			}
@@ -1178,6 +1182,21 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 			return expression.ValidateConditionWithMatrix(source, scope, matrix)
 		}
 	}
+	return validateConditions(path, job, validate)
+}
+
+func supportedCompileTimeConditions(path string, job workflow.Job, context expression.CompileContext, matrix map[string]any) error {
+	validate := func(source string, scope expression.ConditionScope) error {
+		usesEvent, err := expression.ReferencesGitHubEvent(source)
+		if err != nil || !usesEvent {
+			return nil
+		}
+		return expression.ValidateCompileConditionWithMatrix(source, scope, context, matrix)
+	}
+	return validateConditions(path, job, validate)
+}
+
+func validateConditions(path string, job workflow.Job, validate func(string, expression.ConditionScope) error) error {
 	var diagnostics []error
 	if err := validate(job.If, expression.JobCondition); err != nil {
 		position := job.IfSpan.Start

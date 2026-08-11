@@ -192,7 +192,11 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
-		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+		kind := classifyRuntimeReference(root, path)
+		if kind == runtimeReferenceSecret {
+			return fmt.Errorf("action input defaults cannot grant secret authority")
+		}
+		if kind == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
@@ -564,6 +568,19 @@ func ValidateConditionWithMatrix(source string, scope ConditionScope, matrix map
 	return validateCondition(source, scope, matrix, true)
 }
 
+// ValidateCompileConditionWithMatrix verifies every branch of an event-backed
+// condition before compile-time evaluation can short-circuit it. It admits the
+// union of compile-time and runtime condition references, while retaining the
+// concrete matrix type checks used by runtime validation.
+func ValidateCompileConditionWithMatrix(source string, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return err
+	}
+	context.Matrix = matrix
+	return validateCompileConditionNode(node, scope, context, matrix)
+}
+
 func validateCondition(source string, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
 	node, empty, err := parseCondition(source)
 	if err != nil || empty {
@@ -640,6 +657,90 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 	default:
 		return fmt.Errorf("unsupported condition expression")
 	}
+}
+
+func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope, context CompileContext, matrix map[string]any) error {
+	switch node := node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(root, "github") && len(path) != 0 {
+			if strings.EqualFold(path[0], "event") {
+				return nil
+			}
+			switch strings.ToLower(path[0]) {
+			case "actor", "event_name", "ref", "repository", "repository_owner", "sha", "workflow":
+				if len(path) == 1 {
+					return nil
+				}
+			}
+		}
+		if strings.EqualFold(root, "matrix") && len(path) == 1 {
+			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
+				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
+			}
+		}
+		return validateConditionReference(root, path, scope)
+	case *actionlint.NotOpNode:
+		return validateCompileConditionNode(node.Operand, scope, context, matrix)
+	case *actionlint.LogicalOpNode:
+		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
+			return err
+		}
+		return validateCompileConditionNode(node.Right, scope, context, matrix)
+	case *actionlint.CompareOpNode:
+		if !node.Kind.IsEqualityOp() {
+			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
+		}
+		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
+			return err
+		}
+		if err := validateCompileConditionNode(node.Right, scope, context, matrix); err != nil {
+			return err
+		}
+		left := compileConditionOperandCategory(node.Left, context, matrix)
+		right := compileConditionOperandCategory(node.Right, context, matrix)
+		if left == "unsupported" || right == "unsupported" {
+			return fmt.Errorf("condition equality uses an unsupported matrix value type")
+		}
+		if left != "unknown" && right != "unknown" && left != right {
+			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
+		}
+		return nil
+	case *actionlint.FuncCallNode:
+		switch {
+		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
+			return nil
+		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1,
+			strings.EqualFold(node.Callee, "startsWith") && len(node.Args) == 2:
+			for _, argument := range node.Args {
+				if err := validateCompileConditionNode(argument, scope, context, matrix); err != nil {
+					return err
+				}
+			}
+			_, err := evaluateCompileNode(node, context)
+			return err
+		default:
+			return fmt.Errorf("condition function %q is unsupported", node.Callee)
+		}
+	default:
+		return fmt.Errorf("unsupported condition expression")
+	}
+}
+
+func compileConditionOperandCategory(node actionlint.ExprNode, context CompileContext, matrix map[string]any) string {
+	if value, err := evaluateCompileNode(node, context); err == nil {
+		return conditionValueCategory(value)
+	}
+	root, _, err := referencePath(node)
+	if err == nil && strings.EqualFold(root, "github") {
+		return "unknown"
+	}
+	return conditionOperandCategory(node, matrix)
 }
 
 func conditionOperandCategory(node actionlint.ExprNode, matrix map[string]any) string {

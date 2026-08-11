@@ -1612,6 +1612,59 @@ jobs:
 	}
 }
 
+func TestCompileValidatesEveryEventConditionBranchBeforeFolding(t *testing.T) {
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": {"pull_request": {"draft": false}}
+}`)
+	for _, test := range []struct {
+		name, workflow, want string
+	}{
+		{
+			name: "job unsupported function after false event operand",
+			workflow: `on: pull_request
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft && hashFiles('go.sum') != ''
+    steps:
+      - run: echo draft
+`,
+			want: `ci.yml:5:9: job "configure": job condition: condition function "hashFiles" is unsupported`,
+		},
+		{
+			name: "step matrix type after false event operand",
+			workflow: `on: pull_request
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: ["14"]
+    steps:
+      - if: github.event.pull_request.draft && matrix.version == 12
+        run: echo draft
+`,
+			want: `ci.yml:9:13: job "configure": step 1 condition: condition equality compares incompatible string and number operands`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report, err := ValidateEvent("ci.yml", []byte(test.workflow), event)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ValidateEvent() error = %v, want %q", err, test.want)
+			}
+			if report.LogicalJobs != 1 || report.Instances != 1 || len(report.Jobs) != 1 {
+				t.Fatalf("failed condition report = %#v", report)
+			}
+		})
+	}
+}
+
 func TestCompileRejectsExplicitReusableWorkflowSecretMappings(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push

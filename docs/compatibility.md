@@ -121,7 +121,7 @@ service.
 | Public GitHub repositories | Supported subset | Public event-repository checkout and public GitHub actions are supported within the source-authentication boundary above. GitHub Enterprise Server and non-GitHub repository providers are not current production sources. |
 | Private repositories | Supported subset | The event repository can be checked out when Buildkite supplies repository-provider Git credentials to the job and its backend authorizes the concrete repository URL. Alternate repositories, private actions, and private reusable workflows are not supported. |
 | `secrets.GITHUB_TOKEN` | Supported subset | A static reference can receive one short-lived token for the exact event repository when the job has non-empty effective permissions and the organization enables the job-bound token service. Omitted permissions use the product's narrow `contents: read` default. The runtime does not inject the token into the initial job environment; an action may explicitly export it through `GITHUB_ENV`, as on GitHub Runner. |
-| Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Reusable-workflow secret passing and environment secrets are also rejected. |
+| Other workflow secrets | Not admitted | The runtime has a plan-declared `BUILDKITE_GHA_SECRET_<NAME>` resolver boundary, but `hosted-tokenless` admission rejects its `secrets` capability. Action-metadata defaults cannot grant secret authority; reusable-workflow secret passing and environment secrets are also rejected. |
 | `github.token` and ambient `GITHUB_TOKEN` | Supported subset | `github.token` is populated only while evaluating an effective action metadata input default and uses the same scoped-token contract as `secrets.GITHUB_TOKEN`. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` remain unavailable. An action may explicitly export its input as `GITHUB_TOKEN` for later steps through `GITHUB_ENV`; an explicitly supplied action input, including an empty value, suppresses its metadata default. |
 | OIDC | Not supported | GitHub-compatible and migration OIDC flows, including `id-token`, are deferred. |
 | Windows and macOS | Not supported | Runner labels fail validation. Linux arm64 is also outside the current Linux x86-64 distribution/runtime contract. |
@@ -410,7 +410,9 @@ unavailable to workflow-authored expressions. The runtime does not inject an
 ambient `GITHUB_TOKEN`, but an action can explicitly export the token to later
 steps through `GITHUB_ENV`, matching GitHub Runner file-command behavior. Other
 secrets still use the existing explicit `BUILDKITE_GHA_SECRET_<NAME>` boundary
-and are not enabled by this feature.
+and are not enabled by this feature. In particular, a third-party action's
+metadata default cannot add a secret to the plan; such defaults fail
+compilation rather than becoming an authority source.
 
 This job-bound service does not independently establish fork or actor trust.
 Pipelines that permit workflow changes from untrusted sources must apply the

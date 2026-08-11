@@ -289,13 +289,6 @@ func (n *actionNode) inspectInvocation(supplied map[string]string) (actionRequir
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
-		secretNames, err := expression.SecretReferences(*input.Default)
-		if err != nil {
-			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
-		}
-		for _, secretName := range secretNames {
-			requirements.requiredSecrets[secretName] = true
-		}
 	}
 	if n.native {
 		return requirements, nil

@@ -167,7 +167,7 @@ func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArti
 	if err := verifyDownloadDigestFile(ctx, archive, artifact.Digest, artifact.Size); err != nil {
 		return 0, err
 	}
-	expanded, err := downloadZIPExpandedSize(archivePath, artifact.FileCount, expandedLimit)
+	expanded, err := downloadZIPExpandedSize(archive, artifact.Size, artifact.FileCount, expandedLimit)
 	if err != nil {
 		return 0, err
 	}
@@ -177,12 +177,11 @@ func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArti
 	return expanded, nil
 }
 
-func downloadZIPExpandedSize(filename string, expectedCount int, limit int64) (int64, error) {
-	z, err := zip.OpenReader(filename)
+func downloadZIPExpandedSize(reader io.ReaderAt, size int64, expectedCount int, limit int64) (int64, error) {
+	z, err := zip.NewReader(reader, size)
 	if err != nil {
 		return 0, fmt.Errorf("open artifact ZIP: %w", err)
 	}
-	defer func() { _ = z.Close() }()
 	if len(z.File) != expectedCount {
 		return 0, fmt.Errorf("artifact ZIP file count mismatch")
 	}
