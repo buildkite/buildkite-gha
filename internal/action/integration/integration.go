@@ -51,7 +51,17 @@ const (
 	UploadArtifactV5Commit = "330a01c490aca151604b8cf639adc76d48f6c5d4"
 	UploadArtifactV6Commit = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 	UploadArtifactV7Commit = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
-	DownloadArtifactCommit = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
+	// DownloadArtifact commits are the exact audited upstream releases whose
+	// exact-name ZIP mode is implemented by the native adapter. Other selection,
+	// raw-download, and digest-policy modes remain unsupported.
+	DownloadArtifactV4Commit   = "d3f86a106a0bac45b974a628896c90dbdf5c8093"
+	DownloadArtifactV5Commit   = "634f93cb2916e3fdff6788551b99b062d0335ce0"
+	DownloadArtifactV6Commit   = "018cc2cf5baa6db3ef3c5f8a56943fffe632ef53"
+	DownloadArtifactV7Commit   = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+	DownloadArtifactV8Commit   = "70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3"
+	DownloadArtifactV801Commit = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+	// DownloadArtifactCommit is retained as the original v4.3.0 spelling.
+	DownloadArtifactCommit = DownloadArtifactV4Commit
 	// CacheCommit is the only actions/cache implementation admitted to the
 	// Buildkite-backed cache-v2 service.
 	CacheCommit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
@@ -142,10 +152,24 @@ func ValidateUploadArtifactCommit(commit string) error {
 }
 
 func ValidateDownloadArtifactCommit(commit string) error {
-	if commit != DownloadArtifactCommit {
-		return fmt.Errorf("actions/download-artifact native adapter supports only commit %s, resolved %q; Phase 6 is required", DownloadArtifactCommit, commit)
+	for _, supported := range DownloadArtifactCommits() {
+		if commit == supported {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("actions/download-artifact native adapter does not support resolved commit %q; supported commits are %s; Phase 6 is required", commit, strings.Join(DownloadArtifactCommits(), ", "))
+}
+
+// DownloadArtifactCommits returns the complete immutable admission set.
+func DownloadArtifactCommits() []string {
+	return []string{
+		DownloadArtifactV4Commit,
+		DownloadArtifactV5Commit,
+		DownloadArtifactV6Commit,
+		DownloadArtifactV7Commit,
+		DownloadArtifactV8Commit,
+		DownloadArtifactV801Commit,
+	}
 }
 
 // ValidateCacheCommit rejects cache client and protocol drift from v6.1.0.
@@ -156,9 +180,28 @@ func ValidateCacheCommit(commit string) error {
 	return nil
 }
 
-// ValidateDownloadArtifactInputs implements only v4.3.0 exact-name mode.
-func ValidateDownloadArtifactInputs(inputs map[string]string) error {
+// ValidateDownloadArtifactInputs implements source-time admission for the
+// common exact-name ZIP subset. Exact names are validated after evaluation by
+// ValidateDownloadArtifactRuntimeInputs.
+func ValidateDownloadArtifactInputs(commit string, inputs map[string]string) error {
+	return validateDownloadArtifactInputs(commit, inputs, true)
+}
+
+// ValidateDownloadArtifactRuntimeInputs validates evaluated inputs at the
+// runtime boundary.
+func ValidateDownloadArtifactRuntimeInputs(commit string, inputs map[string]string) error {
+	return validateDownloadArtifactInputs(commit, inputs, false)
+}
+
+func validateDownloadArtifactInputs(commit string, inputs map[string]string, allowNameExpression bool) error {
+	if err := ValidateDownloadArtifactCommit(commit); err != nil {
+		return err
+	}
 	allowed := map[string]bool{"name": true, "path": true, "merge-multiple": true}
+	if commit == DownloadArtifactV8Commit || commit == DownloadArtifactV801Commit {
+		allowed["skip-decompress"] = true
+		allowed["digest-mismatch"] = true
+	}
 	seen := map[string]bool{}
 	for _, name := range sortedNames(inputs) {
 		lower := strings.ToLower(name)
@@ -171,18 +214,61 @@ func ValidateDownloadArtifactInputs(inputs map[string]string) error {
 		}
 	}
 	name, ok := inputFold(inputs, "name")
-	if !ok || strings.Contains(name, "${{") || ValidateUploadArtifactName(name) != nil {
+	name = strings.TrimSpace(name)
+	hasNameExpression := strings.Contains(name, "${{")
+	if !ok || name == "" || hasNameExpression && !allowNameExpression {
+		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
+	}
+	if !hasNameExpression && ValidateUploadArtifactName(name) != nil {
 		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
 	}
 	if value, ok := inputFold(inputs, "path"); ok {
-		if value == "" || strings.Contains(value, "${{") || len(value) > MaxUploadArtifactPathBytes || strings.Contains(value, "\\") || !filepath.IsLocal(value) || path.Clean(value) != value {
-			return fmt.Errorf("input %q must be a clean workspace-relative literal", "path")
+		if _, err := NormalizeDownloadArtifactPath(value); err != nil {
+			return err
 		}
 	}
-	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(value) {
+	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q may only be omitted or false; Phase 6 is required", "merge-multiple")
 	}
+	if value, ok := inputFold(inputs, "skip-decompress"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
+		return fmt.Errorf("input %q may only be omitted or false; raw downloads are unsupported", "skip-decompress")
+	}
+	if value, ok := inputFold(inputs, "digest-mismatch"); ok && strings.TrimSpace(value) != "error" {
+		return fmt.Errorf("input %q may only be omitted or error; digest mismatch is always fatal", "digest-mismatch")
+	}
 	return nil
+}
+
+// NormalizeDownloadArtifactPath accepts the safe relative spellings used by
+// upstream and returns their clean slash form. It intentionally normalizes
+// only leading ./ components and trailing slashes.
+func NormalizeDownloadArtifactPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." {
+		return ".", nil
+	}
+	if strings.Contains(value, "${{") || len(value) > MaxUploadArtifactPathBytes || strings.Contains(value, "\\") {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	normalized := value
+	for strings.HasPrefix(normalized, "./") {
+		normalized = strings.TrimPrefix(normalized, "./")
+	}
+	if strings.HasPrefix(normalized, "/") {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	if normalized == "" {
+		return ".", nil
+	}
+	if windowsDrivePath(normalized) || !filepath.IsLocal(normalized) || path.Clean(normalized) != normalized {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	return normalized, nil
+}
+
+func windowsDrivePath(value string) bool {
+	return len(value) >= 2 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':'
 }
 
 // ValidateUploadArtifactInputs validates the bounded adapter's static input

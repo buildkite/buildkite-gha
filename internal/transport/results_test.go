@@ -179,6 +179,28 @@ func TestLoadNeedsMapsLogicalFanInToVerifiedProducers(t *testing.T) {
 	}
 }
 
+func TestLoadNeedsRetainsOneConditionalMatrixArtifact(t *testing.T) {
+	first := ResultSource{StepKey: "gha-build-one", PlanDigest: Digest([]byte("one-plan"))}
+	second := ResultSource{StepKey: "gha-build-two", PlanDigest: Digest([]byte("two-plan"))}
+	firstManifest := resultManifest(testJobID, first.StepKey, first.PlanDigest, "success")
+	firstManifest.Artifacts = []ResultArtifact{resultArtifact("payload", "1", strings.Repeat("a", 64))}
+	runner := &resultRunner{
+		jobByStep: map[string]string{first.StepKey: testJobID, second.StepKey: testJobID2},
+		dataByPath: map[string][]byte{
+			ResultPath(first.StepKey, first.PlanDigest):   mustManifest(t, firstManifest),
+			ResultPath(second.StepKey, second.PlanDigest): mustManifest(t, resultManifest(testJobID2, second.StepKey, second.PlanDigest, "success")),
+		},
+	}
+	needs, err := LoadNeeds(context.Background(), Agent{Runner: runner}, t.TempDir(), testBuildID, map[string][]ResultSource{"build": {first, second}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need := needs["build"]
+	if need.Result != "success" || len(need.Producers) != 2 || len(need.Artifacts) != 1 || need.Artifacts[0].Artifact.Name != "payload" || need.Artifacts[0].Producer.StepKey != first.StepKey {
+		t.Fatalf("conditional matrix fan-in = %#v", need)
+	}
+}
+
 func TestAggregateResultTreatsMixedSuccessAndSkippedAsSuccess(t *testing.T) {
 	if got := aggregateResult("skipped", "success"); got != "success" {
 		t.Fatalf("aggregateResult() = %q, want success", got)
