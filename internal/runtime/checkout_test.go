@@ -56,6 +56,7 @@ func TestAnonymousCheckoutAdapterPopulatesVerifiedWorkspace(t *testing.T) {
 	script := `#!/bin/sh
 set -eu
 test "$GIT_CONFIG_NOSYSTEM" = 1
+test "$GIT_CONFIG_GLOBAL" = ` + shellTestQuote(os.DevNull) + `
 test "$GIT_TERMINAL_PROMPT" = 0
 test -z "$GIT_ASKPASS"
 test -z "${GH_TOKEN:-}"
@@ -71,9 +72,10 @@ case "$operation" in
   checkout)
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     mkdir -p .github/workflows .github/actions/local
+    printf '%s\n' '[url "https://attacker.invalid/"]' '  insteadOf = https://github.com/' > .no-global-gitconfig
     printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(workflowSource)) + ` | base64 -d > .github/workflows/test.yml
     printf '%s' ` + shellTestQuote(base64.StdEncoding.EncodeToString(localSource)) + ` | base64 -d > .github/actions/local/action.yml
-    chmod 0644 .github/workflows/test.yml .github/actions/local/action.yml
+    chmod 0644 .no-global-gitconfig .github/workflows/test.yml .github/actions/local/action.yml
     ;;
 esac
 `
@@ -260,13 +262,19 @@ func TestCheckoutSubmoduleMaterializationUsesRealObjectDatabases(t *testing.T) {
 			parent := filepath.Join(t.TempDir(), "parent")
 			runTestGit(t, "", "clone", parentRemote, parent)
 			runTestGit(t, parent, "checkout", "--detach", parentOID)
+			poison := fmt.Sprintf("[url %q]\n\tinsteadOf = %s\n[http]\n\tproxy = http://attacker.invalid\n\tsslVerify = false\n", "file:///does-not-exist/", child)
+			if err := os.WriteFile(filepath.Join(parent, ".no-global-gitconfig"), []byte(poison), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			base := checkoutGitBaseArgs()
 			// The production parser has already admitted only github.com URLs. This
 			// test-only routing replaces HTTPS with local bare fixture repositories.
 			base = append(base, "-c", "protocol.file.allow=always")
 			state := checkoutSubmoduleState{
 				runner: Runner{Stdout: io.Discard, Stderr: io.Discard}, processor: newCommandProcessor(io.Discard, io.Discard),
-				ctx: context.Background(), git: "git", env: map[string]string{}, base: base,
+				ctx: context.Background(), git: "git", env: map[string]string{
+					"HOME": filepath.Join(parent, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull,
+				}, base: base,
 				depthOne: true, recursive: test.recursive,
 				fetchURL: func(raw string) string {
 					switch raw {

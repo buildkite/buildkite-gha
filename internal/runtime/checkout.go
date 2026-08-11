@@ -108,7 +108,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	env := map[string]string{
 		"HOME":                   filepath.Join(workspace, ".no-home"),
 		"GIT_CONFIG_NOSYSTEM":    "1",
-		"GIT_CONFIG_GLOBAL":      filepath.Join(workspace, ".no-global-gitconfig"),
+		"GIT_CONFIG_GLOBAL":      os.DevNull,
 		"GIT_TERMINAL_PROMPT":    "0",
 		"GIT_ASKPASS":            "",
 		"SSH_ASKPASS":            "",
