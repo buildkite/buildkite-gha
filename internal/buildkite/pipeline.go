@@ -159,7 +159,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			}
 			usedDigests[job.PlanDigest] = job.Key
 		}
-		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != ""}
+		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != "", Aggregate: aggregate}
 		if workflow.ConcurrencyGate != nil {
 			gateNamespace := pipeline.CompilerStep
 			if aggregate {
@@ -194,13 +194,18 @@ type preparedWorkflow struct {
 	Workflow
 	Jobs                      []Job
 	Grouped                   bool
+	Aggregate                 bool
 	GateOpenKey, GateCloseKey string
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string, workflow preparedWorkflow) {
 	stepIndent := "  "
 	if workflow.Grouped {
-		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(workflow.GroupLabel))
+		groupLabel := workflow.GroupLabel
+		if workflow.Aggregate {
+			groupLabel = ":github: " + groupLabel
+		}
+		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(groupLabel))
 		if workflow.GroupKey != "" {
 			_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		}
@@ -212,12 +217,19 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string,
 			out.WriteString("      - github_check:\n")
 			_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
 		}
+		if workflow.Aggregate {
+			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		}
 		out.WriteString("    steps:\n")
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
 	if workflow.ConcurrencyGate != nil {
-		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
+		dependencies := []dependency{{Step: pipeline.CompilerStep}}
+		if workflow.Aggregate {
+			dependencies = nil
+		}
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, dependencies)
 	}
 	for _, job := range workflow.Jobs {
 		planPath, err := PlanPath(job.PlanDigest)
@@ -270,8 +282,12 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string,
 			_, _ = fmt.Fprintf(out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
 			_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
 		}
-		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
-		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
+		if !workflow.Aggregate {
+			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
+		} else if workflow.GateOpenKey != "" || len(job.Dependencies) != 0 {
+			_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
+		}
 		if workflow.GateOpenKey != "" {
 			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(workflow.GateOpenKey), attributeIndent)
 		}
@@ -281,7 +297,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string,
 	}
 	if workflow.ConcurrencyGate != nil {
 		dependencies := make([]dependency, 0, len(workflow.Jobs)+1)
-		dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
+		if !workflow.Aggregate {
+			dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
+		}
 		for _, job := range workflow.Jobs {
 			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
 		}
@@ -305,6 +323,9 @@ func emitConcurrencyGateStep(out *bytes.Buffer, stepIndent, attributeIndent, lab
 	_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 	_, _ = fmt.Fprintf(out, "%sconcurrency: 1\n", attributeIndent)
 	_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(gate.Group))
+	if len(dependencies) == 0 {
+		return
+	}
 	_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
 	for _, dependency := range dependencies {
 		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: %t\n", attributeIndent, yamlScalar(dependency.Step), attributeIndent, dependency.AllowFailure)

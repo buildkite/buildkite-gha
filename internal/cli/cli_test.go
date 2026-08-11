@@ -555,6 +555,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			Group     string `yaml:"group"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
 			Steps     []struct {
 				Key      string `yaml:"key"`
 				Command  string `yaml:"command"`
@@ -573,7 +574,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || !strings.Contains(pipeline.Steps[0].Condition, `build.source_event == "push"`) || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || !strings.Contains(pipeline.Steps[0].Condition, `build.source_event == "push"`) || pipeline.Steps[0].DependsOn != "phase-2-importer" || len(pipeline.Steps[0].Steps) != 3 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
 	wantLegacyKeys := map[string]bool{"gha-producer": true, "gha-consumer-5ebbc197d87b": true, "gha-consumer-91934b28b00f": true}
@@ -584,8 +585,13 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if step.Cache != nil {
 			t.Fatalf("shell-only step %q unexpectedly configures a runtime cache: %#v", step.Key, step.Cache)
 		}
-		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
-			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
+		if !step.Checkout.Skip || step.Agents != nil {
+			t.Fatalf("step %q lacks isolated checkout or default agent targeting: %#v", step.Key, step)
+		}
+		for _, dependency := range step.DependsOn {
+			if dependency.Step == "phase-2-importer" {
+				t.Fatalf("step %q retains importer dependency: %#v", step.Key, step.DependsOn)
+			}
 		}
 		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `--step 'phase-2-importer'`) ||
@@ -679,6 +685,7 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 			Group     string `yaml:"group"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
 					Name string `yaml:"name"`
@@ -703,7 +710,7 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 			t.Fatalf("unexpected aggregate group %d = %#v", i, group)
 		}
 		wantCheckName := "Buildkite / " + wantLabels[i]
-		if group.Group != wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || !strings.Contains(group.Condition, `build.source_event == "push"`) || !strings.Contains(group.Condition, `build.source == "ui"`) || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != wantCheckName {
+		if group.Group != ":github: "+wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || !strings.Contains(group.Condition, `build.source_event == "push"`) || !strings.Contains(group.Condition, `build.source == "ui"`) || group.DependsOn != "aggregate-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != wantCheckName {
 			t.Fatalf("aggregate group %d = %#v", i, group)
 		}
 		prefix := "gha-" + inputs[i].Identity + "-"
@@ -712,8 +719,8 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 				t.Fatalf("aggregate step key %q, prefix %q, seen %t", step.Key, prefix, seenKeys[step.Key])
 			}
 			seenKeys[step.Key] = true
-			for _, dependency := range step.DependsOn[1:] {
-				if !strings.HasPrefix(dependency.Step, prefix) {
+			for _, dependency := range step.DependsOn {
+				if dependency.Step == "aggregate-importer" || !strings.HasPrefix(dependency.Step, prefix) {
 					t.Fatalf("step %q has cross-workflow or unnamespaced dependency %q", step.Key, dependency.Step)
 				}
 			}
@@ -780,14 +787,16 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group  string `yaml:"group"`
-			Notify []struct {
+			Group     string `yaml:"group"`
+			DependsOn string `yaml:"depends_on"`
+			Notify    []struct {
 				GitHubCheck struct {
 					Name string `yaml:"name"`
 				} `yaml:"github_check"`
 			} `yaml:"notify"`
 			Steps []struct {
-				Notify any `yaml:"notify"`
+				Notify    any        `yaml:"notify"`
+				DependsOn *yaml.Node `yaml:"depends_on"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -797,20 +806,20 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	want := []struct {
 		group, checkName string
 	}{
-		{group: `Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
-		{group: `Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
-		{group: ".github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml"},
+		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
+		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks"`},
+		{group: ":github: .github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml"},
 	}
 	if len(pipeline.Steps) != len(want) {
 		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
 	}
 	for i, group := range pipeline.Steps {
-		if group.Group != want[i].group || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName {
+		if group.Group != want[i].group || group.DependsOn != "checks-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		for _, step := range group.Steps {
-			if step.Notify != nil {
-				t.Fatalf("aggregate group %d has job-level notification: %#v", i, step.Notify)
+			if step.Notify != nil || step.DependsOn != nil {
+				t.Fatalf("aggregate group %d child emitted notification or dependency: %#v / %#v", i, step.Notify, step.DependsOn)
 			}
 		}
 	}
@@ -869,8 +878,9 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group  string `yaml:"group"`
-			Notify []struct {
+			Group     string `yaml:"group"`
+			DependsOn string `yaml:"depends_on"`
+			Notify    []struct {
 				GitHubCheck struct {
 					Name string `yaml:"name"`
 				} `yaml:"github_check"`
@@ -884,7 +894,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "Caller" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Caller" || pipeline.Steps[0].DependsOn != "reusable-importer" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
 		t.Fatalf("aggregate reusable pipeline = %#v", pipeline)
 	}
 	compiledReusable := false
@@ -1192,6 +1202,7 @@ func TestRunUploadUsesWorkflowGroupInsteadOfContainingGroup(t *testing.T) {
 			Group     string `yaml:"group"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
 			Steps     []struct {
 				Key string `yaml:"key"`
 			} `yaml:"steps"`
@@ -1200,7 +1211,7 @@ func TestRunUploadUsesWorkflowGroupInsteadOfContainingGroup(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || pipeline.Steps[0].Condition == "" || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: buildkite-gha shell smoke" || pipeline.Steps[0].Key == "" || pipeline.Steps[0].Condition == "" || pipeline.Steps[0].DependsOn != "grouped-importer" || len(pipeline.Steps[0].Steps) != 3 {
 		t.Fatalf("grouped upload = %#v", pipeline.Steps)
 	}
 }
@@ -1352,7 +1363,8 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 
 	var pipeline struct {
 		Steps []struct {
-			Steps []struct {
+			DependsOn string `yaml:"depends_on"`
+			Steps     []struct {
 				Key       string `yaml:"key"`
 				Agents    any    `yaml:"agents"`
 				DependsOn []struct {
@@ -1365,15 +1377,15 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[3].stdin, &pipeline); err != nil {
 		t.Fatalf("uploaded pipeline YAML: %v", err)
 	}
-	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 2 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].DependsOn != "phase-3-upload-importer" || len(pipeline.Steps[0].Steps) != 2 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
 	steps := pipeline.Steps[0].Steps
-	if steps[0].Key != "gha-concurrent" || steps[0].Agents != nil || len(steps[0].DependsOn) != 1 || steps[0].DependsOn[0].Step != "phase-3-upload-importer" || steps[0].DependsOn[0].AllowFailure {
+	if steps[0].Key != "gha-concurrent" || steps[0].Agents != nil || len(steps[0].DependsOn) != 0 {
 		t.Fatalf("concurrent step = %#v", steps[0])
 	}
 	observer := steps[1]
-	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "phase-3-upload-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
+	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 1 || observer.DependsOn[0].Step != "gha-concurrent" || !observer.DependsOn[0].AllowFailure {
 		t.Fatalf("observer step = %#v", observer)
 	}
 }
