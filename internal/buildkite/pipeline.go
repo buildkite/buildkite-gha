@@ -39,6 +39,17 @@ type Pipeline struct {
 	RuntimeImage       string
 	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
+	Workflows          []Workflow
+}
+
+// Workflow is one independently conditioned workflow group in an aggregate
+// pipeline. GroupLabel and GroupKey are required for aggregate emission.
+type Workflow struct {
+	GroupLabel      string
+	GroupKey        string
+	Condition       string
+	ConcurrencyGate *ConcurrencyGate
+	Jobs            []Job
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -90,15 +101,73 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if !validStepKey(pipeline.CompilerStep) {
 		return nil, fmt.Errorf("invalid compiler step key %q", pipeline.CompilerStep)
 	}
-	if len(pipeline.Jobs) == 0 {
-		return nil, fmt.Errorf("pipeline requires at least one generated job")
+	aggregate := len(pipeline.Workflows) != 0
+	workflows := pipeline.Workflows
+	if aggregate {
+		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil {
+			return nil, fmt.Errorf("aggregate pipeline cannot mix legacy workflow fields")
+		}
+	} else {
+		workflows = []Workflow{{
+			GroupLabel:      pipeline.GroupLabel,
+			ConcurrencyGate: pipeline.ConcurrencyGate,
+			Jobs:            pipeline.Jobs,
+		}}
 	}
-	jobs, err := orderJobs(pipeline.CompilerStep, pipeline.Jobs)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateConcurrencyGate(pipeline.ConcurrencyGate); err != nil {
-		return nil, err
+
+	prepared := make([]preparedWorkflow, len(workflows))
+	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
+	usedDigests := make(map[string]string)
+	for i, workflow := range workflows {
+		if len(workflow.Jobs) == 0 {
+			return nil, fmt.Errorf("workflow %d requires at least one generated job", i+1)
+		}
+		if aggregate {
+			if workflow.GroupLabel == "" {
+				return nil, fmt.Errorf("workflow %d requires a group label", i+1)
+			}
+			if !validStepKey(workflow.GroupKey) {
+				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
+			}
+			if workflow.Condition == "" {
+				return nil, fmt.Errorf("workflow %q requires a trigger condition", workflow.GroupKey)
+			}
+			if owner, exists := usedKeys[workflow.GroupKey]; exists {
+				return nil, fmt.Errorf("workflow group key %q collides with %s", workflow.GroupKey, owner)
+			}
+			usedKeys[workflow.GroupKey] = "workflow group"
+		}
+		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateConcurrencyGate(workflow.ConcurrencyGate); err != nil {
+			return nil, err
+		}
+		for _, job := range jobs {
+			if owner, exists := usedKeys[job.Key]; exists {
+				return nil, fmt.Errorf("generated step key %q collides with %s", job.Key, owner)
+			}
+			usedKeys[job.Key] = "generated job"
+			if owner, exists := usedDigests[job.PlanDigest]; exists {
+				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
+			}
+			usedDigests[job.PlanDigest] = job.Key
+		}
+		prepared[i] = preparedWorkflow{Workflow: workflow, Jobs: jobs, Grouped: aggregate || workflow.GroupLabel != ""}
+		if workflow.ConcurrencyGate != nil {
+			gateNamespace := pipeline.CompilerStep
+			if aggregate {
+				gateNamespace += "\x00" + workflow.GroupKey
+			}
+			prepared[i].GateOpenKey, prepared[i].GateCloseKey = concurrencyGateKeys(gateNamespace, workflow.ConcurrencyGate.Group, jobs)
+			for _, gateKey := range []string{prepared[i].GateOpenKey, prepared[i].GateCloseKey} {
+				if owner, exists := usedKeys[gateKey]; exists {
+					return nil, fmt.Errorf("workflow concurrency key %q collides with %s", gateKey, owner)
+				}
+				usedKeys[gateKey] = "workflow concurrency gate"
+			}
+		}
 	}
 	if pipeline.RuntimeImage != "" && !runtimeImagePattern.MatchString(pipeline.RuntimeImage) {
 		return nil, fmt.Errorf("runtime image %q must be an immutable registry sha256 reference", pipeline.RuntimeImage)
@@ -107,29 +176,48 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
+	for _, workflow := range prepared {
+		emitWorkflow(&out, pipeline, distributionPath, workflow)
+	}
+	return out.Bytes(), nil
+}
+
+type preparedWorkflow struct {
+	Workflow
+	Jobs                      []Job
+	Grouped                   bool
+	GateOpenKey, GateCloseKey string
+}
+
+func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, distributionPath string, workflow preparedWorkflow) {
 	stepIndent := "  "
-	if pipeline.GroupLabel != "" {
-		_, _ = fmt.Fprintf(&out, "  - group: %s\n", yamlScalar(pipeline.GroupLabel))
+	if workflow.Grouped {
+		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(workflow.GroupLabel))
+		if workflow.GroupKey != "" {
+			_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
+		}
+		if workflow.Condition != "" {
+			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
+		}
 		out.WriteString("    steps:\n")
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
-	var gateOpenKey, gateCloseKey string
-	if pipeline.ConcurrencyGate != nil {
-		gateOpenKey, gateCloseKey = concurrencyGateKeys(pipeline.CompilerStep, pipeline.ConcurrencyGate.Group, jobs)
-		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Start workflow concurrency", gateOpenKey, pipeline.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
+	if workflow.ConcurrencyGate != nil {
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Start workflow concurrency", workflow.GateOpenKey, workflow.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
 	}
-	for _, job := range jobs {
+	for _, job := range workflow.Jobs {
 		planPath, err := PlanPath(job.PlanDigest)
 		if err != nil {
-			return nil, fmt.Errorf("job %q: %w", job.Key, err)
+			panic(fmt.Sprintf("validated job %q has invalid plan path: %v", job.Key, err))
 		}
-		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
-		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
+		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
+		_, _ = fmt.Fprintf(out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		if pipeline.RuntimeImage != "" {
-			_, _ = fmt.Fprintf(&out, "%simage: %s\n", attributeIndent, yamlScalar(pipeline.RuntimeImage))
+			_, _ = fmt.Fprintf(out, "%simage: %s\n", attributeIndent, yamlScalar(pipeline.RuntimeImage))
 		}
 		commands := []string{
 			"set -euo pipefail",
@@ -149,47 +237,46 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		}
 		commands = append(commands, runJob)
 		command := strings.Join(commands, "\n")
-		_, _ = fmt.Fprintf(&out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if job.Queue != "" {
-			_, _ = fmt.Fprintf(&out, "%sagents:\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
+			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
 		}
-		_, _ = fmt.Fprintf(&out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
+		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		if job.RequiresMise {
-			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
-			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
+			_, _ = fmt.Fprintf(out, "%scache:\n", attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
+			_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
 		}
-		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
+		_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
+		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
+		_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
 		if job.RequiresMise {
-			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
+			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
 		}
 		if job.Concurrency != 0 {
-			_, _ = fmt.Fprintf(&out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
-			_, _ = fmt.Fprintf(&out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
+			_, _ = fmt.Fprintf(out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
+			_, _ = fmt.Fprintf(out, "%sconcurrency_group: %s\n", attributeIndent, yamlScalar(job.ConcurrencyGroup))
 		}
-		_, _ = fmt.Fprintf(&out, "%sdepends_on:\n", attributeIndent)
-		_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
-		if gateOpenKey != "" {
-			_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(gateOpenKey), attributeIndent)
+		_, _ = fmt.Fprintf(out, "%sdepends_on:\n", attributeIndent)
+		_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(pipeline.CompilerStep), attributeIndent)
+		if workflow.GateOpenKey != "" {
+			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: false\n", attributeIndent, yamlScalar(workflow.GateOpenKey), attributeIndent)
 		}
 		for _, dependency := range job.Dependencies {
-			_, _ = fmt.Fprintf(&out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
+			_, _ = fmt.Fprintf(out, "%s  - step: %s\n%s    allow_failure: true\n", attributeIndent, yamlScalar(dependency), attributeIndent)
 		}
 	}
-	if pipeline.ConcurrencyGate != nil {
-		dependencies := make([]dependency, 0, len(jobs)+1)
+	if workflow.ConcurrencyGate != nil {
+		dependencies := make([]dependency, 0, len(workflow.Jobs)+1)
 		dependencies = append(dependencies, dependency{Step: pipeline.CompilerStep})
-		for _, job := range jobs {
+		for _, job := range workflow.Jobs {
 			dependencies = append(dependencies, dependency{Step: job.Key, AllowFailure: true})
 		}
-		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", gateCloseKey, pipeline.ConcurrencyGate, dependencies)
+		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
 	}
-	return out.Bytes(), nil
 }
 
 type dependency struct {
