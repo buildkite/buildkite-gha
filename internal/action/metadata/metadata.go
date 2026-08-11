@@ -37,6 +37,8 @@ type Input struct {
 	DeprecationMessage string  `yaml:"deprecationMessage"`
 	Required           bool    `yaml:"required"`
 	Default            *string `yaml:"default"`
+	// Type exists only for GitHub-runner compatibility; it adds no typed-input semantics.
+	Type string `yaml:"type"`
 }
 
 // Output declares one action output.

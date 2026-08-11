@@ -128,6 +128,18 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 		}
 	})
 
+	t.Run("runner-compatible input type", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "inputs:\n  no-cache:\n    description: Disable the cache\n    type: boolean\nruns:\n  using: node24\n  main: dist/index.js\n")
+		action, err := Load(root, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := action.Inputs["no-cache"].Type; got != "boolean" {
+			t.Fatalf("Load() input type = %q, want boolean", got)
+		}
+	})
+
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")
