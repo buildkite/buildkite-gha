@@ -2480,26 +2480,27 @@ func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
 		condition   string
 		failMain    bool
 		wantPost    bool
+		wantStatus  string
 		wantFailure bool
 	}{
-		{name: "success after success", condition: "success()", wantPost: true},
+		{name: "success after success", condition: "success()", wantPost: true, wantStatus: "success"},
 		{name: "success after failure", condition: "${{ success() }}", failMain: true, wantFailure: true},
-		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantFailure: true},
-		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantFailure: true},
+		{name: "failure after failure", condition: "failure()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
+		{name: "always after failure", condition: "always()", failMain: true, wantPost: true, wantStatus: "failure", wantFailure: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			workflowPath := ".github/workflows/test.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
-			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", "name: Conditional post\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: "+test.condition+"\n")
+			writeFixtureFile(t, workspace, ".github/actions/conditional/action.yml", "name: Conditional post\ninputs:\n  job_status:\n    default: ${{ job.status }}\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: "+test.condition+"\n")
 			writeFixtureFile(t, workspace, ".github/actions/conditional/main.js", "")
 			writeFixtureFile(t, workspace, ".github/actions/conditional/post.js", "")
 			fakeNode := filepath.Join(workspace, "node24")
 			writeFixtureFile(t, workspace, "node24", `#!/bin/sh
 set -eu
 if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
-if [ "${1##*/}" = post.js ]; then touch "$POST_MARKER"; fi
+if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 `)
 			if err := os.Chmod(fakeNode, 0o700); err != nil {
@@ -2516,6 +2517,12 @@ if [ "${1##*/}" = main.js ] && [ "${FAIL_MAIN:-false}" = true ]; then exit 9; fi
 			_, statErr := os.Stat(marker)
 			if gotPost := statErr == nil; gotPost != test.wantPost {
 				t.Fatalf("post ran = %v, want %v (stat error %v)", gotPost, test.wantPost, statErr)
+			}
+			if test.wantPost {
+				status, readErr := os.ReadFile(marker)
+				if readErr != nil || strings.TrimSpace(string(status)) != test.wantStatus {
+					t.Fatalf("post job.status = %q, %v, want %q", status, readErr, test.wantStatus)
+				}
 			}
 		})
 	}

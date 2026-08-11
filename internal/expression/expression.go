@@ -45,6 +45,7 @@ type Context struct {
 	Env          map[string]string
 	GitHub       map[string]any
 	Services     map[string]map[string]string
+	JobStatus    string
 }
 
 // StepStatus contains the values exposed for one completed step while
@@ -166,6 +167,16 @@ func ValidateRuntimeTemplate(template string) error {
 // ValidateActionInputDefault verifies the restricted compound expression
 // surface supported only while evaluating action metadata input defaults.
 func ValidateActionInputDefault(template string) error {
+	referencesJobStatus, err := ReferencesJobStatus(template)
+	if err != nil {
+		return err
+	}
+	if referencesJobStatus {
+		root, path, err := ReferencePath(template)
+		if err != nil || !isJobStatusReference(root, path) {
+			return fmt.Errorf("action input default job.status must be one direct expression")
+		}
+	}
 	return visitTemplateExpressions(template, validateActionInputDefaultNode)
 }
 
@@ -177,6 +188,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		root, path, err := referencePath(node)
 		if err != nil {
 			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+		}
+		if isJobStatusReference(root, path) {
+			return nil
 		}
 		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
@@ -351,6 +365,30 @@ func ReferencesGitHubToken(template string) (bool, error) {
 			found = true
 		})
 		return referenceErr
+	})
+	return found, err
+}
+
+// ReferencesJobStatus reports whether a template statically references
+// job.status.
+func ReferencesJobStatus(template string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+			if !entering || found {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, err := referencePath(node)
+			if err == nil && isJobStatusReference(root, path) {
+				found = true
+			}
+		})
+		return nil
 	})
 	return found, err
 }
@@ -1078,7 +1116,17 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	case *actionlint.StringNode:
 		return node.Value, nil
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return evaluateDirectRuntimeNode(node, context)
+		root, path, err := referencePath(node)
+		if err != nil {
+			return nil, err
+		}
+		if isJobStatusReference(root, path) {
+			if context.JobStatus == "" {
+				return nil, fmt.Errorf("expression references unavailable job.status")
+			}
+			return context.JobStatus, nil
+		}
+		return resolveRuntimeReference(root, path, context)
 	case *actionlint.LogicalOpNode:
 		left, err := evaluateActionInputDefaultNode(node.Left, context)
 		if err != nil {
@@ -1283,6 +1331,10 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	default:
 		return runtimeReferenceUnsupported
 	}
+}
+
+func isJobStatusReference(root string, path []string) bool {
+	return len(path) == 1 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "status")
 }
 
 func referenceName(root string, path []string) string {

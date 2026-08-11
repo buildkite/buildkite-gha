@@ -99,13 +99,14 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *testing.T) {
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
+		"${{ job.status }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 	} {
 		if err := ValidateActionInputDefault(template); err != nil {
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}"} {
+	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -140,6 +141,25 @@ func TestEvaluateActionInputDefaultSupportsConditionalValueExpressions(t *testin
 	}
 	if _, err := Evaluate(template, Context{}); err == nil {
 		t.Fatal("Evaluate() accepted action-default compound expression outside action metadata")
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
+	references, err := ReferencesJobStatus("${{ job.status }}")
+	if err != nil || !references {
+		t.Fatalf("ReferencesJobStatus() = %v, %v", references, err)
+	}
+	for _, status := range []string{"success", "failure", "cancelled"} {
+		got, err := EvaluateActionInputDefault("${{ job.status }}", Context{JobStatus: status})
+		if err != nil || got != status {
+			t.Errorf("EvaluateActionInputDefault(job.status = %q) = %q, %v", status, got, err)
+		}
+	}
+	if _, err := EvaluateActionInputDefault("${{ job.status }}", Context{}); err == nil {
+		t.Fatal("EvaluateActionInputDefault() accepted unavailable job.status")
+	}
+	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
+		t.Fatal("Evaluate() accepted action-default-only job.status")
 	}
 }
 

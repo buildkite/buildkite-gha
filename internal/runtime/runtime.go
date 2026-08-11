@@ -145,8 +145,9 @@ type JavaScriptAction struct {
 	Env    map[string]string
 	Cache  bool
 
-	nodeMajor int
-	reference string
+	nodeMajor       int
+	reference       string
+	jobStatusInputs []string
 }
 
 // DockerAction is an already-resolved local Docker action.

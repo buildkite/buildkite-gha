@@ -225,6 +225,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		NeedResults:  needResults(job.Needs),
 		Vars:         job.Vars,
 		GitHub:       githubContext(job),
+		JobStatus:    "success",
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
@@ -437,6 +438,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	preStatus := remotePreparationStatus{}
 	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
+			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			if step.Kind != "uses" {
 				continue
 			}
@@ -472,6 +474,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 	}
 	for stepIndex, step := range job.Steps {
+		eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 		if step.Kind == "cancel" {
 			for _, execution := range supervisor.cancel(step.Targets[0]) {
 				targetErr := commitStepExecution(execution, &jobResult, &eval, statuses)
@@ -565,6 +568,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		if !runPost {
 			continue
+		}
+		if len(post.action.jobStatusInputs) != 0 {
+			post.action.Inputs = cloneStrings(post.action.Inputs)
+			status := jobStatusValue(runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+			for _, name := range post.action.jobStatusInputs {
+				post.action.Inputs[name] = status
+			}
 		}
 		postResult := newResult()
 		postResult.Env = cloneStrings(jobResult.Env)
@@ -1029,6 +1039,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 
 func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
 	result := newResult()
+	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
 	source, err := actions.source(*step.Action)
 	if err != nil {
 		return result, err
@@ -1068,7 +1079,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		}
 		major, _ := actionNodeMajor(runtime)
 		explicit := r.explicitNode(major)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), nodeMajor: major, reference: step.Uses}
+		jobStatusInputs, err := actionJobStatusInputs(action, step.With)
+		if err != nil {
+			return result, err
+		}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1267,6 +1282,10 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	if err != nil {
 		return result, err
 	}
+	jobStatusInputs, err := actionJobStatusInputs(action, inputs)
+	if err != nil {
+		return result, err
+	}
 	inputs, err = resolveActionInputs(action, inputs, eval)
 	if err != nil {
 		return result, err
@@ -1291,7 +1310,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major, reference: step.Uses}
+		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1376,6 +1395,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 	compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
 	var runErr error
 	for i, step := range action.Runs.Steps {
+		eval.JobStatus = jobStatusValue(runErr != nil, ctx.Err() != nil)
 		// GITHUB_ENV effects are visible to subsequent children. Keep this
 		// composite's invocation environment in expression contexts, while
 		// rebuilding the map so a child's declared env cannot leak to siblings.
@@ -1520,6 +1540,34 @@ func resolveActionInputs(action metadata.Metadata, supplied map[string]string, c
 	return inputs, nil
 }
 
+func actionJobStatusInputs(action metadata.Metadata, supplied map[string]string) ([]string, error) {
+	var inputs []string
+	for _, name := range sortedKeys(action.Inputs) {
+		definition := action.Inputs[name]
+		if definition.Default == nil {
+			continue
+		}
+		suppliedInput := false
+		for candidate := range supplied {
+			if strings.EqualFold(candidate, name) {
+				suppliedInput = true
+				break
+			}
+		}
+		if suppliedInput {
+			continue
+		}
+		references, err := expression.ReferencesJobStatus(*definition.Default)
+		if err != nil {
+			return nil, fmt.Errorf("action input %q default: %w", name, err)
+		}
+		if references {
+			inputs = append(inputs, name)
+		}
+	}
+	return inputs, nil
+}
+
 func needOutputs(needs map[string]plan.Need) map[string]map[string]string {
 	outputs := make(map[string]map[string]string, len(needs))
 	for name, need := range needs {
@@ -1606,6 +1654,16 @@ func evaluateLifecycleCondition(value string, unsuccessful, cancelled bool) (boo
 	default:
 		return false, fmt.Errorf("condition %q is unsupported", value)
 	}
+}
+
+func jobStatusValue(unsuccessful, cancelled bool) string {
+	if cancelled {
+		return "cancelled"
+	}
+	if unsuccessful {
+		return "failure"
+	}
+	return "success"
 }
 
 func actionName(action metadata.Metadata, step plan.Step) string {

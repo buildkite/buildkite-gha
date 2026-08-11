@@ -1176,6 +1176,8 @@ func TestUploadAcceptsConditionalActionInputDefault(t *testing.T) {
 inputs:
   token:
     default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+  job-status:
+    default: ${{ job.status }}
 runs:
   using: node24
   main: main.js
