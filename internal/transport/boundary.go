@@ -96,11 +96,6 @@ func (b *boundedBuffer) Bytes() []byte {
 	return b.buffer.Bytes()
 }
 
-func (a Agent) UploadArtifact(ctx context.Context, path string) error {
-	_, err := a.run(ctx, []string{"artifact", "upload", path}, nil)
-	return err
-}
-
 // UploadArtifactFrom uploads a workspace-relative path rooted at root.
 func (a Agent) UploadArtifactFrom(ctx context.Context, root, path string) error {
 	nativePath := filepath.FromSlash(path)

@@ -40,7 +40,7 @@ type JobResult struct {
 const maxJobOutputBytes = 1024
 
 type registeredPost struct {
-	action     JavaScriptAction
+	action     javaScriptAction
 	state      map[string]string
 	node       string
 	condition  string
@@ -53,7 +53,7 @@ type postRegistry struct {
 }
 
 type preparedInvocation struct {
-	action         JavaScriptAction
+	action         javaScriptAction
 	state          map[string]string
 	node           string
 	postRegistered bool
@@ -124,8 +124,8 @@ func (r *postRegistry) snapshot() []registeredPost {
 	return append([]registeredPost(nil), r.posts...)
 }
 
-// VerifyWorkflow binds a plan to the workflow bytes in the supplied workspace.
-func VerifyWorkflow(job plan.Job, workspace string) error {
+// verifyWorkflow binds a plan to the workflow bytes in the supplied workspace.
+func verifyWorkflow(job plan.Job, workspace string) error {
 	path, err := workspacePath(workspace, job.Workflow.Path)
 	if err != nil {
 		return fmt.Errorf("verify workflow binding: %w", err)
@@ -1083,7 +1083,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if err != nil {
 			return result, err
 		}
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1251,7 +1251,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if !strings.HasPrefix(step.Uses, "./") {
 			return result, fmt.Errorf("remote action %q is unsupported in the supported runtime subset", step.Uses)
 		}
-		if err := VerifyWorkflow(job, workspace); err != nil {
+		if err := verifyWorkflow(job, workspace); err != nil {
 			return result, err
 		}
 		var err error
@@ -1313,7 +1313,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
-		javascript := JavaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1381,7 +1381,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 				invocationEnv[name] = value
 			}
 		}
-		result, err := r.runDocker(ctx, processor, DockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
@@ -1632,7 +1632,7 @@ func workspacePath(root, path string) (string, error) {
 	return resolved, nil
 }
 
-func postFor(action JavaScriptAction, state map[string]string, node, condition string) *registeredPost {
+func postFor(action javaScriptAction, state map[string]string, node, condition string) *registeredPost {
 	if action.Post == "" {
 		return nil
 	}
