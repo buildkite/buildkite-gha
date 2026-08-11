@@ -35,21 +35,23 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := actionintegration.ValidateDownloadArtifactInputs(commit, inputs); err != nil {
+	if err := actionintegration.ValidateDownloadArtifactRuntimeInputs(commit, inputs); err != nil {
 		return result, fmt.Errorf("bounded download-artifact adapter: %w", err)
 	}
 	values := map[string]string{}
 	for k, v := range inputs {
 		values[strings.ToLower(k)] = strings.TrimSpace(v)
 	}
-	name, destinationRelative := values["name"], "."
+	name := values["name"]
+	destinationSlash, err := actionintegration.NormalizeDownloadArtifactPath(values["path"])
+	if err != nil {
+		return result, fmt.Errorf("bounded download-artifact adapter: %w", err)
+	}
+	destinationRelative := filepath.FromSlash(destinationSlash)
 	for _, mask := range processor.maskValues() {
 		if mask != "" && strings.Contains(name, mask) {
 			return result, errors.New("artifact name contains a registered mask and cannot be downloaded")
 		}
-	}
-	if p := values["path"]; p != "" {
-		destinationRelative = filepath.FromSlash(p)
 	}
 	logicalWorkspace, err := filepath.Abs(workspace)
 	if err != nil {

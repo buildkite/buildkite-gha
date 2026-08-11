@@ -1020,6 +1020,71 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactCompilesConditionalProducerAndConsumerMatrixFanout(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifacts.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")
+	workflow := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        publish: [true, false]
+    steps:
+      - if: matrix.publish
+        uses: actions/upload-artifact@` + actionintegration.UploadArtifactCommit + `
+        with:
+          name: ${{ github.sha }}
+          path: payload
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [one, two]
+    steps:
+      - uses: actions/download-artifact@` + actionintegration.DownloadArtifactV7Commit + `
+        with:
+          name: ${{ github.sha }}
+          path: './'
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plans, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 4 {
+		t.Fatalf("plans = %d, want two producers and two consumers", len(plans))
+	}
+	for i, producer := range plans[:2] {
+		if producer.Workflow.LogicalJobID != "producer" || len(producer.Steps) != 1 || producer.Steps[0].Condition != "matrix.publish" || producer.Matrix["publish"] != (i == 0) {
+			t.Fatalf("producer %d = %#v", i, producer)
+		}
+	}
+	for i, consumer := range plans[2:] {
+		if consumer.Workflow.LogicalJobID != "consumer" || consumer.Matrix["shard"] != []string{"one", "two"}[i] || len(consumer.NeedSources["producer"]) != 2 {
+			t.Fatalf("consumer %d fan-in = %#v", i, consumer)
+		}
+		if len(consumer.Steps) != 1 || consumer.Steps[0].With["name"] != "${{ github.sha }}" || consumer.Steps[0].With["path"] != "./" || len(consumer.Actions) != 1 || consumer.Actions[0].Commit != actionintegration.DownloadArtifactV7Commit {
+			t.Fatalf("consumer %d download = %#v", i, consumer)
+		}
+	}
+}
+
 func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: artifact action\nruns:\n  using: node24\n  main: index.js\n")

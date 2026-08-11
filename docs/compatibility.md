@@ -516,7 +516,7 @@ bundled client.
 | `name` omitted or explicitly empty | Rejected. Upstream selects all artifacts; run-wide listing is outside the producer-bound bridge. |
 | `name: <exact value>` | Required. Leading/trailing whitespace is trimmed like `@actions/core`; the resulting UTF-8 name must satisfy the bounded upload name rules. Lookup is case-sensitive and must find exactly one artifact across all direct-needs manifests. Duplicate names, including matrix producers, are ambiguous and rejected. |
 | `path` omitted or explicitly empty | Workspace root, matching upstream fallback. The `download-path` output is its absolute logical path. |
-| `path: <value>` | Trimmed, clean, literal, workspace-relative slash path only. Absolute, drive, UNC, backslash, traversal, unclean, oversized, and expression-authored paths are rejected rather than reproducing upstream tilde/absolute-path expansion. |
+| `path: <value>` | Trimmed, literal, workspace-relative slash path only. A leading `./` and trailing slash are normalized (`./` means the workspace root and `./out/` means `out`). Absolute, drive, UNC, backslash, traversal, other unclean spellings, oversized values, and expression-authored paths are rejected rather than reproducing upstream tilde/absolute-path expansion. |
 | `merge-multiple` omitted | `false`, matching every admitted release. |
 | `merge-multiple: false` | Accepted with the toolkit's `false`, `False`, or `FALSE` spellings after trimming. Empty or true values are rejected. Since exactly one artifact is allowed, this is only explicit-default compatibility. |
 | `artifact-ids`, `pattern` | Rejected, including empty values. ID, pattern, one-result pattern/ID layout, all-artifact selection, and partial missing-ID behavior are not implemented. |
@@ -524,7 +524,7 @@ bundled client.
 | v8 `skip-decompress` omitted or `false` | ZIP extraction. Explicit false accepts the toolkit's three case spellings. `true` and empty are rejected; raw archive download and direct non-ZIP artifacts are unsupported. The input itself is rejected for v4–v7 because it is not in those releases' metadata. |
 | v8 `digest-mismatch` omitted or `error` | Digest mismatch is fatal. `ignore`, `info`, and `warn` are rejected. The input itself is rejected for v4–v7; their upstream warning-only mismatch behavior is deliberately tightened by the bridge. |
 | Any other or future input | Rejected. Input names that collide case-insensitively are also rejected. |
-| Expressions in supported inputs | Workflow-authored expressions are rejected by compiler admission. Runtime validation is repeated after evaluation as defense in depth, but it does not broaden the admitted source syntax. |
+| Expressions in supported inputs | `name` may contain workflow expressions and must evaluate at runtime to one valid exact artifact name; for example, `${{ github.sha }}` is supported. Expressions remain rejected in `path` and mode-selecting inputs. Runtime validation is repeated after evaluation and rejects unresolved or invalid names. |
 
 The only upstream output is `download-path`. The adapter sets it after a
 successful install, exposes it through normal step-output and environment-file
@@ -542,6 +542,16 @@ cancelled producers expose only a terminal manifest they actually published;
 a producer cancellation that prevents publication makes hydration fail rather
 than silently widening the search. Retrying one producer can make producer
 selection ambiguous, so retry the whole build.
+
+Matrix jobs do not broaden that boundary. Every downstream matrix instance
+that directly `needs` a producer matrix receives the verified manifests for
+that producer group. If only one producer conditionally publishes the requested
+exact name, every consumer may select it; if two producers publish that name,
+every consumer rejects the ambiguous match. This covers the download-side
+invocation used by
+[`mastodon/mastodon`'s pinned v7 consumers](https://github.com/mastodon/mastodon/blob/7d9b24bba24eb46a23a207882718feb61138fada/.github/workflows/test-ruby.yml),
+which use `${{ github.sha }}` and `path: './'`, without granting run-wide
+artifact visibility. That workflow's upload side remains outside this profile.
 
 Only ZIP artifacts published by the bounded native upload adapters are
 accepted. The consumer opens the manifest path without following a final

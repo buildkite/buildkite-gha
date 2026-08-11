@@ -687,3 +687,59 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 		t.Fatalf("unsupported runtime commit error = %v", err)
 	}
 }
+
+func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *testing.T) {
+	archive, size, digest := testDownloadZIP(t, "result.txt")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: download artifact\nruns:\n  using: node24\n  main: dist/main.js\n")
+	writeFixtureFile(t, remote, "dist/main.js", "throw new Error('adapter must not execute upstream JavaScript')\n")
+	sourceDigest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const eventSHA = "7d9b24bba24eb46a23a207882718feb61138fada"
+	artifact := plan.NeedArtifact{
+		Name: eventSHA, ID: "42", Path: "buildkite-gha/v1/artifacts/" + strings.Repeat("c", 64) + ".zip",
+		Digest: digest, Size: size, FileCount: 1,
+		Producer: plan.NeedProducer{BuildID: "11111111-1111-4111-8111-111111111111", JobID: "22222222-2222-4222-8222-222222222222", StepKey: "gha-producer-one"},
+	}
+	store := &downloadStore{archive: archive}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: sourceDigest}}
+	for _, shard := range []string{"one", "two"} {
+		t.Run(shard, func(t *testing.T) {
+			workspace := canonicalTempDir(t)
+			workflowPath := ".github/workflows/download.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: matrix download proof\n")
+			lockID := "a-0000000000000002"
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+				ID: "download", Kind: "uses", Uses: "actions/download-artifact@" + actionintegration.DownloadArtifactV7Commit,
+				With: map[string]string{"name": "${{ github.sha }}", "path": "./"}, Action: &plan.ActionSelector{Lock: lockID},
+			}})
+			job.Schema = plan.SchemaV3
+			job.RequiredCapabilities = []string{"network"}
+			job.Event.SHA = eventSHA
+			job.Matrix = map[string]any{"shard": shard}
+			job.Outputs = map[string]string{"download_path": "${{ steps.download.outputs.download-path }}"}
+			job.Actions = []plan.ActionLock{{
+				ID: lockID, Source: "github", Repository: "actions/download-artifact", RequestedRef: actionintegration.DownloadArtifactV7Commit,
+				Commit: actionintegration.DownloadArtifactV7Commit, SourceDigest: sourceDigest,
+			}}
+			job.Needs = map[string]plan.Need{"producer": {Result: "success", Artifacts: []plan.NeedArtifact{artifact}}}
+
+			result, err := (Runner{Actions: materializer, Artifacts: store}).RunJob(context.Background(), job, workspace)
+			wantPath, absErr := filepath.Abs(workspace)
+			if absErr != nil {
+				t.Fatal(absErr)
+			}
+			if err != nil || result.Conclusion != "success" || result.Outputs["download_path"] != wantPath || !filepath.IsAbs(result.Outputs["download_path"]) {
+				t.Fatalf("RunJob() result = %#v, error = %v, want download path %q", result, err, wantPath)
+			}
+			if got, err := os.ReadFile(filepath.Join(workspace, "result.txt")); err != nil || string(got) != "payload" {
+				t.Fatalf("workspace-root contents = %q, %v", got, err)
+			}
+		})
+	}
+	if materializer.calls != 2 || store.path != artifact.Path || store.jobID != artifact.Producer.JobID {
+		t.Fatalf("materializations/download = %d / %q / %q", materializer.calls, store.path, store.jobID)
+	}
+}

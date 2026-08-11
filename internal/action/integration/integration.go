@@ -180,9 +180,20 @@ func ValidateCacheCommit(commit string) error {
 	return nil
 }
 
-// ValidateDownloadArtifactInputs implements the common exact-name ZIP subset
-// for the audited commit. The runtime applies it again after evaluation.
+// ValidateDownloadArtifactInputs implements source-time admission for the
+// common exact-name ZIP subset. Exact names are validated after evaluation by
+// ValidateDownloadArtifactRuntimeInputs.
 func ValidateDownloadArtifactInputs(commit string, inputs map[string]string) error {
+	return validateDownloadArtifactInputs(commit, inputs, true)
+}
+
+// ValidateDownloadArtifactRuntimeInputs validates evaluated inputs at the
+// runtime boundary.
+func ValidateDownloadArtifactRuntimeInputs(commit string, inputs map[string]string) error {
+	return validateDownloadArtifactInputs(commit, inputs, false)
+}
+
+func validateDownloadArtifactInputs(commit string, inputs map[string]string, allowNameExpression bool) error {
 	if err := ValidateDownloadArtifactCommit(commit); err != nil {
 		return err
 	}
@@ -204,13 +215,16 @@ func ValidateDownloadArtifactInputs(commit string, inputs map[string]string) err
 	}
 	name, ok := inputFold(inputs, "name")
 	name = strings.TrimSpace(name)
-	if !ok || strings.Contains(name, "${{") || ValidateUploadArtifactName(name) != nil {
+	hasNameExpression := strings.Contains(name, "${{")
+	if !ok || name == "" || hasNameExpression && !allowNameExpression {
+		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
+	}
+	if !hasNameExpression && ValidateUploadArtifactName(name) != nil {
 		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
 	}
 	if value, ok := inputFold(inputs, "path"); ok {
-		value = strings.TrimSpace(value)
-		if value != "" && (strings.Contains(value, "${{") || len(value) > MaxUploadArtifactPathBytes || strings.Contains(value, "\\") || windowsDrivePath(value) || !filepath.IsLocal(value) || path.Clean(value) != value) {
-			return fmt.Errorf("input %q must be a clean workspace-relative literal", "path")
+		if _, err := NormalizeDownloadArtifactPath(value); err != nil {
+			return err
 		}
 	}
 	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
@@ -223,6 +237,34 @@ func ValidateDownloadArtifactInputs(commit string, inputs map[string]string) err
 		return fmt.Errorf("input %q may only be omitted or error; digest mismatch is always fatal", "digest-mismatch")
 	}
 	return nil
+}
+
+// NormalizeDownloadArtifactPath accepts the safe relative spellings used by
+// upstream and returns their clean slash form. It intentionally normalizes
+// only leading ./ components and trailing slashes.
+func NormalizeDownloadArtifactPath(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." {
+		return ".", nil
+	}
+	if strings.Contains(value, "${{") || len(value) > MaxUploadArtifactPathBytes || strings.Contains(value, "\\") {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	normalized := value
+	for strings.HasPrefix(normalized, "./") {
+		normalized = strings.TrimPrefix(normalized, "./")
+	}
+	if strings.HasPrefix(normalized, "/") {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	if normalized == "" {
+		return ".", nil
+	}
+	if windowsDrivePath(normalized) || !filepath.IsLocal(normalized) || path.Clean(normalized) != normalized {
+		return "", fmt.Errorf("input %q must be a safe workspace-relative literal", "path")
+	}
+	return normalized, nil
 }
 
 func windowsDrivePath(value string) bool {

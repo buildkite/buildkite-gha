@@ -42,11 +42,14 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 		t.Fatal("unrecognized commit accepted")
 	}
 	for _, commit := range DownloadArtifactCommits() {
-		for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": " payload ", "path": "", "merge-multiple": " False "}} {
+		for _, inputs := range []map[string]string{{"name": "payload"}, {"Name": " payload ", "path": "", "merge-multiple": " False "}, {"name": "${{ github.sha }}", "path": "./out/"}} {
 			if err := ValidateDownloadArtifactInputs(commit, inputs); err != nil {
 				t.Fatalf("commit %s valid inputs rejected: %v", commit, err)
 			}
 		}
+	}
+	if err := ValidateDownloadArtifactRuntimeInputs(DownloadArtifactV7Commit, map[string]string{"name": "${{ github.sha }}", "path": "./"}); err == nil {
+		t.Fatal("unevaluated runtime name accepted")
 	}
 	for _, commit := range []string{DownloadArtifactV8Commit, DownloadArtifactV801Commit} {
 		if err := ValidateDownloadArtifactInputs(commit, map[string]string{"name": "payload", "skip-decompress": "false", "digest-mismatch": "error"}); err != nil {
@@ -54,7 +57,7 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 		}
 	}
 	for name, inputs := range map[string]map[string]string{
-		"all": nil, "expression": {"name": "${{ x }}"}, "absolute": {"name": "x", "path": "/tmp"},
+		"all": nil, "absolute": {"name": "x", "path": "/tmp"},
 		"merge": {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
 		"duplicate": {"name": "x", "Name": "y"}, "token": {"name": "x", "github-token": ""},
 		"drive path": {"name": "x", "path": "C:/out"},
@@ -73,6 +76,24 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 		t.Run("v8 "+name, func(t *testing.T) {
 			if ValidateDownloadArtifactInputs(DownloadArtifactV801Commit, inputs) == nil {
 				t.Fatal("unsupported v8 mode accepted")
+			}
+		})
+	}
+}
+
+func TestNormalizeDownloadArtifactPath(t *testing.T) {
+	for input, want := range map[string]string{"": ".", ".": ".", "./": ".", "././": ".", "out": "out", "out/": "out", "./out/": "out", "././out/": "out", "./nested/out///": "nested/out"} {
+		t.Run("accept "+input, func(t *testing.T) {
+			got, err := NormalizeDownloadArtifactPath(input)
+			if err != nil || got != want {
+				t.Fatalf("NormalizeDownloadArtifactPath(%q) = %q, %v, want %q", input, got, err, want)
+			}
+		})
+	}
+	for _, input := range []string{"/", "//", "/tmp", "C:/out", "./C:/out", "././C:/out", `\\server\share`, "../out", "./../out", ".//", ".//out", `out\child`, "out/./child", "out//child", "${{ matrix.path }}"} {
+		t.Run("reject "+input, func(t *testing.T) {
+			if _, err := NormalizeDownloadArtifactPath(input); err == nil {
+				t.Fatalf("NormalizeDownloadArtifactPath(%q) succeeded", input)
 			}
 		})
 	}
