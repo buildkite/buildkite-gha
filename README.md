@@ -138,7 +138,7 @@ association. Buildkite environment values always define the exact top-level
 repository, SHA, and ref being executed. Every source remains untrusted; raw
 webhook data cannot grant protected capabilities and is not retained in plans
 or pipeline YAML. Stored webhook data has no delivery headers, and GitHub push
-payloads may omit `commits`. See [Event snapshots](docs/compatibility.md#event-snapshots)
+payloads may omit `commits`. See [Event snapshots](docs/cli.md#event-snapshots)
 for limits and failure behavior.
 
 As a quick screen, the plugin path is a good fit for workflows built from:
@@ -195,7 +195,7 @@ It is not currently a fit for workflows that require:
 - Windows or macOS jobs.
 
 The underlying runtime has broader container coverage than the production
-plugin currently exposes. See the [compatibility and CLI guide](docs/compatibility.md)
+plugin currently exposes. See the [compatibility reference](docs/compatibility.md)
 for the exact distinction and intentional behavior differences.
 
 ## Check before running
@@ -210,9 +210,25 @@ For example, a workflow with one producer and a two-entry consumer matrix
 reports:
 
 ```text
+Schema: buildkite-gha/processing-report/v1
 Workflow: .github/workflows/ci.yml
 Result: compilable
+Status: passed
+Logical jobs: 2
+Instances: 3
+Compile: compilable
+Admission: not-evaluated
 ✓ 2 logical jobs and 3 static instances compile
+- Workflow parsing: passed
+- Event validation: not-evaluated
+- Static graph construction: passed
+- Matrix expansion: passed
+- Expression validation: passed
+- Local and public action discovery: passed
+- Immutable action resolution: passed
+- Job-plan construction: not-evaluated
+- Hosted-profile admission: not-evaluated
+- Pipeline generation: not-evaluated
 ```
 
 To also resolve public actions and apply the same policy as the plugin's
@@ -230,6 +246,13 @@ the workflow or prove that arbitrary action code is independent of GitHub-only
 services. Condition preflight validates the supported syntax, functions,
 contexts, and statically known operand types, but cannot prove value-dependent
 runtime behavior. JSON output is available with `--format json`.
+
+Every report includes all ten processing stages with `passed`, `failed`, or
+`not-evaluated`, plus source-located job, matrix-instance, action, and
+diagnostic records. Independent errors are aggregated deterministically.
+`compile` writes the same report to standard error before writing compiler
+output; the Buildkite importer writes it to its job log before upload or exit.
+Any failed required stage suppresses every plan and pipeline artifact.
 
 ## What gets translated?
 
@@ -278,7 +301,8 @@ too.
 
 ## Documentation
 
-- [Compatibility, behavior differences, and direct CLI use](docs/compatibility.md)
+- [GitHub Actions compatibility and behavior differences](docs/compatibility.md)
+- [Direct CLI use](docs/cli.md)
 - [Development, smoke tests, and releases](docs/development.md)
 - [Active product and implementation plan](docs/plans/2026-07-22-buildkite-gha.md)
 - [Architecture decisions](docs/architecture/)

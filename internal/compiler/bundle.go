@@ -32,9 +32,10 @@ type PlanAuthorization struct {
 
 // Bundle is the complete deterministic output of static compilation.
 type Bundle struct {
-	IR       IR
-	Plans    []PlanArtifact
-	Pipeline []byte
+	IR         IR
+	Plans      []PlanArtifact
+	Pipeline   []byte
+	Processing ProcessingEvidence
 }
 
 // CompileBundle compiles an unattested event snapshot with the fail-closed
@@ -52,6 +53,16 @@ func CompileBundleWithOptions(path string, source, eventSource []byte, compilerV
 // CompileBundleContext produces a complete bundle and permits cancellation
 // while compilation resolves immutable public action source.
 func CompileBundleContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
+	bundle, err := CompileBundlePlansContext(ctx, path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
+	if err != nil {
+		return bundle, err
+	}
+	return GenerateBundlePipeline(bundle, compilerDistributionDigest, compilerStep, options)
+}
+
+// CompileBundlePlansContext constructs every immutable plan but deliberately
+// stops before pipeline generation so callers can apply admission policy.
+func CompileBundlePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) (Bundle, error) {
 	if compilerVersion == "" {
 		return Bundle{}, fmt.Errorf("compiler version is required")
 	}
@@ -60,37 +71,59 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 	}
 	ir, err := compile(path, source, eventSource, options)
 	if err != nil {
-		return Bundle{}, err
+		return Bundle{IR: ir}, err
 	}
-	plans, authorizations, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	options.ActionSource = newMemoizedActionSource(options.ActionSource)
+	evidence, err := validateActionResolutions(ctx, ir, options)
+	bundle := Bundle{IR: ir, Processing: evidence}
 	if err != nil {
-		return Bundle{}, err
+		return bundle, err
+	}
+	plans, authorizations, planEvaluations, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	bundle.Processing.Plans = planEvaluations
+	if err != nil {
+		return bundle, err
 	}
 	if len(plans) != len(ir.Jobs) || len(authorizations) != len(plans) {
-		return Bundle{}, fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs))
+		return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("compiler produced %d plans and %d authorizations for %d job instances", len(plans), len(authorizations), len(ir.Jobs)))
 	}
 
 	artifacts := make([]PlanArtifact, len(plans))
-	jobs := make([]buildkitepipeline.Job, len(plans))
 	for i, job := range plans {
 		if job.Target.StepKey != ir.Jobs[i].Key || job.Target.Queue != ir.Jobs[i].Queue {
-			return Bundle{}, fmt.Errorf("plan %d target %q/%q does not match job instance %q/%q", i, job.Target.StepKey, job.Target.Queue, ir.Jobs[i].Key, ir.Jobs[i].Queue)
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d target %q/%q does not match job instance %q/%q", i, job.Target.StepKey, job.Target.Queue, ir.Jobs[i].Key, ir.Jobs[i].Queue))
 		}
 		contents, err := plan.Encode(job)
 		if err != nil {
-			return Bundle{}, fmt.Errorf("encode plan for job %q: %w", job.Workflow.LogicalJobID, err)
+			return bundle, &ProcessingFinding{Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility", Job: job.Workflow.LogicalJobID, Instance: ir.Jobs[i].Key, Err: fmt.Errorf("encode plan for job %q: %w", job.Workflow.LogicalJobID, err)}
 		}
 		digest := transport.Digest(contents)
 		planPath, err := buildkitepipeline.PlanPath(digest)
 		if err != nil {
-			return Bundle{}, fmt.Errorf("locate plan for job %q: %w", job.Workflow.LogicalJobID, err)
+			return bundle, &ProcessingFinding{Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility", Job: job.Workflow.LogicalJobID, Instance: ir.Jobs[i].Key, Err: fmt.Errorf("locate plan for job %q: %w", job.Workflow.LogicalJobID, err)}
 		}
 		artifacts[i] = PlanArtifact{Job: job, Digest: digest, Path: planPath, Contents: contents, Authorization: authorizations[i]}
+	}
+	bundle.Plans = artifacts
+	bundle.Processing.PlansConstructed = true
+	return bundle, nil
+}
+
+// GenerateBundlePipeline emits pipeline bytes only after plan construction and
+// any caller-owned admission stage have succeeded.
+func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerStep string, options Options) (Bundle, error) {
+	ir, artifacts := bundle.IR, bundle.Plans
+	if len(artifacts) != len(ir.Jobs) {
+		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", fmt.Errorf("compiler has %d plans for %d job instances", len(artifacts), len(ir.Jobs)))
+	}
+	jobs := make([]buildkitepipeline.Job, len(artifacts))
+	for i, artifact := range artifacts {
+		job := artifact.Job
 		jobs[i] = buildkitepipeline.Job{
 			Key:          ir.Jobs[i].Key,
 			Label:        ir.Jobs[i].Label,
 			Queue:        ir.Jobs[i].Queue,
-			PlanDigest:   digest,
+			PlanDigest:   artifact.Digest,
 			Dependencies: append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise: job.NeedsMise(),
 		}
@@ -118,9 +151,11 @@ func CompileBundleContext(ctx context.Context, path string, source, eventSource 
 		Jobs:               jobs,
 	})
 	if err != nil {
-		return Bundle{}, fmt.Errorf("emit Buildkite pipeline: %w", err)
+		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", fmt.Errorf("emit Buildkite pipeline: %w", err))
 	}
-	return Bundle{IR: ir, Plans: artifacts, Pipeline: pipeline}, nil
+	bundle.Pipeline = pipeline
+	bundle.Processing.PipelineGenerated = true
+	return bundle, nil
 }
 
 func buildkiteConcurrencyGroup(repository Repository, group string) string {

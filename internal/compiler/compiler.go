@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -124,9 +125,70 @@ type NeedOutput struct {
 
 // Report summarizes successful workflow validation.
 type Report struct {
-	LogicalJobs int
-	Instances   int
-	Warnings    []Warning
+	LogicalJobs           int
+	Instances             int
+	Warnings              []Warning
+	Jobs                  []JobInstance
+	ParsedJobs            []ParsedJob
+	NotEvaluatedJobs      map[string]bool
+	NotEvaluatedInstances map[string]bool
+}
+
+// ParsedJob is the source identity retained before expansion succeeds.
+type ParsedJob struct {
+	ID     string
+	Path   string
+	Source workflow.Span
+}
+
+type expansionResult struct {
+	instances             []JobInstance
+	candidates            []JobInstance
+	jobs                  []ParsedJob
+	notEvaluatedJobs      map[string]bool
+	notEvaluatedInstances map[string]bool
+}
+
+func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
+	jobs := make([]ParsedJob, len(parsed.Jobs))
+	for i, job := range parsed.Jobs {
+		jobs[i] = ParsedJob{ID: job.ID, Path: path, Source: job.Span}
+	}
+	return jobs
+}
+
+func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJob) []ParsedJob {
+	jobs := parsedJobs(path, parsed)
+	seen := make(map[string]bool, len(jobs)+len(resolved))
+	for _, job := range jobs {
+		seen[job.ID] = true
+	}
+	for _, sourced := range resolved {
+		if seen[sourced.ID] {
+			continue
+		}
+		seen[sourced.ID] = true
+		jobs = append(jobs, ParsedJob{ID: sourced.ID, Path: sourced.path, Source: sourced.Span})
+	}
+	return jobs
+}
+
+// ParseWorkflow reports only event-independent workflow syntax and job
+// identities. Later stages deliberately remain unevaluated.
+func ParseWorkflow(path string, source []byte) (Report, error) {
+	parsed, err := workflow.Parse(path, source)
+	if err != nil {
+		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
+	}
+	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+}
+
+func expansionReport(expanded expansionResult, warnings []Warning) Report {
+	return Report{
+		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
+		Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: warnings,
+		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
+	}
 }
 
 // Validate parses and validates the supported static graph without requiring an
@@ -134,7 +196,7 @@ type Report struct {
 func Validate(path string, source []byte) (Report, error) {
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
-		return Report{}, err
+		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
 	options := defaultOptions()
 	event := Event{
@@ -144,14 +206,13 @@ func Validate(path string, source []byte) (Report, error) {
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
-	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
-		return Report{}, err
+	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	expanded, expandErr := expand(path, source, parsed, context, options)
+	if err := errors.Join(concurrencyErr, expandErr); err != nil {
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
 	}
-	instances, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return Report{}, err
-	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -162,27 +223,39 @@ func ValidateEvent(path string, source, eventSource []byte) (Report, error) {
 // ValidateEventWithOptions validates the graph against explicit variables and
 // runner policy without producing compiler output.
 func ValidateEventWithOptions(path string, source, eventSource []byte, options Options) (Report, error) {
+	var optionsErr error
 	if err := options.validate(); err != nil {
-		return Report{}, err
+		optionsErr = &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
 	}
-	parsed, err := workflow.Parse(path, source)
-	if err != nil {
-		return Report{}, err
-	}
-	event, err := parseEvent(eventSource)
-	if err != nil {
-		return Report{}, err
+	parsed, parseErr := workflow.Parse(path, source)
+	parseErr = processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", parseErr)
+	event, eventErr := parseEvent(eventSource)
+	eventErr = processingFinding(StageEventValidation, CodeEventInvalid, "environment", eventErr)
+	if parseErr != nil || eventErr != nil || optionsErr != nil {
+		if parsed == nil {
+			return Report{}, errors.Join(parseErr, eventErr, optionsErr)
+		}
+		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
+		for _, job := range parsed.Jobs {
+			notEvaluatedJobs[job.ID] = true
+		}
+		return Report{
+			LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed),
+			Warnings: compilerWarnings(parsed.Concurrency), NotEvaluatedJobs: notEvaluatedJobs,
+		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
-	if _, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil); err != nil {
-		return Report{}, err
+	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	expanded, expandErr := expand(path, source, parsed, context, options)
+	if err := errors.Join(concurrencyErr, expandErr); err != nil {
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
 	}
-	instances, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return Report{}, err
-	}
-	return Report{LogicalJobs: len(parsed.Jobs), Instances: len(instances), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -247,278 +320,316 @@ func CompilePlansContext(ctx context.Context, path string, source, eventSource [
 }
 
 func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
-	plans, _, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	plans, _, _, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
+	if err != nil {
+		return nil, err
+	}
 	return plans, err
 }
 
-func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, error) {
+func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {
-		return nil, nil, fmt.Errorf("encode event payload: %w", err)
+		return nil, nil, nil, fmt.Errorf("encode event payload: %w", err)
 	}
 	eventDigest := sha256.Sum256(payload)
 	plans := make([]plan.Job, 0, len(ir.Jobs))
 	authorizations := make([]PlanAuthorization, 0, len(ir.Jobs))
+	evaluations := make([]JobEvaluation, 0, len(ir.Jobs))
+	failedInstances := make(map[string]bool, len(ir.Jobs))
+	var diagnostics []error
 	planDigests := make(map[string]string, len(ir.Jobs))
 	actionSource := newMemoizedActionSource(options.ActionSource)
+instances:
 	for _, instance := range ir.Jobs {
-		steps := make([]plan.Step, len(instance.Steps))
-		var actionIndexes []int
-		var actionRefs []string
-		var actionInputs []map[string]string
-		usedIDs := make(map[string]struct{}, len(instance.Steps))
-		for _, step := range instance.Steps {
-			if step.ID != "" {
-				usedIDs[strings.ToLower(step.ID)] = struct{}{}
+		for _, dependency := range instance.Needs {
+			if failedInstances[dependency] {
+				failedInstances[instance.Key] = true
+				evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID})
+				continue instances
 			}
 		}
-		for i, step := range instance.Steps {
-			id := step.ID
-			if id == "" {
-				id = fmt.Sprintf("step-%d", i+1)
-				for suffix := 2; ; suffix++ {
-					if _, exists := usedIDs[strings.ToLower(id)]; !exists {
+		var builtJob plan.Job
+		var builtAuthorization PlanAuthorization
+		var encoded []byte
+		planErr := func() error {
+			steps := make([]plan.Step, len(instance.Steps))
+			var actionIndexes []int
+			var actionRefs []string
+			var actionInputs []map[string]string
+			usedIDs := make(map[string]struct{}, len(instance.Steps))
+			for _, step := range instance.Steps {
+				if step.ID != "" {
+					usedIDs[strings.ToLower(step.ID)] = struct{}{}
+				}
+			}
+			for i, step := range instance.Steps {
+				id := step.ID
+				if id == "" {
+					id = fmt.Sprintf("step-%d", i+1)
+					for suffix := 2; ; suffix++ {
+						if _, exists := usedIDs[strings.ToLower(id)]; !exists {
+							break
+						}
+						id = fmt.Sprintf("step-%d-%d", i+1, suffix)
+					}
+					usedIDs[strings.ToLower(id)] = struct{}{}
+				}
+				span := planSpan(step.Span)
+				steps[i] = plan.Step{
+					ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
+					Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
+					Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
+					ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
+				}
+				if step.Kind == "uses" {
+					actionIndexes = append(actionIndexes, i)
+					actionRefs = append(actionRefs, step.Uses)
+					actionInputs = append(actionInputs, step.With)
+				}
+			}
+			jobSchema := plan.Schema
+			var actions []plan.ActionLock
+			requiresMise := len(actionRefs) != 0
+			var capabilities []string
+			var authorization PlanAuthorization
+			lockActions := options.ResolveActions
+			if len(actionRefs) != 0 && !lockActions {
+				lockActions = true
+				for _, ref := range actionRefs {
+					if !strings.HasPrefix(ref, "./") {
+						lockActions = false
 						break
 					}
-					id = fmt.Sprintf("step-%d-%d", i+1, suffix)
-				}
-				usedIDs[strings.ToLower(id)] = struct{}{}
-			}
-			span := planSpan(step.Span)
-			steps[i] = plan.Step{
-				ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
-				Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
-				Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
-				ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
-			}
-			if step.Kind == "uses" {
-				actionIndexes = append(actionIndexes, i)
-				actionRefs = append(actionRefs, step.Uses)
-				actionInputs = append(actionInputs, step.With)
-			}
-		}
-		jobSchema := plan.Schema
-		var actions []plan.ActionLock
-		requiresMise := len(actionRefs) != 0
-		var capabilities []string
-		var authorization PlanAuthorization
-		lockActions := options.ResolveActions
-		if len(actionRefs) != 0 && !lockActions {
-			lockActions = true
-			for _, ref := range actionRefs {
-				if !strings.HasPrefix(ref, "./") {
-					lockActions = false
-					break
 				}
 			}
-		}
-		actionRequiresGitHubToken := false
-		if lockActions && len(actionRefs) != 0 {
-			compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, actionRefs, actionInputs)
+			actionRequiresGitHubToken := false
+			if lockActions && len(actionRefs) != 0 {
+				compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, actionRefs, actionInputs)
+				if err != nil {
+					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				}
+				selectors := compiledActions.selectors
+				locks := compiledActions.locks
+				actionCapabilities := compiledActions.capabilities
+				requiresMise = compiledActions.requiresMise
+				actionRequiresGitHubToken = compiledActions.requiresGitHubToken
+				locksByID := make(map[string]plan.ActionLock, len(locks))
+				for _, lock := range locks {
+					locksByID[lock.ID] = lock
+				}
+				for i, selector := range selectors {
+					stepIndex := actionIndexes[i]
+					steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
+					lock, ok := locksByID[selector.Lock]
+					if !ok {
+						return fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
+					}
+					descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+					if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
+						if err := actionintegration.ValidateCheckoutInputs(instance.Steps[stepIndex].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
+							span := instance.Steps[stepIndex].Span.Start
+							return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						}
+						capabilities = append(capabilities, "provider-token-read")
+						authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+					}
+					if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
+						if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+							span := instance.Steps[stepIndex].Span.Start
+							return fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						}
+					}
+					if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
+						if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
+							span := instance.Steps[stepIndex].Span.Start
+							return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+						}
+						if len(instance.NeedGroups) == 0 {
+							span := instance.Steps[stepIndex].Span.Start
+							return fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
+						}
+					}
+				}
+				jobSchema = plan.SchemaV7
+				actions = locks
+				capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
+				sort.Strings(capabilities)
+				capabilities = slices.Compact(capabilities)
+				sort.Strings(authorization.ProviderTokenReadCapabilitySources)
+				authorization.ProviderTokenReadCapabilitySources = slices.Compact(authorization.ProviderTokenReadCapabilitySources)
+				if slices.Contains(actionCapabilities, "docker") {
+					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "dockerfile-actions")
+				}
+			} else {
+				var err error
+				capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
+				if err != nil {
+					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				}
+			}
+			if instance.Container != nil || len(instance.Services) != 0 {
+				if len(actionRefs) != 0 && !lockActions {
+					return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
+				}
+				if jobSchema != plan.SchemaV7 {
+					jobSchema = plan.SchemaV4
+				}
+				capabilities = append(capabilities, "docker", "network")
+				sort.Strings(capabilities)
+				capabilities = slices.Compact(capabilities)
+				if instance.Container != nil {
+					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "job-containers")
+				}
+				if len(instance.Services) != 0 {
+					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "service-containers")
+				}
+				sort.Strings(authorization.DockerCapabilitySources)
+			}
+			needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
+			for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
+				dependencies := instance.NeedGroups[logicalNeed]
+				if len(dependencies) > plan.MaxNeedProducers {
+					return fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
+				}
+				for _, dependency := range dependencies {
+					digest, ok := planDigests[dependency]
+					if !ok {
+						return fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
+					}
+					needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
+				}
+			}
+			var needOutputs map[string][]plan.NeedOutput
+			if len(instance.NeedOutputs) != 0 {
+				needOutputs = make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
+				for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
+					outputs := instance.NeedOutputs[logicalNeed]
+					needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
+					for i, output := range outputs {
+						needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
+					}
+				}
+			}
+			if len(needOutputs) != 0 {
+				if jobSchema != plan.SchemaV7 {
+					jobSchema = plan.SchemaV5
+				}
+			}
+			secrets, err := requiredSecrets(instance)
 			if err != nil {
-				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
-			selectors := compiledActions.selectors
-			locks := compiledActions.locks
-			actionCapabilities := compiledActions.capabilities
-			requiresMise = compiledActions.requiresMise
-			actionRequiresGitHubToken = compiledActions.requiresGitHubToken
-			locksByID := make(map[string]plan.ActionLock, len(locks))
-			for _, lock := range locks {
-				locksByID[lock.ID] = lock
+			var githubToken *plan.GitHubToken
+			referencesGitHubTokenSecret := slices.Contains(secrets, "GITHUB_TOKEN")
+			if referencesGitHubTokenSecret {
+				secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
 			}
-			for i, selector := range selectors {
-				stepIndex := actionIndexes[i]
-				steps[stepIndex].Action = &plan.ActionSelector{Lock: selector.Lock}
-				lock, ok := locksByID[selector.Lock]
-				if !ok {
-					return nil, nil, fmt.Errorf("build plan for job %q: action lock %q is missing", instance.LogicalJobID, selector.Lock)
-				}
-				descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-				if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
-					if err := actionintegration.ValidateCheckoutInputs(instance.Steps[stepIndex].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
-						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
+			if referencesGitHubTokenSecret || actionRequiresGitHubToken {
+				if len(instance.Permissions) == 0 {
+					reference := "an action input default that references github.token"
+					if referencesGitHubTokenSecret {
+						reference = "secrets.GITHUB_TOKEN"
 					}
-					capabilities = append(capabilities, "provider-token-read")
-					authorization.ProviderTokenReadCapabilitySources = append(authorization.ProviderTokenReadCapabilitySources, "checkout-adapter")
+					return fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
 				}
-				if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
-					if err := actionintegration.ValidateUploadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
-						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded upload-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
-					}
+				permissions := make(map[string]string, len(instance.Permissions))
+				for name, access := range instance.Permissions {
+					permissions[strings.ReplaceAll(name, "-", "_")] = access
 				}
-				if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
-					if err := actionintegration.ValidateDownloadArtifactInputs(lock.Commit, instance.Steps[stepIndex].With); err != nil {
-						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter: %w", instance.SourcePath, span.Line, span.Column, err)
-					}
-					if len(instance.NeedGroups) == 0 {
-						span := instance.Steps[stepIndex].Span.Start
-						return nil, nil, fmt.Errorf("%s:%d:%d: bounded download-artifact adapter requires at least one direct needs producer", instance.SourcePath, span.Line, span.Column)
-					}
+				githubToken = &plan.GitHubToken{Permissions: permissions}
+				if jobSchema != plan.SchemaV7 {
+					jobSchema = plan.SchemaV6
 				}
+				capabilities = append(capabilities, "provider-token-write")
+				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 			}
-			jobSchema = plan.SchemaV7
-			actions = locks
-			capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
+			if instance.Queue == "" {
+				jobSchema = plan.SchemaV7
+			}
+			if len(secrets) != 0 {
+				capabilities = append(capabilities, "secrets")
+			}
 			sort.Strings(capabilities)
 			capabilities = slices.Compact(capabilities)
-			sort.Strings(authorization.ProviderTokenReadCapabilitySources)
-			authorization.ProviderTokenReadCapabilitySources = slices.Compact(authorization.ProviderTokenReadCapabilitySources)
-			if slices.Contains(actionCapabilities, "docker") {
-				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "dockerfile-actions")
+			job := plan.Job{
+				Schema: jobSchema,
+				Compiler: plan.Compiler{
+					Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
+				},
+				Workflow: plan.Workflow{
+					Path:         instance.SourcePath,
+					Digest:       instance.SourceDigest,
+					LogicalJobID: instance.LogicalJobID,
+				},
+				Event: plan.Event{
+					Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
+					Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
+					Ref:        ir.Event.Ref, SHA: ir.Event.SHA, Actor: ir.Event.Actor,
+				},
+				Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
+				RequiredCapabilities:    capabilities,
+				RequiredSecrets:         secrets,
+				GitHubToken:             githubToken,
+				Matrix:                  instance.Matrix,
+				Vars:                    cloneMap(ir.Vars),
+				Dependencies:            append([]string(nil), instance.Needs...),
+				NeedSources:             needSources,
+				NeedOutputs:             needOutputs,
+				Env:                     instance.Env,
+				Condition:               instance.If,
+				TimeoutMinutes:          instance.TimeoutMinutes,
+				DefaultShell:            instance.DefaultShell,
+				DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
+				Outputs:                 instance.Outputs,
+				Steps:                   steps,
+				Actions:                 actions,
 			}
-		} else {
-			var err error
-			capabilities, err = requiredCapabilities(instance.RepositoryRoot, instance.SourcePath, instance.Steps)
-			if err != nil {
-				return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
+			if jobSchema == plan.SchemaV7 {
+				job.RequiresMise = &requiresMise
 			}
-		}
-		if instance.Container != nil || len(instance.Services) != 0 {
-			if len(actionRefs) != 0 && !lockActions {
-				return nil, nil, fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
-			}
-			if jobSchema != plan.SchemaV7 {
-				jobSchema = plan.SchemaV4
-			}
-			capabilities = append(capabilities, "docker", "network")
-			sort.Strings(capabilities)
-			capabilities = slices.Compact(capabilities)
 			if instance.Container != nil {
-				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "job-containers")
+				job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
 			}
 			if len(instance.Services) != 0 {
-				authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "service-containers")
+				job.Services = make(map[string]plan.Container, len(instance.Services))
 			}
-			sort.Strings(authorization.DockerCapabilitySources)
-		}
-		needSources := make(map[string][]plan.NeedSource, len(instance.NeedGroups))
-		for _, logicalNeed := range sortedKeys(instance.NeedGroups) {
-			dependencies := instance.NeedGroups[logicalNeed]
-			if len(dependencies) > plan.MaxNeedProducers {
-				return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has %d producers, maximum is %d", instance.LogicalJobID, logicalNeed, len(dependencies), plan.MaxNeedProducers)
+			for _, service := range instance.Services {
+				job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
 			}
-			for _, dependency := range dependencies {
-				digest, ok := planDigests[dependency]
-				if !ok {
-					return nil, nil, fmt.Errorf("build plan for job %q: prerequisite %q has no earlier plan digest", instance.LogicalJobID, dependency)
-				}
-				needSources[logicalNeed] = append(needSources[logicalNeed], plan.NeedSource{StepKey: dependency, PlanDigest: digest})
+			if err := job.Validate(); err != nil {
+				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
-		}
-		var needOutputs map[string][]plan.NeedOutput
-		if len(instance.NeedOutputs) != 0 {
-			needOutputs = make(map[string][]plan.NeedOutput, len(instance.NeedOutputs))
-			for _, logicalNeed := range sortedKeys(instance.NeedOutputs) {
-				outputs := instance.NeedOutputs[logicalNeed]
-				needOutputs[logicalNeed] = make([]plan.NeedOutput, len(outputs))
-				for i, output := range outputs {
-					needOutputs[logicalNeed][i] = plan.NeedOutput{Name: output.Name, StepKey: output.StepKey, Output: output.Output}
-				}
+			encodedJob, err := plan.Encode(job)
+			if err != nil {
+				return fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
 			}
-		}
-		if len(needOutputs) != 0 {
-			if jobSchema != plan.SchemaV7 {
-				jobSchema = plan.SchemaV5
-			}
-		}
-		secrets, err := requiredSecrets(instance)
-		if err != nil {
-			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-		}
-		var githubToken *plan.GitHubToken
-		referencesGitHubTokenSecret := slices.Contains(secrets, "GITHUB_TOKEN")
-		if referencesGitHubTokenSecret {
-			secrets = slices.DeleteFunc(secrets, func(name string) bool { return name == "GITHUB_TOKEN" })
-		}
-		if referencesGitHubTokenSecret || actionRequiresGitHubToken {
-			if len(instance.Permissions) == 0 {
-				reference := "an action input default that references github.token"
-				if referencesGitHubTokenSecret {
-					reference = "secrets.GITHUB_TOKEN"
-				}
-				return nil, nil, fmt.Errorf("%s:%d:%d: job %q references %s but has no effective permissions", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID, reference)
-			}
-			permissions := make(map[string]string, len(instance.Permissions))
-			for name, access := range instance.Permissions {
-				permissions[strings.ReplaceAll(name, "-", "_")] = access
-			}
-			githubToken = &plan.GitHubToken{Permissions: permissions}
-			if jobSchema != plan.SchemaV7 {
-				jobSchema = plan.SchemaV6
-			}
-			capabilities = append(capabilities, "provider-token-write")
-			authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
-		}
-		if instance.Queue == "" {
-			jobSchema = plan.SchemaV7
-		}
-		if len(secrets) != 0 {
-			capabilities = append(capabilities, "secrets")
-		}
-		sort.Strings(capabilities)
-		capabilities = slices.Compact(capabilities)
-		job := plan.Job{
-			Schema: jobSchema,
-			Compiler: plan.Compiler{
-				Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
-			},
-			Workflow: plan.Workflow{
-				Path:         instance.SourcePath,
-				Digest:       instance.SourceDigest,
-				LogicalJobID: instance.LogicalJobID,
-			},
-			Event: plan.Event{
-				Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
-				Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
-				Ref:        ir.Event.Ref, SHA: ir.Event.SHA, Actor: ir.Event.Actor,
-			},
-			Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
-			RequiredCapabilities:    capabilities,
-			RequiredSecrets:         secrets,
-			GitHubToken:             githubToken,
-			Matrix:                  instance.Matrix,
-			Vars:                    cloneMap(ir.Vars),
-			Dependencies:            append([]string(nil), instance.Needs...),
-			NeedSources:             needSources,
-			NeedOutputs:             needOutputs,
-			Env:                     instance.Env,
-			Condition:               instance.If,
-			TimeoutMinutes:          instance.TimeoutMinutes,
-			DefaultShell:            instance.DefaultShell,
-			DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
-			Outputs:                 instance.Outputs,
-			Steps:                   steps,
-			Actions:                 actions,
-		}
-		if jobSchema == plan.SchemaV7 {
-			job.RequiresMise = &requiresMise
-		}
-		if instance.Container != nil {
-			job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
-		}
-		if len(instance.Services) != 0 {
-			job.Services = make(map[string]plan.Container, len(instance.Services))
-		}
-		for _, service := range instance.Services {
-			job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
-		}
-		if err := job.Validate(); err != nil {
-			return nil, nil, fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
-		}
-		encoded, err := plan.Encode(job)
-		if err != nil {
-			return nil, nil, fmt.Errorf("encode plan for job %q: %w", instance.LogicalJobID, err)
+			builtJob = job
+			builtAuthorization = authorization
+			encoded = encodedJob
+			return nil
+		}()
+		if planErr != nil {
+			failedInstances[instance.Key] = true
+			evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true})
+			diagnostics = append(diagnostics, planConstructionFinding(instance, planErr))
+			continue
 		}
 		digest := sha256.Sum256(encoded)
 		planDigests[instance.Key] = "sha256:" + hex.EncodeToString(digest[:])
-		plans = append(plans, job)
-		authorizations = append(authorizations, authorization)
+		plans = append(plans, builtJob)
+		authorizations = append(authorizations, builtAuthorization)
+		evaluations = append(evaluations, JobEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Evaluated: true, Passed: true})
 	}
-	return plans, authorizations, nil
+	return plans, authorizations, evaluations, errors.Join(diagnostics...)
+}
+
+func planConstructionFinding(instance JobInstance, err error) error {
+	return &ProcessingFinding{
+		Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility",
+		Path: instance.SourcePath, Line: instance.Source.Start.Line, Column: instance.Source.Start.Column,
+		Job: instance.LogicalJobID, Instance: instance.Key, Err: err,
+	}
 }
 
 func requiredSecrets(instance JobInstance) ([]string, error) {
@@ -576,29 +687,27 @@ func planSpan(span workflow.Span) plan.Span {
 
 func compile(path string, source, eventSource []byte, options Options) (IR, error) {
 	if err := options.validate(); err != nil {
-		return IR{}, err
+		return IR{}, &ProcessingFinding{
+			Code: CodeEnvironment, Category: "environment",
+			Message: "workflow-processing configuration is invalid", Err: err,
+		}
 	}
 	parsed, err := workflow.Parse(path, source)
 	if err != nil {
-		return IR{}, err
+		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
 	event, err := parseEvent(eventSource)
 	if err != nil {
-		return IR{}, err
+		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
 	}
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
 	context := compileContext(event, vars, path, parsed.Name)
-	workflowConcurrencyGroup, err := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
-	if err != nil {
-		return IR{}, err
-	}
-	jobs, err := expand(path, source, parsed, context, options)
-	if err != nil {
-		return IR{}, err
-	}
+	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
+	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	expanded, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
-	return IR{
+	ir := IR{
 		Schema:   schema,
 		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
 		Event:    event,
@@ -608,8 +717,9 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 			Supported: true,
 			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
 		},
-		Jobs: jobs,
-	}, nil
+		Jobs: expanded.instances,
+	}
+	return ir, errors.Join(concurrencyErr, expandErr)
 }
 
 func compilerWarnings(concurrency *workflow.Concurrency) []Warning {
@@ -695,20 +805,31 @@ func canonicalWorkflowName(path string) string {
 	return filepath.ToSlash(filepath.Clean(path))
 }
 
-func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) ([]JobInstance, error) {
+func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
 	resolved, err := resolveReusableWorkflows(path, source, parsed)
 	if err != nil {
-		return nil, err
+		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
+		for _, job := range parsed.Jobs {
+			notEvaluatedJobs[job.ID] = true
+		}
+		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+	}
+	result := expansionResult{
+		jobs:             processingJobs(path, parsed, resolved),
+		notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 	}
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
+	var diagnostics []error
+	failedJobs := make(map[string]bool, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
-			return nil, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))
+			diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", sourced.path, 0, 0, job.ID, "", "", 0, jobError(sourced.path, job, fmt.Sprintf("flattened job id %q collides with another job", job.ID))))
+			continue
 		}
 		jobs[job.ID] = job
 		sourcePaths[job.ID] = sourced.path
@@ -716,12 +837,36 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourceRoots[job.ID] = sourced.root
 		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
-			return nil, err
+			diagnostics = append(diagnostics, err)
+			failedJobs[job.ID] = true
 		}
 	}
 	order, err := topologicalOrder(path, jobs)
 	if err != nil {
-		return nil, err
+		diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err))
+		order = sortedKeys(jobs)
+	}
+
+	matricesByJob := make(map[string][]map[string]any, len(jobs))
+	failedMatrices := make(map[string]bool)
+	for _, id := range order {
+		job := jobs[id]
+		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
+		if matrixErr != nil {
+			line, column := job.Span.Start.Line, job.Span.Start.Column
+			if job.Matrix != nil {
+				line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
+			}
+			diagnostics = append(diagnostics, &ProcessingFinding{
+				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
+				Path: sourcePaths[id], Line: line, Column: column, Job: job.ID,
+				Message: "matrix could not be expanded or validated", Err: matrixErr,
+			})
+			failedMatrices[id] = true
+			failedJobs[id] = true
+			continue
+		}
+		matricesByJob[id] = matrices
 	}
 
 	byLogicalID := make(map[string][]JobInstance, len(jobs))
@@ -729,48 +874,39 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	for _, id := range order {
 		job := jobs[id]
 		jobPath := sourcePaths[id]
-		matrices, err := expandMatrix(jobPath, job, context)
-		if err != nil {
-			return nil, err
+		if failedMatrices[id] {
+			continue
 		}
+		jobBlocked := false
+		for _, binding := range needBindings[id] {
+			for _, member := range binding.members {
+				if failedJobs[member] {
+					jobBlocked = true
+				}
+			}
+		}
+		jobFailed := failedJobs[id]
+		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
-			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
-				return nil, err
-			}
-			labels, err := resolveRunsOn(job, context, matrix)
-			if err != nil {
-				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
-			}
-			queue, err := options.Runners.resolve(labels, options.EventTrust)
-			if err != nil {
-				return nil, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error())
-			}
-			concurrencyGroup, err := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
-			if err != nil {
-				return nil, err
-			}
-			if concurrencyGroup != "" {
-				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
-			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
-				return nil, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
+				jobFailed = true
+				continue
 			}
 			if existingJob, exists := instanceKeys[key]; exists {
-				return nil, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))))
+				jobFailed = true
+				continue
 			}
 			instanceKeys[key] = job.ID
-			instance := JobInstance{
+			candidate := JobInstance{
 				Key:                     key,
 				LogicalJobID:            job.ID,
-				Label:                   instanceLabel(job, matrix, context),
-				RunsOn:                  labels,
-				Queue:                   queue,
 				Matrix:                  matrix,
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
-				ConcurrencyGroup:        concurrencyGroup,
 				Steps:                   append([]workflow.Step(nil), job.Steps...),
 				Env:                     cloneMap(job.Env),
 				Permissions:             permissionScopes(job.Permissions),
@@ -786,6 +922,55 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				RepositoryRoot:          sourceRoots[id],
 				Source:                  job.Span,
 			}
+			result.candidates = append(result.candidates, candidate)
+
+			valid := true
+			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
+				valid = false
+			}
+			labels, runsOnErr := resolveRunsOn(job, context, matrix)
+			if runsOnErr != nil {
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
+				valid = false
+			}
+			queue := ""
+			if runsOnErr == nil {
+				queue, err = options.Runners.resolve(labels, options.EventTrust)
+				if err != nil {
+					finding := &ProcessingFinding{
+						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
+						Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
+						Job: job.ID, Instance: key, Message: "resolved runner target is not admitted by policy",
+						Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
+					}
+					diagnostics = append(diagnostics, finding)
+					valid = false
+				}
+			}
+			concurrencyGroup, concurrencyErr := resolveConcurrency(jobPath, job.ID, job.Concurrency, context, matrix)
+			if concurrencyErr != nil {
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
+				valid = false
+			}
+			if concurrencyGroup != "" {
+				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
+			}
+			if !valid {
+				jobFailed = true
+				continue
+			}
+			if jobBlocked {
+				result.notEvaluatedJobs[id] = true
+				result.notEvaluatedInstances[key] = true
+				continue
+			}
+			instance := candidate
+			instance.Label = instanceLabel(job, matrix, context)
+			instance.RunsOn = labels
+			instance.Queue = queue
+			instance.ConcurrencyGroup = concurrencyGroup
+			dependencyFailed := false
 			for _, need := range sortedKeys(needBindings[id]) {
 				binding := needBindings[id][need]
 				var members []string
@@ -796,7 +981,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				}
 				sort.Strings(members)
 				if len(members) == 0 {
-					return nil, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))
+					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))))
+					dependencyFailed = true
+					break
 				}
 				if instance.NeedGroups == nil {
 					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
@@ -811,10 +998,12 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					for _, output := range binding.outputs {
 						producers := byLogicalID[output.member]
 						if len(producers) == 0 {
-							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)
+							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q selects unexpanded job %q", output.path, output.span.Start.Line, output.span.Start.Column, output.name, output.member)))
+							continue
 						}
 						if len(projected)+len(producers) > plan.MaxNeedOutputs {
-							return nil, fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)
+							diagnostics = append(diagnostics, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", fmt.Errorf("%s:%d:%d: workflow_call output %q expands call projections beyond the maximum of %d", output.path, output.span.Start.Line, output.span.Start.Column, output.name, plan.MaxNeedOutputs)))
+							continue
 						}
 						for _, producer := range producers {
 							projected = append(projected, NeedOutput{Name: output.name, StepKey: producer.Key, Output: output.output})
@@ -832,21 +1021,28 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					instance.NeedOutputs[need] = projected
 				}
 			}
+			if dependencyFailed {
+				jobFailed = true
+				continue
+			}
 			sort.Strings(instance.Needs)
 			instance.Needs = slices.Compact(instance.Needs)
 			byLogicalID[id] = append(byLogicalID[id], instance)
 		}
 		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
 			position := job.Concurrency.Span.Start
-			return nil, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")
+			diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, "", "", 0, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")))
+			jobFailed = true
 		}
+		failedJobs[id] = jobFailed || jobBlocked
 	}
 
 	var instances []JobInstance
 	for _, id := range order {
 		instances = append(instances, byLogicalID[id]...)
 	}
-	return instances, nil
+	result.instances = instances
+	return result, errors.Join(diagnostics...)
 }
 
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {
@@ -884,20 +1080,17 @@ func permissionScopes(permissions *workflow.Permissions) map[string]string {
 
 func supported(path string, job workflow.Job) error {
 	if job.Reusable != nil {
-		return jobError(path, job, "internal error: unresolved reusable-workflow job")
+		return attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "internal error: unresolved reusable-workflow job"))
 	}
 	if len(job.RunsOn) == 0 && job.RunsOnExpr == nil {
-		return jobError(path, job, "runs-on must resolve statically")
-	}
-	if err := supportedConditions(path, job, nil, false); err != nil {
-		return err
+		return attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", path, 0, 0, job.ID, "", "", 0, jobError(path, job, "runs-on must resolve statically"))
 	}
 	ids := make(map[string]struct{}, len(job.Steps))
 	for _, step := range job.Steps {
 		if step.ID != "" {
 			id := strings.ToLower(step.ID)
 			if _, exists := ids[id]; exists {
-				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID))
+				return attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", path, step.Span.Start.Line, step.Span.Start.Column, job.ID, "", "", 0, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("duplicate step id %q", step.ID)))
 			}
 			ids[id] = struct{}{}
 		}
@@ -912,12 +1105,13 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 			return expression.ValidateConditionWithMatrix(source, scope, matrix)
 		}
 	}
+	var diagnostics []error
 	if err := validate(job.If, expression.JobCondition); err != nil {
 		position := job.IfSpan.Start
 		if position.Line == 0 {
 			position = job.Span.Start
 		}
-		return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err))
+		diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("job condition: %v", err)))
 	}
 	for i, step := range job.Steps {
 		if err := validate(step.If, expression.StepCondition); err != nil {
@@ -929,10 +1123,10 @@ func supportedConditions(path string, job workflow.Job, matrix map[string]any, m
 			if step.ID != "" {
 				label = fmt.Sprintf("step %q", step.ID)
 			}
-			return locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err))
+			diagnostics = append(diagnostics, locatedJobError(path, job, position.Line, position.Column, fmt.Sprintf("%s condition: %v", label, err)))
 		}
 	}
-	return nil
+	return errors.Join(diagnostics...)
 }
 
 func cloneMap(in map[string]string) map[string]string {

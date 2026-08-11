@@ -123,7 +123,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_COMPILE" {
+		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid {
 			t.Fatalf("report = %#v", report)
 		}
 
@@ -136,7 +136,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &profileReport); err != nil {
 			t.Fatal(err)
 		}
-		if profileReport.Result != "incompatible" || profileReport.Compile.Result != "incompatible" || profileReport.Admission.Result != "not-evaluated" || len(profileReport.Diagnostics) != 1 || profileReport.Diagnostics[0].Code != "E_COMPILE" {
+		if profileReport.Result != "incompatible" || profileReport.Compile.Result != "incompatible" || profileReport.Admission.Result != "not-evaluated" || len(profileReport.Diagnostics) != 1 || profileReport.Diagnostics[0].Code != compiler.CodeMatrixInvalid {
 			t.Fatalf("profile report = %#v", profileReport)
 		}
 	})
@@ -212,6 +212,754 @@ func TestRunValidateAndCompile(t *testing.T) {
 			t.Fatalf("compile IR = %#v, error = %v", ir, err)
 		}
 	})
+}
+
+func TestProcessingReportAggregatesIndependentErrorsAndRetainsPartialSuccess(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "incompatible.yml")
+	workflow := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        run: true
+  good:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./missing-action
+  bad-matrix:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - run: true
+  bad-condition:
+    runs-on: ubuntu-latest
+    steps:
+      - if: ${{ hashFiles('go.sum') }}
+        run: true
+  bad-runner:
+    runs-on: windows-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != compatibility.Failed || len(report.Stages) != 10 || len(report.Diagnostics) < 3 {
+		t.Fatalf("processing report = %#v", report)
+	}
+	stageResults := map[string]string{}
+	for _, stage := range report.Stages {
+		stageResults[stage.ID] = stage.Result
+	}
+	if stageResults[stageMatrix] != compatibility.Failed || stageResults[stageExpressions] != compatibility.Failed || stageResults[stageResolution] != compatibility.NotEvaluated {
+		t.Fatalf("stage results = %#v", stageResults)
+	}
+	foundGoodInstance := false
+	for _, job := range report.Jobs {
+		if job.ID == "good" && job.Instance != "" && job.Result == compatibility.Passed {
+			foundGoodInstance = true
+		}
+	}
+	if !foundGoodInstance || len(report.Actions) != 1 || report.Actions[0].Reference != "./missing-action" {
+		t.Fatalf("partial jobs/actions = %#v / %#v", report.Jobs, report.Actions)
+	}
+}
+
+func TestCompileReportsActionResolutionFailureWithoutPipeline(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "action.yml")
+	workflow := []byte("on: push\njobs:\n  first:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-one\n  second:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-two\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("compile emitted partial pipeline: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"Immutable action resolution: failed",
+		"Job-plan construction: not-evaluated",
+		"Pipeline generation: not-evaluated",
+		"[E_ACTION_RESOLUTION]",
+		"job first/gha-first: passed",
+		"job second/gha-second: passed",
+		"action ./missing-one (job gha-first, step 1): failed",
+		"action ./missing-two (job gha-second, step 1): failed",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestProcessingReportStageAttributionDoesNotDependOnWorkflowPath(t *testing.T) {
+	for _, name := range []string{"matrix.yml", "workflow.yml"} {
+		t.Run(name, func(t *testing.T) {
+			workflowPath := filepath.Join(t.TempDir(), name)
+			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps:\n      - run: true\n")
+			if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			results := map[string]string{}
+			for _, stage := range report.Stages {
+				results[stage.ID] = stage.Result
+			}
+			if results[stageMatrix] != compatibility.Passed || results[stageExpressions] != compatibility.Failed || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeExpressionInvalid {
+				t.Fatalf("report = %#v", report)
+			}
+		})
+	}
+}
+
+func TestCompileLeavesSkippedRemoteActionResolutionNotEvaluated(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "remote.yml")
+	workflow := []byte(`on: push
+permissions: {}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: owner/action@v1
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("compile emitted partial pipeline: %q", stdout.String())
+	}
+	for _, want := range []string{
+		"Immutable action resolution: not-evaluated",
+		"Job-plan construction: failed",
+		"action owner/action@v1 (job gha-test, step 1): not-evaluated",
+		"[E_PLAN_CONSTRUCTION]",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestHostedReportRetainsIndependentActionInvocationResultsThroughWrapper(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, ".github", "workflows", "actions.yml")
+	actionPath := filepath.Join(root, ".github", "actions", "dynamic")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte(`on: push
+jobs:
+  duplicate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/dynamic
+        with:
+          value: supplied
+      - uses: ./.github/actions/dynamic
+  missing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/missing-one
+      - uses: ./.github/actions/missing-two
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	action := []byte(`name: dynamic
+inputs:
+  value:
+    default: ${{ github[env.NAME] }}
+runs:
+  using: node24
+  main: main.js
+`)
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), action, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "main.js"), []byte("console.log('unused')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
+	if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 3 {
+		t.Fatalf("diagnostics = %#v, want three independent action failures", report.Diagnostics)
+	}
+	wantResults := map[int]string{1: compatibility.Passed, 2: compatibility.Failed}
+	missingFailures := 0
+	for _, result := range report.Actions {
+		switch result.Job {
+		case "gha-duplicate":
+			if result.Result != wantResults[result.Step] {
+				t.Fatalf("duplicate action result = %#v", result)
+			}
+		case "gha-missing":
+			if result.Result == compatibility.Failed {
+				missingFailures++
+			}
+		}
+	}
+	if missingFailures != 2 {
+		t.Fatalf("actions = %#v, want both missing invocations failed", report.Actions)
+	}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Code != compiler.CodeActionResolution || diagnostic.Message != "action could not be resolved or validated" {
+			t.Fatalf("diagnostic lacks invocation identity: %#v", diagnostic)
+		}
+	}
+}
+
+func TestValidateReportsIndependentWorkflowAndEventSyntaxFailures(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "invalid.yml")
+	eventPath := filepath.Join(root, "event.json")
+	if err := os.WriteFile(workflowPath, []byte("jobs: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, []byte("{\"provider\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	results := map[string]string{}
+	for _, stage := range report.Stages {
+		results[stage.ID] = stage.Result
+	}
+	if results[stageWorkflowParsing] != compatibility.Failed || results[stageEventValidation] != compatibility.Failed || results[stageGraph] != compatibility.NotEvaluated {
+		t.Fatalf("stage results = %#v", results)
+	}
+	if len(report.Diagnostics) != 2 || report.Diagnostics[0].Category != "syntax" || report.Diagnostics[1].Category != "environment" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	validEventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	if code := Run([]string{"validate", "--format", "json", "--event-path", validEventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() with valid event code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	results = map[string]string{}
+	for _, stage := range report.Stages {
+		results[stage.ID] = stage.Result
+	}
+	if results[stageWorkflowParsing] != compatibility.Failed || results[stageEventValidation] != compatibility.Passed || results[stageGraph] != compatibility.NotEvaluated {
+		t.Fatalf("stage results with valid event = %#v", results)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Category != "syntax" {
+		t.Fatalf("diagnostics with valid event = %#v", report.Diagnostics)
+	}
+}
+
+func TestCommandsEmitVersionedReportWhenEventInputCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "workflow.yml")
+	missingEventPath := filepath.Join(root, "missing-event.json")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.runner }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("validate JSON", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--format", "json", "--event-path", missingEventPath, workflowPath}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		stages := map[string]string{}
+		for _, stage := range report.Stages {
+			stages[stage.ID] = stage.Result
+		}
+		if report.Schema != compatibility.ProcessingSchema || report.Result != "indeterminate" || report.Status != compatibility.Failed || stages[stageWorkflowParsing] != compatibility.Passed || stages[stageEventValidation] != compatibility.NotEvaluated || stages[stageExpressions] != compatibility.NotEvaluated || report.Instances != 0 || len(report.Jobs) != 1 || report.Jobs[0].Result != compatibility.NotEvaluated || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_ENVIRONMENT" || report.Diagnostics[0].Stage != "" {
+			t.Fatalf("report = %#v", report)
+		}
+	})
+
+	t.Run("compile text", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		args := []string{"compile", "--event-path", missingEventPath, workflowPath}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		for _, want := range []string{"Schema: " + compatibility.ProcessingSchema, "Event validation: not-evaluated", "[E_ENVIRONMENT] event input could not be read"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+			}
+		}
+	})
+}
+
+func TestProcessingReportLeavesDependentsOfFailedMatrixNotEvaluated(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "failed-prerequisite.yml")
+	workflow := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        run: true
+  upstream:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - run: true
+  downstream:
+    needs: upstream
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	stages := map[string]string{}
+	for _, stage := range report.Stages {
+		stages[stage.ID] = stage.Result
+	}
+	if stages[stageGraph] != compatibility.Passed || stages[stageMatrix] != compatibility.Failed {
+		t.Fatalf("stages = %#v", stages)
+	}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == compiler.CodeGraphInvalid || diagnostic.Job == "downstream" {
+			t.Fatalf("cascading graph diagnostic = %#v", diagnostic)
+		}
+	}
+	logical, instance := "", ""
+	for _, job := range report.Jobs {
+		if job.ID != "downstream" {
+			continue
+		}
+		if job.Instance == "" {
+			logical = job.Result
+		} else {
+			instance = job.Result
+		}
+	}
+	if logical != compatibility.NotEvaluated || instance != compatibility.NotEvaluated {
+		t.Fatalf("downstream results = logical %q, instance %q; jobs = %#v", logical, instance, report.Jobs)
+	}
+}
+
+func TestProcessingReportRetainsEveryExpandedMatrixCandidate(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "matrix.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	instances := map[string]string{}
+	for _, job := range report.Jobs {
+		if job.Instance != "" {
+			instances[job.Instance] = job.Result
+		}
+	}
+	if report.Instances != 2 || len(instances) != 2 {
+		t.Fatalf("instances = %d / %#v, want both matrix candidates", report.Instances, instances)
+	}
+	failedInstance := ""
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == compiler.CodeExpressionInvalid {
+			failedInstance = diagnostic.Instance
+		}
+	}
+	if failedInstance == "" || instances[failedInstance] != compatibility.Failed {
+		t.Fatalf("diagnostics/jobs = %#v / %#v", report.Diagnostics, report.Jobs)
+	}
+	passed := 0
+	for _, result := range instances {
+		if result == compatibility.Passed {
+			passed++
+		}
+	}
+	if passed != 1 {
+		t.Fatalf("instances = %#v, want one passed and one failed", instances)
+	}
+}
+
+func TestProcessingReportFailsAllInstancesForJobScopedExpressionFailure(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "matrix-concurrency.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      max-parallel: 2
+      matrix:
+        target: [one, two]
+    runs-on: ubuntu-latest
+    concurrency: deploy-${{ matrix.target }}
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	instances := 0
+	for _, job := range report.Jobs {
+		if job.ID == "test" && job.Instance != "" {
+			instances++
+			if job.Result != compatibility.Failed {
+				t.Fatalf("matrix instance = %#v, want failed", job)
+			}
+		}
+	}
+	if instances != 2 {
+		t.Fatalf("matrix instances = %d, want 2; jobs = %#v", instances, report.Jobs)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "test" || report.Diagnostics[0].Instance != "" {
+		t.Fatalf("diagnostics = %#v, want one job-scoped finding", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
+	const sentinel = "raw-event-secret-8675309"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "event-runner.yml")
+	eventPath := filepath.Join(root, "event.json")
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.runner }}\n    steps:\n      - run: true\n")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"runner":"` + sentinel + `"}}`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event payload value: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportRedactsEventDerivedMatrixKeys(t *testing.T) {
+	const sentinel = "EVENT_SECRET_KEY_8675309"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "event-matrix.yml")
+	eventPath := filepath.Join(root, "event.json")
+	workflow := []byte("on: push\njobs:\n  test:\n    strategy:\n      matrix: ${{ github.event.matrix }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	event := []byte(`{"provider":"github","event":"push","repository":{"owner":"owner","name":"repo"},"ref":"refs/heads/main","sha":"1111111111111111111111111111111111111111","actor":"actor","payload":{"matrix":{"` + sentinel + `":"invalid"}}}`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventPath, event, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("report leaked event payload key: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeMatrixInvalid || report.Diagnostics[0].Message != "matrix could not be expanded or validated" {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestCompileAggregatesIndependentPlanFailuresWithoutPipeline(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "plans.yml")
+	workflow := []byte(`on: push
+permissions: {}
+jobs:
+  first:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+  second:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+  dependent:
+    needs: first
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"compile", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("compile emitted partial pipeline: %q", stdout.String())
+	}
+	if got := strings.Count(stderr.String(), "[E_PLAN_CONSTRUCTION]"); got != 2 {
+		t.Fatalf("plan diagnostics = %d, want 2; report = %q", got, stderr.String())
+	}
+	for _, want := range []string{"job first/gha-first: failed", "job second/gha-second: failed", "job dependent/gha-dependent: not-evaluated", "Pipeline generation: not-evaluated"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("report = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+func TestHostedReportAggregatesIndependentAdmissionFailures(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "containers.yml")
+	workflow := []byte(`on: push
+jobs:
+  first:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - run: true
+  second:
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	var stdout, stderr bytes.Buffer
+	args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
+	if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	profileFailures := 0
+	instances := map[string]string{}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == "E_PROFILE" {
+			profileFailures++
+		}
+	}
+	for _, job := range report.Jobs {
+		if job.Instance != "" {
+			instances[job.Instance] = job.Result
+		}
+	}
+	if profileFailures != 2 || instances["gha-first"] != compatibility.Failed || instances["gha-second"] != compatibility.Failed {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestProcessingReportRetainsReusableCalleeJobsAfterFailure(t *testing.T) {
+	root := t.TempDir()
+	workflowRoot := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowRoot, "caller.yml")
+	calleePath := filepath.Join(workflowRoot, "reusable.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	callee := []byte(`on: workflow_call
+jobs:
+  good:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  bad:
+    runs-on: windows-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(calleePath, callee, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	logicalBad, instanceBad := false, false
+	for _, job := range report.Jobs {
+		if job.ID != "call.bad" {
+			continue
+		}
+		if job.Instance == "" && job.Result == compatibility.Failed {
+			logicalBad = true
+		}
+		if job.Instance != "" && job.Result == compatibility.Failed {
+			instanceBad = true
+		}
+	}
+	if !logicalBad || !instanceBad {
+		t.Fatalf("callee job ledger = %#v", report.Jobs)
+	}
+}
+
+func TestProcessingReportFailsReusableCallerWhenResolutionFails(t *testing.T) {
+	root := t.TempDir()
+	workflowRoot := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(workflowRoot, "caller.yml")
+	calleePath := filepath.Join(workflowRoot, "reusable.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  delegated:\n    uses: ./.github/workflows/reusable.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	callee := []byte(`on:
+  workflow_call:
+    outputs:
+      published:
+        value: literal
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(calleePath, callee, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Jobs) != 1 || report.Jobs[0].ID != "delegated" || report.Jobs[0].Result != compatibility.Failed {
+		t.Fatalf("caller job ledger = %#v", report.Jobs)
+	}
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph {
+		t.Fatalf("diagnostics = %#v", report.Diagnostics)
+	}
+}
+
+func TestProcessingReportAggregatesIndependentExpressionChecksPerInstance(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "expressions.yml")
+	workflow := []byte(`on: push
+jobs:
+  test:
+    if: ${{ hashFiles('condition') }}
+    runs-on: windows-latest
+    concurrency: ${{ hashFiles('concurrency') }}
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Diagnostics) != 3 {
+		t.Fatalf("diagnostics = %#v, want condition, runner, and concurrency failures", report.Diagnostics)
+	}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code != compiler.CodeExpressionInvalid || diagnostic.Instance != "gha-test" {
+			t.Fatalf("diagnostic = %#v", diagnostic)
+		}
+	}
 }
 
 func TestWorkflowConcurrencyCancellationWarnsAndRetainsGate(t *testing.T) {
@@ -369,7 +1117,7 @@ jobs:
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_COMPILE" || !strings.Contains(report.Diagnostics[0].Message, want) {
+		if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodeExpressionInvalid || !strings.Contains(report.Diagnostics[0].Message, want) {
 			t.Fatalf("report = %#v", report)
 		}
 	})
@@ -830,8 +1578,16 @@ func TestRunUploadRejectsInvalidTargetQueueEnvironment(t *testing.T) {
 			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code == 0 {
 				t.Fatalf("run() code = 0, want invalid target queue failure")
 			}
-			if len(runner.commands) != 0 || (!strings.Contains(stderr.String(), targetQueueEnvironment) && !strings.Contains(stderr.String(), "runner policy queue")) {
+			if len(runner.commands) != 0 {
 				t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
+			}
+			if test.name == "empty" && !strings.Contains(stderr.String(), targetQueueEnvironment) {
+				t.Fatalf("stderr = %q, want environment name", stderr.String())
+			}
+			if test.name == "malformed" {
+				if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] workflow-processing configuration is invalid") || strings.Contains(stderr.String(), "[E_EXPRESSION_INVALID]") || strings.Contains(stderr.String(), test.queue) {
+					t.Fatalf("stderr = %q, want redacted environment diagnostic without expression failure", stderr.String())
+				}
 			}
 		})
 	}
@@ -985,6 +1741,9 @@ func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := run([]string{"upload", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("run() code = %d, stderr = %q, want %q", code, stderr.String(), test.want)
+			}
+			if !strings.Contains(stderr.String(), "Schema: "+compatibility.ProcessingSchema) || !strings.Contains(stderr.String(), "[E_ENVIRONMENT] event input could not be acquired") {
+				t.Fatalf("stderr = %q, want versioned environment report", stderr.String())
 			}
 			if len(runner.commands) != 1 || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
 				t.Fatalf("commands = %#v, want only one metadata read", runner.commands)

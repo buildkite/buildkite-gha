@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/processing-report-v1.schema.json",
+  "title": "buildkite-gha processing report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workflow", "result", "status", "logical_jobs", "instances", "compile", "admission", "stages", "jobs", "actions", "diagnostics"],
+  "properties": {
+    "schema": {"const": "buildkite-gha/processing-report/v1"},
+    "workflow": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "profile": {"type": "string", "maxLength": 128},
+    "result": {"type": "string", "minLength": 1, "maxLength": 128},
+    "status": {"$ref": "#/$defs/stageResult"},
+    "logical_jobs": {"type": "integer", "minimum": 0},
+    "instances": {"type": "integer", "minimum": 0},
+    "compile": {"$ref": "#/$defs/legacyStage"},
+    "admission": {"$ref": "#/$defs/legacyStage"},
+    "stages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/stage"}
+    },
+    "jobs": {"type": "array", "items": {"$ref": "#/$defs/job"}},
+    "actions": {"type": "array", "items": {"$ref": "#/$defs/action"}},
+    "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}}
+  },
+  "$defs": {
+    "stageResult": {"enum": ["passed", "failed", "not-evaluated"]},
+    "stageID": {
+      "enum": [
+        "workflow-parsing",
+        "event-validation",
+        "static-graph-construction",
+        "matrix-expansion",
+        "expression-validation",
+        "action-discovery",
+        "action-resolution",
+        "job-plan-construction",
+        "hosted-profile-admission",
+        "pipeline-generation"
+      ]
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "result"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stageID"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "result": {"$ref": "#/$defs/stageResult"}
+      }
+    },
+    "legacyStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result"],
+      "properties": {
+        "result": {"type": "string", "minLength": 1, "maxLength": 128},
+        "logical_jobs": {"type": "integer", "minimum": 0},
+        "instances": {"type": "integer", "minimum": 0}
+      }
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "column"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "line": {"type": "integer", "minimum": 1},
+        "column": {"type": "integer", "minimum": 1}
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "result"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 255},
+        "instance": {"type": "string", "minLength": 1, "maxLength": 255},
+        "result": {"$ref": "#/$defs/stageResult"},
+        "location": {"$ref": "#/$defs/location"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "job", "step", "result"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "job": {"type": "string", "minLength": 1, "maxLength": 255},
+        "step": {"type": "integer", "minimum": 1},
+        "result": {"$ref": "#/$defs/stageResult"},
+        "location": {"$ref": "#/$defs/location"}
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "code", "message"],
+      "properties": {
+        "level": {"enum": ["error", "warning"]},
+        "code": {"type": "string", "pattern": "^[EW]_[A-Z0-9_]+$"},
+        "category": {"enum": ["syntax", "compatibility", "action-resolution", "environment", "admission"]},
+        "stage": {"$ref": "#/$defs/stageID"},
+        "message": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "location": {"$ref": "#/$defs/location"},
+        "job": {"type": "string", "minLength": 1, "maxLength": 255},
+        "instance": {"type": "string", "minLength": 1, "maxLength": 255},
+        "action": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "step": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

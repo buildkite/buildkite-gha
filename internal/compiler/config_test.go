@@ -3,6 +3,7 @@ package compiler
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -109,6 +110,26 @@ func TestOptionsRejectActionConfigurationWithoutResolution(t *testing.T) {
 	options.ActionSource = &fakeActionSource{}
 	if err := options.validate(); err == nil || !strings.Contains(err.Error(), "requires ResolveActions") {
 		t.Fatalf("Options.validate() error = %v, want action-resolution configuration rejection", err)
+	}
+}
+
+func TestValidateEventReportsInvalidCompilerEnvironmentWithoutFailingWorkflowStage(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
+	options := defaultOptions()
+	options.Runners.Labels["ubuntu-latest"] = "not a queue"
+	report, err := ValidateEventWithOptions("environment.yml", workflow, pushEvent(t), options)
+	if err == nil {
+		t.Fatal("ValidateEventWithOptions() error = nil, want invalid environment")
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) {
+		t.Fatalf("ValidateEventWithOptions() error = %T, want ProcessingFinding", err)
+	}
+	if finding.Code != CodeEnvironment || finding.Stage != "" || finding.Category != "environment" || finding.Message != "workflow-processing configuration is invalid" {
+		t.Fatalf("finding = %#v", finding)
+	}
+	if report.LogicalJobs != 1 || len(report.ParsedJobs) != 1 || !report.NotEvaluatedJobs["test"] {
+		t.Fatalf("report = %#v", report)
 	}
 }
 
