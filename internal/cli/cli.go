@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,6 +33,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 const usage = `Usage:
@@ -50,7 +52,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runtime-queue hosted] <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runtime-queue hosted] <workflow-pattern>\n",
 	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -62,7 +64,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. It can select an immutable image for generated jobs with %s. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment, runtimeImageEnvironment)
+		_, _ = fmt.Fprintf(stdout, "\nThe workflow pattern is expanded against tracked files and uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Generated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. It can select an immutable image for generated jobs with %s. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment, runtimeImageEnvironment)
 	}
 }
 
@@ -1086,7 +1088,7 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, err := uploadArgs(args)
+	workflowPattern, eventPath, err := uploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
@@ -1102,9 +1104,31 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
 	}
-	workflowSource, err := os.ReadFile(workflowPath)
+	workflows, err := expandWorkflowPattern(workflowPattern)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
+	uploadableWorkflowCount := 0
+	for i := range workflows {
+		workflows[i].Source, err = os.ReadFile(workflows[i].Path)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: read workflow %s: %v\n", workflows[i].CanonicalPath, err)
+			return 1
+		}
+		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
+		if parseErr != nil {
+			workflows[i].ParseErr = parseErr
+			uploadableWorkflowCount++
+			continue
+		}
+		workflows[i].ReusableOnly = parsed.ReusableOnly()
+		if !workflows[i].ReusableOnly {
+			uploadableWorkflowCount++
+		}
+	}
+	if uploadableWorkflowCount == 0 {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow pattern %q matched only reusable workflow_call workflows; there is nothing to upload\n", workflowPattern)
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1132,26 +1156,92 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
+	activeEvent, err := compiler.EventName(eventSource)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, runtimeImage, jobScopedActionSourceAuthentication(stderr))
+	authentication := jobScopedActionSourceAuthentication(stderr)
+	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
+	planArtifacts := make([]compiler.PlanArtifact, 0)
+	jobCount := 0
+	for _, input := range workflows {
+		if input.ReusableOnly {
+			continue
+		}
+		if input.ParseErr != nil {
+			displayLabel := input.CanonicalPath + " (" + activeEvent + ")"
+			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
+				CommandSteps: []buildkitepipeline.CommandStep{{
+					Key:       "gha-" + input.Identity + "-parse-error",
+					Label:     ":github: " + displayLabel,
+					CheckName: "Buildkite / " + displayLabel,
+					Command:   "printf '%s\\n' " + buildkitepipeline.ShellQuote(input.ParseErr.Error()) + " >&2\nexit 1",
+					Queue:     targetQueue,
+				}},
+			})
+			jobCount++
+			continue
+		}
+		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, eventSource, version, distributionDigest, importerStep, "", targetQueue, runtimeImage, input.StepKeyNamespace, authentication)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: %v\n", input.CanonicalPath, err)
+			return 1
+		}
+		bundle := preflight.Bundle
+		if bundle.IR.Event.Event != activeEvent {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: compiler event %q does not match active event %q\n", input.CanonicalPath, bundle.IR.Event.Event, activeEvent)
+			return 1
+		}
+		condition, err := buildkitepipeline.TranslateTriggerCondition(bundle.IR.Workflow.Triggers)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %s: translate workflow triggers: %v\n", input.CanonicalPath, err)
+			return 1
+		}
+		label := bundle.IR.Workflow.Name
+		if label == "" {
+			label = input.CanonicalPath
+		}
+		displayLabel := label + " (" + bundle.IR.Event.Event + ")"
+		generated := bundle.GeneratedWorkflow
+		generated.GroupLabel = displayLabel
+		generated.GroupKey = "gha-workflow-" + input.Identity
+		generated.CheckName = "Buildkite / " + displayLabel
+		generated.Condition = condition
+		generatedWorkflows = append(generatedWorkflows, generated)
+		planArtifacts = append(planArtifacts, bundle.Plans...)
+		jobCount += len(bundle.Plans)
+		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
+	}
+	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
+		CompilerStep:       importerStep,
+		DistributionDigest: distributionDigest,
+		RuntimeImage:       runtimeImage,
+		Workflows:          generatedWorkflows,
+	})
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
 		return 1
 	}
-	bundle := preflight.Bundle
-	writeCompilerWarnings(stderr, "upload", workflowPath, bundle.IR.Warnings)
-	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
+	artifacts := make([]transport.Artifact, 0, 1+len(planArtifacts))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
-	for _, jobPlan := range bundle.Plans {
+	artifactPaths := map[string]struct{}{distributionPath: {}}
+	for _, jobPlan := range planArtifacts {
+		if _, exists := artifactPaths[jobPlan.Path]; exists {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: duplicate aggregate artifact path %q\n", jobPlan.Path)
+			return 1
+		}
+		artifactPaths[jobPlan.Path] = struct{}{}
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
 	root, err := os.MkdirTemp("", "buildkite-gha-upload-")
@@ -1161,12 +1251,99 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	defer func() { _ = os.RemoveAll(root) }()
 
-	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, bundle.Pipeline); err != nil {
+	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, aggregatePipeline); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %s with importer %s.\n", len(bundle.Plans), executablePath, importerStep)
+	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
+}
+
+type workflowInput struct {
+	Path, CanonicalPath, Identity, StepKeyNamespace string
+	Source                                          []byte
+	ReusableOnly                                    bool
+	ParseErr                                        error
+}
+
+func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
+	patternHasMeta := strings.ContainsAny(pattern, "*?[")
+	if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
+		// An existing path is always literal, even when its filename contains
+		// glob metacharacters. This preserves the pre-pattern CLI contract.
+		patternHasMeta = false
+	}
+	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if rootErr != nil {
+		if !patternHasMeta {
+			if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
+				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+			}
+		}
+		return nil, fmt.Errorf("locate checked-out git repository: %w", rootErr)
+	}
+	root := strings.TrimSpace(string(rootBytes))
+	absolutePattern, err := filepath.Abs(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow pattern %q: %w", pattern, err)
+	}
+	relativePattern, err := filepath.Rel(root, absolutePattern)
+	if err != nil || relativePattern == ".." || strings.HasPrefix(relativePattern, ".."+string(filepath.Separator)) {
+		if !patternHasMeta {
+			if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
+				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+			}
+		}
+		return nil, fmt.Errorf("workflow pattern %q is outside the checked-out git repository", pattern)
+	}
+	pathspecMagic := ":(literal)"
+	if patternHasMeta {
+		pathspecMagic = ":(glob)"
+	}
+	command := exec.Command("git", "-C", root, "ls-files", "-z", "--", pathspecMagic+filepath.ToSlash(relativePattern))
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("expand workflow pattern %q against tracked files: %w", pattern, err)
+	}
+	var matches []workflowInput
+	for _, entry := range bytes.Split(output, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		canonical := string(entry)
+		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
+	}
+	if len(matches) == 0 && !patternHasMeta {
+		if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
+			return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("workflow pattern %q matched no tracked files", pattern)
+	}
+	return workflowInputs(matches, patternHasMeta || len(matches) > 1)
+}
+
+func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInput, error) {
+	sort.Slice(matches, func(i, j int) bool { return matches[i].CanonicalPath < matches[j].CanonicalPath })
+	out := matches[:0]
+	identities := make(map[string]string, len(matches))
+	for _, match := range matches {
+		if len(out) != 0 && out[len(out)-1].CanonicalPath == match.CanonicalPath {
+			continue
+		}
+		digest := sha256.Sum256([]byte(match.CanonicalPath))
+		match.Identity = hex.EncodeToString(digest[:8])
+		if other, exists := identities[match.Identity]; exists {
+			return nil, fmt.Errorf("workflow identity collision between %q and %q", other, match.CanonicalPath)
+		}
+		identities[match.Identity] = match.CanonicalPath
+		if namespaceKeys {
+			match.StepKeyNamespace = match.Identity
+		}
+		out = append(out, match)
+	}
+	return out, nil
 }
 
 type hostedTokenlessCompilation struct {
@@ -1265,6 +1442,10 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 }
 
 func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue, runtimeImage string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
+	return compileHostedTokenlessNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, targetQueue, runtimeImage, "", actionAuthentication)
+}
+
+func compileHostedTokenlessNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue, runtimeImage, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
 	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
@@ -1275,9 +1456,10 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 	}
 	hasActions := irUsesActions(ir)
 	options := compiler.Options{
-		EventTrust:   compiler.EventUntrusted,
-		GroupLabel:   groupLabel,
-		RuntimeImage: runtimeImage,
+		EventTrust:       compiler.EventUntrusted,
+		GroupLabel:       groupLabel,
+		RuntimeImage:     runtimeImage,
+		StepKeyNamespace: stepKeyNamespace,
 		Runners: compiler.RunnerPolicy{
 			Labels: map[string]string{
 				"ubuntu-latest": targetQueue,

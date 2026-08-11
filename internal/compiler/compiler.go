@@ -77,10 +77,11 @@ type ExecutionBoundary struct {
 
 // WorkflowSource binds the IR to its input workflow bytes.
 type WorkflowSource struct {
-	Path             string `json:"path"`
-	Name             string `json:"name,omitempty"`
-	Digest           string `json:"digest"`
-	ConcurrencyGroup string `json:"concurrency_group,omitempty"`
+	Path             string             `json:"path"`
+	Name             string             `json:"name,omitempty"`
+	Digest           string             `json:"digest"`
+	ConcurrencyGroup string             `json:"concurrency_group,omitempty"`
+	Triggers         []workflow.Trigger `json:"-"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
@@ -600,7 +601,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	digest := sha256.Sum256(source)
 	return IR{
 		Schema:   schema,
-		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
+		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers},
 		Event:    event,
 		Vars:     vars,
 		Warnings: compilerWarnings(parsed.Concurrency),
@@ -660,6 +661,16 @@ func parseEvent(source []byte) (Event, error) {
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+// EventName validates an event snapshot with the compiler's canonical parser
+// and returns its active provider event name.
+func EventName(source []byte) (string, error) {
+	event, err := parseEvent(source)
+	if err != nil {
+		return "", err
+	}
+	return event.Event, nil
 }
 
 func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
@@ -753,7 +764,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			if concurrencyGroup != "" {
 				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
 			}
-			key, err := instanceKey(job.ID, matrix)
+			key, err := namespacedInstanceKey(options.StepKeyNamespace, job.ID, matrix)
 			if err != nil {
 				return nil, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))
 			}
@@ -1329,7 +1340,15 @@ func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, erro
 }
 
 func instanceKey(jobID string, matrix map[string]any) (string, error) {
-	prefix := "gha-" + sanitize(jobID)
+	return namespacedInstanceKey("", jobID, matrix)
+}
+
+func namespacedInstanceKey(namespace, jobID string, matrix map[string]any) (string, error) {
+	prefix := "gha-"
+	if namespace != "" {
+		prefix += namespace + "-"
+	}
+	prefix += sanitize(jobID)
 	if len(matrix) == 0 {
 		return prefix, nil
 	}
