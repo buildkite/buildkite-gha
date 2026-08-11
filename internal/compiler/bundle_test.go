@@ -98,6 +98,43 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	}
 }
 
+func TestCompileBundleNamespacesTargetsAndDependencies(t *testing.T) {
+	path := smokePath(".github", "workflows", "shell.yml")
+	options := defaultOptions()
+	options.StepKeyNamespace = "0123456789abcdef"
+	bundle, err := CompileBundleWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 3 || len(bundle.GeneratedWorkflow.Jobs) != 3 {
+		t.Fatalf("namespaced bundle size = IR %d, plans %d, jobs %d", len(bundle.IR.Jobs), len(bundle.Plans), len(bundle.GeneratedWorkflow.Jobs))
+	}
+	producer := "gha-0123456789abcdef-producer"
+	if bundle.IR.Jobs[0].Key != producer || bundle.Plans[0].Job.Target.StepKey != producer || bundle.GeneratedWorkflow.Jobs[0].Key != producer {
+		t.Fatalf("namespaced producer = IR %q, plan %q, pipeline %q", bundle.IR.Jobs[0].Key, bundle.Plans[0].Job.Target.StepKey, bundle.GeneratedWorkflow.Jobs[0].Key)
+	}
+	for i := 1; i < len(bundle.Plans); i++ {
+		if !strings.HasPrefix(bundle.Plans[i].Job.Target.StepKey, "gha-0123456789abcdef-consumer-") || !reflect.DeepEqual(bundle.Plans[i].Job.Dependencies, []string{producer}) || !reflect.DeepEqual(bundle.GeneratedWorkflow.Jobs[i].Dependencies, []string{producer}) {
+			t.Fatalf("namespaced consumer %d = target %q, plan needs %#v, pipeline needs %#v", i, bundle.Plans[i].Job.Target.StepKey, bundle.Plans[i].Job.Dependencies, bundle.GeneratedWorkflow.Jobs[i].Dependencies)
+		}
+	}
+}
+
+func TestCompileBundleNamespacesMaxParallelConcurrency(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    strategy:\n      max-parallel: 1\n      matrix:\n        target: [one, two]\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	options := defaultOptions()
+	options.StepKeyNamespace = "0123456789abcdef"
+	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range bundle.GeneratedWorkflow.Jobs {
+		if !strings.Contains(job.ConcurrencyGroup, "/0123456789abcdef/test") {
+			t.Fatalf("matrix concurrency group = %q, want workflow namespace", job.ConcurrencyGroup)
+		}
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {

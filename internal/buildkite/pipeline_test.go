@@ -79,7 +79,7 @@ func TestEmitGolden(t *testing.T) {
 		}
 		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `test "$actual_distribution_digest" = `+shellQuote(pipeline.DistributionDigest)) ||
+			!strings.Contains(step.Command, `test "$actual_distribution_digest" = `+ShellQuote(pipeline.DistributionDigest)) ||
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q does not bootstrap and verify its exact distribution:\n%s", step.Key, step.Command)
 		}
@@ -131,6 +131,322 @@ func TestEmitMergesIntoContainingGroup(t *testing.T) {
 	job := document.Steps[0].Steps[0]
 	if job.Key != "job" || len(job.DependsOn) != 1 || job.DependsOn[0].Step != "importer" || job.DependsOn[0].AllowFailure {
 		t.Fatalf("grouped job = %#v", job)
+	}
+}
+
+func TestEmitAggregateWorkflowGroups(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{
+			{
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", CheckName: "Buildkite / CI (push)", Condition: `build.source_event == "push"`,
+				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("first plan")}},
+			},
+			{
+				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", CheckName: "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)", Condition: `build.source == "ui"`,
+				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test", PlanDigest: testDigest("second plan")}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Key       string `yaml:"key"`
+			Condition string `yaml:"if"`
+			DependsOn string `yaml:"depends_on"`
+			Notify    []struct {
+				GitHubCheck struct {
+					Name string `yaml:"name"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+			Steps []struct {
+				Key       string            `yaml:"key"`
+				Command   string            `yaml:"command"`
+				Env       map[string]string `yaml:"env"`
+				Notify    any               `yaml:"notify"`
+				DependsOn *yaml.Node        `yaml:"depends_on"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Notify) != 1 || document.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || document.Steps[0].Steps[0].Notify != nil {
+		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
+	}
+	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || len(document.Steps[1].Notify) != 1 || document.Steps[1].Notify[0].GitHubCheck.Name != "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)" || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || document.Steps[1].Steps[0].Notify != nil {
+		t.Fatalf("second aggregate group = %#v\n%s", document.Steps[1], output)
+	}
+	for _, group := range document.Steps {
+		for _, step := range group.Steps {
+			if step.DependsOn != nil {
+				t.Fatalf("dependency-free aggregate child %q emitted depends_on: %#v", step.Key, step.DependsOn)
+			}
+			if step.Env["BUILDKITE_GHA_PLAN_PRODUCER"] != "importer" || strings.Count(step.Command, `--step 'importer'`) != 2 {
+				t.Fatalf("aggregate child %q does not fetch artifacts from importer: env %#v, command %q", step.Key, step.Env, step.Command)
+			}
+		}
+	}
+	if !strings.Contains(string(output), `name: "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)"`) {
+		t.Fatalf("GitHub Check name did not use YAML scalar escaping:\n%s", output)
+	}
+}
+
+func TestEmitAggregateDirectCommandStepsAreIsolatedAndShellSafe(t *testing.T) {
+	temporary := t.TempDir()
+	commandSubstitutionMarker := filepath.Join(temporary, "command-substitution-ran")
+	backtickMarker := filepath.Join(temporary, "backtick-ran")
+	message := "parse 'single' and \"double\"; $(touch " + commandSubstitutionMarker + ") `touch " + backtickMarker + "` $HOME\n---\n-leading: [yaml] # punctuation & * ? | > < = ! % @"
+	command := "printf '%s\\n' " + ShellQuote(message) + " >&2\nexit 1"
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		RuntimeImage:       image,
+		Workflows: []Workflow{
+			{CommandSteps: []CommandStep{{Key: "parse-error-queued", Label: ":github: Broken queued (push)", CheckName: "Buildkite / Broken queued (push)", Command: command, Queue: "hosted"}}},
+			{CommandSteps: []CommandStep{{Key: "parse-error-default", Label: ":github: Broken default (push)", CheckName: "Buildkite / Broken default (push)", Command: command}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type emittedCommandStep struct {
+		Group     string `yaml:"group"`
+		Label     string `yaml:"label"`
+		Key       string `yaml:"key"`
+		Condition string `yaml:"if"`
+		DependsOn string `yaml:"depends_on"`
+		Notify    []struct {
+			GitHubCheck struct {
+				Name string `yaml:"name"`
+			} `yaml:"github_check"`
+		} `yaml:"notify"`
+		Command  string            `yaml:"command"`
+		Image    string            `yaml:"image"`
+		Agents   map[string]string `yaml:"agents"`
+		Env      *yaml.Node        `yaml:"env"`
+		Cache    *yaml.Node        `yaml:"cache"`
+		Steps    *yaml.Node        `yaml:"steps"`
+		Checkout struct {
+			Skip bool `yaml:"skip"`
+		} `yaml:"checkout"`
+	}
+	var document struct {
+		Steps []emittedCommandStep `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse direct command pipeline: %v\n%s", err, output)
+	}
+	if len(document.Steps) != 2 {
+		t.Fatalf("direct command steps = %#v", document.Steps)
+	}
+	for i, step := range document.Steps {
+		wantLabel := []string{":github: Broken queued (push)", ":github: Broken default (push)"}[i]
+		wantCheck := []string{"Buildkite / Broken queued (push)", "Buildkite / Broken default (push)"}[i]
+		if step.Group != "" || step.Label != wantLabel || step.Condition != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != wantCheck || step.Command != command || !step.Checkout.Skip || step.Image != "" || step.Env != nil || step.Cache != nil || step.Steps != nil {
+			t.Fatalf("direct command step %d gained generated-job state: %#v", i, step)
+		}
+	}
+	if document.Steps[0].Agents["queue"] != "hosted" || document.Steps[1].Agents != nil {
+		t.Fatalf("direct command queues = %#v / %#v", document.Steps[0].Agents, document.Steps[1].Agents)
+	}
+
+	var stdout, stderr bytes.Buffer
+	commandProcess := exec.Command("sh", "-c", document.Steps[1].Command)
+	commandProcess.Dir = temporary
+	commandProcess.Stdout = &stdout
+	commandProcess.Stderr = &stderr
+	err = commandProcess.Run()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 1 {
+		t.Fatalf("direct command exit = %v, want 1", err)
+	}
+	if stdout.Len() != 0 || stderr.String() != message+"\n" {
+		t.Fatalf("direct command stdout/stderr = %q / %q, want exact stderr %q", stdout.String(), stderr.String(), message+"\n")
+	}
+	for _, marker := range []string{commandSubstitutionMarker, backtickMarker} {
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shell injection marker %q exists or cannot be checked: %v", marker, err)
+		}
+	}
+}
+
+func TestEmitAggregateRejectsInvalidDirectCommandContent(t *testing.T) {
+	digest := testDigest("distribution")
+	metadata := Workflow{GroupLabel: "Broken", GroupKey: "workflow-broken", CheckName: "Buildkite / Broken", Condition: "true"}
+	direct := func(key string) CommandStep {
+		return CommandStep{Key: key, Label: ":github: Broken (push)", CheckName: "Buildkite / Broken (push)", Command: "false"}
+	}
+	tests := []struct {
+		name      string
+		workflows []Workflow
+		want      string
+	}{
+		{name: "empty", workflows: []Workflow{metadata}, want: "requires exactly one of generated jobs or direct command steps"},
+		{
+			name: "mixed",
+			workflows: []Workflow{{
+				GroupLabel: "Mixed", GroupKey: "workflow-mixed", CheckName: "Buildkite / Mixed", Condition: "true",
+				Jobs: []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}}, CommandSteps: []CommandStep{direct("command")},
+			}},
+			want: "cannot mix generated jobs and direct command steps",
+		},
+		{name: "multiple direct steps", workflows: []Workflow{{CommandSteps: []CommandStep{direct("one"), direct("two")}}}, want: "requires exactly one command step"},
+		{name: "direct group key", workflows: []Workflow{{GroupKey: "workflow-broken", CommandSteps: []CommandStep{direct("command")}}}, want: "cannot set group metadata"},
+		{name: "direct condition", workflows: []Workflow{{Condition: "true", CommandSteps: []CommandStep{direct("command")}}}, want: "cannot set group metadata"},
+		{name: "direct concurrency gate", workflows: []Workflow{{ConcurrencyGate: &ConcurrencyGate{Group: "group"}, CommandSteps: []CommandStep{direct("command")}}}, want: "cannot set group metadata"},
+		{
+			name: "missing direct check",
+			workflows: func() []Workflow {
+				step := direct("command")
+				step.CheckName = ""
+				return []Workflow{{CommandSteps: []CommandStep{step}}}
+			}(),
+			want: "requires a GitHub Check name",
+		},
+		{
+			name:      "importer collision",
+			workflows: []Workflow{{CommandSteps: []CommandStep{direct("importer")}}},
+			want:      `direct command step key "importer" collides with compiler step`,
+		},
+		{
+			name: "generated job collision",
+			workflows: []Workflow{
+				{CommandSteps: []CommandStep{direct("shared")}},
+				{GroupLabel: "Generated", GroupKey: "workflow-generated", CheckName: "Buildkite / Generated", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Job", PlanDigest: testDigest("plan")}}},
+			},
+			want: `generated step key "shared" collides with direct command step`,
+		},
+		{
+			name: "workflow group collision",
+			workflows: []Workflow{
+				{CommandSteps: []CommandStep{direct("workflow-generated")}},
+				{GroupLabel: "Generated", GroupKey: "workflow-generated", CheckName: "Buildkite / Generated", Condition: "true", Jobs: []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}}},
+			},
+			want: `workflow group key "workflow-generated" collides with direct command step`,
+		},
+		{
+			name: "concurrency gate collision",
+			workflows: func() []Workflow {
+				gate := &ConcurrencyGate{Group: "buildkite-gha/concurrency/generated"}
+				jobs := []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}}
+				open, _ := concurrencyGateKeys("importer\x00workflow-generated", gate.Group, jobs)
+				return []Workflow{
+					{GroupLabel: "Generated", GroupKey: "workflow-generated", CheckName: "Buildkite / Generated", Condition: "true", ConcurrencyGate: gate, Jobs: jobs},
+					{CommandSteps: []CommandStep{direct(open)}},
+				}
+			}(),
+			want: "collides with workflow concurrency gate",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Emit(Pipeline{CompilerStep: "importer", DistributionDigest: digest, Workflows: test.workflows})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Emit() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{{
+			GroupLabel:      "CI",
+			GroupKey:        "workflow-ci",
+			CheckName:       "Buildkite / CI",
+			Condition:       "true",
+			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
+			Jobs: []Job{
+				{Key: "producer", Label: "Producer", PlanDigest: testDigest("producer")},
+				{Key: "consumer", Label: "Consumer", PlanDigest: testDigest("consumer"), Dependencies: []string{"producer"}},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type emittedDependency struct {
+		Step         string `yaml:"step"`
+		AllowFailure bool   `yaml:"allow_failure"`
+	}
+	type emittedStep struct {
+		Key       string              `yaml:"key"`
+		DependsOn []emittedDependency `yaml:"depends_on"`
+	}
+	var document struct {
+		Steps []struct {
+			DependsOn string        `yaml:"depends_on"`
+			Steps     []emittedStep `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatalf("parse aggregate concurrency pipeline: %v\n%s", err, output)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Steps) != 4 {
+		t.Fatalf("aggregate concurrency group = %#v\n%s", document.Steps, output)
+	}
+	openKey, closeKey := concurrencyGateKeys("importer\x00workflow-ci", pipeline.Workflows[0].ConcurrencyGate.Group, pipeline.Workflows[0].Jobs)
+	open, producer, consumer, close := document.Steps[0].Steps[0], document.Steps[0].Steps[1], document.Steps[0].Steps[2], document.Steps[0].Steps[3]
+	if open.Key != openKey || len(open.DependsOn) != 0 {
+		t.Fatalf("aggregate opening gate = %#v", open)
+	}
+	if producer.Key != "producer" || len(producer.DependsOn) != 1 || producer.DependsOn[0].Step != openKey || producer.DependsOn[0].AllowFailure {
+		t.Fatalf("aggregate producer dependencies = %#v", producer)
+	}
+	if consumer.Key != "consumer" || len(consumer.DependsOn) != 2 || consumer.DependsOn[0].Step != openKey || consumer.DependsOn[0].AllowFailure || consumer.DependsOn[1].Step != "producer" || !consumer.DependsOn[1].AllowFailure {
+		t.Fatalf("aggregate consumer dependencies = %#v", consumer)
+	}
+	if close.Key != closeKey || len(close.DependsOn) != 2 || close.DependsOn[0].Step != "producer" || !close.DependsOn[0].AllowFailure || close.DependsOn[1].Step != "consumer" || !close.DependsOn[1].AllowFailure {
+		t.Fatalf("aggregate closing gate dependencies = %#v", close)
+	}
+	for _, step := range document.Steps[0].Steps {
+		for _, dependency := range step.DependsOn {
+			if dependency.Step == pipeline.CompilerStep {
+				t.Fatalf("aggregate child %q retains importer dependency: %#v", step.Key, step.DependsOn)
+			}
+		}
+	}
+}
+
+func TestEmitAggregateRequiresGitHubCheckName(t *testing.T) {
+	_, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{{
+			GroupLabel: "CI", GroupKey: "workflow-ci", Condition: "true",
+			Jobs: []Job{{Key: "test", Label: "Test", PlanDigest: testDigest("plan")}},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), `workflow "workflow-ci" requires a GitHub Check name`) {
+		t.Fatalf("missing GitHub Check name error = %v", err)
+	}
+}
+
+func TestEmitAggregateRejectsCrossWorkflowCollisions(t *testing.T) {
+	base := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Workflows: []Workflow{
+			{GroupLabel: "One", GroupKey: "workflow-one", CheckName: "Buildkite / One", Condition: "true", Jobs: []Job{{Key: "shared", Label: "One", PlanDigest: testDigest("one")}}},
+			{GroupLabel: "Two", GroupKey: "workflow-two", CheckName: "Buildkite / Two", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Two", PlanDigest: testDigest("two")}}},
+		},
+	}
+	if _, err := Emit(base); err == nil || !strings.Contains(err.Error(), `generated step key "shared" collides`) {
+		t.Fatalf("duplicate aggregate key error = %v", err)
+	}
+	base.Workflows[1].Jobs[0].Key = "other"
+	base.Workflows[1].Jobs[0].PlanDigest = base.Workflows[0].Jobs[0].PlanDigest
+	if _, err := Emit(base); err == nil || !strings.Contains(err.Error(), "share plan digest") {
+		t.Fatalf("duplicate aggregate plan error = %v", err)
 	}
 }
 
