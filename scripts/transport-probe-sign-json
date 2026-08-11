@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mise exec -- go run ./internal/harness/cmd/transport-probe-signing sign

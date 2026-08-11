@@ -1,0 +1,21 @@
+name: Container runtime Dockerfile action
+description: Exercises workspace file commands and service access from a sibling container.
+
+inputs:
+  expected_file:
+    description: Workspace-relative file that must be visible in the container.
+    required: true
+  service_host:
+    description: Job-network service alias.
+    required: true
+  service_port:
+    description: Job-network service port.
+    required: true
+
+outputs:
+  container:
+    description: Confirms that the Docker action ran.
+
+runs:
+  using: docker
+  image: Dockerfile

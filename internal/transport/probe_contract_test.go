@@ -12,10 +12,10 @@ import (
 	"testing"
 )
 
-const liveProbePath = ".buildkite/phase-0-transport-probe/probe.sh"
+const liveProbePath = ".buildkite/transport-probe/probe.sh"
 
 func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
-	root := filepath.Join("..", "..", ".buildkite", "phase-0-transport-probe")
+	root := filepath.Join("..", "..", ".buildkite", "transport-probe")
 	pipeline := readProbeFile(t, filepath.Join(root, "pipeline.yml"))
 	if strings.Contains(pipeline, "checkout:\n      skip: true") {
 		t.Fatal("unprivileged live probe must use the exact build checkout")
@@ -39,9 +39,9 @@ func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
 	}
 	for _, required := range []string{
 		`readonly binding_issuer="buildkite-gha-plan-envelope"`,
-		`PHASE0_BINDING_JTI`,
-		`PHASE0_REDACTION_SECRET`,
-		`PHASE0_PRODUCER_PLAN_DIGEST`,
+		`TRANSPORT_PROBE_BINDING_JTI`,
+		`TRANSPORT_PROBE_REDACTION_SECRET`,
+		`TRANSPORT_PROBE_PRODUCER_PLAN_DIGEST`,
 		`cmp -s "${canonical}" "${manifest}"`,
 		`.producer.job_id == $job_id`,
 		`artifact search "buildkite-gha/v1/results/${producer_key}/manifest.json" --step "${producer_key}" --format '%j'`,
@@ -60,7 +60,7 @@ func TestLiveProbeUsesOnlyPinnedRepositoryCommands(t *testing.T) {
 }
 
 func TestProbeAndGoUseTheSameJCSRuntimeBinding(t *testing.T) {
-	root := filepath.Join("..", "..", ".buildkite", "phase-0-transport-probe")
+	root := filepath.Join("..", "..", ".buildkite", "transport-probe")
 	fixture := []byte(readProbeFile(t, filepath.Join(root, "fixtures", "runtime-binding.claims.json")))
 	fixture = bytes.TrimSuffix(fixture, []byte("\n"))
 

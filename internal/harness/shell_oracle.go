@@ -32,7 +32,7 @@ func CompareShellOracle(ctx context.Context, source, expectedCommit, provider st
 	return compareFixtureOracle(ctx, source, expectedCommit, provider, shellExpectedCapturePath, output, CaptureShellOutput)
 }
 
-// CompareConcurrentOracle compares the Phase 3 concurrent-step observation
+// CompareConcurrentOracle compares the concurrent-step observation
 // with the portable expectation in the same exact materialized fixture.
 func CompareConcurrentOracle(ctx context.Context, source, expectedCommit, provider string, output io.Reader) (result []byte, err error) {
 	return compareFixtureOracle(ctx, source, expectedCommit, provider, concurrentExpectedCapturePath, output, CaptureConcurrentOutput)

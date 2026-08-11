@@ -27,7 +27,7 @@ steps:
       automatic: false
     plugins:
       - github-actions#v0.2.2:
-          workflow: .github/workflows/phase-4-actions-oracle.yml
+          workflow: .github/workflows/local-actions-oracle.yml
 
   - label: ":rocket: Advanced released-plugin demo"
     key: "plugin-demo-advanced-importer"

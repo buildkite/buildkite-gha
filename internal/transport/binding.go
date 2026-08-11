@@ -11,12 +11,12 @@ import (
 
 const (
 	bindingType = "buildkite-gha-runtime-binding+jws"
-	// RuntimeBindingIssuer is the Phase 0 issuer shared with plan envelopes.
+	// RuntimeBindingIssuer is the plan-envelope issuer shared with plan envelopes.
 	RuntimeBindingIssuer = "buildkite-gha-plan-envelope"
 	maxBindingLifetime   = int64((24 * time.Hour) / time.Second)
 )
 
-// RuntimeBinding is the signed Phase 0 integrity binding and is inert until its
+// RuntimeBinding is the signed transport integrity binding and is inert until its
 // signature has been verified. It does not authorize protected capabilities.
 type RuntimeBinding struct {
 	Issuer            string       `json:"iss"`

@@ -157,7 +157,7 @@ func ValidateDownloadArtifactCommit(commit string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("actions/download-artifact native adapter does not support resolved commit %q; supported commits are %s; Phase 6 is required", commit, strings.Join(DownloadArtifactCommits(), ", "))
+	return fmt.Errorf("actions/download-artifact native adapter does not support resolved commit %q; supported commits are %s", commit, strings.Join(DownloadArtifactCommits(), ", "))
 }
 
 // DownloadArtifactCommits returns the complete immutable admission set.
@@ -206,11 +206,11 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 	for _, name := range sortedNames(inputs) {
 		lower := strings.ToLower(name)
 		if seen[lower] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[lower] = true
 		if !allowed[lower] {
-			return fmt.Errorf("input %q is unsupported by the bounded download-artifact adapter; Phase 6 is required", name)
+			return fmt.Errorf("input %q is unsupported by the bounded download-artifact adapter", name)
 		}
 	}
 	name, ok := inputFold(inputs, "name")
@@ -228,7 +228,7 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 		}
 	}
 	if value, ok := inputFold(inputs, "merge-multiple"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
-		return fmt.Errorf("input %q may only be omitted or false; Phase 6 is required", "merge-multiple")
+		return fmt.Errorf("input %q may only be omitted or false; merging multiple artifacts is unsupported", "merge-multiple")
 	}
 	if value, ok := inputFold(inputs, "skip-decompress"); ok && !uploadArtifactFalse(strings.TrimSpace(value)) {
 		return fmt.Errorf("input %q may only be omitted or false; raw downloads are unsupported", "skip-decompress")
@@ -293,11 +293,11 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 	for _, name := range sortedNames(inputs) {
 		lower := strings.ToLower(name)
 		if seen[lower] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[lower] = true
 		if !allowed[lower] {
-			return fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter; Phase 6 is required", name)
+			return fmt.Errorf("unknown input %q is unsupported by the bounded upload-artifact adapter", name)
 		}
 		if lower == "archive" && commit != UploadArtifactV7Commit {
 			return fmt.Errorf("input %q exists only in actions/upload-artifact v7", name)
@@ -337,10 +337,10 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 		}
 	}
 	if value, ok := inputFold(inputs, "overwrite"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactFalse(strings.TrimSpace(value)) {
-		return fmt.Errorf("input %q may only be omitted or false; Phase 6 is required", "overwrite")
+		return fmt.Errorf("input %q may only be omitted or false; replacing artifacts is unsupported", "overwrite")
 	}
 	if value, ok := inputFold(inputs, "archive"); ok && (evaluated || !uploadArtifactExpression(value)) && !uploadArtifactTrue(strings.TrimSpace(value)) {
-		return fmt.Errorf("input %q may only be omitted or true; Phase 6 is required", "archive")
+		return fmt.Errorf("input %q may only be omitted or true; raw uploads are unsupported", "archive")
 	}
 	return nil
 }
@@ -367,7 +367,7 @@ func ValidateUploadArtifactName(name string) error {
 // final-component file globs.
 func UploadArtifactPaths(value string) ([]string, error) {
 	if strings.Contains(value, "${{") {
-		return nil, fmt.Errorf("input %q must contain literal paths, not expressions; Phase 6 is required", "path")
+		return nil, fmt.Errorf("input %q must contain literal paths, not expressions", "path")
 	}
 	var roots []string
 	for _, line := range strings.Split(value, "\n") {
@@ -386,11 +386,11 @@ func UploadArtifactPaths(value string) ([]string, error) {
 				return nil, fmt.Errorf("path %q contains traversal; bounded adapter requires workspace-relative paths", root)
 			}
 			if glob && component == "." && i != 0 {
-				return nil, fmt.Errorf("path %q uses a non-canonical glob; Phase 6 is required", root)
+				return nil, fmt.Errorf("path %q uses a non-canonical glob", root)
 			}
 		}
 		if glob && directoryOnly {
-			return nil, fmt.Errorf("path %q uses an unsupported directory glob; Phase 6 is required", root)
+			return nil, fmt.Errorf("path %q uses an unsupported directory glob", root)
 		}
 		root = path.Clean(root)
 		if directoryOnly {
@@ -403,7 +403,7 @@ func UploadArtifactPaths(value string) ([]string, error) {
 				directory = "."
 			}
 			if strings.Contains(directory, "*") || strings.Contains(pattern, "**") {
-				return nil, fmt.Errorf("path %q uses an unsupported recursive or non-final glob; Phase 6 is required", root)
+				return nil, fmt.Errorf("path %q uses an unsupported recursive or non-final glob", root)
 			}
 			if _, err := path.Match(pattern, "probe"); err != nil {
 				return nil, fmt.Errorf("path %q has an invalid glob: %w", root, err)
@@ -472,7 +472,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 		value := inputs[name]
 		normalized := strings.ToLower(name)
 		if seen[normalized] {
-			return fmt.Errorf("duplicate case-insensitive input %q is unsupported; Phase 6 is required", name)
+			return fmt.Errorf("duplicate case-insensitive input %q is unsupported", name)
 		}
 		seen[normalized] = true
 		switch normalized {
@@ -521,7 +521,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		}
-		return fmt.Errorf("explicit input %q value is unsupported; Phase 6 is required", name)
+		return fmt.Errorf("explicit input %q value is unsupported", name)
 	}
 	return nil
 }

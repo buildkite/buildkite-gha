@@ -1,0 +1,36 @@
+name: Upload artifact proof
+
+on:
+  push:
+
+jobs:
+  upload-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the artifact payload
+        shell: bash
+        run: |
+          mkdir -p payload/nested
+          printf '%s\n' 'upload-artifact' > payload/result.txt
+          printf '%s\n' '{"proof":"native-buildkite-artifact"}' > payload/nested/metadata.json
+          printf '%s\n' 'must-not-be-published' > payload/.hidden-canary
+
+      - name: Upload the payload
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: upload-artifact-proof
+          path: payload
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Verify compatible upload outputs
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          printf 'UPLOAD_ARTIFACT_OUTPUTS={"id":"%s","digest":"%s"}\n' \
+            "$ARTIFACT_ID" "$ARTIFACT_DIGEST"

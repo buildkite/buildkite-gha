@@ -265,8 +265,8 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"case-colliding names": {"Repository": repository, "repository": repository},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "Phase 6") {
-				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want Phase 6 rejection", inputs, err)
+			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want unsupported-capability rejection", inputs, err)
 			}
 		})
 	}

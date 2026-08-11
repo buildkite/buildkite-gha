@@ -1,4 +1,4 @@
-// Package compiler expands an owned workflow into deterministic Phase 0 JSON IR.
+// Package compiler expands an owned workflow into deterministic workflow JSON IR.
 package compiler
 
 import (
@@ -51,7 +51,7 @@ type Repository struct {
 	DefaultBranch string `json:"default_branch"`
 }
 
-// IR is the deterministic, actionlint-independent Phase 0 compiler output.
+// IR is the deterministic, actionlint-independent workflow compiler output.
 type IR struct {
 	Schema    string            `json:"schema"`
 	Workflow  WorkflowSource    `json:"workflow"`
@@ -70,7 +70,7 @@ type Warning struct {
 	Message string `json:"message"`
 }
 
-// ExecutionBoundary makes the compile-only Phase 0 boundary explicit.
+// ExecutionBoundary makes the compile-only boundary explicit.
 type ExecutionBoundary struct {
 	Supported bool   `json:"supported"`
 	Reason    string `json:"reason"`
@@ -715,7 +715,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Warnings: compilerWarnings(parsed.Concurrency),
 		Execution: ExecutionBoundary{
 			Supported: true,
-			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
+			Reason:    "run-job supports the fail-closed supported shell and local-action subset",
 		},
 		Jobs: expanded.instances,
 	}

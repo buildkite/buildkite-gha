@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":docker: Hosted Docker capabilities"
+    key: "hosted-docker-probe"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    command: "scripts/hosted-docker-probe"

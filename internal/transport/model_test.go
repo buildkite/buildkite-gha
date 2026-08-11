@@ -523,7 +523,7 @@ func testPlan(stepKey, contents string) PlanArtifact {
 
 func testKey(t *testing.T) ES256Key {
 	t.Helper()
-	key, err := NewTestES256Key("phase0-test")
+	key, err := NewTestES256Key("transport-probe-test")
 	if err != nil {
 		t.Fatal(err)
 	}

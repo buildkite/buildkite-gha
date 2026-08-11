@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Summary annotation settled"
+    key: "summary-annotation-complete"
+    depends_on:
+      - step: "gha-summary-annotation"
+        allow_failure: true
+    command: "echo 'Summary annotation job settled before API verification'"

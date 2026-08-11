@@ -1,0 +1,75 @@
+name: Local actions differential oracle
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.composite.outputs.result }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          package-manager-cache: "false"
+          token: ""
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.5"
+          cache: "false"
+          token: ""
+
+      - name: Verify portable setup actions
+        shell: bash
+        run: |
+          node --version | grep '^v24\.'
+          go version | grep 'go1\.26\.5 '
+
+      - name: Produce shell output
+        id: shell
+        shell: bash
+        run: echo "result=smoke" >> "$GITHUB_OUTPUT"
+
+      - name: Run local JavaScript action
+        id: javascript
+        uses: ./.github/actions/oracle-javascript
+        with:
+          message: ${{ steps.shell.outputs.result }}
+
+      - name: Run local composite action
+        id: composite
+        uses: ./.github/actions/oracle-composite
+        with:
+          message: ${{ steps.javascript.outputs.result }}
+
+      - name: Verify composite environment
+        shell: bash
+        run: test "$SMOKE_COMPOSITE_SEEN" = "true"
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify output observation
+        shell: bash
+        env:
+          EXPECTED_RESULT: ${{ needs.producer.outputs.result }}
+        run: |
+          test "$EXPECTED_RESULT" = "smoke-javascript-composite"
+          printf '{"result":"%s"}\n' "$EXPECTED_RESULT" > observation.json
+          printf '%s\n' '{"result":"smoke-javascript-composite"}' > expected-observation.json
+          diff -u expected-observation.json observation.json

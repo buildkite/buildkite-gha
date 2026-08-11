@@ -5,7 +5,7 @@ This directory is a self-contained repository fixture for the first
 this directory as the repository root, run the workflows on GitHub Actions and
 Buildkite, and compare their normalized observations.
 
-The fixture is deliberately staged so early phases can use it before the whole
+The fixture is deliberately staged so individual behaviors can use it before the whole
 workflow is executable:
 
 1. `shell.yml` is the first runtime target. It has two logical jobs, a static
@@ -19,7 +19,7 @@ workflow is executable:
    payload in both consumer matrix instances.
 
 `manifest.json` is the authoritative, ordered compatibility inventory for
-these workflows and the related Phase 4, Phase 5, and Phase 6 fixtures. Every
+these workflows and the related behavior-oriented proof fixtures. Every
 entry names its deterministic compile event and records the separate runtime
 evidence.
 
