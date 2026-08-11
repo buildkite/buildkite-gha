@@ -635,44 +635,56 @@ each verified repository fetch command and are never persisted.
 | `github-server-url` | Omitted, empty, or `https://github.com` |
 | `allow-unsafe-pr-checkout` | Omitted or false |
 
-`false` and omission do no manifest traversal. `true` materializes direct
-gitlinks. `recursive` revalidates each nested committed manifest before
-materializing its children, to depth 8 and 256 total children. `fetch-depth: 1`
-requests each exact gitlink with depth 1. `fetch-depth: 0` fetches all child
-heads and tags plus the exact gitlink; `fetch-tags` affects only the
-superproject, matching upstream command construction. Nested children are
-checked out detached at their exact committed gitlinks.
+`false` and omission do not run submodule commands. `true` runs native Git
+submodule porcelain for direct children; `recursive` adds Git's `--recursive`
+flag to sync, update, and status. `fetch-depth: 1` adds `--depth=1` to the
+submodule update, while `fetch-depth: 0` omits a depth flag. `fetch-tags`
+affects only the superproject, matching upstream command construction.
 
-The adapter does not use Git's submodule porcelain. Before any child network
-request it reads the committed `.gitmodules` blob from the selected commit's
-object database, parses it with includes disabled, and admits only one
-unambiguous `path` and `url` per entry. Every path must be a clean relative
-workspace path and an exact mode-`160000` gitlink in that commit. Manifest size,
-entry count, aggregate bytes, paths, and recursion are bounded. Duplicate,
-case-colliding, prefix-colliding, absolute, traversal, drive, UNC, backslash,
-control, `.git`, symlink, and non-gitlink forms fail before child authority is
-granted. Installation uses pinned no-follow directory descriptors and
-no-replace renames; publication and local submodule registration roll back on
-sibling failure or cancellation.
+The patched Git executable owns `.gitmodules` parsing, path handling, relative
+URL resolution, recursive traversal, exact gitlink checkout, and the native
+`.git/modules` layout. The adapter runs `submodule sync`, then `submodule
+update --init --force`, then verifies initialized state with `submodule status`.
+Current, patched Git and whole-job isolation are therefore requirements, not
+optional hardening. The runtime resolves Git before workflow execution but does
+not attest its vendor security patch level. Operators must provide a
+vendor-supported Git distribution patched for recursive-submodule path, hook,
+gitdir, and credential URL vulnerabilities, including the vulnerability
+families represented by CVE-2024-32002, CVE-2024-50338, CVE-2024-52006, and
+CVE-2025-48384. Pinning that distribution in the immutable runtime image is
+preferred to relying on a mutable agent installation.
 
-Each child is fetched into private staging with system and global Git config,
-hooks, prompts, redirects, SSH, local/file, `ext`, and all non-HTTPS transports
-disabled. Recursive mode repeats the same checks for every committed child
-manifest. Each validated child is registered with its canonical URL and
-`active=true` in its immediate parent's isolated local config, so `git
-submodule status` reports it initialized. No helper, token, header, proxy,
-conditional include, or other credential configuration is retained.
+Git runs with hermetic system and global configuration, hooks and prompts
+disabled, HTTPS as the only enabled transport, and SSH, file/local, `ext`, and
+redirects disabled. A command-scoped rule rewrites `git@github.com:` to
+`https://github.com/`. Repository-provider credential helper configuration and
+`useHttpPath` are scoped specifically to `https://github.com`; there is no
+generic helper, so external HTTPS submodules are anonymous. Private GitHub
+children use Buildkite's managed code-access policy: the requested owner must
+match the pipeline's GitHub account, the connected GitHub App installation must
+include the requested repository, and the issued token is attenuated to that
+one repository with `contents: read`. This intentionally permits a checked-in
+manifest to select an App-authorized sibling repository in the same account; it
+is not a pipeline-repository-only allowlist.
+Credentials are command-scoped and are not persisted, although concurrent
+processes in the same job share an OS trust boundary. Whole-job isolation is
+required to make that boundary meaningful.
+
+Failure or cancellation can leave partial native submodule state. The failed
+isolated job and its workspace are discarded; the adapter does not promise a
+transactional rollback inside that workspace.
 
 | Submodule URL or auth category | Adapter-compatible behavior | Deliberate Buildkite safety boundary |
 | --- | --- | --- |
 | Public GitHub HTTPS | Supported anonymously when provider credentials are unavailable. | Redirects are disabled and ambient Git configuration and credential helpers are not inherited. |
-| Same-provider relative URL | `./` and `../` resolve against the immediate parent's canonical GitHub remote, then pass the full URL policy again. | Resolution outside canonical `github.com/owner/repository` fails closed. |
-| Private GitHub repository | Supported when the Buildkite repository-provider backend authorizes the exact canonical child path. | Backend denial is terminal; controlled helper tests cover this path, but this repository does not yet contain a production private-repository runtime proof. |
-| `git@github.com:owner/repository` | Rewritten to canonical HTTPS when no SSH key is supplied, matching upstream's no-key behavior. | Other SCP users or hosts and all `ssh://` URLs fail closed. |
+| Relative URL | Native patched Git resolves it against the immediate parent's remote, including in recursive mode. | The resolved transport remains subject to the HTTPS-only policy. |
+| Private GitHub repository | Supported under Buildkite managed code access when it is in the pipeline's GitHub account and included in the connected App installation. | The backend mints a `contents: read` token for the requested repository only. A manifest may intentionally select an authorized sibling; there is no pipeline-specific child allowlist. |
+| `git@github.com:owner/repository` | Rewritten to HTTPS for the submodule commands, matching upstream's no-key behavior. | Other SSH forms remain disabled. |
 | `ssh-key`, known-hosts, or SSH agent | Unsupported. | There is no confined per-submodule SSH credential authority; non-empty `ssh-key` fails validation. |
-| External HTTPS, GHES, `git://`, file/local, `ext`, or remote helpers | Unsupported. | There is no external-host authority or credential policy, so these fail before Git sees the URL. |
+| External HTTPS, including GHES submodules | Git may fetch it anonymously. | The GitHub-specific helper is not offered to external hosts; alternate `github-server-url` values for the superproject remain unsupported. |
+| `git://`, file/local, `ext`, or remote helpers | Unsupported. | The transport policy disables non-HTTPS protocols. |
 | `persist-credentials` | Omitted or false only. | Unlike upstream's true default, credentials are never persisted; explicit true fails closed. |
-| Post cleanup | Staging, command-scoped credentials, and adapter-owned temporary configuration are removed on success, failure, and cancellation. | The upstream Node post action is not registered because its main action is not executed. |
+| Failure or cancellation | Partial submodule state is discarded with the failed isolated job. | There is no in-workspace transactional rollback. |
 
 The exact upstream sources audited for all admitted commits are the
 [`submodules` parser](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/input-helper.ts#L143-L176),

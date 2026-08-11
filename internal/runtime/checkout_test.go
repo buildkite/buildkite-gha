@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -225,337 +224,139 @@ func TestCheckoutRefOutput(t *testing.T) {
 	}
 }
 
-func TestCheckoutSubmoduleInputAndURLNormalization(t *testing.T) {
+func TestCheckoutSubmoduleInputMode(t *testing.T) {
 	if got := checkoutSubmoduleMode(map[string]string{"SuBmOdUlEs": " ReCuRsIvE "}); got != "recursive" {
 		t.Fatalf("checkoutSubmoduleMode() = %q", got)
 	}
-	for _, test := range []struct{ raw, parent, want string }{
-		{"git@github.com:owner/child", "https://github.com/owner/parent.git", "https://github.com/owner/child.git"},
-		{"../child.git", "https://github.com/owner/parent.git", "https://github.com/owner/child.git"},
-	} {
-		got, err := canonicalCheckoutSubmoduleURL(test.raw, test.parent)
-		if err != nil || got != test.want {
-			t.Fatalf("canonicalCheckoutSubmoduleURL(%q) = %q, %v; want %q", test.raw, got, err, test.want)
-		}
+}
+
+func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "git.log")
+	git := filepath.Join(t.TempDir(), "git")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellTestQuote(logPath) + "\n"
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	for _, raw := range []string{"file:///tmp/repo", "http://github.com/a/b", "https://code.example.org/team/child.git", "https://GitHub.com/a/b", "https://github.com:443/a/b", "https://user@github.com/a/b", "https://github.com/a/b/c", "https://github.com/a/b?x=1", "https://github.com/a/b#x", "https://github.com/a/%62", "ext::sh -c evil"} {
-		if got, err := canonicalCheckoutSubmoduleURL(raw, "https://github.com/owner/parent.git"); err == nil {
-			t.Fatalf("canonicalCheckoutSubmoduleURL(%q) = %q, want rejection", raw, got)
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	if len(lines) != 3 || !strings.Contains(lines[0], "submodule sync --recursive") || !strings.Contains(lines[1], "submodule update --init --force --depth=1 --recursive") || !strings.Contains(lines[2], "submodule status --recursive") {
+		t.Fatalf("native submodule command sequence = %q", lines)
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, "url.https://github.com/.insteadOf=git@github.com:") {
+			t.Fatalf("command lacks scoped GitHub rewrite: %q", line)
+		}
+		if strings.Contains(line, "credential.helper=!") {
+			t.Fatalf("command contains generic credential helper: %q", line)
 		}
 	}
 }
 
-func TestCheckoutSubmoduleMaterializationUsesRealObjectDatabases(t *testing.T) {
-	grand, grandOID := createSubmoduleFixtureRepository(t, "grand.txt", "grand\n", nil)
-	childModules := []testGitlink{{name: "nested.module", path: "deps/grand", url: "../grand.git", oid: grandOID}}
-	child, childOID := createSubmoduleFixtureRepository(t, "child.txt", "child\n", childModules)
+func TestCheckoutSubmoduleStatusRejectsInvalidStates(t *testing.T) {
+	for _, prefix := range []string{"-", "+", "U"} {
+		t.Run(prefix, func(t *testing.T) {
+			git := filepath.Join(t.TempDir(), "git")
+			script := `#!/bin/sh
+previous=
+for argument in "$@"; do
+  if [ "$previous" = submodule ] && [ "$argument" = status ]; then
+    printf '%s%s child\n' ` + shellTestQuote(prefix) + ` ` + shellTestQuote(strings.Repeat("a", 40)) + `
+    exit 0
+  fi
+  previous="$argument"
+done
+exit 0
+`
+			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false)
+			if err == nil || !strings.Contains(err.Error(), "invalid state") {
+				t.Fatalf("status prefix %q error = %v", prefix, err)
+			}
+		})
+	}
+}
+
+func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
+	root := t.TempDir()
+	_, grandOID := createNativeSubmoduleRepository(t, root, "grand", "grand.txt", "grand\n", "", "")
+	_, childOID := createNativeSubmoduleRepository(t, root, "child", "child.txt", "child\n", "../grand.git", "deps/grand")
+	_, parentOID := createNativeSubmoduleRepository(t, root, "parent", "parent.txt", "parent\n", "../child.git", "deps/child")
+
 	for _, test := range []struct {
 		name      string
 		recursive bool
+		depthOne  bool
 	}{
-		{name: "direct"},
-		{name: "recursive", recursive: true},
+		{name: "direct depth zero"},
+		{name: "recursive depth one", recursive: true, depthOne: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			parentModules := []testGitlink{{name: "child.with.dots", path: "deps/child", url: "https://github.com/owner/child.git", oid: childOID}}
-			parentRemote, parentOID := createSubmoduleFixtureRepository(t, "parent.txt", "parent\n", parentModules)
-			parent := filepath.Join(t.TempDir(), "parent")
-			runTestGit(t, "", "clone", parentRemote, parent)
-			runTestGit(t, parent, "checkout", "--detach", parentOID)
-			poison := fmt.Sprintf("[url %q]\n\tinsteadOf = %s\n[http]\n\tproxy = http://attacker.invalid\n\tsslVerify = false\n", "file:///does-not-exist/", child)
-			if err := os.WriteFile(filepath.Join(parent, ".no-global-gitconfig"), []byte(poison), 0o644); err != nil {
+			workspace := filepath.Join(t.TempDir(), "parent")
+			runTestGit(t, "", "clone", filepath.Join(root, "parent.git"), workspace)
+			runTestGit(t, workspace, "checkout", "--detach", parentOID)
+			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
+			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
+			if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false); err != nil {
 				t.Fatal(err)
 			}
-			base := checkoutGitBaseArgs()
-			// The production parser has already admitted only github.com URLs. This
-			// test-only routing replaces HTTPS with local bare fixture repositories.
-			base = append(base, "-c", "protocol.file.allow=always")
-			state := checkoutSubmoduleState{
-				runner: Runner{Stdout: io.Discard, Stderr: io.Discard}, processor: newCommandProcessor(io.Discard, io.Discard),
-				ctx: context.Background(), git: "git", env: map[string]string{
-					"HOME": filepath.Join(parent, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull,
-				}, base: base,
-				depthOne: true, recursive: test.recursive,
-				fetchURL: func(raw string) string {
-					switch raw {
-					case "https://github.com/owner/child.git":
-						return child
-					case "https://github.com/owner/grand.git":
-						return grand
-					default:
-						t.Fatalf("unexpected validated fetch URL %q", raw)
-						return ""
-					}
-				},
-			}
-			if err := state.materialize(parent, parentOID, "https://github.com/owner/parent.git", 0); err != nil {
-				t.Fatalf("materialize: %v", err)
-			}
-			childPath := filepath.Join(parent, "deps", "child")
+			childPath := filepath.Join(workspace, "deps", "child")
 			if got := strings.TrimSpace(runTestGit(t, childPath, "rev-parse", "HEAD")); got != childOID {
 				t.Fatalf("child HEAD = %s, want %s", got, childOID)
 			}
-			if got := strings.TrimSpace(runTestGit(t, parent, "config", "--local", "--get", "submodule.child.with.dots.url")); got != "https://github.com/owner/child.git" {
-				t.Fatalf("registered child URL = %q", got)
-			}
-			if got := strings.TrimSpace(runTestGit(t, parent, "config", "--local", "--get", "submodule.child.with.dots.active")); got != "true" {
-				t.Fatalf("registered child active = %q", got)
+			if _, err := os.Stat(filepath.Join(workspace, ".git", "modules", "deps", "child", "HEAD")); err != nil {
+				t.Fatalf("native child module layout: %v", err)
 			}
 			grandPath := filepath.Join(childPath, "deps", "grand")
 			if test.recursive {
 				if got := strings.TrimSpace(runTestGit(t, grandPath, "rev-parse", "HEAD")); got != grandOID {
 					t.Fatalf("grandchild HEAD = %s, want %s", got, grandOID)
 				}
-				if got := strings.TrimSpace(runTestGit(t, childPath, "config", "--local", "--get", "submodule.nested.module.url")); got != "https://github.com/owner/grand.git" {
-					t.Fatalf("registered grandchild URL = %q", got)
+				if _, err := os.Stat(filepath.Join(workspace, ".git", "modules", "deps", "child", "modules", "deps", "grand", "HEAD")); err != nil {
+					t.Fatalf("native nested module layout: %v", err)
 				}
 			} else if _, err := os.Stat(filepath.Join(grandPath, ".git")); !os.IsNotExist(err) {
-				t.Fatalf("direct materialization installed grandchild repository: %v", err)
+				t.Fatalf("direct mode initialized nested child: %v", err)
 			}
 			statusArgs := []string{"submodule", "status"}
 			if test.recursive {
 				statusArgs = append(statusArgs, "--recursive")
 			}
-			status := strings.TrimSuffix(runTestGit(t, parent, statusArgs...), "\n")
-			lines := strings.Split(status, "\n")
-			wantLines := 1
-			if test.recursive {
-				wantLines = 2
-			}
-			if len(lines) != wantLines {
-				t.Fatalf("submodule status lines = %q", lines)
-			}
-			for _, line := range lines {
-				if line == "" || line[0] != ' ' {
-					t.Fatalf("submodule remains uninitialized: %q", line)
-				}
-			}
-			config := runTestGit(t, parent, "config", "--local", "--list") + runTestGit(t, childPath, "config", "--local", "--list")
-			for _, forbidden := range []string{"credential.helper", "extraheader", "job-secret", "repository-secret"} {
-				if strings.Contains(config, forbidden) {
-					t.Fatalf("submodule config retained forbidden value %q: %s", forbidden, config)
+			for _, line := range strings.Split(strings.TrimSpace(runTestGit(t, workspace, statusArgs...)), "\n") {
+				if line == "" || line[0] == '-' {
+					t.Fatalf("uninitialized status %q", line)
 				}
 			}
 		})
 	}
 }
 
-type testGitlink struct{ name, path, url, oid string }
-
-func createSubmoduleFixtureRepository(t *testing.T, file, contents string, links []testGitlink) (string, string) {
+func createNativeSubmoduleRepository(t *testing.T, root, name, file, contents, childURL, childPath string) (string, string) {
 	t.Helper()
-	repo := t.TempDir()
-	runTestGit(t, repo, "init", "--initial-branch=main")
-	runTestGit(t, repo, "config", "user.name", "buildkite-gha test")
-	runTestGit(t, repo, "config", "user.email", "test@example.invalid")
-	if err := os.WriteFile(filepath.Join(repo, file), []byte(contents), 0o644); err != nil {
+	work := filepath.Join(root, name+"-work")
+	runTestGit(t, "", "init", "--initial-branch=main", work)
+	runTestGit(t, work, "config", "user.name", "buildkite-gha test")
+	runTestGit(t, work, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(work, file), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runTestGit(t, repo, "add", file)
-	if len(links) != 0 {
-		var manifest strings.Builder
-		for _, link := range links {
-			fmt.Fprintf(&manifest, "[submodule %q]\n\tpath = %s\n\turl = %s\n", link.name, link.path, link.url)
-			runTestGit(t, repo, "update-index", "--add", "--cacheinfo", "160000,"+link.oid+","+link.path)
-		}
-		if err := os.WriteFile(filepath.Join(repo, ".gitmodules"), []byte(manifest.String()), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runTestGit(t, repo, "add", ".gitmodules")
+	runTestGit(t, work, "add", file)
+	if childURL != "" {
+		runTestGit(t, work, "-c", "protocol.file.allow=always", "submodule", "add", childURL, childPath)
 	}
-	runTestGit(t, repo, "commit", "-m", "fixture")
-	oid := strings.TrimSpace(runTestGit(t, repo, "rev-parse", "HEAD"))
-	bare := filepath.Join(t.TempDir(), "fixture.git")
-	runTestGit(t, "", "clone", "--bare", repo, bare)
+	runTestGit(t, work, "commit", "-m", "fixture")
+	oid := strings.TrimSpace(runTestGit(t, work, "rev-parse", "HEAD"))
+	bare := filepath.Join(root, name+".git")
+	runTestGit(t, "", "clone", "--bare", work, bare)
 	return bare, oid
-}
-
-type testIndexEntry struct{ mode, path, oid string }
-
-func createManifestFixtureRepository(t *testing.T, manifest []byte, manifestMode string, entries []testIndexEntry) (string, string) {
-	t.Helper()
-	repo := t.TempDir()
-	runTestGit(t, repo, "init", "--initial-branch=main")
-	runTestGit(t, repo, "config", "user.name", "buildkite-gha test")
-	runTestGit(t, repo, "config", "user.email", "test@example.invalid")
-	manifestOID := strings.TrimSpace(runTestGitInput(t, repo, manifest, "hash-object", "-w", "--stdin"))
-	if manifestMode != "120000" {
-		runTestGit(t, repo, "update-index", "--add", "--cacheinfo", manifestMode+","+manifestOID+",.gitmodules")
-	}
-	for _, entry := range entries {
-		if entry.oid == "" {
-			entry.oid = strings.TrimSpace(runTestGitInput(t, repo, nil, "hash-object", "-w", "--stdin"))
-		}
-		runTestGit(t, repo, "update-index", "--add", "--cacheinfo", entry.mode+","+entry.oid+","+entry.path)
-	}
-	var tree string
-	if manifestMode == "120000" {
-		tree = strings.TrimSpace(runTestGitInput(t, repo, []byte("120000 blob "+manifestOID+"\t.gitmodules\n"), "mktree"))
-	} else {
-		tree = strings.TrimSpace(runTestGit(t, repo, "write-tree"))
-	}
-	oid := strings.TrimSpace(runTestGitInput(t, repo, []byte("manifest fixture\n"), "commit-tree", tree))
-	runTestGit(t, repo, "update-ref", "refs/heads/main", oid)
-	bare := filepath.Join(t.TempDir(), "fixture.git")
-	runTestGit(t, "", "clone", "--bare", repo, bare)
-	return bare, oid
-}
-
-func TestCheckoutSubmoduleManifestRejectsUntrustedTreesBeforeFetch(t *testing.T) {
-	_, childOID := createSubmoduleFixtureRepository(t, "child.txt", "child\n", nil)
-	valid := func(name, path string) string {
-		return fmt.Sprintf("[submodule %q]\n\tpath = %s\n\turl = https://github.com/owner/child.git\n", name, path)
-	}
-	tests := []struct {
-		name, manifest, mode string
-		entries              []testIndexEntry
-	}{
-		{name: "unknown update command", manifest: valid("child", "child") + "\tupdate = !command\n", entries: []testIndexEntry{{"160000", "child", childOID}}},
-		{name: "include path", manifest: "[include]\n\tpath = /tmp/evil\n"},
-		{name: "duplicate path key", manifest: valid("child", "child") + "\tpath = other\n", entries: []testIndexEntry{{"160000", "child", childOID}}},
-		{name: "duplicate URL key", manifest: valid("child", "child") + "\turl = https://github.com/owner/other.git\n", entries: []testIndexEntry{{"160000", "child", childOID}}},
-		{name: "missing URL", manifest: "[submodule \"child\"]\n\tpath = child\n", entries: []testIndexEntry{{"160000", "child", childOID}}},
-		{name: "path is blob", manifest: valid("child", "child"), entries: []testIndexEntry{{mode: "100644", path: "child"}}},
-		{name: "literal path mismatch", manifest: valid("child", ":(glob)child"), entries: []testIndexEntry{{"160000", "child", childOID}}},
-		{name: "case-fold path", manifest: valid("one", "A/B") + valid("two", "a/b"), entries: []testIndexEntry{{"160000", "A/B", childOID}, {"160000", "a/b", childOID}}},
-		{name: "nonadjacent case-fold ancestor", manifest: valid("one", "A") + valid("guard", "a-guard") + valid("two", "a/child"), entries: []testIndexEntry{{"160000", "A", childOID}, {"160000", "a-guard", childOID}, {"160000", "a/child", childOID}}},
-		{name: "parent child collision", manifest: valid("one", "deps") + valid("two", "deps/child"), entries: []testIndexEntry{{"160000", "deps", childOID}}},
-		{name: "traversal", manifest: valid("child", "../child")},
-		{name: "absolute", manifest: valid("child", "/child")},
-		{name: "drive absolute", manifest: valid("child", "C:/child")},
-		{name: "drive relative", manifest: valid("child", "C:child")},
-		{name: "backslash", manifest: valid("child", `deps\child`)},
-		{name: "dot git", manifest: valid("child", "deps/.git/child")},
-		{name: "control", manifest: valid("child", "deps/\x01child")},
-		{name: "symlink manifest", manifest: "target", mode: "120000"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			mode := test.mode
-			if mode == "" {
-				mode = "100644"
-			}
-			repo, commit := createManifestFixtureRepository(t, []byte(test.manifest), mode, test.entries)
-			fetches := 0
-			state := checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs(), fetchURL: func(raw string) string { fetches++; return raw }}
-			if err := state.materialize(repo, commit, "https://github.com/owner/parent.git", 0); err == nil {
-				t.Fatal("materialize accepted malicious manifest")
-			}
-			if fetches != 0 {
-				t.Fatalf("fetch routing called %d times before manifest rejection", fetches)
-			}
-		})
-	}
-}
-
-func TestCheckoutSubmoduleManifestBounds(t *testing.T) {
-	_, childOID := createSubmoduleFixtureRepository(t, "child.txt", "child\n", nil)
-	var manifest strings.Builder
-	entries := make([]testIndexEntry, 0, 129)
-	for i := range 129 {
-		name, path := fmt.Sprintf("module-%03d", i), fmt.Sprintf("deps/module-%03d", i)
-		fmt.Fprintf(&manifest, "[submodule %q]\n\tpath = %s\n\turl = https://github.com/owner/child.git\n", name, path)
-		entries = append(entries, testIndexEntry{"160000", path, childOID})
-	}
-	repo, commit := createManifestFixtureRepository(t, []byte(manifest.String()), "100644", entries)
-	state := checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
-	if _, err := state.manifest(repo, commit, "https://github.com/owner/parent.git"); err == nil || !strings.Contains(err.Error(), "entry bound") {
-		t.Fatalf("129-entry manifest error = %v", err)
-	}
-
-	repo, commit = createManifestFixtureRepository(t, bytes.Repeat([]byte{'x'}, (1<<20)+1), "100644", nil)
-	state = checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
-	if _, err := state.manifest(repo, commit, "https://github.com/owner/parent.git"); err == nil || !strings.Contains(err.Error(), "size bounds") {
-		t.Fatalf("oversized manifest error = %v", err)
-	}
-
-	executableManifest := []byte("[submodule \"child\"]\n\tpath = child\n\turl = https://github.com/owner/child.git\n")
-	repo, commit = createManifestFixtureRepository(t, executableManifest, "100755", []testIndexEntry{{"160000", "child", childOID}})
-	state = checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
-	if modules, err := state.manifest(repo, commit, "https://github.com/owner/parent.git"); err != nil || len(modules) != 1 {
-		t.Fatalf("executable regular manifest modules = %#v, error = %v", modules, err)
-	}
-}
-
-func TestCheckoutSubmoduleFetchArgumentsIgnoreParentFetchTags(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		depthOne bool
-		want     []string
-	}{
-		{"depth one", true, []string{"fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", strings.Repeat("a", 40)}},
-		{"depth zero", false, []string{"fetch", "--no-tags", "--no-recurse-submodules", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*", "+" + strings.Repeat("a", 40) + ":refs/buildkite-gha/submodule"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			oid := strings.Repeat("a", 40)
-			if got := checkoutSubmoduleFetchArgs(test.depthOne, oid); !slices.Equal(got, test.want) {
-				t.Fatalf("submodule fetch args = %q, want %q", got, test.want)
-			}
-		})
-	}
-}
-
-func TestCheckoutSubmodulePathValidation(t *testing.T) {
-	for _, valid := range []string{"vendor/child", "a"} {
-		if err := validateCheckoutSubmodulePath(valid); err != nil {
-			t.Fatalf("validateCheckoutSubmodulePath(%q): %v", valid, err)
-		}
-	}
-	for _, invalid := range []string{"", "../child", "/child", "a\\b", "-child", "a/.git/b", "a//b", "a/child.", "C:/child", "c:/child", "C:child", "z:child"} {
-		if err := validateCheckoutSubmodulePath(invalid); err == nil {
-			t.Fatalf("validateCheckoutSubmodulePath(%q) succeeded", invalid)
-		}
-	}
-	root := t.TempDir()
-	if err := os.Symlink(t.TempDir(), filepath.Join(root, "vendor")); err != nil {
-		t.Fatal(err)
-	}
-	if err := preflightCheckoutSubmoduleDestination(root, "vendor/child"); err == nil {
-		t.Fatal("symlink ancestor was accepted")
-	}
-	root = t.TempDir()
-	if err := os.Symlink(t.TempDir(), filepath.Join(root, "child")); err != nil {
-		t.Fatal(err)
-	}
-	if err := preflightCheckoutSubmoduleDestination(root, "child"); err == nil {
-		t.Fatal("final symlink was accepted")
-	}
-}
-
-func TestPublishCheckoutSubmodulesRollsBackEarlierSibling(t *testing.T) {
-	root, staging := t.TempDir(), t.TempDir()
-	runTestGit(t, root, "init")
-	for i := range 2 {
-		if err := os.Mkdir(filepath.Join(staging, fmt.Sprint(i)), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "second"), []byte("collision"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	modules := []checkoutSubmodule{{name: "first", path: "deps/first", url: "https://github.com/owner/first.git"}, {name: "second", path: "second", url: "https://github.com/owner/second.git"}}
-	state := checkoutSubmoduleState{ctx: context.Background(), git: "git", env: map[string]string{}, base: checkoutGitBaseArgs()}
-	err := state.registerAndPublish(root, staging, modules)
-	if err == nil {
-		t.Fatal("publication succeeded despite second destination collision")
-	}
-	if _, err := os.Stat(filepath.Join(root, "deps", "first")); !os.IsNotExist(err) {
-		t.Fatalf("first sibling remained published after rollback: %v", err)
-	}
-	if entries, err := os.ReadDir(filepath.Join(root, "deps")); err != nil || len(entries) != 0 {
-		t.Fatalf("rollback residue is not an empty ancestor: %v, entries=%v", err, entries)
-	}
-	if info, err := os.Stat(filepath.Join(staging, "0")); err != nil || !info.IsDir() {
-		t.Fatalf("first sibling was not returned to staging: %v", err)
-	}
-	for _, module := range modules {
-		for _, field := range []string{"url", "active"} {
-			cmd := exec.Command("git", "-C", root, "config", "--local", "--get", "submodule."+module.name+"."+field)
-			if err := cmd.Run(); err == nil {
-				t.Fatalf("registration %s.%s remained after publication rollback", module.name, field)
-			}
-		}
-	}
 }
 
 func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testing.T) {
@@ -568,12 +369,8 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 	if err := os.WriteFile(git, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	state := checkoutSubmoduleState{
-		runner:    Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard},
-		processor: newCommandProcessor(io.Discard, io.Discard), ctx: context.Background(), git: git,
-		base: checkoutGitBaseArgs(), env: map[string]string{}, allowProviderCredentials: false,
-	}
-	if err := state.stream(t.TempDir(), state.allowProviderCredentials, "fetch", "origin"); err != nil {
+	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -601,7 +398,7 @@ printf 'username=token\npassword=repository-secret\n'
 set -eu
 helper=
 for argument in "$@"; do
-  case "$argument" in credential.helper=!*) helper="${argument#credential.helper=!}" ;; esac
+  case "$argument" in credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;; esac
 done
 test -n "$helper"
 mkdir -p .git
@@ -613,11 +410,8 @@ echo job-secret
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
-	state := checkoutSubmoduleState{
-		runner:    Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs},
-		processor: newCommandProcessor(&logs, &logs), ctx: context.Background(), git: git, base: checkoutGitBaseArgs(), env: map[string]string{}, allowProviderCredentials: true,
-	}
-	if err := state.stream(workspace, true, "fetch", "origin", strings.Repeat("a", 40)); err != nil {
+	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
+	if err := runner.runRepositoryProviderCheckoutFetch(context.Background(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}); err != nil {
 		t.Fatal(err)
 	}
 	input, err := os.ReadFile(inputLog)
@@ -707,53 +501,55 @@ func runTestGitInput(t *testing.T, directory string, input []byte, args ...strin
 	return string(output)
 }
 
-func TestCheckoutSubmoduleCancellationCleansStagingAndProcessGroup(t *testing.T) {
-	child, childOID := createSubmoduleFixtureRepository(t, "child.txt", "child\n", nil)
-	parent, parentOID := createSubmoduleFixtureRepository(t, "parent.txt", "parent\n", []testGitlink{{"child", "deps/child", "https://github.com/owner/child.git", childOID}})
+func TestCheckoutSubmoduleCancellationCleansNativeUpdateProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	createNativeSubmoduleRepository(t, root, "child", "child.txt", "child\n", "", "")
+	_, parentOID := createNativeSubmoduleRepository(t, root, "parent", "parent.txt", "parent\n", "../child.git", "deps/child")
+	workspace := filepath.Join(t.TempDir(), "parent")
+	runTestGit(t, "", "clone", filepath.Join(root, "parent.git"), workspace)
+	runTestGit(t, workspace, "checkout", "--detach", parentOID)
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pidFile, fetchStarted := filepath.Join(t.TempDir(), "child.pid"), filepath.Join(t.TempDir(), "fetch-started")
+	pidFile, updateStarted := filepath.Join(t.TempDir(), "child.pid"), filepath.Join(t.TempDir(), "update-started")
 	wrapper := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
-operation=
+previous=
 for argument in "$@"; do
-  case "$argument" in fetch) operation=fetch; break ;; esac
+  if [ "$previous" = submodule ] && [ "$argument" = update ]; then
+    (trap '' INT TERM; sleep 30) &
+    echo $! > ` + shellTestQuote(pidFile) + `
+    : > ` + shellTestQuote(updateStarted) + `
+    wait
+  fi
+  previous="$argument"
 done
-if [ "$operation" = fetch ]; then
-  (trap '' INT TERM; sleep 30) &
-  echo $! > ` + shellTestQuote(pidFile) + `
-  : > ` + shellTestQuote(fetchStarted) + `
-  wait
-fi
 exec ` + shellTestQuote(realGit) + ` "$@"
 `
 	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	state := checkoutSubmoduleState{
-		runner:    Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond},
-		processor: newCommandProcessor(io.Discard, io.Discard), ctx: ctx, git: wrapper, env: map[string]string{}, base: append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), depthOne: true,
-		fetchURL: func(string) string { return child },
-	}
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
-	go func() { done <- state.materialize(parent, parentOID, "https://github.com/owner/parent.git", 0) }()
+	go func() {
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), true, false, false)
+	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(fetchStarted); err == nil {
+		if _, err := os.Stat(updateStarted); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("fetch did not start")
+			t.Fatal("submodule update did not start")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("materialize cancellation error = %v", err)
+		t.Fatalf("submodule update cancellation error = %v", err)
 	}
 	pidBytes, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -761,13 +557,57 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	}
 	pid := strings.TrimSpace(string(pidBytes))
 	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
-		t.Fatalf("fetch child process %s remains alive", pid)
+		t.Fatalf("update child process %s remains alive", pid)
 	}
-	if matches, _ := filepath.Glob(filepath.Join(parent, ".buildkite-gha-submodules-*")); len(matches) != 0 {
-		t.Fatalf("staging leaked: %v", matches)
+}
+
+func TestCheckoutSubmoduleCancellationCleansNativeStatusProcessGroup(t *testing.T) {
+	pidFile, statusStarted := filepath.Join(t.TempDir(), "child.pid"), filepath.Join(t.TempDir(), "status-started")
+	git := filepath.Join(t.TempDir(), "git")
+	script := `#!/bin/sh
+set -eu
+previous=
+for argument in "$@"; do
+  if [ "$previous" = submodule ] && [ "$argument" = status ]; then
+    (trap '' INT TERM; sleep 30) &
+    echo $! > ` + shellTestQuote(pidFile) + `
+    : > ` + shellTestQuote(statusStarted) + `
+    wait
+  fi
+  previous="$argument"
+done
+exit 0
+`
+	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(parent, "deps", "child")); !os.IsNotExist(err) {
-		t.Fatalf("destination published after cancellation: %v", err)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, true, false)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(statusStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("submodule status did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("submodule status cancellation error = %v", err)
+	}
+	pidBytes, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := strings.TrimSpace(string(pidBytes))
+	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
+		t.Fatalf("status child process %s remains alive", pid)
 	}
 }
 
@@ -876,8 +716,8 @@ case "$operation" in
     use_http_path=
     for argument in "$@"; do
       case "$argument" in
-        credential.helper=!*) helper="${argument#credential.helper=!}" ;;
-        credential.useHttpPath=true) use_http_path=true ;;
+        credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;;
+        credential.https://github.com.useHttpPath=true) use_http_path=true ;;
       esac
     done
     test -n "$helper"
@@ -948,6 +788,47 @@ func TestAgentGitCredentialHelperCommandQuotesExecutable(t *testing.T) {
 	}
 }
 
+func TestRepositoryProviderCredentialHelperIsGitHubSpecific(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "helper.log")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	script := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+cat > ` + shellTestQuote(marker) + `
+printf 'username=token\npassword=secret\n'
+`
+	if err := os.WriteFile(agent, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(), agent)
+	fill := func(host, path string) error {
+		cmd := exec.Command("git", append(args, "credential", "fill")...)
+		cmd.Env = processEnv(map[string]string{"GIT_TERMINAL_PROMPT": "0"})
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=" + host + "\npath=" + path + "\n\n")
+		return cmd.Run()
+	}
+	if err := fill("github.com", "owner/private.git"); err != nil {
+		t.Fatalf("GitHub credential fill: %v", err)
+	}
+	request, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(request), "path=owner/private.git") {
+		t.Fatalf("helper request = %q", request)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := fill("code.example.org", "owner/public.git"); err == nil {
+		t.Fatal("external host unexpectedly received credentials")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("external host invoked GitHub helper: %v", err)
+	}
+}
+
 func TestRepositoryProviderCheckoutFailsClosedWhenHelperDeniesAccess(t *testing.T) {
 	workspace := t.TempDir()
 	checkoutMarker := filepath.Join(t.TempDir(), "checkout-ran")
@@ -963,7 +844,7 @@ helper=
 for argument in "$@"; do
   case "$argument" in
     init|remote|fetch|checkout) operation="$argument" ;;
-    credential.helper=!*) helper="${argument#credential.helper=!}" ;;
+    credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;;
   esac
 done
 case "$operation" in
@@ -1016,7 +897,7 @@ case "$operation" in
   fetch)
     helper=
     for argument in "$@"; do
-      case "$argument" in credential.helper=!*) helper="${argument#credential.helper=!}" ;; esac
+      case "$argument" in credential.https://github.com.helper=!*) helper="${argument#credential.https://github.com.helper=!}" ;; esac
     done
     test -n "$helper"
     credentials="$(printf 'protocol=https\nhost=github.com\npath=buildkite/buildkite-gha.git\n\n' | sh -c "$helper get")"

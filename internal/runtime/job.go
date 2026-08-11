@@ -173,12 +173,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return JobResult{}, err
 			}
 			r.RepositoryCredentials = credentials
-			git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "repository-provider checkout Git")
-			if err != nil {
-				return JobResult{}, err
-			}
-			r.Git = git
 		}
+		git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "native checkout Git")
+		if err != nil {
+			return JobResult{}, err
+		}
+		r.Git = git
 	}
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")

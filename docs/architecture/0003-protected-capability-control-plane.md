@@ -243,17 +243,29 @@ capability and the server-provided job environment indicates
 repository-provider Git credentials are enabled. Otherwise it performs the same
 checkout anonymously.
 
-The event repository and exact SHA remain the only checkout targets. The
-credential helper is configured as a command-scoped Git option only for the
-fetch, uses HTTP-path matching, receives the current job's Agent API identity,
-and is not persisted. The runtime forwards proxy variables captured from the job
-process before workflow execution to that credentialed fetch but does not add
-the job credential to ordinary workflow subprocess environments. This is
-inheritance control, not OS-level isolation between hostile processes in the
-same job. The Buildkite backend independently authorizes the concrete repository
-URL received through Git's credential protocol. Through the supported adapter
-no workflow input can select another credential target or access level, and the
-job's Agent credential is not placed in plans.
+The superproject target remains the event repository at its exact SHA. When the
+admitted checkout requests submodules, native Git may additionally request the
+repositories selected by the checked-in `.gitmodules` graph. The credential
+helper is configured as a command-scoped, `github.com`-specific Git option only
+for the fetch or submodule update, uses HTTP-path matching, receives the current
+job's Agent API identity, and is not persisted. External HTTPS submodules do not
+receive this helper. The Buildkite backend independently authorizes every
+concrete GitHub repository URL received through Git's credential protocol. For
+managed GitHub code access, the requested owner must match the pipeline's GitHub
+account and the connected App installation must include the repository; the
+resulting token is restricted to that repository with `contents: read`. This is
+an intentional same-account sibling-repository authority, not a
+pipeline-repository-only allowlist.
+
+The runtime forwards proxy variables captured from the job process before
+workflow execution to a credentialed Git command but does not add the job
+credential to ordinary workflow subprocess environments. This is inheritance
+control, not OS-level isolation between hostile processes in the same job.
+Action pre-hooks and ordered workflow steps share that job trust boundary, so
+whole-job isolation remains mandatory. The job's Agent credential is not placed
+in plans; protecting it from concurrent same-UID processes would require a
+separate credential broker or checkout sandbox rather than additional manifest
+validation.
 
 A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
