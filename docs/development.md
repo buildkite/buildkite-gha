@@ -26,9 +26,9 @@ mise run check
 ```
 
 `check` verifies formatting, builds the commands, runs standard and
-race-enabled tests, runs `go vet`, golangci-lint, and shellcheck, validates the
-signed plan-envelope fixtures, checks deterministic smoke compilation, and
-validates the release configuration. `make check` is a convenience alias.
+race-enabled tests, runs `go vet`, golangci-lint, and shellcheck, checks
+deterministic smoke compilation, and validates the release configuration.
+`make check` is a convenience alias.
 The standard and race-enabled suites run serially because their live container
 tests inspect daemon-wide Docker resources. Local runs may skip those tests when
 Docker or managed Node is unavailable; the hosted repository check requires the
@@ -44,7 +44,6 @@ mise run test:race
 mise run lint:go
 mise run lint:shell
 mise run vet
-mise run plan-fixtures
 ```
 
 ## Understand the smoke lanes
@@ -186,26 +185,6 @@ producer and both consumer matrix jobs to pass, checks all three terminal
 manifests, and confirms both consumers observed the exact payload and compatible
 absolute `download-path` output.
 
-The pre-release migration POC covers basic CI, artifact transfer, and the
-advanced service-free workflow without adding another behavior-specific proof. It
-builds the exact checked-out source locally, so it is runtime evidence rather
-than installation evidence:
-
-```sh
-commit=$(git rev-parse HEAD)
-test ${#commit} -eq 40
-bk build create --pipeline buildkite/buildkite-gha \
-  --branch "$(git branch --show-current)" --commit "$commit" \
-  --env POC_SUITE=migration --env POC_COMMIT="$commit" --yes
-```
-
-[Buildkite build 303](https://buildkite.com/buildkite/buildkite-gha/builds/303)
-passed the predecessor three-workflow suite at exact commit
-`9d29bf26492be760016d29c7ba0d00033b4f9b39`, including declared reusable-output
-publication and caller consumption, the build-unique cache miss, post-save,
-dependent exact hit, and subsequent artifact fan-out. The revised stable
-service-free and cache fixtures retain compile/admission coverage.
-
 The initial CLI and companion plugin `v0.2.0` releases exercised the complete
 customer installation path at source commit
 `d5102df7e81c49f27a30fb2830d9608a56ee84de`. The service-free importer,
@@ -273,8 +252,6 @@ coverage. Git, pull requests, and Buildkite retain the historical evidence.
 - [ADR 0001](architecture/0001-upstream-actions-reuse.md) explains why the
   compiler uses actionlint while act and the official runner remain behavioral
   references.
-- [ADR 0002](architecture/0002-plan-envelope-trust-boundary.md) preserves the
-  superseded plan-envelope signing experiment and its conformance history.
 - [ADR 0003](architecture/0003-protected-capability-control-plane.md) proposes
   the control plane required for broader protected capabilities.
 

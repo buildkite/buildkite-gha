@@ -1,4 +1,4 @@
-name: Migration POC - cache extension
+name: Released plugin demo - cache extension
 
 on:
   push:
@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 env:
-  POC_CACHE_KEY: migration-plugin-v1-${{ github.sha }}
-  POC_CACHE_PAYLOAD: migration-plugin-cache:${{ github.sha }}
+  EXAMPLE_CACHE_KEY: plugin-demo-v1-${{ github.sha }}
+  EXAMPLE_CACHE_PAYLOAD: plugin-demo-cache:${{ github.sha }}
 
 jobs:
   cache-producer:
@@ -21,8 +21,8 @@ jobs:
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: migration-cache
-          key: ${{ env.POC_CACHE_KEY }}
+          path: plugin-demo-cache
+          key: ${{ env.EXAMPLE_CACHE_KEY }}
 
       - name: Create or verify payload
         shell: bash
@@ -30,10 +30,10 @@ jobs:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           if [[ "$CACHE_HIT" == true ]]; then
-            test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+            test "$(cat plugin-demo-cache/payload.txt)" = "$EXAMPLE_CACHE_PAYLOAD"
           else
-            mkdir -p migration-cache
-            printf '%s\n' "$POC_CACHE_PAYLOAD" > migration-cache/payload.txt
+            mkdir -p plugin-demo-cache
+            printf '%s\n' "$EXAMPLE_CACHE_PAYLOAD" > plugin-demo-cache/payload.txt
           fi
 
   cache-consumer:
@@ -46,8 +46,8 @@ jobs:
         id: cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: migration-cache
-          key: ${{ env.POC_CACHE_KEY }}
+          path: plugin-demo-cache
+          key: ${{ env.EXAMPLE_CACHE_KEY }}
 
       - name: Require exact cache hit
         shell: bash
@@ -55,19 +55,19 @@ jobs:
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
           test "$CACHE_HIT" = true
-          test "$(cat migration-cache/payload.txt)" = "$POC_CACHE_PAYLOAD"
+          test "$(cat plugin-demo-cache/payload.txt)" = "$EXAMPLE_CACHE_PAYLOAD"
 
       - name: Publish cache summary
         shell: bash
         run: |
           {
-            echo '## Cache migration POC'
+            echo '## Released plugin cache demo'
             echo
             echo 'The dependent job restored the exact actions/cache v6 entry.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  poc-cache:
-    name: Cache POC complete
+  plugin-demo-cache:
+    name: Cache demo complete
     needs: cache-consumer
     runs-on: ubuntu-latest
     steps:

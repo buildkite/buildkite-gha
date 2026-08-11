@@ -11,8 +11,8 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-func TestDecodePreservesEnvelopeFixtureContract(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join("..", "..", "testdata", "plans", "plans", "valid.json"))
+func TestDecodePreservesPlanContract(t *testing.T) {
+	source, err := Encode(validJob())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +20,7 @@ func TestDecodePreservesEnvelopeFixtureContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Target.StepKey != "gha-ci-test" {
+	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Target.StepKey != "gha-test" {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
 }

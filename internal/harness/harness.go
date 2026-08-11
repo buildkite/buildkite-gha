@@ -3,7 +3,6 @@
 package harness
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -202,74 +201,6 @@ type Capture struct {
 type normalizedCapture struct {
 	Observations []Record `json:"observations"`
 	Lifecycle    []Record `json:"lifecycle"`
-}
-
-// CaptureShellOutput extracts and validates the portable observation records
-// emitted by shell.yml. Provider log prefixes before SMOKE_OBSERVATION= are
-// tolerated; the JSON value must end the line.
-func CaptureShellOutput(provider string, output io.Reader) (Capture, error) {
-	const marker = "SMOKE_OBSERVATION="
-	capture := Capture{Provider: provider}
-	scanner := bufio.NewScanner(output)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		index := strings.Index(line, marker)
-		if index < 0 {
-			continue
-		}
-		document := json.RawMessage(strings.TrimSpace(line[index+len(marker):]))
-		var value struct {
-			Variant string `json:"variant"`
-		}
-		if err := decodeJSON(document, &value); err != nil {
-			return Capture{}, fmt.Errorf("decode shell observation: %w", err)
-		}
-		identity := fmt.Sprintf("consumer[variant=%s]", value.Variant)
-		capture.Observations = append(capture.Observations, Record{Identity: identity, Document: document})
-	}
-	if err := scanner.Err(); err != nil {
-		return Capture{}, fmt.Errorf("read shell output: %w", err)
-	}
-
-	expected := Capture{Observations: []Record{
-		{Identity: "consumer[variant=one]", Document: json.RawMessage(`{"result":"smoke-shell","variant":"one"}`)},
-		{Identity: "consumer[variant=two]", Document: json.RawMessage(`{"result":"smoke-shell","variant":"two"}`)},
-	}}
-	if err := Compare(expected, capture); err != nil {
-		return Capture{}, fmt.Errorf("capture shell target: %w", err)
-	}
-	return capture, nil
-}
-
-// CaptureConcurrentOutput extracts the single portable observation emitted by
-// concurrent.yml after all concurrent-step assertions have passed.
-func CaptureConcurrentOutput(provider string, output io.Reader) (Capture, error) {
-	const marker = "CONCURRENT_OBSERVATION="
-	capture := Capture{Provider: provider}
-	scanner := bufio.NewScanner(output)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		index := strings.Index(line, marker)
-		if index < 0 {
-			continue
-		}
-		document := json.RawMessage(strings.TrimSpace(line[index+len(marker):]))
-		var value map[string]any
-		if err := decodeJSON(document, &value); err != nil {
-			return Capture{}, fmt.Errorf("decode concurrent observation: %w", err)
-		}
-		capture.Observations = append(capture.Observations, Record{Identity: "concurrent", Document: document})
-	}
-	if err := scanner.Err(); err != nil {
-		return Capture{}, fmt.Errorf("read concurrent output: %w", err)
-	}
-	expected := Capture{Observations: []Record{{Identity: "concurrent", Document: json.RawMessage(`{"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`)}}}
-	if err := Compare(expected, capture); err != nil {
-		return Capture{}, fmt.Errorf("capture concurrent target: %w", err)
-	}
-	return capture, nil
 }
 
 // ReadObservation reads a JSON observation below root. Absolute paths, parent

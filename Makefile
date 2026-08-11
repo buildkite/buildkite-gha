@@ -1,4 +1,4 @@
-.PHONY: build check lint plan-fixtures test test-race vet
+.PHONY: build check lint test test-race vet
 
 check:
 	mise run check
@@ -9,9 +9,6 @@ build:
 lint:
 	mise run lint:go
 	mise run lint:shell
-
-plan-fixtures:
-	mise run plan-fixtures
 
 test:
 	mise run test

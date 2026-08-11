@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 env:
-  POC_ADVANCED_PAYLOAD: migration-poc-advanced:${{ github.sha }}
+  EXAMPLE_ADVANCED_PAYLOAD: example-advanced:${{ github.sha }}
 
 jobs:
   quality:
@@ -27,14 +27,14 @@ jobs:
           TESTED_PACKAGE: ${{ needs.quality.outputs.tested-package }}
         run: |
           test "$TESTED_PACKAGE" = './internal/action/integration'
-          mkdir -p migration-payload
-          printf '%s\n' "$POC_ADVANCED_PAYLOAD" > migration-payload/payload.txt
+          mkdir -p example-payload
+          printf '%s\n' "$EXAMPLE_ADVANCED_PAYLOAD" > example-payload/payload.txt
 
       - name: Run public Dockerfile action
         id: docker
         uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
         with:
-          who-to-greet: Migration POC
+          who-to-greet: Advanced example
 
       - name: Verify Dockerfile action output
         shell: bash
@@ -56,8 +56,8 @@ jobs:
       - name: Upload restored payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: migration-poc-advanced
-          path: migration-payload/payload.txt
+          name: example-advanced
+          path: example-payload/payload.txt
           if-no-files-found: error
 
   advanced-verify:
@@ -73,7 +73,7 @@ jobs:
       - name: Download payload
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: migration-poc-advanced
+          name: example-advanced
           path: payload
 
       - name: Verify payload
@@ -81,16 +81,16 @@ jobs:
         env:
           VARIANT: ${{ matrix.variant }}
         run: |
-          test "$(cat payload/payload.txt)" = "$POC_ADVANCED_PAYLOAD"
-          echo "::warning title=Migration POC::$VARIANT verified the advanced artifact"
+          test "$(cat payload/payload.txt)" = "$EXAMPLE_ADVANCED_PAYLOAD"
+          echo "::warning title=Advanced example::$VARIANT verified the advanced artifact"
           {
-            echo "## Advanced migration POC: $VARIANT"
+            echo "## Advanced example: $VARIANT"
             echo
             echo 'Reusable output, Dockerfile action, artifact, matrix, and annotation checks passed.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  poc-advanced:
-    name: Advanced POC complete
+  advanced:
+    name: Advanced example complete
     needs: advanced-verify
     runs-on: ubuntu-latest
     steps:

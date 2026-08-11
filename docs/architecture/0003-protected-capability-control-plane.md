@@ -15,9 +15,8 @@ establish general authority for private source, secrets, provider tokens,
 environments, privileged queues, or compatible OIDC claims.
 
 A plan cannot authorize those protected values. Workflow and event files are
-compiler inputs, dynamic pipeline upload is ordinary pipeline authority, and
-the transport-probe runtime binding proves integrity rather than provider
-provenance. The runtime needs a separate authorization result tied to both the
+compiler inputs, and dynamic pipeline upload is ordinary pipeline authority.
+The runtime needs a separate authorization result tied to both the
 actual Buildkite job and independently established provider facts.
 
 Buildkite Job OIDC supplies the job half of that identity. A running Agent can
@@ -61,12 +60,8 @@ The control plane owns:
 - grant signing, key rotation, revocation, and audit records; and
 - later credential brokering behind the same authorization decision.
 
-The control-plane signing key is a separate trust domain from transport probe
-keys, Buildkite pipeline-signing keys, cache tokens, and provider credentials.
-The concrete transport-probe `RuntimeBinding` and its test key must not be
-treated as a grant or production trust root. Generic bounded JWS helpers may be
-extracted only if issuer, type, key configuration, and verification policy
-remain separate.
+The control-plane signing key is a separate trust domain from Buildkite
+pipeline-signing keys, cache tokens, and provider credentials.
 
 ### Job authentication
 
@@ -393,8 +388,6 @@ grant.
   private compatibility features can ship.
 - The CLI gains a small client and verifier, while signing keys, provider
   records, and audit state remain outside workflow-controlled execution.
-- Transport-probe signing code may yield generic cryptographic helpers, but its concrete
-  keys, issuer, claims, and capability ceiling remain non-authorizing.
 - A full protected-capability implementation explicitly spans this repository and a
   Buildkite platform service; repository-local code alone cannot satisfy it.
 
@@ -407,4 +400,3 @@ grant.
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [RFC 7515: JSON Web Signature](https://www.rfc-editor.org/rfc/rfc7515)
 - [RFC 7519: JSON Web Token](https://www.rfc-editor.org/rfc/rfc7519)
-- [ADR 0002: superseded plan-envelope prototype](0002-plan-envelope-trust-boundary.md)

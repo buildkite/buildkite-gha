@@ -7,10 +7,10 @@ permissions:
   contents: read
 
 env:
-  POC_SUITE: basic
+  EXAMPLE_SUITE: basic
 
 jobs:
-  poc-basic:
+  basic:
     name: Basic Go CI
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo '## Basic migration POC'
+            echo '## Basic CI example'
             echo
             echo 'Checkout, setup-go, conditions, outputs, and focused tests passed.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 jobs:
-  poc-artifact-producer:
+  artifact-producer:
     name: Build and publish CLI
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -35,13 +35,13 @@ jobs:
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: migration-poc-cli
+          name: example-cli
           path: dist
           if-no-files-found: error
 
-  poc-artifact-consumer:
+  artifact-consumer:
     name: Consume and verify CLI
-    needs: poc-artifact-producer
+    needs: artifact-producer
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -49,13 +49,13 @@ jobs:
         id: download
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: migration-poc-cli
+          name: example-cli
           path: download
 
       - name: Verify distributable
         shell: bash
         env:
-          ARCHIVE_DIGEST: ${{ needs.poc-artifact-producer.outputs.archive-digest }}
+          ARCHIVE_DIGEST: ${{ needs.artifact-producer.outputs.archive-digest }}
           DOWNLOAD_PATH: ${{ steps.download.outputs.download-path }}
         run: |
           [[ "$ARCHIVE_DIGEST" =~ ^[0-9a-f]{64}$ ]]
@@ -67,10 +67,10 @@ jobs:
       - name: Publish summary
         shell: bash
         env:
-          ARCHIVE_DIGEST: ${{ needs.poc-artifact-producer.outputs.archive-digest }}
+          ARCHIVE_DIGEST: ${{ needs.artifact-producer.outputs.archive-digest }}
         run: |
           {
-            echo '## Artifact migration POC'
+            echo '## Artifact example'
             echo
             echo "Built, transferred, and executed the CLI artifact ($ARCHIVE_DIGEST)."
           } >> "$GITHUB_STEP_SUMMARY"

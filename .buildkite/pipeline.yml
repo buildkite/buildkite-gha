@@ -6,16 +6,6 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":test_tube: Load shell oracle"
-    key: "shell-oracle-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "shell-oracle"
-    command: "buildkite-agent pipeline upload .buildkite/shell-oracle.yml"
-
-  - label: ":test_tube: Load transport probe"
-    key: "transport-probe-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "transport-probe"
-    command: "buildkite-agent pipeline upload .buildkite/transport-probe/pipeline.yml"
-
   - label: ":pipeline: Load shell upload proof"
     key: "shell-upload-loader"
     if: build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"
@@ -65,11 +55,6 @@ steps:
     key: "artifact-roundtrip-loader"
     if: build.env("COMPATIBILITY_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
     command: "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml"
-
-  - label: ":rocket: Load migration POC suite"
-    key: "migration-poc-loader"
-    if: build.env("POC_SUITE") == "migration"
-    command: "buildkite-agent pipeline upload .buildkite/migration-poc.yml"
 
   - label: ":github: Load released plugin demo"
     key: "plugin-demo-loader"

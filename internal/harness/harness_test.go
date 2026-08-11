@@ -165,67 +165,6 @@ func TestLookupTargetStagesWorkflows(t *testing.T) {
 	}
 }
 
-func TestCaptureShellOutput(t *testing.T) {
-	output := strings.NewReader(strings.Join([]string{
-		"unrelated output",
-		`github-prefix SMOKE_OBSERVATION={"variant":"two","result":"smoke-shell"}`,
-		`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"one"}`,
-	}, "\n"))
-	capture, err := CaptureShellOutput("github", output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := Normalize(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := `{"observations":[{"identity":"consumer[variant=one]","document":{"result":"smoke-shell","variant":"one"}},{"identity":"consumer[variant=two]","document":{"result":"smoke-shell","variant":"two"}}],"lifecycle":[]}`
-	if string(got) != want {
-		t.Fatalf("Normalize() = %s, want %s", got, want)
-	}
-}
-
-func TestCaptureShellOutputFailures(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   string
-	}{
-		{
-			name:   "missing",
-			output: `SMOKE_OBSERVATION={"result":"smoke-shell","variant":"one"}`,
-			want:   `missing expected observation "consumer[variant=two]"`,
-		},
-		{
-			name: "duplicate",
-			output: strings.Join([]string{
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"one"}`,
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"one"}`,
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"two"}`,
-			}, "\n"),
-			want: `duplicate observation identity "consumer[variant=one]"`,
-		},
-		{
-			name: "unknown",
-			output: strings.Join([]string{
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"one"}`,
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"two"}`,
-				`SMOKE_OBSERVATION={"result":"smoke-shell","variant":"three"}`,
-			}, "\n"),
-			want: `unknown observation identity "consumer[variant=three]"`,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := CaptureShellOutput("test", strings.NewReader(test.output))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want it to contain %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestNormalizeExcludesProviderAndNativeTransport(t *testing.T) {
 	capture := Capture{
 		Provider: "buildkite",
