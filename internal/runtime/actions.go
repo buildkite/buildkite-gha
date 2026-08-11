@@ -167,7 +167,7 @@ func (r *actionLockResolver) verifyWorkspace(lock plan.ActionLock) (metadata.Met
 	if r.workspace == "" {
 		return metadata.Metadata{}, fmt.Errorf("workspace is missing")
 	}
-	if err := VerifyWorkflow(r.job, r.workspace); err != nil {
+	if err := verifyWorkflow(r.job, r.workspace); err != nil {
 		return metadata.Metadata{}, fmt.Errorf("workspace action workflow verification failed: %w", err)
 	}
 	resolved, err := metadata.Load(r.workspace, lock.Path)

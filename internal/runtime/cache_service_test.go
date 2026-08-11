@@ -512,7 +512,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	runner := Runner{Cache: provider, Redactor: &testRedactor{}}
 	if err := runner.runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
-		JavaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, nil, &result,
+		javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, nil, &result,
 	); err != nil {
 		t.Fatalf("generic action cache fallback error = %v", err)
 	}
@@ -524,7 +524,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if err := runner.runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
-		JavaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
 	); err == nil || !strings.Contains(err.Error(), "configure actions/cache v6 service: cache unavailable") {
 		t.Fatalf("explicit cache action error = %v", err)
 	}
@@ -542,7 +542,7 @@ func TestDockerActionReceivesCacheCredentialsWithoutTokenInArguments(t *testing.
 	action.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
 	action.Env["ACTIONS_RESULTS_URL"] = "https://attacker.invalid"
 	action.Env["ACTIONS_CACHE_SERVICE_V2"] = "false"
-	if _, err := (Runner{Docker: fake.path, Cache: provider, Redactor: redactor}).RunDocker(context.Background(), action); err != nil {
+	if _, err := (Runner{Docker: fake.path, Cache: provider, Redactor: redactor}).runDockerAction(context.Background(), action); err != nil {
 		t.Fatal(err)
 	}
 	cacheRuntime, err := os.ReadFile(filepath.Join(fake.root, "cache-runtime"))
@@ -587,7 +587,7 @@ func TestCacheV6RedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T)
 	result := newResult()
 	result.Env["MARKER"] = marker
 	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
-		context.Background(), processor, actionRoot, "node", JavaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
 	)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("runJavaScriptPhase() error = %v", err)
@@ -622,7 +622,7 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			state := map[string]string{"kept": "action state"}
 			err := (Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
 				context.Background(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
-				JavaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
+				javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
 			)
 			if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "phase effects were discarded") {
 				t.Fatalf("runJavaScriptPhase() error = %v", err)

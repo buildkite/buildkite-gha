@@ -134,8 +134,8 @@ func (r *Runner) setExplicitNode(major int, path string) {
 	}
 }
 
-// JavaScriptAction is an already-resolved local JavaScript action.
-type JavaScriptAction struct {
+// javaScriptAction is an already-resolved local JavaScript action.
+type javaScriptAction struct {
 	Name   string
 	Path   string
 	Pre    string
@@ -150,8 +150,8 @@ type JavaScriptAction struct {
 	jobStatusInputs []string
 }
 
-// DockerAction is an already-resolved local Docker action.
-type DockerAction struct {
+// dockerAction is an already-resolved local Docker action.
+type dockerAction struct {
 	Name         string
 	Path         string
 	SourceRoot   string
@@ -225,8 +225,9 @@ func boundJobSummary(summary string, truncated bool) (string, bool) {
 	return bounded, boundedTruncated
 }
 
-// RunDocker builds and executes an explicitly resolved local Docker action.
-func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Result, err error) {
+// runDockerAction builds and executes an explicitly resolved local Docker
+// action, creating an isolated workspace when the caller supplies none.
+func (r Runner) runDockerAction(ctx context.Context, action dockerAction) (result Result, err error) {
 	callerWorkspace := action.Workspace != ""
 	if !callerWorkspace {
 		action.Workspace, err = os.MkdirTemp("", "buildkite-gha-workspace-")
@@ -276,7 +277,7 @@ func (r Runner) RunDocker(ctx context.Context, action DockerAction) (result Resu
 	return r.runDocker(ctx, newCommandProcessor(r.stdout(), r.stderr()), action)
 }
 
-func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action DockerAction) (result Result, err error) {
+func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, action dockerAction) (result Result, err error) {
 	result = newResult()
 	if action.runnerTemp == "" {
 		action.runnerTemp = r.runnerTemp
@@ -623,7 +624,7 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 	return w.writer.Write(p)
 }
 
-func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action JavaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
+func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProcessor, workspace, node string, action javaScriptAction, entry string, stateEnv, stateOut map[string]string, result *Result) error {
 	env := mergeStringMaps(result.Env, action.Env, actionInputEnv(action.Inputs))
 	if path, ok := result.Env["PATH"]; ok {
 		env["PATH"] = path
@@ -1174,13 +1175,9 @@ func verifyManagedNodeExecutable(ctx context.Context, major int, path, want stri
 	return nil
 }
 
-// DiscoverNode resolves an explicit Node binary or a binary in the managed
-// runtime root, and rejects binaries that do not report the requested major.
-// It deliberately does not fall back to PATH.
-func DiscoverNode(major int, explicit, managedRoot string) (string, error) {
-	return discoverNodeContext(context.Background(), major, explicit, managedRoot)
-}
-
+// discoverNodeContext resolves an explicit Node binary or a binary in the
+// managed runtime root, and rejects binaries that do not report the requested
+// major. It deliberately does not fall back to PATH.
 func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot string) (string, error) {
 	var candidates []string
 	if explicit != "" {
@@ -1216,11 +1213,6 @@ func discoverNodeContext(ctx context.Context, major int, explicit, managedRoot s
 		failures = append(failures, fmt.Sprintf("%s: reported %q", candidate, version))
 	}
 	return "", fmt.Errorf("node %d discovery failed: %s", major, strings.Join(failures, "; "))
-}
-
-// DiscoverNode24 retains the original Node 24 discovery API.
-func DiscoverNode24(explicit, managedRoot string) (string, error) {
-	return DiscoverNode(24, explicit, managedRoot)
 }
 
 func newResult() Result {

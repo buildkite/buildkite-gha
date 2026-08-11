@@ -369,14 +369,14 @@ func (fake fakeDocker) calls(t *testing.T) []fakeDockerCall {
 	return calls
 }
 
-func fakeDockerAction(t *testing.T) DockerAction {
+func fakeDockerAction(t *testing.T) dockerAction {
 	t.Helper()
 	path := fixturePath(t, "actions", "docker")
 	digest, err := source.DigestTree(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return DockerAction{
+	return dockerAction{
 		Name: "fake Docker", Path: path, SourceRoot: path, SourceDigest: digest,
 		Workspace: t.TempDir(), Env: map[string]string{"Z_LAST": "z", "A_FIRST": "a"},
 	}
@@ -414,7 +414,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 	t.Setenv("BUILDX_BUILDER", "ambient-builder")
 	t.Setenv("BUILDKIT_HOST", "tcp://ambient.invalid:1234")
 	var logs bytes.Buffer
-	result, err := (Runner{Docker: fake.path, Stdout: &logs, Stderr: &logs}).RunDocker(context.Background(), action)
+	result, err := (Runner{Docker: fake.path, Stdout: &logs, Stderr: &logs}).runDockerAction(context.Background(), action)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +648,7 @@ func TestRunDockerRejectsUntrustedBuilderBeforeExecution(t *testing.T) {
 	for _, scenario := range []string{"remote", "multiline", "oversized", "inspect-fail"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake := newFakeDocker(t, scenario)
-			if _, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t)); err == nil {
+			if _, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t)); err == nil {
 				t.Fatal("untrusted builder was accepted")
 			}
 			calls := fake.calls(t)
@@ -665,7 +665,7 @@ func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
 	for _, scenario := range []string{"build-fail", "run-fail", "leftover", "query-fail"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake := newFakeDocker(t, scenario)
-			if _, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second}).RunDocker(context.Background(), fakeDockerAction(t)); err == nil {
+			if _, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second}).runDockerAction(context.Background(), fakeDockerAction(t)); err == nil {
 				t.Fatal("Docker failure returned success")
 			}
 			calls := fake.calls(t)
@@ -691,9 +691,9 @@ func TestRunDockerFakeFailuresCleanOwnedResources(t *testing.T) {
 
 func TestRunDockerProcessesFileCommandsAfterFailure(t *testing.T) {
 	fake := newFakeDocker(t, "run-fail")
-	result, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	result, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
 	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) {
-		t.Fatalf("RunDocker() error = %v", err)
+		t.Fatalf("runDockerAction() error = %v", err)
 	}
 	if result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" || result.State["docker_state"] != "seen" || result.Summary != "docker action summary\n" || !slices.Equal(result.Paths, []string{"/fake/action/bin"}) {
 		t.Fatalf("Docker failure result = %#v", result)
@@ -702,9 +702,9 @@ func TestRunDockerProcessesFileCommandsAfterFailure(t *testing.T) {
 
 func TestRunDockerJoinsRunAndFileCommandFailures(t *testing.T) {
 	fake := newFakeDocker(t, "run-fail-invalid-files")
-	_, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	_, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
 	if err == nil || !strings.Contains(err.Error(), `run Docker action "fake Docker"`) || !strings.Contains(err.Error(), `process Docker action "fake Docker" file commands`) || !strings.Contains(err.Error(), "invalid file command") {
-		t.Fatalf("RunDocker() error = %v", err)
+		t.Fatalf("runDockerAction() error = %v", err)
 	}
 }
 
@@ -712,7 +712,7 @@ func TestRunDockerReadsOnlyOriginalCommandFiles(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeDocker(t, "replace-files")
-	result, err := (Runner{Docker: fake.path}).RunDocker(context.Background(), fakeDockerAction(t))
+	result, err := (Runner{Docker: fake.path}).runDockerAction(context.Background(), fakeDockerAction(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -728,7 +728,7 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second, InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).RunDocker(ctx, fakeDockerAction(t))
+		_, err := (Runner{Docker: fake.path, CleanupTimeout: 2 * time.Second, InterruptGrace: 50 * time.Millisecond, TerminateGrace: 50 * time.Millisecond}).runDockerAction(ctx, fakeDockerAction(t))
 		done <- err
 	}()
 	deadline := time.Now().Add(3 * time.Second)
@@ -745,10 +745,10 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("RunDocker() error = %v, want context cancellation", err)
+			t.Fatalf("runDockerAction() error = %v, want context cancellation", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("RunDocker cancellation exceeded bound")
+		t.Fatal("runDockerAction cancellation exceeded bound")
 	}
 	calls := fake.calls(t)
 	for _, command := range [][]string{{"stop"}, {"rm", "--force"}, {"image", "rm", "--force"}, {"ps", "--all"}, {"image", "ls"}} {
@@ -3380,17 +3380,17 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	if err := os.WriteFile(node, []byte("#!/bin/sh\necho v24.99.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, err := DiscoverNode24("", managed)
+	got, err := discoverNodeContext(context.Background(), 24, "", managed)
 	if err != nil || got != node {
-		t.Fatalf("DiscoverNode24() = %q, %v, want %q, nil", got, err, node)
+		t.Fatalf("discoverNodeContext(24) = %q, %v, want %q, nil", got, err, node)
 	}
 
 	wrong := filepath.Join(t.TempDir(), "node")
 	if err := os.WriteFile(wrong, []byte("#!/bin/sh\necho v23.1.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := DiscoverNode24(wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
-		t.Fatalf("DiscoverNode24() error = %v, want wrong-version detail", err)
+	if _, err := discoverNodeContext(context.Background(), 24, wrong, ""); err == nil || !strings.Contains(err.Error(), `reported "v23.1.0"`) {
+		t.Fatalf("discoverNodeContext(24) error = %v, want wrong-version detail", err)
 	}
 
 	node20 := filepath.Join(managed, "node", "20", "bin", "node")
@@ -3400,11 +3400,11 @@ func TestDiscoverNodeManagedAndWrongExplicitVersion(t *testing.T) {
 	if err := os.WriteFile(node20, []byte("#!/bin/sh\necho v20.99.0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := DiscoverNode(20, "", managed); err != nil || got != node20 {
-		t.Fatalf("DiscoverNode(20) = %q, %v, want %q, nil", got, err, node20)
+	if got, err := discoverNodeContext(context.Background(), 20, "", managed); err != nil || got != node20 {
+		t.Fatalf("discoverNodeContext(20) = %q, %v, want %q, nil", got, err, node20)
 	}
-	if _, err := DiscoverNode(24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
-		t.Fatalf("DiscoverNode(24) error = %v, want exact-major rejection", err)
+	if _, err := discoverNodeContext(context.Background(), 24, node20, ""); err == nil || !strings.Contains(err.Error(), `reported "v20.99.0"`) {
+		t.Fatalf("discoverNodeContext(24) error = %v, want exact-major rejection", err)
 	}
 }
 
@@ -3601,7 +3601,7 @@ func TestJavaScriptPhaseUsesVerifiedMiseNodeWithoutWorkflowRedirection(t *testin
 		t.Fatal(err)
 	}
 	result := newResult()
-	action := JavaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
+	action := javaScriptAction{Name: "mise", Path: root, Main: "main.js", Env: map[string]string{"MISE_DATA_DIR": "/workflow-controlled"}, nodeMajor: 24}
 	if err := runner.runJavaScriptPhase(context.Background(), newCommandProcessor(io.Discard, io.Discard), root, resolvedNode, action, action.Main, nil, nil, &result); err != nil {
 		t.Fatal(err)
 	}
@@ -3650,12 +3650,13 @@ func TestDockerAction(t *testing.T) {
 	docker := requireDocker(t)
 	var logs bytes.Buffer
 	runner := Runner{Stdout: &logs, Stderr: &logs, Docker: docker}
-	result, err := runner.RunDocker(context.Background(), DockerAction{
+	result, err := runner.runDockerAction(context.Background(), dockerAction{
 		Name: "local Docker", Path: fixturePath(t, "actions", "docker"), Workspace: fixturePath(t),
 		Env: map[string]string{"INPUT_EXPECTED_FILE": "smoke/.github/workflows/ci.yml"},
 	})
+
 	if err != nil {
-		t.Fatalf("RunDocker() error = %v", err)
+		t.Fatalf("runDockerAction() error = %v", err)
 	}
 	if result.Outputs["container"] != "ran" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
 		t.Errorf("Docker result = %#v", result)
@@ -3715,9 +3716,9 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := (Runner{Docker: docker}).RunDocker(context.Background(), DockerAction{Name: "non-root Docker", Path: action, Workspace: workspace})
+	result, err := (Runner{Docker: docker}).runDockerAction(context.Background(), dockerAction{Name: "non-root Docker", Path: action, Workspace: workspace})
 	if err != nil {
-		t.Fatalf("RunDocker() error = %v", err)
+		t.Fatalf("runDockerAction() error = %v", err)
 	}
 	if result.Outputs["nonroot"] != "written" {
 		t.Fatalf("Docker result = %#v", result)
@@ -4773,7 +4774,7 @@ func canonicalTempDir(t *testing.T) string {
 func requireNode24(t *testing.T) string {
 	t.Helper()
 	if node := os.Getenv("BUILDKITE_GHA_TEST_NODE24"); node != "" {
-		if _, err := DiscoverNode24(node, ""); err != nil {
+		if _, err := discoverNodeContext(context.Background(), 24, node, ""); err != nil {
 			t.Fatalf("BUILDKITE_GHA_TEST_NODE24 is not Node 24: %v", err)
 		}
 		return node
@@ -4782,7 +4783,7 @@ func requireNode24(t *testing.T) string {
 		output, err := exec.Command(mise, "where", "node@24").CombinedOutput()
 		if err == nil {
 			node := filepath.Join(strings.TrimSpace(string(output)), "bin", "node")
-			if _, err := DiscoverNode24(node, ""); err == nil {
+			if _, err := discoverNodeContext(context.Background(), 24, node, ""); err == nil {
 				return node
 			}
 		}

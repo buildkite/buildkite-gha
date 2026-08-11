@@ -1680,7 +1680,7 @@ func TestRunJobContainerSiblingDockerFailureCleansActionAndJobResources(t *testi
 
 func TestRunDockerRejectsMismatchedJobContainerPaths(t *testing.T) {
 	r := Runner{jobContainer: &jobContainerBackend{workspace: "/owned/workspace", temp: "/owned/temp"}}
-	_, err := r.runDocker(context.Background(), newCommandProcessor(nil, nil), DockerAction{Workspace: "/other/workspace", runnerTemp: "/owned/temp"})
+	_, err := r.runDocker(context.Background(), newCommandProcessor(nil, nil), dockerAction{Workspace: "/other/workspace", runnerTemp: "/owned/temp"})
 	if err == nil || !strings.Contains(err.Error(), "must match the job container's owned host paths") {
 		t.Fatalf("mismatched sibling paths error = %v", err)
 	}
