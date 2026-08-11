@@ -1,0 +1,430 @@
+name: Shell and concurrent differential oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full commit containing this oracle definition and fixture
+        required: true
+        type: string
+      target:
+        description: Runtime target to compare
+        required: false
+        default: shell
+        type: choice
+        options:
+          - shell
+          - concurrent
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      fixture_commit: ${{ steps.fixture.outputs.commit }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Materialize exact fixture commit
+        id: fixture
+        env:
+          WORKFLOW_COMMIT: ${{ github.sha }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$WORKFLOW_COMMIT" = "$SOURCE_COMMIT"
+          scripts/verify-source-checkout "$SOURCE_COMMIT"
+          fixture_commit=$(go run ./internal/harness/cmd/shell-oracle materialize --source testdata/smoke)
+          printf 'commit=%s\n' "$fixture_commit" >> "$GITHUB_OUTPUT"
+          printf 'Materialized shell fixture commit: %s\n' "$fixture_commit"
+
+  producer:
+    if: inputs.target == 'shell'
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      result: ${{ steps.produce.outputs.result }}
+    steps:
+      - name: Produce bounded output
+        id: produce
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'result=smoke-shell\n' >> "$GITHUB_OUTPUT"
+
+  consumer:
+    if: inputs.target == 'shell'
+    needs: [prepare, producer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [one, two]
+    steps:
+      - name: Capture portable observation
+        env:
+          RESULT: ${{ needs.producer.outputs.result }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RESULT" = "smoke-shell"
+          printf 'SMOKE_OBSERVATION={"result":"%s","variant":"%s"}\n' \
+            "$RESULT" "$VARIANT" | tee "observation-$VARIANT.log"
+
+      - name: Upload captured observation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: github-shell-observation-${{ matrix.variant }}
+          path: observation-${{ matrix.variant }}.log
+          if-no-files-found: error
+          retention-days: 1
+
+  compare:
+    if: inputs.target == 'shell'
+    needs: [prepare, consumer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download captured observations
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: github-shell-observation-*
+          path: shell-oracle-observations
+          merge-multiple: true
+
+      - name: Normalize and compare
+        env:
+          FIXTURE_COMMIT: ${{ needs.prepare.outputs.fixture_commit }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-source-checkout "$SOURCE_COMMIT"
+          cat \
+            shell-oracle-observations/observation-one.log \
+            shell-oracle-observations/observation-two.log \
+            | go run ./internal/harness/cmd/shell-oracle compare \
+                --source testdata/smoke \
+                --commit "$FIXTURE_COMMIT" \
+                --provider github \
+            | tee shell-oracle-normalized.json
+
+  concurrent:
+    if: inputs.target == 'concurrent'
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      targeted: ${{ steps.verify-targets.outputs.value }}
+      failure: ${{ steps.verify-failure.outputs.value }}
+      queue_max: ${{ steps.verify-queue.outputs.value }}
+      cancel: ${{ steps.verify-cancel.outputs.value }}
+      parallel: ${{ steps.verify-parallel.outputs.value }}
+      implicit: ${{ steps.implicit.outputs.value }}
+    steps:
+      - id: target-one
+        shell: bash
+        run: |
+          sleep 0.05
+          echo "TARGET_ONE=one" >> "$GITHUB_ENV"
+          echo "value=one" >> "$GITHUB_OUTPUT"
+          touch "$RUNNER_TEMP/target-one.done"
+        background: true
+
+      - id: target-two
+        shell: bash
+        run: |
+          sleep 0.05
+          echo "TARGET_TWO=two" >> "$GITHUB_ENV"
+          echo "value=two" >> "$GITHUB_OUTPUT"
+          touch "$RUNNER_TEMP/target-two.done"
+        background: true
+
+      - name: Verify completed effects remain private before a barrier
+        shell: bash
+        run: |
+          while [ ! -f "$RUNNER_TEMP/target-one.done" ] || [ ! -f "$RUNNER_TEMP/target-two.done" ]; do sleep 0.01; done
+          test -z "$TARGET_ONE"
+          test -z "$TARGET_TWO"
+
+      - wait: target-one
+
+      - name: Verify targeted barrier visibility
+        shell: bash
+        run: |
+          test "$TARGET_ONE" = one
+          test -z "$TARGET_TWO"
+          test "${{ steps.target-one.outputs.value }}" = one
+
+      - wait-all:
+
+      - id: verify-targets
+        name: Verify full barrier visibility
+        shell: bash
+        run: |
+          test "$TARGET_ONE" = one
+          test "$TARGET_TWO" = two
+          test "${{ steps.target-two.outputs.value }}" = two
+          echo "value=targeted-and-full" >> "$GITHUB_OUTPUT"
+
+      - id: expected-failure
+        shell: bash
+        run: exit 7
+        background: true
+        continue-on-error: true
+
+      - wait: expected-failure
+
+      - id: verify-failure
+        if: steps.expected-failure.outcome == 'failure'
+        shell: bash
+        run: echo "value=failure-at-wait" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare bounded queue probe
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/concurrent-queue-worker" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          id="$1"
+          lock="$RUNNER_TEMP/concurrent-queue-lock"
+          active_file="$RUNNER_TEMP/concurrent-queue-active"
+          max_file="$RUNNER_TEMP/concurrent-queue-max"
+          starts_file="$RUNNER_TEMP/concurrent-queue-starts"
+          acquire() { while ! mkdir "$lock" 2>/dev/null; do sleep 0.01; done; }
+          release() { rmdir "$lock"; }
+          acquire
+          active=0
+          [ ! -f "$active_file" ] || active=$(cat "$active_file")
+          active=$((active + 1))
+          echo "$active" > "$active_file"
+          maximum=0
+          [ ! -f "$max_file" ] || maximum=$(cat "$max_file")
+          if [ "$active" -gt "$maximum" ]; then echo "$active" > "$max_file"; fi
+          echo "$id" >> "$starts_file"
+          release
+          while [ ! -f "$RUNNER_TEMP/concurrent-queue-release" ]; do sleep 0.01; done
+          acquire
+          active=$(cat "$active_file")
+          echo $((active - 1)) > "$active_file"
+          release
+          SCRIPT
+          chmod +x "$RUNNER_TEMP/concurrent-queue-worker"
+
+      - id: queued-01
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 01'
+        background: true
+      - id: queued-02
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 02'
+        background: true
+      - id: queued-03
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 03'
+        background: true
+      - id: queued-04
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 04'
+        background: true
+      - id: queued-05
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 05'
+        background: true
+      - id: queued-06
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 06'
+        background: true
+      - id: queued-07
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 07'
+        background: true
+      - id: queued-08
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 08'
+        background: true
+      - id: queued-09
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 09'
+        background: true
+      - id: queued-10
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 10'
+        background: true
+      - id: queued-11
+        run: '"$RUNNER_TEMP/concurrent-queue-worker" 11'
+        background: true
+
+      - name: Release the first ten queued workers
+        shell: bash
+        run: |
+          while :; do
+            started=0
+            [ ! -f "$RUNNER_TEMP/concurrent-queue-starts" ] || started=$(wc -l < "$RUNNER_TEMP/concurrent-queue-starts")
+            [ "$started" -eq 10 ] && break
+            sleep 0.01
+          done
+          sleep 0.1
+          test "$(wc -l < "$RUNNER_TEMP/concurrent-queue-starts")" -eq 10
+          touch "$RUNNER_TEMP/concurrent-queue-release"
+
+      - wait-all:
+
+      - id: verify-queue
+        shell: bash
+        run: |
+          test "$(cat "$RUNNER_TEMP/concurrent-queue-max")" -eq 10
+          test "$(wc -l < "$RUNNER_TEMP/concurrent-queue-starts")" -eq 11
+          echo "value=10" >> "$GITHUB_OUTPUT"
+
+      - id: masker
+        shell: bash
+        run: |
+          echo "::add-mask::concurrent-cross-stream-secret"
+          sleep 0.05
+          touch "$RUNNER_TEMP/concurrent-mask-ready"
+        background: true
+
+      - name: Emit a cross-stream masked probe
+        shell: bash
+        run: |
+          while [ ! -f "$RUNNER_TEMP/concurrent-mask-ready" ]; do sleep 0.01; done
+          echo "CONCURRENT_MASK_PROBE=concurrent-cross-stream-secret"
+
+      - wait: masker
+
+      - id: cancellable
+        shell: bash
+        run: |
+          trap 'echo graceful > "$RUNNER_TEMP/concurrent-cancelled"; exit 0' INT
+          touch "$RUNNER_TEMP/concurrent-cancel-ready"
+          while :; do sleep 1; done
+        background: true
+
+      - name: Wait for cancellable step to start
+        run: while [ ! -f "$RUNNER_TEMP/concurrent-cancel-ready" ]; do sleep 0.01; done
+
+      - cancel: cancellable
+
+      - id: verify-cancel
+        if: steps.cancellable.outcome == 'cancelled'
+        shell: bash
+        run: |
+          test "$(cat "$RUNNER_TEMP/concurrent-cancelled")" = graceful
+          echo "value=graceful" >> "$GITHUB_OUTPUT"
+
+      - parallel:
+          - id: parallel-one
+            run: |
+              sleep 0.05
+              echo "value=one" >> "$GITHUB_OUTPUT"
+          - id: parallel-two
+            run: |
+              sleep 0.05
+              echo "value=two" >> "$GITHUB_OUTPUT"
+
+      - id: verify-parallel
+        shell: bash
+        run: |
+          test "${{ steps.parallel-one.outputs.value }}" = one
+          test "${{ steps.parallel-two.outputs.value }}" = two
+          echo "value=parallel" >> "$GITHUB_OUTPUT"
+
+      - id: implicit
+        shell: bash
+        run: |
+          sleep 0.05
+          echo "value=implicit-wait-all" >> "$GITHUB_OUTPUT"
+        background: true
+
+  concurrent-observe:
+    if: inputs.target == 'concurrent'
+    needs: [prepare, concurrent]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Capture concurrent runtime observation
+        env:
+          TARGETED: ${{ needs.concurrent.outputs.targeted }}
+          FAILURE: ${{ needs.concurrent.outputs.failure }}
+          QUEUE_MAX: ${{ needs.concurrent.outputs.queue_max }}
+          CANCEL: ${{ needs.concurrent.outputs.cancel }}
+          PARALLEL: ${{ needs.concurrent.outputs.parallel }}
+          IMPLICIT: ${{ needs.concurrent.outputs.implicit }}
+        shell: bash
+        run: |
+          test "$TARGETED" = targeted-and-full
+          test "$FAILURE" = failure-at-wait
+          test "$QUEUE_MAX" = 10
+          test "$CANCEL" = graceful
+          test "$PARALLEL" = parallel
+          test "$IMPLICIT" = implicit-wait-all
+          printf 'CONCURRENT_OBSERVATION={"cancel":"%s","failure":"%s","implicit":"%s","parallel":"%s","queue_max":%s,"targeted":"%s"}\n' \
+            "$CANCEL" "$FAILURE" "$IMPLICIT" "$PARALLEL" "$QUEUE_MAX" "$TARGETED" \
+            | tee concurrent-observation.log
+
+      - name: Upload captured observation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: github-concurrent-observation
+          path: concurrent-observation.log
+          if-no-files-found: error
+          retention-days: 1
+
+  concurrent-compare:
+    if: inputs.target == 'concurrent'
+    needs: [prepare, concurrent-observe]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download captured observation
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: github-concurrent-observation
+
+      - name: Normalize and compare
+        env:
+          FIXTURE_COMMIT: ${{ needs.prepare.outputs.fixture_commit }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-source-checkout "$SOURCE_COMMIT"
+          go run ./internal/harness/cmd/shell-oracle compare \
+            --source testdata/smoke \
+            --commit "$FIXTURE_COMMIT" \
+            --provider github \
+            --target concurrent \
+            < concurrent-observation.log \
+            | tee concurrent-normalized.json

@@ -43,7 +43,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
-      "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, checkout, setup-go, shell tests, conditions, outputs, and the summary-producing workflow all completed on the hosted runtime; the dedicated Phase 6 fixture owns independent summary-persistence evidence.",
+      "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, checkout, setup-go, shell tests, conditions, outputs, and the summary-producing workflow all completed on the hosted runtime; the dedicated summary-annotation fixture owns independent persistence evidence.",
       "action_preflight": "hosted-tokenless"
     },
     {
@@ -74,26 +74,26 @@
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "phase4-public-actions",
-      "workflow": "testdata/phase4/.github/workflows/public-actions.yml",
-      "event": "testdata/phase4/events/public-checkout.json",
+      "id": "public-actions",
+      "workflow": "testdata/public-actions/.github/workflows/public-actions.yml",
+      "event": "testdata/public-actions/events/public-checkout.json",
       "expectation": "runtime-pass",
       "evidence": "The pinned public checkout and setup action proof has runtime coverage.",
       "note": "The local harness compiles only and never fetches these actions.",
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "phase5-docker-action",
-      "workflow": "testdata/phase5/.github/workflows/docker-action.yml.tmpl",
+      "id": "dockerfile-action",
+      "workflow": "testdata/dockerfile-action/.github/workflows/docker-action.yml.tmpl",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The pinned public Dockerfile action proof has hosted runtime coverage.",
-      "note": "The deterministic smoke event matches the production Phase 5 proof input.",
+      "note": "The deterministic smoke event matches the production Dockerfile-action proof input.",
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "phase5-container-runtime",
-      "workflow": "testdata/phase5/runtime/.github/workflows/runtime.yml",
+      "id": "container-runtime",
+      "workflow": "testdata/container-runtime/.github/workflows/runtime.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The complete compiler-to-Runner container fixture passed in exact-commit Buildkite build 136.",
@@ -101,8 +101,8 @@
       "action_preflight": "none"
     },
     {
-      "id": "phase6-summary-annotation",
-      "workflow": "testdata/phase6/.github/workflows/summary-annotation.yml",
+      "id": "summary-annotation",
+      "workflow": "testdata/smoke/.github/workflows/summary-annotation.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 242 and a read-only API observation proved the persisted job-scoped summary annotation contract.",
@@ -110,8 +110,8 @@
       "action_preflight": "none"
     },
     {
-      "id": "phase6-workflow-command-annotations",
-      "workflow": "testdata/phase6/.github/workflows/workflow-command-annotations.yml",
+      "id": "workflow-command-annotations",
+      "workflow": "testdata/smoke/.github/workflows/workflow-command-annotations.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 252 and a read-only API observation proved both persisted job-scoped workflow-command annotation contracts.",
@@ -119,8 +119,8 @@
       "action_preflight": "none"
     },
     {
-      "id": "phase6-upload-artifact",
-      "workflow": "testdata/phase6/.github/workflows/upload-artifact.yml",
+      "id": "upload-artifact",
+      "workflow": "testdata/smoke/.github/workflows/upload-artifact.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 259 and an independent read-only artifact observation proved native archive publication and its bounded producer contract.",
@@ -128,8 +128,8 @@
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "phase6-cache-v6",
-      "workflow": "testdata/phase6/.github/workflows/cache-v6.yml",
+      "id": "cache-v6",
+      "workflow": "testdata/smoke/.github/workflows/cache-v6.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
       "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",

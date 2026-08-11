@@ -7,7 +7,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
+      "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "producer"
     },
     "event": {
@@ -51,7 +51,7 @@
         "command": "echo \"::add-mask::$CANARY\"\nprintf 'MASKED_CANARY=%s\\n' \"$CANARY\"\n",
         "shell": "bash",
         "env": {
-          "CANARY": "phase2-secret-canary-7f4c2a91"
+          "CANARY": "shell-secret-canary-7f4c2a91"
         },
         "source": {
           "start": {
@@ -75,7 +75,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
+      "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "consumer"
     },
     "event": {
@@ -101,7 +101,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:994223366b38c8d57ca90af8e9946425ce0e0bc3c90bd33f662c8558e6075dd1"
+          "plan_digest": "sha256:2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814"
         }
       ]
     },
@@ -138,7 +138,7 @@
     },
     "workflow": {
       "path": "./.github/workflows/shell.yml",
-      "digest": "sha256:1bfe534bd5445c8c46cf9da4c007c75fbaedaa0a66552123a0c3b05e9f34fa0c",
+      "digest": "sha256:15ecf8cf6f5e03f52862f6988c8972973c6a1feb63b3518a03be9f69eaf5ee0c",
       "logical_job_id": "consumer"
     },
     "event": {
@@ -164,7 +164,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:994223366b38c8d57ca90af8e9946425ce0e0bc3c90bd33f662c8558e6075dd1"
+          "plan_digest": "sha256:2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814"
         }
       ]
     },

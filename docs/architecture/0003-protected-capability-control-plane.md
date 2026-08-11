@@ -16,9 +16,9 @@ environments, privileged queues, or compatible OIDC claims.
 
 A plan cannot authorize those protected values. Workflow and event files are
 compiler inputs, dynamic pipeline upload is ordinary pipeline authority, and
-the Phase 0 runtime binding proves integrity rather than provider provenance.
-The runtime needs a separate authorization result tied to both the actual
-Buildkite job and independently established provider facts.
+the transport-probe runtime binding proves integrity rather than provider
+provenance. The runtime needs a separate authorization result tied to both the
+actual Buildkite job and independently established provider facts.
 
 Buildkite Job OIDC supplies the job half of that identity. A running Agent can
 mint a short-lived token for an exact audience with immutable organization,
@@ -27,7 +27,7 @@ complete GitHub event, actor, fork relationship, workflow source, installation,
 or policy decision. A Buildkite-owned control plane must join those facts before
 issuing any grant.
 
-Phase 6 therefore starts the protected path with a signed **no-op grant**. It
+The protected-capability implementation therefore starts with a signed **no-op grant**. It
 proves authentication, provenance, policy, signing, verification, expiry, and
 audit boundaries while carrying an empty capability set and returning no
 credential. General private source, non-provider secrets, GitHub authority
@@ -61,12 +61,12 @@ The control plane owns:
 - grant signing, key rotation, revocation, and audit records; and
 - later credential brokering behind the same authorization decision.
 
-The control-plane signing key is a separate trust domain from Phase 0 probe
+The control-plane signing key is a separate trust domain from transport probe
 keys, Buildkite pipeline-signing keys, cache tokens, and provider credentials.
-The concrete Phase 0 `RuntimeBinding` and its test key must not be treated as a
-grant or production trust root. Generic bounded JWS helpers may be extracted
-only if issuer, type, key configuration, and verification policy remain
-separate.
+The concrete transport-probe `RuntimeBinding` and its test key must not be
+treated as a grant or production trust root. Generic bounded JWS helpers may be
+extracted only if issuer, type, key configuration, and verification policy
+remain separate.
 
 ### Job authentication
 
@@ -170,7 +170,7 @@ a mismatched queue, an unattested event, or unavailable policy data is a denial.
 
 An allowed decision returns a standard three-part compact JWT signed with
 ES256. Its signature covers the exact transmitted protected-header and payload
-bytes; it has no detached payload and does not use Phase 0's JCS reconstruction
+bytes; it has no detached payload and does not use the prototype's JCS reconstruction
 or canonical-byte equality rule. Unknown top-level claims are rejected by this
 bounded versioned contract.
 
@@ -243,17 +243,29 @@ capability and the server-provided job environment indicates
 repository-provider Git credentials are enabled. Otherwise it performs the same
 checkout anonymously.
 
-The event repository and exact SHA remain the only checkout targets. The
-credential helper is configured as a command-scoped Git option only for the
-fetch, uses HTTP-path matching, receives the current job's Agent API identity,
-and is not persisted. The runtime forwards proxy variables captured from the job
-process before workflow execution to that credentialed fetch but does not add
-the job credential to ordinary workflow subprocess environments. This is
-inheritance control, not OS-level isolation between hostile processes in the
-same job. The Buildkite backend independently authorizes the concrete repository
-URL received through Git's credential protocol. Through the supported adapter
-no workflow input can select another credential target or access level, and the
-job's Agent credential is not placed in plans.
+The superproject target remains the event repository at its exact SHA. When the
+admitted checkout requests submodules, native Git may additionally request the
+repositories selected by the checked-in `.gitmodules` graph. The credential
+helper is configured as a command-scoped, `github.com`-specific Git option only
+for the fetch or submodule update, uses HTTP-path matching, receives the current
+job's Agent API identity, and is not persisted. External HTTPS submodules do not
+receive this helper. The Buildkite backend independently authorizes every
+concrete GitHub repository URL received through Git's credential protocol. For
+managed GitHub code access, the requested owner must match the pipeline's GitHub
+account and the connected App installation must include the repository; the
+resulting token is restricted to that repository with `contents: read`. This is
+an intentional same-account sibling-repository authority, not a
+pipeline-repository-only allowlist.
+
+The runtime forwards proxy variables captured from the job process before
+workflow execution to a credentialed Git command but does not add the job
+credential to ordinary workflow subprocess environments. This is inheritance
+control, not OS-level isolation between hostile processes in the same job.
+Action pre-hooks and ordered workflow steps share that job trust boundary, so
+whole-job isolation remains mandatory. The job's Agent credential is not placed
+in plans; protecting it from concurrent same-UID processes would require a
+separate credential broker or checkout sandbox rather than additional manifest
+validation.
 
 A second bounded integration uses the scoped-token endpoint for a synthetic
 `secrets.GITHUB_TOKEN` or an action metadata input default that references
@@ -381,9 +393,9 @@ grant.
   private compatibility features can ship.
 - The CLI gains a small client and verifier, while signing keys, provider
   records, and audit state remain outside workflow-controlled execution.
-- Phase 0 signing code may yield generic cryptographic helpers, but its concrete
+- Transport-probe signing code may yield generic cryptographic helpers, but its concrete
   keys, issuer, claims, and capability ceiling remain non-authorizing.
-- A full Phase 6 implementation now explicitly spans this repository and a
+- A full protected-capability implementation explicitly spans this repository and a
   Buildkite platform service; repository-local code alone cannot satisfy it.
 
 ## References checked
@@ -395,4 +407,4 @@ grant.
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [RFC 7515: JSON Web Signature](https://www.rfc-editor.org/rfc/rfc7515)
 - [RFC 7519: JSON Web Token](https://www.rfc-editor.org/rfc/rfc7519)
-- [ADR 0002: Phase 0 plan-envelope trust experiment](0002-plan-envelope-trust-boundary.md)
+- [ADR 0002: superseded plan-envelope prototype](0002-plan-envelope-trust-boundary.md)

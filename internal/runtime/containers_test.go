@@ -1844,10 +1844,10 @@ runs:
 	}
 }
 
-func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
+func TestLiveCompiledContainerRuntime(t *testing.T) {
 	workspace := t.TempDir()
-	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "phase5", "runtime"))); err != nil {
-		t.Fatalf("copy Phase 5 fixture: %v", err)
+	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "container-runtime"))); err != nil {
+		t.Fatalf("copy container runtime fixture: %v", err)
 	}
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "runtime.yml")
 	workflowSource, err := os.ReadFile(workflowPath)
@@ -1858,7 +1858,7 @@ func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle, err := compiler.CompileBundleWithOptions(workflowPath, workflowSource, eventSource, "phase5-live", "sha256:"+strings.Repeat("2", 64), "phase5-live-importer", compiler.Options{
+	bundle, err := compiler.CompileBundleWithOptions(workflowPath, workflowSource, eventSource, "container-runtime-live", "sha256:"+strings.Repeat("2", 64), "container-runtime-live-importer", compiler.Options{
 		EventTrust: compiler.EventUntrusted,
 		Runners: compiler.RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "gha-untrusted"},
@@ -1903,11 +1903,11 @@ func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
 		if result.Outputs["observation"] != wantObservation {
 			t.Fatalf("run %s observation = %q, want %q", job.Workflow.LogicalJobID, result.Outputs["observation"], wantObservation)
 		}
-		if strings.Contains(logs.String(), "phase5-javascript-secret") || strings.Contains(logs.String(), "phase5-docker-secret") {
+		if strings.Contains(logs.String(), "container-runtime-javascript-secret") || strings.Contains(logs.String(), "container-runtime-docker-secret") {
 			t.Fatalf("run %s leaked a registered mask: %q", job.Workflow.LogicalJobID, logs.String())
 		}
 		if job.Workflow.LogicalJobID == "container-runtime" {
-			for _, want := range []string{"phase5 JavaScript main\n", "phase5 Docker action summary\n", "phase5 JavaScript post\n"} {
+			for _, want := range []string{"container runtime JavaScript main\n", "container runtime Docker action summary\n", "container runtime JavaScript post\n"} {
 				if !strings.Contains(result.Summary, want) {
 					t.Fatalf("container summary lacks %q: %q", want, result.Summary)
 				}
@@ -1918,15 +1918,15 @@ func TestLivePhase5CompiledContainerRuntime(t *testing.T) {
 	if !seen["container-runtime"] || !seen["host-runtime"] {
 		t.Fatalf("executed logical jobs = %#v", seen)
 	}
-	if contents, readErr := os.ReadFile(filepath.Join(workspace, "phase5-post-ran")); readErr != nil || string(contents) != "yes" {
+	if contents, readErr := os.ReadFile(filepath.Join(workspace, "container-runtime-post-ran")); readErr != nil || string(contents) != "yes" {
 		t.Fatalf("compiled container post marker = %q, %v", contents, readErr)
 	}
 	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
-		t.Fatalf("Phase 5 runtime leaked owned Docker resources: before=%#v after=%#v", before, after)
+		t.Fatalf("container runtime leaked owned Docker resources: before=%#v after=%#v", before, after)
 	}
 }
 
-func TestLivePhase5ManifestContainerFixtures(t *testing.T) {
+func TestLiveManifestContainerFixtures(t *testing.T) {
 	docker := requireDocker(t)
 	workspace := t.TempDir()
 	if err := os.CopyFS(workspace, os.DirFS(fixturePath(t, "unsupported"))); err != nil {
@@ -1951,7 +1951,7 @@ func TestLivePhase5ManifestContainerFixtures(t *testing.T) {
 		if readErr != nil {
 			t.Fatal(readErr)
 		}
-		bundle, compileErr := compiler.CompileBundle(workflowPath, workflowSource, eventSource, "phase5-live", "sha256:"+strings.Repeat("2", 64), "phase5-live-importer")
+		bundle, compileErr := compiler.CompileBundle(workflowPath, workflowSource, eventSource, "container-runtime-live", "sha256:"+strings.Repeat("2", 64), "container-runtime-live-importer")
 		if compileErr != nil {
 			t.Fatalf("compile %s: %v", test.name, compileErr)
 		}
@@ -1970,17 +1970,17 @@ func TestLivePhase5ManifestContainerFixtures(t *testing.T) {
 	}
 }
 
-func TestLivePhase5UnhealthyServiceDiagnostics(t *testing.T) {
+func TestLiveUnhealthyServiceDiagnostics(t *testing.T) {
 	docker := requireDocker(t)
 	contextDir := t.TempDir()
 	dockerfile := `FROM busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
 HEALTHCHECK --interval=1s --timeout=1s --retries=1 CMD exit 1
-CMD ["sh", "-c", "echo phase5-health-diagnostic >&2; sleep 300"]
+CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 `
 	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"), []byte(dockerfile), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	image := "buildkite-gha-phase5-unhealthy-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	image := "buildkite-gha-container-runtime-unhealthy-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	command := exec.Command(docker, "buildx", "build", "--builder", "default", "--load", "--tag", image, contextDir)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build unhealthy service: %v: %s", err, output)
@@ -2006,7 +2006,7 @@ CMD ["sh", "-c", "echo phase5-health-diagnostic >&2; sleep 300"]
 	if err == nil || !strings.Contains(err.Error(), `service "unhealthy" failed readiness with status "unhealthy"`) {
 		t.Fatalf("unhealthy service error = %v, logs = %q", err, logs.String())
 	}
-	if !strings.Contains(logs.String(), "phase5-health-diagnostic") {
+	if !strings.Contains(logs.String(), "container-runtime-health-diagnostic") {
 		t.Fatalf("unhealthy service diagnostic absent: %q", logs.String())
 	}
 }

@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Hosted Docker capability probe settled"
+    key: "hosted-docker-complete"
+    depends_on:
+      - step: "hosted-docker-probe"
+        allow_failure: true
+    command: "echo 'Hosted Docker capability probe settled'"

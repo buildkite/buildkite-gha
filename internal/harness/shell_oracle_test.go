@@ -68,7 +68,7 @@ func TestConcurrentOracleMaterializesAndComparesExactFixture(t *testing.T) {
 	if err := repository.Close(); err != nil {
 		t.Fatal(err)
 	}
-	output := strings.NewReader(`prefix PHASE3_OBSERVATION={"targeted":"targeted-and-full","queue_max":10,"parallel":"parallel","implicit":"implicit-wait-all","failure":"failure-at-wait","cancel":"graceful"}`)
+	output := strings.NewReader(`prefix CONCURRENT_OBSERVATION={"targeted":"targeted-and-full","queue_max":10,"parallel":"parallel","implicit":"implicit-wait-all","failure":"failure-at-wait","cancel":"graceful"}`)
 	got, err := CompareConcurrentOracle(context.Background(), source, commit, "test", output)
 	if err != nil {
 		t.Fatal(err)

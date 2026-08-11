@@ -1,0 +1,25 @@
+name: Summary annotation proof
+
+on:
+  push:
+
+jobs:
+  summary-annotation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write the summary heading
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ### Job summary annotation proof
+
+          `buildkite-gha` collected this Markdown from `GITHUB_STEP_SUMMARY`.
+          EOF
+
+      - name: Append the summary observation
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+
+          `SUMMARY_ANNOTATION_OBSERVATION=job-scoped-annotation`
+          EOF

@@ -76,8 +76,8 @@ func TestShellOracleDefinitionsMatchFixtureContract(t *testing.T) {
 		t.Fatalf("producer does not emit expected result %q", result)
 	}
 	for _, path := range []string{
-		filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml"),
-		filepath.Join("..", "..", ".buildkite", "phase-0-shell-oracle.yml"),
+		filepath.Join("..", "..", ".github", "workflows", "shell-oracle.yml"),
+		filepath.Join("..", "..", ".buildkite", "shell-oracle.yml"),
 	} {
 		definition, err := os.ReadFile(path)
 		if err != nil {
@@ -95,7 +95,7 @@ func TestShellOracleDefinitionsMatchFixtureContract(t *testing.T) {
 }
 
 func TestGitHubShellOracleDefinitionIsManualAndPinned(t *testing.T) {
-	path := filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml")
+	path := filepath.Join("..", "..", ".github", "workflows", "shell-oracle.yml")
 	document := readYAMLMap(t, path)
 	triggers := yamlMap(t, document["on"], "on")
 	if len(triggers) != 1 || triggers["workflow_dispatch"] == nil {
@@ -117,7 +117,7 @@ func TestGitHubShellOracleDefinitionIsManualAndPinned(t *testing.T) {
 		"internal/harness/cmd/shell-oracle materialize",
 		"internal/harness/cmd/shell-oracle compare",
 		"--provider github",
-		"scripts/phase-0-shell-oracle-checkout",
+		"scripts/verify-source-checkout",
 	})
 }
 
@@ -126,7 +126,7 @@ func TestGitHubConcurrentOracleMatchesSmokeFixture(t *testing.T) {
 	fixture := readYAMLMap(t, fixturePath)
 	fixtureJob := yamlMap(t, yamlMap(t, fixture["jobs"], "fixture jobs")["concurrent"], "fixture concurrent job")
 
-	oraclePath := filepath.Join("..", "..", ".github", "workflows", "phase-0-shell-oracle.yml")
+	oraclePath := filepath.Join("..", "..", ".github", "workflows", "shell-oracle.yml")
 	oracle := readYAMLMap(t, oraclePath)
 	oracleJobs := yamlMap(t, oracle["jobs"], "oracle jobs")
 	oracleJob := yamlMap(t, oracleJobs["concurrent"], "oracle concurrent job")
@@ -145,7 +145,7 @@ func TestGitHubConcurrentOracleMatchesSmokeFixture(t *testing.T) {
 		t.Fatal("concurrent oracle has no comparison job")
 	}
 	assertDefinitionText(t, oraclePath, []string{
-		"PHASE3_OBSERVATION=",
+		"CONCURRENT_OBSERVATION=",
 		"github-concurrent-observation",
 		"--target concurrent",
 		"needs: [prepare, concurrent]",
@@ -154,18 +154,18 @@ func TestGitHubConcurrentOracleMatchesSmokeFixture(t *testing.T) {
 }
 
 func TestBuildkiteShellOracleDefinitionHasIsolatedDependencyGraph(t *testing.T) {
-	path := filepath.Join("..", "..", ".buildkite", "phase-0-shell-oracle.yml")
+	path := filepath.Join("..", "..", ".buildkite", "shell-oracle.yml")
 	document := readYAMLMap(t, path)
 	steps, ok := document["steps"].([]any)
 	if !ok || len(steps) != 5 {
 		t.Fatalf("steps = %#v, want five command steps", document["steps"])
 	}
 	wantKeys := map[string]bool{
-		"phase-0-shell-prepare":      false,
-		"phase-0-shell-producer":     false,
-		"phase-0-shell-consumer-one": false,
-		"phase-0-shell-consumer-two": false,
-		"phase-0-shell-compare":      false,
+		"shell-oracle-prepare":      false,
+		"shell-oracle-producer":     false,
+		"shell-oracle-consumer-one": false,
+		"shell-oracle-consumer-two": false,
+		"shell-oracle-compare":      false,
 	}
 	for index, raw := range steps {
 		step := yamlMap(t, raw, "step")
@@ -190,7 +190,7 @@ func TestBuildkiteShellOracleDefinitionHasIsolatedDependencyGraph(t *testing.T) 
 		"internal/harness/cmd/shell-oracle materialize",
 		"internal/harness/cmd/shell-oracle compare",
 		"--provider buildkite",
-		"scripts/phase-0-shell-oracle-checkout",
+		"scripts/verify-source-checkout",
 		"$$ORACLE_SOURCE_COMMIT",
 	})
 	documentBytes, err := os.ReadFile(path)

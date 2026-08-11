@@ -243,9 +243,9 @@ func CaptureShellOutput(provider string, output io.Reader) (Capture, error) {
 }
 
 // CaptureConcurrentOutput extracts the single portable observation emitted by
-// concurrent.yml after all Phase 3 assertions have passed.
+// concurrent.yml after all concurrent-step assertions have passed.
 func CaptureConcurrentOutput(provider string, output io.Reader) (Capture, error) {
-	const marker = "PHASE3_OBSERVATION="
+	const marker = "CONCURRENT_OBSERVATION="
 	capture := Capture{Provider: provider}
 	scanner := bufio.NewScanner(output)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)

@@ -6,11 +6,11 @@
       "key_ops": [
         "verify"
       ],
-      "kid": "phase0-fixture-2026-07-22",
+      "kid": "plan-fixture-2026-07-22",
       "kty": "EC",
       "use": "sig",
-      "x": "EmXcoE_nptjE07T1j_spEiBL8laHUoe3o1GBkXOwYfs",
-      "y": "508_2DRPzxyhjITcHxvdCQAmIRuJD62KkPfx3QaTSTw"
+      "x": "_bHKBz9Cza76zTLGTzIfEzjIPKQq0j6-EIb2JsqySog",
+      "y": "mFiQc8RJZiwpbxwjKClgy_vNDIMslWhy6Dwjw-UJZBg"
     }
   ]
 }

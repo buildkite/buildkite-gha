@@ -1,0 +1,17 @@
+name: Oracle smoke JavaScript action
+description: Exercises inputs, outputs, state, masking, summaries, and post actions.
+
+inputs:
+  message:
+    description: Value to transform.
+    required: true
+
+outputs:
+  result:
+    description: Transformed value.
+
+runs:
+  using: node24
+  main: index.js
+  post: post.js
+  post-if: always()

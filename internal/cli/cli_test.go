@@ -1383,7 +1383,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "shell-upload-importer")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -1434,11 +1434,11 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if step.Cache != nil {
 			t.Fatalf("shell-only step %q unexpectedly configures a runtime cache: %#v", step.Key, step.Cache)
 		}
-		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "phase-2-importer" || step.DependsOn[0].AllowFailure {
+		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "shell-upload-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
 		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
-			!strings.Contains(step.Command, `--step 'phase-2-importer'`) ||
+			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
@@ -1868,7 +1868,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "phase-3-upload-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "concurrent-steps-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
@@ -1897,11 +1897,11 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 	if len(pipeline.Steps) != 2 {
 		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
 	}
-	if pipeline.Steps[0].Key != "gha-concurrent" || pipeline.Steps[0].Agents != nil || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "phase-3-upload-importer" || pipeline.Steps[0].DependsOn[0].AllowFailure {
+	if pipeline.Steps[0].Key != "gha-concurrent" || pipeline.Steps[0].Agents != nil || len(pipeline.Steps[0].DependsOn) != 1 || pipeline.Steps[0].DependsOn[0].Step != "concurrent-steps-importer" || pipeline.Steps[0].DependsOn[0].AllowFailure {
 		t.Fatalf("concurrent step = %#v", pipeline.Steps[0])
 	}
 	observer := pipeline.Steps[1]
-	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "phase-3-upload-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
+	if observer.Key != "gha-observe" || observer.Agents != nil || len(observer.DependsOn) != 2 || observer.DependsOn[0].Step != "concurrent-steps-importer" || observer.DependsOn[0].AllowFailure || observer.DependsOn[1].Step != "gha-concurrent" || !observer.DependsOn[1].AllowFailure {
 		t.Fatalf("observer step = %#v", observer)
 	}
 }
@@ -2467,7 +2467,7 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "phase-2-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "shell-upload-importer")
 	runner := &cliCaptureRunner{failAt: 2}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"upload", workflowPath, "--event-path", eventPath, "--runtime-queue", "hosted"}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -2601,7 +2601,7 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				Actions:  []plan.ActionLock{test.action},
 			}}}}
 			err := validateUnprivilegedBundle(bundle)
-			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+test.service+" service") || !strings.Contains(err.Error(), "Phase 6") {
+			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+test.service+" service") || !strings.Contains(err.Error(), "unavailable") {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})

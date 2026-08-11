@@ -39,6 +39,6 @@
       "step_key": "gha-ci-test"
     }
   },
-  "protected": "eyJhbGciOiJFUzI1NiIsImtpZCI6InVudHJ1c3RlZC1maXh0dXJlLTIwMjYtMDctMjIiLCJ0eXAiOiJidWlsZGtpdGUtZ2hhLXBsYW4tZW52ZWxvcGUrandzIn0",
-  "signature": "uBHBKKs3RdkrxiZR3gqMSapyBs1APsUDahuMnMH816OdnlGK147lNTfG4xbBmwUrX1H6VUZV0rKRzgr0Onk07g"
+  "protected": "eyJhbGciOiJFUzI1NiIsImtpZCI6InVudHJ1c3RlZC1wbGFuLWZpeHR1cmUtMjAyNi0wNy0yMiIsInR5cCI6ImJ1aWxka2l0ZS1naGEtcGxhbi1lbnZlbG9wZStqd3MifQ",
+  "signature": "YIRzzNs0EL5sjF5mYLvTXDhv8FqRiPtB4ljnOFgzhwiHxBEUuz9fXaZvg9Ws_7a9T2bysrQ-c_ePfEqivxtyWA"
 }

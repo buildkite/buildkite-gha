@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Workflow command annotations settled"
+    key: "workflow-annotations-complete"
+    depends_on:
+      - step: "gha-workflow-command-annotations"
+        allow_failure: true
+    command: "echo 'Workflow command annotation job settled before API verification'"

@@ -6,65 +6,65 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":test_tube: Load Phase 0 shell oracle"
-    key: "phase-0-shell-oracle-loader"
-    if: build.env("PHASE0_PROBE") == "shell"
-    command: "buildkite-agent pipeline upload .buildkite/phase-0-shell-oracle.yml"
+  - label: ":test_tube: Load shell oracle"
+    key: "shell-oracle-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "shell-oracle"
+    command: "buildkite-agent pipeline upload .buildkite/shell-oracle.yml"
 
-  - label: ":test_tube: Load Phase 0 transport probe"
-    key: "phase-0-transport-probe-loader"
-    if: build.env("PHASE0_PROBE") == "transport"
-    command: "buildkite-agent pipeline upload .buildkite/phase-0-transport-probe/pipeline.yml"
+  - label: ":test_tube: Load transport probe"
+    key: "transport-probe-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "transport-probe"
+    command: "buildkite-agent pipeline upload .buildkite/transport-probe/pipeline.yml"
 
-  - label: ":pipeline: Load Phase 2 upload proof"
-    key: "phase-2-upload-loader"
-    if: build.env("PHASE2_PROBE") == "upload" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-2-upload.yml"
+  - label: ":pipeline: Load shell upload proof"
+    key: "shell-upload-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml"
 
-  - label: ":pipeline: Load Phase 3 concurrent proof"
-    key: "phase-3-upload-loader"
-    if: build.env("PHASE3_PROBE") == "concurrent" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-3-upload.yml"
+  - label: ":pipeline: Load concurrent steps proof"
+    key: "concurrent-steps-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "concurrent-steps" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml"
 
-  - label: ":pipeline: Load Phase 4 actions proof"
-    key: "phase-4-upload-loader"
-    if: build.env("PHASE4_PROBE") == "actions" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-4-upload.yml"
+  - label: ":pipeline: Load public actions proof"
+    key: "public-actions-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "public-actions" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
 
-  - label: ":docker: Load Phase 5 hosted Docker probe"
-    key: "phase-5-capabilities-loader"
-    if: build.env("PHASE5_PROBE") == "capabilities" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml"
+  - label: ":docker: Load hosted Docker proof"
+    key: "hosted-docker-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "hosted-docker" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml"
 
-  - label: ":docker: Load Phase 5 Dockerfile action proof"
-    key: "phase-5-docker-action-loader"
-    if: build.env("PHASE5_PROBE") == "docker-action" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml"
+  - label: ":docker: Load Dockerfile action proof"
+    key: "dockerfile-action-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "dockerfile-action" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml"
 
-  - label: ":docker: Load Phase 5 container runtime proof"
-    key: "phase-5-runtime-loader"
-    if: build.env("PHASE5_PROBE") == "runtime" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-5-runtime.yml"
+  - label: ":docker: Load container runtime proof"
+    key: "container-runtime-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "container-runtime" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml"
 
-  - label: ":memo: Load Phase 6 summary annotation proof"
-    key: "phase-6-summary-loader"
-    if: build.env("PHASE6_PROBE") == "summary" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-6-summary.yml"
+  - label: ":memo: Load summary annotation proof"
+    key: "summary-annotation-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "summary-annotation" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml"
 
-  - label: ":warning: Load Phase 6 workflow command annotation proof"
-    key: "phase-6-annotations-loader"
-    if: build.env("PHASE6_PROBE") == "annotations" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-6-annotations.yml"
+  - label: ":warning: Load workflow command annotation proof"
+    key: "workflow-annotations-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "workflow-annotations" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml"
 
-  - label: ":package: Load Phase 6 upload-artifact proof"
-    key: "phase-6-upload-artifact-loader"
-    if: build.env("PHASE6_PROBE") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-6-upload-artifact.yml"
+  - label: ":package: Load upload-artifact proof"
+    key: "upload-artifact-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml"
 
-  - label: ":package: Load Phase 6 artifact roundtrip proof"
-    key: "phase-6-artifact-roundtrip-loader"
-    if: build.env("PHASE6_PROBE") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml"
+  - label: ":package: Load artifact roundtrip proof"
+    key: "artifact-roundtrip-loader"
+    if: build.env("COMPATIBILITY_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
+    command: "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml"
 
   - label: ":rocket: Load migration POC suite"
     key: "migration-poc-loader"
@@ -78,7 +78,7 @@ steps:
       set -euo pipefail
       commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
       [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      scripts/phase-0-shell-oracle-checkout "$$commit"
+      scripts/verify-source-checkout "$$commit"
       test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
       buildkite-agent pipeline upload .buildkite/plugin-demo.yml
@@ -90,31 +90,24 @@ steps:
       set -euo pipefail
       commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
       [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      for phase_commit in \
-        "$${PHASE2_COMMIT:-}" \
-        "$${PHASE3_COMMIT:-}" \
-        "$${PHASE4_COMMIT:-}" \
-        "$${PHASE5_COMMIT:-}" \
-        "$${PHASE6_COMMIT:-}"
-      do
-        [[ -z "$$phase_commit" || "$$phase_commit" == "$$commit" ]] || {
-          echo "phase-specific commit $$phase_commit conflicts with SMOKE_COMMIT" >&2
-          exit 1
-        }
-      done
-      scripts/phase-0-shell-oracle-checkout "$$commit"
+      proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"
+      [[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]] || {
+        echo "COMPATIBILITY_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT" >&2
+        exit 1
+      }
+      scripts/verify-source-checkout "$$commit"
       test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
       test -z "$$(git status --porcelain --untracked-files=all)"
-      buildkite-agent pipeline upload .buildkite/phase-2-upload.yml
-      buildkite-agent pipeline upload .buildkite/phase-3-upload.yml
-      buildkite-agent pipeline upload .buildkite/phase-4-upload.yml
-      buildkite-agent pipeline upload .buildkite/phase-5-capabilities.yml
-      buildkite-agent pipeline upload .buildkite/phase-5-docker-action.yml
-      buildkite-agent pipeline upload .buildkite/phase-5-runtime.yml
-      buildkite-agent pipeline upload .buildkite/phase-6-summary.yml
-      buildkite-agent pipeline upload .buildkite/phase-6-annotations.yml
-      buildkite-agent pipeline upload .buildkite/phase-6-upload-artifact.yml
-      buildkite-agent pipeline upload .buildkite/phase-6-artifact-roundtrip.yml
+      buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml
+      buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml
+      buildkite-agent pipeline upload .buildkite/public-actions-proof.yml
+      buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml
+      buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml
+      buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml
+      buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml
+      buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml
+      buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml
+      buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml
       buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
 
   - label: ":go: Repository checks"

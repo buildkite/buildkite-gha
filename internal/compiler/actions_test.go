@@ -809,7 +809,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase4-test", testDistributionDigest, options)
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "checkout-test", testDistributionDigest, options)
 	}
 
 	accepted := []string{
@@ -820,6 +820,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          ref: ${{ github.sha }}\n",
 		"        with:\n          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
 		"        with:\n          ref: test-catalog\n          path: test-catalog\n          fetch-depth: '100'\n          persist-credentials: false\n",
+		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
 		plans, err := compile(with)
@@ -836,7 +837,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"repository":  "          repository: other/repository\n",
 		"ref":         "          ref: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
 		"ssh-key":     "          ssh-key: key\n",
-		"submodules":  "          submodules: true\n",
+		"submodules":  "          submodules: yes\n",
 		"path":        "          path: nested/path\n",
 		"fetch-depth": "          fetch-depth: '-1'\n",
 		"credentials": "          persist-credentials: true\n",
@@ -844,7 +845,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile("        with:\n" + input)
-			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") {
 				t.Fatalf("CompilePlansWithOptions() error = %v", err)
 			}
 		})
@@ -918,7 +919,7 @@ func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	}
 
 	_, err = compile("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", "        with:\n          token: '${{ github.token }}'\n")
-	if err == nil || !strings.Contains(err.Error(), "checkout adapter") || !strings.Contains(err.Error(), "Phase 6") {
+	if err == nil || !strings.Contains(err.Error(), "checkout adapter") {
 		t.Fatalf("workflow token input error = %v", err)
 	}
 }
@@ -941,7 +942,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1014,7 +1015,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.WriteFile(workflowPath, matrixWorkflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err = CompilePlansWithOptions(workflowPath, matrixWorkflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+	plans, err = CompilePlansWithOptions(workflowPath, matrixWorkflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1048,7 +1049,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1148,7 +1149,7 @@ jobs:
 	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "phase6-test", testDistributionDigest, Options{
+	plans, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1196,12 +1197,12 @@ func TestDownloadArtifactMutableTagMustResolveToAuditedExactLock(t *testing.T) {
 	}
 }
 
-func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) {
+func TestPublicActionsContinuationDependsOnCompiledTerminal(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: remote\nruns:\n  using: node24\n  main: index.js\n")
-	workflowPath := filepath.Join("..", "..", "testdata", "phase4", ".github", "workflows", "public-actions.yml")
-	eventPath := filepath.Join("..", "..", "testdata", "phase4", "events", "public-checkout.json")
-	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "phase4-test", testDistributionDigest, Options{
+	workflowPath := filepath.Join("..", "..", "testdata", "public-actions", ".github", "workflows", "public-actions.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "public-actions", "events", "public-checkout.json")
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "public-actions-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1225,7 +1226,7 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 			terminals = append(terminals, job.Target.StepKey)
 		}
 	}
-	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "phase-4-upload-continuation.yml"))
+	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "public-actions-continuation.yml"))
 	var continuation struct {
 		Steps []struct {
 			DependsOn []struct {
@@ -1237,16 +1238,16 @@ func TestPhase4ContinuationDependsOnCompiledPublicActionsTerminal(t *testing.T) 
 		t.Fatal(err)
 	}
 	if len(terminals) != 1 || len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != terminals[0] {
-		t.Fatalf("Phase 4 continuation dependencies = %#v, compiled public actions terminals = %#v", continuation.Steps, terminals)
+		t.Fatalf("public-actions continuation dependencies = %#v, compiled terminals = %#v", continuation.Steps, terminals)
 	}
 }
 
-func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.T) {
+func TestDockerfileActionContinuationDependsOnCompiledTerminal(t *testing.T) {
 	remote := t.TempDir()
 	writeAction(t, remote, "", "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
-	workflowPath := filepath.Join("..", "..", "testdata", "phase5", ".github", "workflows", "docker-action.yml")
+	workflowPath := filepath.Join("..", "..", "testdata", "dockerfile-action", ".github", "workflows", "docker-action.yml")
 	templatePath := workflowPath + ".tmpl"
-	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, templatePath), pushEvent(t), "phase5-test", testDistributionDigest, Options{
+	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, templatePath), pushEvent(t), "dockerfile-action-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1259,9 +1260,9 @@ func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.
 		t.Fatal(err)
 	}
 	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"docker", "network"}) || len(plans[0].Actions) != 1 || plans[0].Actions[0].Source != "github" {
-		t.Fatalf("Phase 5 Dockerfile action plans = %#v", plans)
+		t.Fatalf("Dockerfile action plans = %#v", plans)
 	}
-	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "phase-5-docker-action-continuation.yml"))
+	continuationSource := readFile(t, filepath.Join("..", "..", ".buildkite", "dockerfile-action-continuation.yml"))
 	var continuation struct {
 		Steps []struct {
 			DependsOn []struct {
@@ -1273,7 +1274,7 @@ func TestPhase5ContinuationDependsOnCompiledDockerfileActionTerminal(t *testing.
 		t.Fatal(err)
 	}
 	if len(continuation.Steps) != 1 || len(continuation.Steps[0].DependsOn) != 1 || continuation.Steps[0].DependsOn[0].Step != plans[0].Target.StepKey {
-		t.Fatalf("Phase 5 continuation dependencies = %#v, compiled terminal = %q", continuation.Steps, plans[0].Target.StepKey)
+		t.Fatalf("Dockerfile-action continuation dependencies = %#v, compiled terminal = %q", continuation.Steps, plans[0].Target.StepKey)
 	}
 }
 

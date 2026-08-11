@@ -1480,7 +1480,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if descriptor.Service != "" {
-				addFailure(artifact, "action requires a service unavailable to the hosted profile", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service; Phase 6 is required", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service))
+				addFailure(artifact, "action requires a service unavailable to the hosted profile", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service))
 			}
 		}
 	}

@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( $# != 2 )) || [[ ! $1 =~ ^[1-9][0-9]*$ ]] || [[ ! $2 =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'usage: scripts/verify-workflow-annotations <build-number> <commit>' >&2
+  exit 2
+fi
+
+readonly build_number=$1
+readonly expected_commit=$2
+readonly pipeline=${WORKFLOW_ANNOTATIONS_PIPELINE_SLUG:-buildkite-gha}
+readonly step_key=gha-workflow-command-annotations
+readonly warning_context=buildkite-gha-workflow-warnings
+readonly error_context=buildkite-gha-workflow-errors
+readonly masked_canary=workflow-command-secret
+
+command -v bk >/dev/null
+command -v jq >/dev/null
+
+build="$(bk --no-pager api "/pipelines/$pipeline/builds/$build_number")"
+if ! jq -e '.jobs | type == "array"' <<<"$build" >/dev/null; then
+  echo "build $build_number API response has no jobs array" >&2
+  exit 1
+fi
+commit="$(jq -r '.commit // ""' <<<"$build")"
+if [[ $commit != "$expected_commit" ]]; then
+  echo "build $build_number ran commit $commit, expected $expected_commit" >&2
+  exit 1
+fi
+readonly commit
+
+mapfile -t job_ids < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
+if (( ${#job_ids[@]} != 1 )) || [[ ! ${job_ids[0]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
+  echo "build $build_number has ${#job_ids[@]} jobs with step key $step_key; expected exactly one" >&2
+  exit 1
+fi
+readonly job_id=${job_ids[0]}
+
+if ! jq -e --arg job_id "$job_id" '.jobs[] | select(.id == $job_id) | .state == "passed"' <<<"$build" >/dev/null; then
+  echo "generated workflow command annotation job $job_id did not pass" >&2
+  exit 1
+fi
+
+annotations="$(bk --no-pager api "/jobs/$job_id/annotations")"
+if ! jq -e \
+  --arg warning_context "$warning_context" \
+  --arg error_context "$error_context" \
+  --arg job_id "$job_id" \
+  --arg masked_canary "$masked_canary" \
+  '
+    [.[] | select(.context == $warning_context)] as $warnings |
+    [.[] | select(.context == $error_context)] as $errors |
+    ($warnings | length) == 1 and
+    ($errors | length) == 1 and
+    $warnings[0].scope == "job" and
+    $warnings[0].job_id == $job_id and
+    $warnings[0].style == "warning" and
+    ($warnings[0].body_html | contains("Workflow warning")) and
+    ($warnings[0].body_html | contains("workflow-command-annotations.yml")) and
+    ($warnings[0].body_html | contains("Line:")) and
+    ($warnings[0].body_html | contains("13")) and
+    ($warnings[0].body_html | contains("Column:")) and
+    ($warnings[0].body_html | contains("WORKFLOW_WARNING_OBSERVATION=stdout-with-location")) and
+    ($warnings[0].body_html | contains("masked diagnostic")) and
+    ($warnings[0].body_html | contains($masked_canary) | not) and
+    $errors[0].scope == "job" and
+    $errors[0].job_id == $job_id and
+    $errors[0].style == "error" and
+    ($errors[0].body_html | contains("Workflow error")) and
+    ($errors[0].body_html | contains("18")) and
+    ($errors[0].body_html | contains("WORKFLOW_ERROR_OBSERVATION=stderr-outcome-neutral"))
+  ' <<<"$annotations" >/dev/null
+then
+  echo "job $job_id does not have the exact workflow command annotation contract" >&2
+  exit 1
+fi
+
+printf 'WORKFLOW_ANNOTATIONS_OBSERVATION={"build":%s,"commit":"%s","job":"%s","warning_context":"%s","error_context":"%s","scope":"job","warning_style":"warning","error_style":"error"}\n' \
+  "$build_number" "$commit" "$job_id" "$warning_context" "$error_context"

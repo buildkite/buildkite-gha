@@ -15,7 +15,7 @@ type Span struct {
 	End   Position `json:"end"`
 }
 
-// Workflow is the actionlint-independent syntax needed by the Phase 0 compiler.
+// Workflow is the actionlint-independent syntax needed by the workflow compiler.
 type Workflow struct {
 	Name                    string                `json:"name,omitempty"`
 	Env                     map[string]string     `json:"env,omitempty"`
@@ -142,7 +142,7 @@ type Value struct {
 	Span Span `json:"span"`
 }
 
-// Step is the execution data retained in the Phase 0 IR.
+// Step is the execution data retained in the workflow compiler IR.
 type Step struct {
 	ID               string            `json:"id,omitempty"`
 	Name             string            `json:"name,omitempty"`

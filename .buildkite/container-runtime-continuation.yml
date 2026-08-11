@@ -1,0 +1,10 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Container runtime settled"
+    key: "container-runtime-complete"
+    depends_on:
+      - step: "container-runtime-probe"
+        allow_failure: true
+    command: "echo 'Hosted container runtime proof settled'"

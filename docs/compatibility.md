@@ -624,7 +624,7 @@ The adapter checks out a detached commit or static branch from the event
 repository at the workspace root or a clean top-level directory. It uses
 Buildkite's repository-provider Git credentials when the job provides them;
 otherwise it fetches anonymously. Credentials are scoped to the fetch command
-and are never persisted.
+and each verified submodule fetch command, and are never persisted.
 
 | Input | Supported values |
 | --- | --- |
@@ -641,15 +641,25 @@ and are never persisted.
 | `sparse-checkout-cone-mode` | Omitted or true |
 | `fetch-depth` | Omitted or a non-negative integer; `0` fetches full history |
 | `fetch-tags`, `show-progress` | Omitted, true, or false |
-| `lfs`, `submodules` | Omitted or false |
+| `lfs` | Omitted or false |
+| `submodules` | Omitted, false, true, or recursive; whitespace is trimmed and casing is ignored |
 | `set-safe-directory` | Omitted or true |
 | `github-server-url` | Omitted, empty, or `https://github.com` |
 | `allow-unsafe-pr-checkout` | Omitted or false |
 
-Alternate repositories, tags, non-event dynamic commits, SSH, LFS, submodules,
-sparse checkout, GitHub Enterprise Server, and credential persistence are
-unsupported. Commit and branch checkouts remain detached and confined to the
-event repository.
+`false` and omission do not run submodule commands. `true` runs native Git
+for direct children and `recursive` includes nested children. Relative URLs and
+`fetch-depth` follow native Git behavior. Public and private GitHub submodules
+are supported under the job's repository access; external HTTPS submodules are
+anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and
+non-HTTPS transports are unsupported.
+
+See the [security model](security.md#checkout-and-submodules) for the credential,
+Git, and job-isolation boundaries.
+
+Alternate repositories, tags, non-event dynamic commits, LFS, sparse checkout,
+GitHub Enterprise Server, and credential persistence remain unsupported. Commit
+and branch checkouts remain detached and confined to the event repository.
 
 ### `actions/upload-artifact`
 

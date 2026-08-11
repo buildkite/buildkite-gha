@@ -1,0 +1,61 @@
+name: actions/cache v6 proof
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+env:
+  CACHE_ROUNDTRIP_KEY: cache-roundtrip-__CACHE_ROUNDTRIP_NONCE__
+  CACHE_ROUNDTRIP_PAYLOAD: cache-payload:__CACHE_ROUNDTRIP_NONCE__
+  CACHE_ROUNDTRIP_NONCE: __CACHE_ROUNDTRIP_NONCE__
+
+jobs:
+  cache-producer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore build-unique cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache-data
+          key: ${{ env.CACHE_ROUNDTRIP_KEY }}
+
+      - name: Require miss and create payload
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" != true
+          test ! -e cache-data/value
+          mkdir -p cache-data
+          printf '%s\n' "$CACHE_ROUNDTRIP_PAYLOAD" > cache-data/value
+          payload_digest="sha256:$(sha256sum cache-data/value | cut -d ' ' -f 1)"
+          printf 'CACHE_ROUNDTRIP_PRODUCER={"key":"%s","cache_hit":"%s","payload":"%s","payload_digest":"%s","nonce":"%s"}\n' \
+            "$CACHE_ROUNDTRIP_KEY" "$CACHE_HIT" "$CACHE_ROUNDTRIP_PAYLOAD" "$payload_digest" "$CACHE_ROUNDTRIP_NONCE"
+
+  cache-consumer:
+    needs: cache-producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore producer cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache-data
+          key: ${{ env.CACHE_ROUNDTRIP_KEY }}
+
+      - name: Require hit and verify payload
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          payload=$(cat cache-data/value)
+          test "$payload" = "$CACHE_ROUNDTRIP_PAYLOAD"
+          payload_digest="sha256:$(sha256sum cache-data/value | cut -d ' ' -f 1)"
+          expected_digest="sha256:$(printf '%s\n' "$CACHE_ROUNDTRIP_PAYLOAD" | sha256sum | cut -d ' ' -f 1)"
+          test "$payload_digest" = "$expected_digest"
+          printf 'CACHE_ROUNDTRIP_CONSUMER={"key":"%s","cache_hit":"%s","payload":"%s","payload_digest":"%s","nonce":"%s"}\n' \
+            "$CACHE_ROUNDTRIP_KEY" "$CACHE_HIT" "$payload" "$payload_digest" "$CACHE_ROUNDTRIP_NONCE"

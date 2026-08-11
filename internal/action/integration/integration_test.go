@@ -246,6 +246,8 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		{"fetch-depth": "100"},
 		{"ref": strings.Repeat("b", 40)},
 		{"ref": "test-catalog", "path": "test-catalog", "fetch-depth": "100"},
+		{"submodules": " TrUe "},
+		{"submodules": " ReCuRsIvE "},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)
@@ -256,8 +258,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"token":                {"token": ""},
 		"foreign repository":   {"repository": "other/repository"},
 		"SHA-256 ref":          {"ref": strings.Repeat("b", 64)},
-		"submodules":           {"submodules": "true"},
-		"recursive submodules": {"submodules": "recursive"},
+		"invalid submodules":   {"submodules": "yes"},
 		"path":                 {"path": "nested/path"},
 		"filter":               {"filter": "blob:none"},
 		"sparse checkout":      {"sparse-checkout": "src"},
@@ -274,8 +275,8 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"git metadata path":    {"path": ".git"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "Phase 6") {
-				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want Phase 6 rejection", inputs, err)
+			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want unsupported-capability rejection", inputs, err)
 			}
 		})
 	}

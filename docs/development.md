@@ -32,7 +32,7 @@ validates the release configuration. `make check` is a convenience alias.
 The standard and race-enabled suites run serially because their live container
 tests inspect daemon-wide Docker resources. Local runs may skip those tests when
 Docker or managed Node is unavailable; the hosted repository check requires the
-live prerequisites and fails rather than silently losing Phase 5 coverage.
+live prerequisites and fails rather than silently losing container coverage.
 
 Focused tasks are also available:
 
@@ -128,31 +128,31 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env SMOKE_PROBE=hosted --env SMOKE_COMMIT="$commit" --yes
 ```
 
-The aggregate retains each phase's importer and continuation topology. Use a
-phase selector only for targeted diagnosis. Importer steps that generate jobs
+The proof suite retains each behavior's importer and continuation topology. Use
+the proof selector only for targeted diagnosis. Importer steps that generate jobs
 set `BUILDKITE_GHA_TARGET_QUEUE=hosted`; this keeps these hosted-specific proofs
 explicit rather than relying on deployment defaults.
 
 | Coverage | Build environment |
 | --- | --- |
-| Sequential shell and upload | `PHASE2_PROBE=upload`, `PHASE2_COMMIT=<commit>` |
-| Concurrent step controls | `PHASE3_PROBE=concurrent`, `PHASE3_COMMIT=<commit>` |
-| Public JavaScript/composite actions | `PHASE4_PROBE=actions`, `PHASE4_COMMIT=<commit>` |
-| Hosted Docker prerequisites | `PHASE5_PROBE=capabilities`, `PHASE5_COMMIT=<commit>` |
-| Dockerfile action path | `PHASE5_PROBE=docker-action`, `PHASE5_COMMIT=<commit>` |
-| Complete container runtime | `PHASE5_PROBE=runtime`, `PHASE5_COMMIT=<commit>` |
-| Job summary annotation | `PHASE6_PROBE=summary`, `PHASE6_COMMIT=<commit>` |
-| Workflow warning/error annotations | `PHASE6_PROBE=annotations`, `PHASE6_COMMIT=<commit>` |
-| Upload-artifact publication | `PHASE6_PROBE=upload-artifact`, `PHASE6_COMMIT=<commit>` |
-| Artifact producer/consumer roundtrip | `PHASE6_PROBE=artifact-roundtrip`, `PHASE6_COMMIT=<commit>` |
+| Sequential shell and upload | `COMPATIBILITY_PROOF=shell-upload`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Concurrent step controls | `COMPATIBILITY_PROOF=concurrent-steps`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Public JavaScript/composite actions | `COMPATIBILITY_PROOF=public-actions`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Hosted Docker prerequisites | `COMPATIBILITY_PROOF=hosted-docker`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Dockerfile action path | `COMPATIBILITY_PROOF=dockerfile-action`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Complete container runtime | `COMPATIBILITY_PROOF=container-runtime`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Job summary annotation | `COMPATIBILITY_PROOF=summary-annotation`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Workflow warning/error annotations | `COMPATIBILITY_PROOF=workflow-annotations`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Upload-artifact publication | `COMPATIBILITY_PROOF=upload-artifact`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
+| Artifact producer/consumer roundtrip | `COMPATIBILITY_PROOF=artifact-roundtrip`, `COMPATIBILITY_PROOF_COMMIT=<commit>` |
 
 Summary annotation publication is advisory, so the generated job's successful
 outcome does not by itself prove that Buildkite persisted the annotation. After
-the targeted or aggregate build settles, use an authenticated `bk` CLI with
+the targeted proof build settles, use an authenticated `bk` CLI with
 `read_builds` access to verify the job-scoped annotation independently:
 
 ```sh
-scripts/phase-6-summary-annotation-verify <build-number> <commit>
+scripts/verify-summary-annotation <build-number> <commit>
 ```
 
 The verifier reads only the generated job and its annotations. It requires
@@ -164,7 +164,7 @@ Workflow-command annotation publication is also advisory. Verify its distinct
 warning and error contexts independently after the annotations proof settles:
 
 ```sh
-scripts/phase-6-workflow-annotations-verify <build-number> <commit>
+scripts/verify-workflow-annotations <build-number> <commit>
 ```
 
 This verifier requires the generated job to pass even though it emitted an
@@ -173,11 +173,11 @@ one job-scoped `error` annotation, their checked-in body fragments, and the
 absence of the registered masking canary.
 
 Artifact publication and consumption require independent native-storage
-observations after their targeted or aggregate builds settle:
+observations after their targeted proof builds settle:
 
 ```sh
-scripts/phase-6-upload-artifact-verify <build-number> <commit>
-scripts/phase-6-artifact-roundtrip-verify <build-number> <commit>
+scripts/verify-upload-artifact <build-number> <commit>
+scripts/verify-artifact-roundtrip <build-number> <commit>
 ```
 
 The upload verifier binds the archive, terminal manifest, producer, digest,
@@ -187,7 +187,7 @@ manifests, and confirms both consumers observed the exact payload and compatible
 absolute `download-path` output.
 
 The pre-release migration POC covers basic CI, artifact transfer, and the
-advanced service-free workflow without adding another phase-specific proof. It
+advanced service-free workflow without adding another behavior-specific proof. It
 builds the exact checked-out source locally, so it is runtime evidence rather
 than installation evidence:
 
@@ -263,7 +263,7 @@ post-save, and direct-dependent exact hit. The plugin downloads and
 checksum-verifies the public release rather than falling back to a local
 binary.
 
-The smoke manifest and phase definitions under `.buildkite/` record current
+The smoke manifest and proof definitions under `.buildkite/` record current
 coverage. Git, pull requests, and Buildkite retain the historical evidence.
 
 ## Architecture and security
@@ -274,7 +274,7 @@ coverage. Git, pull requests, and Buildkite retain the historical evidence.
   compiler uses actionlint while act and the official runner remain behavioral
   references.
 - [ADR 0002](architecture/0002-plan-envelope-trust-boundary.md) preserves the
-  superseded Phase 0 signing experiment and its conformance history.
+  superseded plan-envelope signing experiment and its conformance history.
 - [ADR 0003](architecture/0003-protected-capability-control-plane.md) proposes
   the control plane required for broader protected capabilities.
 

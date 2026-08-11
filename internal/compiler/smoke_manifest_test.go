@@ -45,7 +45,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		t.Fatalf("schema = %q", manifest.Schema)
 	}
 
-	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "migration-poc-basic", "migration-poc-artifacts", "migration-poc-advanced", "migration-poc-cache", "phase4-public-actions", "phase5-docker-action", "phase5-container-runtime", "phase6-summary-annotation", "phase6-workflow-command-annotations", "phase6-upload-artifact", "phase6-cache-v6", "unsupported-job-container", "unsupported-service-container"}
+	wantOrder := []string{"smoke-shell", "smoke-concurrent", "smoke-ci", "smoke-artifact", "migration-poc-basic", "migration-poc-artifacts", "migration-poc-advanced", "migration-poc-cache", "public-actions", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-command-annotations", "upload-artifact", "cache-v6", "unsupported-job-container", "unsupported-service-container"}
 	if len(manifest.Fixtures) != len(wantOrder) {
 		t.Fatalf("fixtures = %d, want %d", len(manifest.Fixtures), len(wantOrder))
 	}
@@ -87,7 +87,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 	}
 
 	var checkedIn []string
-	for _, pattern := range []string{".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml", "testdata/smoke/.github/workflows/*.yml", "testdata/poc/.github/workflows/cache.yml", "testdata/phase4/.github/workflows/*.yml", "testdata/phase5/.github/workflows/*.yml.tmpl", "testdata/phase5/runtime/.github/workflows/*.yml", "testdata/phase6/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
+	for _, pattern := range []string{".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml", "testdata/smoke/.github/workflows/*.yml", "testdata/poc/.github/workflows/cache.yml", "testdata/public-actions/.github/workflows/*.yml", "testdata/dockerfile-action/.github/workflows/*.yml.tmpl", "testdata/container-runtime/.github/workflows/*.yml", "testdata/unsupported/.github/workflows/*.yml"} {
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
 		if err != nil {
 			t.Fatal(err)
@@ -106,7 +106,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 
 func TestProductionPluginActionWorkflowCompilesDeterministically(t *testing.T) {
 	root := filepath.Join("..", "..")
-	workflowPath := filepath.Join(root, ".github", "workflows", "phase-4-actions-oracle.yml")
+	workflowPath := filepath.Join(root, ".github", "workflows", "local-actions-oracle.yml")
 	workflow, err := os.ReadFile(workflowPath)
 	if err != nil {
 		t.Fatal(err)

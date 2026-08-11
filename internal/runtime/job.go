@@ -173,12 +173,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return JobResult{}, err
 			}
 			r.RepositoryCredentials = credentials
-			git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "repository-provider checkout Git")
-			if err != nil {
-				return JobResult{}, err
-			}
-			r.Git = git
 		}
+		git, err := resolveHostExecutableBeforeWorkflow(r.Git, "git", "native checkout Git")
+		if err != nil {
+			return JobResult{}, err
+		}
+		r.Git = git
 	}
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
@@ -1249,7 +1249,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 	} else {
 		if !strings.HasPrefix(step.Uses, "./") {
-			return result, fmt.Errorf("remote action %q is unsupported in the Phase 0 runtime", step.Uses)
+			return result, fmt.Errorf("remote action %q is unsupported in the supported runtime subset", step.Uses)
 		}
 		if err := VerifyWorkflow(job, workspace); err != nil {
 			return result, err
@@ -1358,7 +1358,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, fmt.Errorf("docker action %q uses unsupported entrypoint, arguments, or pre/post lifecycle", step.Uses)
 		}
 		if action.Runs.Image != "Dockerfile" {
-			return result, fmt.Errorf("docker action image %q is unsupported; Phase 0 requires a local Dockerfile", action.Runs.Image)
+			return result, fmt.Errorf("docker action image %q is unsupported; the supported runtime subset requires a local Dockerfile", action.Runs.Image)
 		}
 		dockerEnv, err := evaluateMap(action.Runs.Env, actionEval)
 		if err != nil {
@@ -1600,7 +1600,7 @@ func shellCommand(shell, script string) ([]string, error) {
 	case "sh":
 		return []string{"sh", "-e", "-c", script}, nil
 	default:
-		return nil, fmt.Errorf("shell %q is unsupported in the Phase 0 runtime", shell)
+		return nil, fmt.Errorf("shell %q is unsupported in the supported runtime subset", shell)
 	}
 }
 

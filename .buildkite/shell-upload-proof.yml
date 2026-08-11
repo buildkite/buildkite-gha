@@ -1,0 +1,28 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: Shell upload proof importer"
+    key: "shell-upload-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"
+      scripts/verify-source-checkout "$$commit"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-shell-upload.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/smoke/events/push.json \
+        --runtime-queue hosted \
+        testdata/smoke/.github/workflows/shell.yml
+
+  - label: ":pipeline: Shell upload proof continuation loader"
+    key: "shell-upload-continuation-loader"
+    depends_on: "shell-upload-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/shell-upload-continuation.yml"
