@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 env:
-  PHASE6_ARTIFACT_PAYLOAD: smoke-artifact:__PHASE6_ARTIFACT_NONCE__
+  ARTIFACT_ROUNDTRIP_PAYLOAD: smoke-artifact:__ARTIFACT_ROUNDTRIP_NONCE__
 
 jobs:
   artifact-producer:
@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p payload
-          printf '%s\n' "$PHASE6_ARTIFACT_PAYLOAD" > payload/result.txt
+          printf '%s\n' "$ARTIFACT_ROUNDTRIP_PAYLOAD" > payload/result.txt
 
       - name: Upload payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -46,7 +46,7 @@ jobs:
         shell: bash
         env:
           DOWNLOAD_PATH: ${{ steps.download.outputs.download-path }}
-          EXPECTED_PAYLOAD: ${{ env.PHASE6_ARTIFACT_PAYLOAD }}
+          EXPECTED_PAYLOAD: ${{ env.ARTIFACT_ROUNDTRIP_PAYLOAD }}
           VARIANT: ${{ matrix.variant }}
         run: |
           result=$(cat payload/result.txt)
@@ -60,5 +60,5 @@ jobs:
           printf '{"artifact":"%s","variant":"%s","file_digest":"%s"}\n' \
             "$EXPECTED_PAYLOAD" "$VARIANT" "$expected_digest" > expected.json
           diff -u expected.json observation.json
-          printf 'PHASE6_ARTIFACT_ROUNDTRIP={"artifact":"%s","variant":"%s","file_digest":"%s","download_path":"%s"}\n' \
+          printf 'ARTIFACT_ROUNDTRIP={"artifact":"%s","variant":"%s","file_digest":"%s","download_path":"%s"}\n' \
             "$result" "$VARIANT" "$result_digest" "$DOWNLOAD_PATH"

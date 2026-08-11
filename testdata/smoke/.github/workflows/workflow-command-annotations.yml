@@ -1,0 +1,25 @@
+name: Workflow command annotations proof
+
+on:
+  push:
+
+jobs:
+  workflow-command-annotations:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit a warning from stdout
+        shell: bash
+        run: |
+          printf '%s\n' '::warning title=Workflow warning,file=.github/workflows/workflow-command-annotations.yml,line=13,endLine=13,col=3,endColumn=8::WORKFLOW_WARNING_OBSERVATION=stdout-with-location'
+
+      - name: Emit an error from stderr without failing the job
+        shell: bash
+        run: |
+          printf '%s\n' '::error title=Workflow error,file=.github/workflows/workflow-command-annotations.yml,line=18::WORKFLOW_ERROR_OBSERVATION=stderr-outcome-neutral' >&2
+
+      - name: Prove late annotation masking
+        shell: bash
+        run: |
+          canary='workflow-command-secret'
+          printf '%s\n' "::warning title=Masked warning::masked diagnostic $canary"
+          printf '%s\n' "::add-mask::$canary"

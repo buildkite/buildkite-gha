@@ -87,7 +87,7 @@ esac
 	job := plan.Job{
 		Schema: plan.SchemaV3,
 		Compiler: plan.Compiler{
-			Version: "phase4-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+			Version: "checkout-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
 		},
 		Workflow: plan.Workflow{
 			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",
@@ -164,7 +164,7 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "Phase 6") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("runCheckout() unsupported input error = %v", err)
 	}
 	workspace := t.TempDir()
@@ -984,7 +984,7 @@ fi
 	job := plan.Job{
 		Schema: plan.SchemaV3,
 		Compiler: plan.Compiler{
-			Version: "phase4-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+			Version: "checkout-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
 		},
 		Workflow: plan.Workflow{
 			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",

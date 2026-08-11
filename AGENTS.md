@@ -31,7 +31,7 @@ CLI. Manual GUI testing does not apply.
 
 - `compile` and `upload` require `--event-path <event.json>`; `validate` does
   not. Sample event snapshots live under `testdata/smoke/events/` and
-  `testdata/phase4/events/`.
+  `testdata/public-actions/events/`.
 - `mise run plan-fixtures` shells out to `python3` (system Python is fine; it is
   not pinned by mise).
 - `mise run smoke:local` is network-free and part of `check`. `mise run

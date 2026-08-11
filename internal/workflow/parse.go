@@ -507,7 +507,7 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			owned.Span = spanFrom(step.Pos, exec.Run.Value)
 		case *actionlint.ExecAction:
 			if exec.Entrypoint != nil || exec.Args != nil {
-				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the Phase 0 runtime")
+				return Job{}, locatedError(path, step.Pos, in.ID.Value, "action entrypoint and args overrides are unsupported in the supported runtime subset")
 			}
 			owned.Kind = "uses"
 			owned.Uses = exec.Uses.Value

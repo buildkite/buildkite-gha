@@ -73,7 +73,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
 	if job.Event.Provider != "github" || !validCheckoutRepository(job.Event.Repository) || !checkoutSHAPattern.MatchString(job.Event.SHA) {
-		return result, fmt.Errorf("%s requires a valid github.com event repository and exact SHA; Phase 6 is required for other events", adapter)
+		return result, fmt.Errorf("%s requires a valid github.com event repository and exact SHA; other event sources are unsupported", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
@@ -83,7 +83,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 		return result, fmt.Errorf("%s inspect workspace: %w", adapter, err)
 	}
 	if len(entries) != 0 {
-		return result, fmt.Errorf("%s requires an empty workspace; Phase 6 is required for clean behavior", adapter)
+		return result, fmt.Errorf("%s requires an empty workspace; cleaning an occupied workspace is unsupported", adapter)
 	}
 	git := r.Git
 	if credentialed && (git == "" || !filepath.IsAbs(git)) {

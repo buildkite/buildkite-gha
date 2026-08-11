@@ -1,0 +1,32 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: Public actions proof importer"
+    key: "public-actions-importer"
+    env:
+      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"
+      scripts/verify-source-checkout "$$commit"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-public-actions.XXXXXXXX")"
+      trap 'rm -rf -- "$$distribution_root"' EXIT
+      runtime_version="0.0.0-public-actions.$$commit"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node" \
+      BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node" \
+      "$$distribution_root/buildkite-gha" upload \
+        --event-path testdata/public-actions/events/public-checkout.json \
+        --runtime-queue hosted \
+        testdata/public-actions/.github/workflows/public-actions.yml
+
+  - label: ":pipeline: Public actions proof continuation loader"
+    key: "public-actions-continuation-loader"
+    depends_on: "public-actions-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/public-actions-continuation.yml"

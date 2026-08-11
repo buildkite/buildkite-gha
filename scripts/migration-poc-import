@@ -18,7 +18,7 @@ case "$workflow" in
 esac
 
 commit=${POC_COMMIT:?POC_COMMIT is required}
-scripts/phase-0-shell-oracle-checkout "$commit"
+scripts/verify-source-checkout "$commit"
 test "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$commit"
 test -z "$(git status --porcelain --untracked-files=all)"
 

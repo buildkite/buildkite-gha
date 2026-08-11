@@ -103,13 +103,13 @@ func parseUploadOptions(commit string, inputs map[string]string) (uploadOptions,
 	if v, ok := values["overwrite"]; ok {
 		b, e := strconv.ParseBool(v)
 		if e != nil || b {
-			return o, fmt.Errorf("overwrite may only be omitted or false; Phase 6 is required")
+			return o, fmt.Errorf("overwrite may only be omitted or false; replacing artifacts is unsupported")
 		}
 	}
 	if v, ok := values["archive"]; ok {
 		b, e := strconv.ParseBool(v)
 		if e != nil || !b {
-			return o, fmt.Errorf("archive may only be omitted or true; Phase 6 is required")
+			return o, fmt.Errorf("archive may only be omitted or true; raw uploads are unsupported")
 		}
 	}
 	o.searchPath = strings.TrimSpace(values["path"])

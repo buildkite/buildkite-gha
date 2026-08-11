@@ -67,7 +67,7 @@ while IFS=$'\t' read -r id workflow event expectation action_preflight; do
       --event-path "$root/$event" "$root/$workflow" >"$work/$id.profile.json" || profile_status=$?
     if [[ "$expectation" == runtime-unsupported ]]; then
       [[ "$profile_status" == 1 ]] || { echo "$id: profile unexpectedly exited $profile_status" >&2; exit 1; }
-      jq -e '.result == "not-admitted" and .admission.result == "not-admitted" and any(.diagnostics[]; .code == "E_PROFILE" and (.message | test("requires the unavailable GitHub Actions (artifact|cache) service; Phase 6 is required$")))' "$work/$id.profile.json" >/dev/null
+      jq -e '.result == "not-admitted" and .admission.result == "not-admitted" and any(.diagnostics[]; .code == "E_PROFILE" and (.message | test("requires the unavailable GitHub Actions (artifact|cache) service$")))' "$work/$id.profile.json" >/dev/null
       echo "$id: profile=$profile admission=expected-rejection"
     else
       [[ "$profile_status" == 0 ]] || { echo "$id: profile unexpectedly exited $profile_status" >&2; exit 1; }

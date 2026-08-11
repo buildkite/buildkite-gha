@@ -1828,10 +1828,10 @@ func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
 	if err != nil || observer.Conclusion != "success" {
 		t.Fatalf("observer result = %#v, error = %v, logs = %q", observer, err, logs.String())
 	}
-	if strings.Contains(logs.String(), "phase3-cross-stream-secret") || !strings.Contains(logs.String(), "PHASE3_MASK_PROBE=***") {
+	if strings.Contains(logs.String(), "concurrent-cross-stream-secret") || !strings.Contains(logs.String(), "CONCURRENT_MASK_PROBE=***") {
 		t.Fatalf("concurrent masking logs = %q", logs.String())
 	}
-	want := `PHASE3_OBSERVATION={"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`
+	want := `CONCURRENT_OBSERVATION={"cancel":"graceful","failure":"failure-at-wait","implicit":"implicit-wait-all","parallel":"parallel","queue_max":10,"targeted":"targeted-and-full"}`
 	if !strings.Contains(logs.String(), want) {
 		t.Fatalf("concurrent observation missing from logs = %q", logs.String())
 	}
@@ -3158,16 +3158,16 @@ func TestRunJobLogsSynchronousStepSectionsAndExpandsFailures(t *testing.T) {
 func TestWorkflowCommandStopTokenPreventsAccidentalAnnotations(t *testing.T) {
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
-	_ = processor.process(&logs, "::stop-commands::phase6-stop-token")
+	_ = processor.process(&logs, "::stop-commands::workflow-stop-token")
 	_ = processor.process(&logs, "::warning::untrusted warning-shaped output")
-	_ = processor.process(&logs, "::phase6-stop-token::")
+	_ = processor.process(&logs, "::workflow-stop-token::")
 	_ = processor.process(&logs, "::warning::collected warning")
 
 	warnings, truncated, commandErrors, _ := processor.workflowCommandAnnotations()
 	if truncated || commandErrors != "" || strings.Contains(warnings, "untrusted warning-shaped output") || !strings.Contains(warnings, "collected warning") {
 		t.Fatalf("workflow command annotations = %q, errors = %q, truncated = %v", warnings, commandErrors, truncated)
 	}
-	if !strings.Contains(logs.String(), "::warning::untrusted warning-shaped output") || strings.Contains(logs.String(), "::warning::collected warning") || strings.Contains(logs.String(), "phase6-stop-token") {
+	if !strings.Contains(logs.String(), "::warning::untrusted warning-shaped output") || strings.Contains(logs.String(), "::warning::collected warning") || strings.Contains(logs.String(), "workflow-stop-token") {
 		t.Fatalf("logs = %q, want stopped command as masked ordinary output", logs.String())
 	}
 }

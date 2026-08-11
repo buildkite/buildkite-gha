@@ -23,7 +23,7 @@ import (
 
 const markerType = "buildkite-gha-upload-marker+jws"
 
-const probePayloadType = "buildkite-gha-phase0-live-probe+jws"
+const probePayloadType = "buildkite-gha-transport-probe+jws"
 
 type protectedHeader struct {
 	Algorithm string `json:"alg"`
@@ -37,7 +37,7 @@ type signedValue struct {
 	Signature string `json:"signature"`
 }
 
-// ES256Key is an in-memory Phase 0 signer/verifier. Production signing remains
+// ES256Key is an in-memory transport signer/verifier. Production signing remains
 // behind KMS; local tests use generated disposable keys.
 type ES256Key struct {
 	ID      string
@@ -53,7 +53,7 @@ func NewTestES256Key(id string) (ES256Key, error) {
 	return ES256Key{ID: id, Private: private, Public: &private.PublicKey}, nil
 }
 
-// SignProbePayload signs already-canonical JSON for the unprivileged Phase 0
+// SignProbePayload signs already-canonical JSON for the unprivileged initial plan-envelope prototype
 // live transport probe. Production plan signing uses a separate trust path.
 func SignProbePayload(key ES256Key, payload []byte) (string, error) {
 	if !json.Valid(payload) {
@@ -62,7 +62,7 @@ func SignProbePayload(key ES256Key, payload []byte) (string, error) {
 	return key.sign(probePayloadType, payload)
 }
 
-// VerifyProbePayload verifies and returns the Phase 0 live probe payload.
+// VerifyProbePayload verifies and returns the transport probe payload.
 func VerifyProbePayload(key ES256Key, encoded string) ([]byte, error) {
 	return key.verify(probePayloadType, encoded)
 }
@@ -151,7 +151,7 @@ func padded(value *big.Int, size int) []byte {
 	return out
 }
 
-// canonicalJSON encodes the bounded, integer-only Phase 0 signing models using
+// canonicalJSON encodes the bounded, integer-only transport signing models using
 // RFC 8785 object ordering and string escaping. The signed models deliberately
 // exclude floating-point values, maps, and interface fields so their complete
 // JCS domain remains small and auditable.
@@ -285,7 +285,7 @@ func normalizeIntent(intent UploadIntent) (UploadIntent, error) {
 	}
 	intent.Jobs = append([]UploadJob(nil), intent.Jobs...)
 	if len(intent.Jobs) != 2 {
-		return UploadIntent{}, fmt.Errorf("phase 0 upload intent requires exactly two jobs, got %d", len(intent.Jobs))
+		return UploadIntent{}, fmt.Errorf("transport-probe upload intent requires exactly two jobs, got %d", len(intent.Jobs))
 	}
 	sort.Slice(intent.Jobs, func(i, j int) bool { return intent.Jobs[i].Key < intent.Jobs[j].Key })
 	for i, job := range intent.Jobs {

@@ -32,7 +32,7 @@ type Expression struct {
 	Span Span   `json:"span"`
 }
 
-// Context contains the Phase 0 values available while evaluating a template.
+// Context contains the compile-time values available while evaluating a template.
 type Context struct {
 	Inputs       map[string]string
 	Matrix       map[string]any

@@ -16,9 +16,9 @@ environments, privileged queues, or compatible OIDC claims.
 
 A plan cannot authorize those protected values. Workflow and event files are
 compiler inputs, dynamic pipeline upload is ordinary pipeline authority, and
-the Phase 0 runtime binding proves integrity rather than provider provenance.
-The runtime needs a separate authorization result tied to both the actual
-Buildkite job and independently established provider facts.
+the transport-probe runtime binding proves integrity rather than provider
+provenance. The runtime needs a separate authorization result tied to both the
+actual Buildkite job and independently established provider facts.
 
 Buildkite Job OIDC supplies the job half of that identity. A running Agent can
 mint a short-lived token for an exact audience with immutable organization,
@@ -27,7 +27,7 @@ complete GitHub event, actor, fork relationship, workflow source, installation,
 or policy decision. A Buildkite-owned control plane must join those facts before
 issuing any grant.
 
-Phase 6 therefore starts the protected path with a signed **no-op grant**. It
+The protected-capability implementation therefore starts with a signed **no-op grant**. It
 proves authentication, provenance, policy, signing, verification, expiry, and
 audit boundaries while carrying an empty capability set and returning no
 credential. General private source, non-provider secrets, GitHub authority
@@ -61,12 +61,12 @@ The control plane owns:
 - grant signing, key rotation, revocation, and audit records; and
 - later credential brokering behind the same authorization decision.
 
-The control-plane signing key is a separate trust domain from Phase 0 probe
+The control-plane signing key is a separate trust domain from transport probe
 keys, Buildkite pipeline-signing keys, cache tokens, and provider credentials.
-The concrete Phase 0 `RuntimeBinding` and its test key must not be treated as a
-grant or production trust root. Generic bounded JWS helpers may be extracted
-only if issuer, type, key configuration, and verification policy remain
-separate.
+The concrete transport-probe `RuntimeBinding` and its test key must not be
+treated as a grant or production trust root. Generic bounded JWS helpers may be
+extracted only if issuer, type, key configuration, and verification policy
+remain separate.
 
 ### Job authentication
 
@@ -170,7 +170,7 @@ a mismatched queue, an unattested event, or unavailable policy data is a denial.
 
 An allowed decision returns a standard three-part compact JWT signed with
 ES256. Its signature covers the exact transmitted protected-header and payload
-bytes; it has no detached payload and does not use Phase 0's JCS reconstruction
+bytes; it has no detached payload and does not use the prototype's JCS reconstruction
 or canonical-byte equality rule. Unknown top-level claims are rejected by this
 bounded versioned contract.
 
@@ -393,9 +393,9 @@ grant.
   private compatibility features can ship.
 - The CLI gains a small client and verifier, while signing keys, provider
   records, and audit state remain outside workflow-controlled execution.
-- Phase 0 signing code may yield generic cryptographic helpers, but its concrete
+- Transport-probe signing code may yield generic cryptographic helpers, but its concrete
   keys, issuer, claims, and capability ceiling remain non-authorizing.
-- A full Phase 6 implementation now explicitly spans this repository and a
+- A full protected-capability implementation explicitly spans this repository and a
   Buildkite platform service; repository-local code alone cannot satisfy it.
 
 ## References checked
@@ -407,4 +407,4 @@ grant.
 - [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html)
 - [RFC 7515: JSON Web Signature](https://www.rfc-editor.org/rfc/rfc7515)
 - [RFC 7519: JSON Web Token](https://www.rfc-editor.org/rfc/rfc7519)
-- [ADR 0002: Phase 0 plan-envelope trust experiment](0002-plan-envelope-trust-boundary.md)
+- [ADR 0002: superseded plan-envelope prototype](0002-plan-envelope-trust-boundary.md)

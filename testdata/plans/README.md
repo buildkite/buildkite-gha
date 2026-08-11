@@ -1,6 +1,6 @@
 # Plan-envelope conformance fixtures
 
-These fixtures exercise the Phase 0 trust contract without production Go code.
+These fixtures exercise the plan-envelope trust contract without production Go code.
 They use disposable public test keys that must never be installed as production
 trust roots.
 

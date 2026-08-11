@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency-free Phase 0 plan-envelope fixture checker."""
+"""Dependency-free Plan-envelope fixture checker."""
 
 from __future__ import annotations
 

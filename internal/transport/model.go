@@ -1,4 +1,4 @@
-// Package transport owns the Phase 0 Buildkite artifact and dynamic-pipeline
+// Package transport owns the Buildkite artifact and dynamic-pipeline
 // contracts. It deliberately depends on a narrow command boundary instead of
 // the Buildkite API so its behavior can be proved without a live build.
 package transport
@@ -72,7 +72,7 @@ func (a PlanArtifact) Path() string {
 	return fmt.Sprintf("buildkite-gha/v1/plans/%s/%s/plan.json", a.StepKey, strings.TrimPrefix(a.Digest, "sha256:"))
 }
 
-// BindingPath is the signed Phase 0 integrity artifact beside the inert plan.
+// BindingPath is the signed transport integrity artifact beside the inert plan.
 func (a PlanArtifact) BindingPath() string {
 	return fmt.Sprintf("buildkite-gha/v1/plans/%s/%s/binding.jws", a.StepKey, strings.TrimPrefix(a.Digest, "sha256:"))
 }
@@ -92,7 +92,7 @@ type Job struct {
 	Dependencies []Dependency
 }
 
-// EmitTwoJobPipeline emits the deterministic Phase 0 producer/consumer spike.
+// EmitTwoJobPipeline emits the deterministic transport-probe producer/consumer pipeline.
 // The compiler dependency is injected as strict; all supplied logical needs
 // are forced to settle even when their producer failed.
 func EmitTwoJobPipeline(compilerStep string, jobs []Job) ([]byte, error) {
@@ -100,7 +100,7 @@ func EmitTwoJobPipeline(compilerStep string, jobs []Job) ([]byte, error) {
 		return nil, fmt.Errorf("invalid compiler step key %q", compilerStep)
 	}
 	if len(jobs) != 2 {
-		return nil, fmt.Errorf("phase 0 transport requires exactly two generated jobs, got %d", len(jobs))
+		return nil, fmt.Errorf("transport probe requires exactly two generated jobs, got %d", len(jobs))
 	}
 	seen := map[string]bool{}
 	var out bytes.Buffer

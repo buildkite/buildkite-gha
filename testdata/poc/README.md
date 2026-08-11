@@ -22,7 +22,7 @@ imported by the Buildkite comparison pipeline. The workflows are manual-only in
 this repository so they do not create extra Actions runs on every push.
 
 The released-plugin service-free lane also imports the repository's root-level
-Phase 4 workflow to prove checked-out local JavaScript and composite actions.
+local-actions workflow to prove checked-out local JavaScript and composite actions.
 Keeping those actions under the actual event repository root allows the runtime
 to rehash the same workspace source that the compiler locked.
 
@@ -121,7 +121,7 @@ passed public checkout, setup-go, the audited cache v6 lifecycle, a direct
 two-job dependency, race tests, static analysis, and a final binary build on a
 compatible Hosted image.
 
-The historical phase fixtures and their recorded observations remain the
-conformance ledger. The now-superseded targeted cache importer, continuation,
-and verifier were removed after build 290 passed. The remaining phase-specific
-loaders still feed the consolidated hosted smoke proof and are retained.
+The proof fixtures and their recorded observations remain the conformance
+ledger. The now-superseded targeted cache importer, continuation, and verifier
+were removed after build 290 passed. The remaining behavior-specific loaders
+still feed the consolidated hosted smoke proof and are retained.

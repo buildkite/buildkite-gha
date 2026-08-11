@@ -1,0 +1,12 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Shell upload proof complete"
+    key: "shell-upload-complete"
+    depends_on:
+      - step: "gha-consumer-5ebbc197d87b"
+        allow_failure: true
+      - step: "gha-consumer-91934b28b00f"
+        allow_failure: true
+    command: "echo 'All shell upload proof jobs settled before native continuation'"

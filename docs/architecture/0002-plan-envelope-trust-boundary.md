@@ -1,6 +1,6 @@
-# ADR 0002: Phase 0 plan-envelope trust experiment
+# ADR 0002: superseded plan-envelope prototype
 
-Status: Superseded as the production authorization model; retained for Phase 0
+Status: Superseded as the production authorization model; retained as initial prototype
 conformance history
 
 Date: 2026-07-22
@@ -38,7 +38,7 @@ explicit queue bindings, but those checks do not authorize protected resources.
 Buildkite pipeline signing remains optional installation-specific defence in
 depth.
 
-The original Phase 0 decision is retained below as an implementation and
+The initial plan-envelope decision is retained below as an implementation and
 conformance record. Its statements that KMS-backed plan envelopes provide the
 production authority boundary are superseded.
 
@@ -61,7 +61,7 @@ protects the artifact and its authorization claims.
 
 ## Decision
 
-Phase 0 uses a detached JSON Web Signature (JWS, RFC 7515) with `ES256`. The
+The initial prototype uses a detached JSON Web Signature (JWS, RFC 7515) with `ES256`. The
 artifact is a small JSON wrapper containing the readable claims, the base64url
 protected header, and the base64url 64-byte JOSE signature. The omitted JWS
 payload is reconstructed from the claims using the JSON Canonicalization Scheme
@@ -124,14 +124,14 @@ resolution:
 3. Recreate the JCS claims bytes and verify the JWS signature. Claims do not
    influence routing, diagnostics containing attacker-chosen identifiers, or
    authorization until this succeeds.
-4. Check `iat <= now < exp`, `exp > iat`, and `exp - iat <= 86400`. Phase 0 has
+4. Check `iat <= now < exp`, `exp > iat`, and `exp - iat <= 86400`. The initial prototype has
    no clock-skew allowance: compiler and runtime queues must have synchronized
    clocks. A retry cannot mint or extend an envelope; an expired build must be
    rebuilt. A longer supported queue or retry window requires a later contract
    revision rather than an installer override.
 5. Match the organization, pipeline, and build UUIDs to immutable Buildkite job
    context.
-6. Match the step key and actual agent queue exactly. Phase 0 reads
+6. Match the step key and actual agent queue exactly. The initial prototype reads
    `BUILDKITE_STEP_KEY` and `BUILDKITE_AGENT_META_DATA_QUEUE`; an absent value is
    a verification failure.
 7. Re-evaluate current local policy using the verified provenance and require
@@ -195,7 +195,7 @@ Primary references checked on 2026-07-22:
 - [RFC 7515: JSON Web Signature](https://www.rfc-editor.org/rfc/rfc7515)
 - [RFC 8785: JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785)
 
-## Phase 0 oracle questions
+## Prototype oracle questions
 
 Documentation establishes the configuration surface, but these behaviors still
 need live Buildkite builds before production support is claimed:
