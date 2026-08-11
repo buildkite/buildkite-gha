@@ -23,7 +23,7 @@ CLI. Manual GUI testing does not apply.
 - Standard commands live in `mise.toml` (tasks) and `Makefile`; see also
   `docs/development.md`. The aggregate gate is `mise run check` (alias
   `make check`), which runs: format, build, test, test:race, lint:go,
-  lint:shell, vet, plan-fixtures, smoke:local, release:check.
+  lint:shell, vet, smoke:local, release:check.
 - Run the CLI directly: `go run ./cmd/buildkite-gha <command>` (commands:
   `validate`, `compile`, `upload`, `run-job`; plus `help`, `--version`).
 
@@ -32,8 +32,6 @@ CLI. Manual GUI testing does not apply.
 - `compile` and `upload` require `--event-path <event.json>`; `validate` does
   not. Sample event snapshots live under `testdata/smoke/events/` and
   `testdata/public-actions/events/`.
-- `mise run plan-fixtures` shells out to `python3` (system Python is fine; it is
-  not pinned by mise).
 - `mise run smoke:local` is network-free and part of `check`. `mise run
   smoke:profile` and the hosted runtime proofs (`bk build create ...`) require
   network access / Buildkite SaaS and are **optional** — not needed for local

@@ -44,7 +44,6 @@ mise run test:race
 mise run lint:go
 mise run lint:shell
 mise run vet
-mise run plan-fixtures
 ```
 
 ## Understand the smoke lanes
