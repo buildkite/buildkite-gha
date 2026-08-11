@@ -211,6 +211,10 @@ func TestCheckoutFetchDepth(t *testing.T) {
 			name: "all branches for explicit branch", inputs: map[string]string{"ref": "refs/heads/test-catalog", "fetch-depth": "0"},
 			want: "fetch --no-tags --no-recurse-submodules --progress --prune origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*",
 		},
+		{
+			name: "all history for explicit commit", inputs: map[string]string{"ref": strings.Repeat("b", 40), "fetch-depth": "0"},
+			want: "fetch --no-tags --no-recurse-submodules --progress --prune origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +" + strings.Repeat("b", 40) + ":refs/buildkite-gha/selected",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := strings.Join(checkoutFetchArgs(test.inputs, sha), " "); got != test.want {

@@ -1157,22 +1157,35 @@ func supported(path string, job workflow.Job) error {
 
 func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
 	context.Matrix = matrix
-	if usesEvent, _ := expression.ReferencesGitHubEvent(job.If); usesEvent {
-		if resolved, err := expression.EvaluateCompileCondition(job.If, context); err == nil {
-			job.If = strconv.FormatBool(resolved)
-		}
+	if resolved, ok := resolveCompileTimeCondition(job.If, context); ok {
+		job.If = resolved
 	}
 	job.Steps = append([]workflow.Step(nil), job.Steps...)
 	for i := range job.Steps {
 		step := &job.Steps[i]
-		if usesEvent, _ := expression.ReferencesGitHubEvent(step.If); usesEvent {
-			resolved, err := expression.EvaluateCompileCondition(step.If, context)
-			if err == nil {
-				step.If = strconv.FormatBool(resolved)
-			}
+		if resolved, ok := resolveCompileTimeCondition(step.If, context); ok {
+			step.If = resolved
 		}
 	}
 	return job
+}
+
+func resolveCompileTimeCondition(source string, context expression.CompileContext) (string, bool) {
+	usesEvent, err := expression.ReferencesGitHubEvent(source)
+	if err != nil || !usesEvent {
+		return source, false
+	}
+	resolved, err := expression.EvaluateCompileCondition(source, context)
+	if err != nil {
+		return source, false
+	}
+	if resolved {
+		referencesStatus, _ := expression.ReferencesStatusFunction(source)
+		if referencesStatus {
+			return "always()", true
+		}
+	}
+	return strconv.FormatBool(resolved), true
 }
 
 func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {

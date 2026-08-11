@@ -216,8 +216,11 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 			"+refs/heads/*:refs/remotes/origin/*",
 			"+refs/tags/*:refs/tags/*",
 		)
-		if checkoutInput(inputs, "ref") == "" || checkoutInput(inputs, "ref") == sha {
+		ref := checkoutInput(inputs, "ref")
+		if ref == "" || ref == sha {
 			args = append(args, "+"+sha+":refs/buildkite-gha/event")
+		} else if checkoutSHAPattern.MatchString(ref) {
+			args = append(args, "+"+ref+":refs/buildkite-gha/selected")
 		}
 		return args
 	}

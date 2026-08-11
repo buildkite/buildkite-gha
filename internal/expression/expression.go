@@ -295,6 +295,43 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 	}
 }
 
+// EvaluateAvailableCompileTemplate folds each graph-time expression that can be
+// resolved independently and preserves expressions that need runtime context.
+func EvaluateAvailableCompileTemplate(template string, context CompileContext) (string, error) {
+	const open = "${{"
+	var evaluated strings.Builder
+	remaining := template
+	for {
+		start := strings.Index(remaining, open)
+		if start < 0 {
+			evaluated.WriteString(remaining)
+			return evaluated.String(), nil
+		}
+		evaluated.WriteString(remaining[:start])
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
+		}
+		complete := open + source[:consumed]
+		value, err := EvaluateCompile(Expression{Text: complete}, context)
+		if err != nil {
+			evaluated.WriteString(complete)
+		} else {
+			switch value := value.(type) {
+			case nil:
+			case string:
+				evaluated.WriteString(value)
+			case bool, json.Number, float64, int:
+				_, _ = fmt.Fprint(&evaluated, value)
+			default:
+				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
+			}
+		}
+		remaining = source[consumed:]
+	}
+}
+
 // SubstituteCompileInputs replaces static inputs.<name> references inside
 // expression regions with equivalent GitHub expression literals. Text and
 // string literals outside those references are preserved byte-for-byte.
@@ -527,6 +564,16 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 		found = pathErr == nil && strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
 	})
 	return found, nil
+}
+
+// ReferencesStatusFunction reports whether a condition explicitly names one of
+// the status functions that suppress the implicit success guard.
+func ReferencesStatusFunction(source string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	return containsStatusFunction(node), nil
 }
 
 // ConditionUsesContext reports whether a condition references a named context.

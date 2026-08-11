@@ -1136,14 +1136,14 @@ jobs:
     if: ${{ inputs.enabled && github.ref }}
     runs-on: ubuntu-latest
     steps:
-      - run: echo enabled
+      - run: echo ${{ inputs.enabled }} ${{ github.ref }}
 `)
 
 	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
@@ -1609,6 +1609,38 @@ jobs:
 	}
 	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].If != "false" {
 		t.Fatalf("compile-time event condition = %#v", ir.Jobs)
+	}
+}
+
+func TestCompilePreservesStatusFunctionsWhenFoldingEventConditions(t *testing.T) {
+	workflow := []byte(`on: pull_request
+jobs:
+  configure:
+    if: github.event.pull_request.draft || always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.pull_request.draft || failure()
+        run: echo draft
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": {"pull_request": {"draft": true}}
+}`)
+	result, err := Compile("ci.yml", workflow, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].If != "always()" || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].If != "always()" {
+		t.Fatalf("status-aware compile-time event condition = %#v", ir.Jobs)
 	}
 }
 

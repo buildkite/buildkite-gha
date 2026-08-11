@@ -852,10 +852,10 @@ func replaceStaticInputs(value string, inputs map[string]any) string {
 	if err != nil || resolved == value {
 		return value
 	}
-	if evaluated, err := expression.EvaluateCompileTemplate(resolved, expression.CompileContext{}); err == nil {
+	if evaluated, err := expression.EvaluateAvailableCompileTemplate(resolved, expression.CompileContext{}); err == nil {
 		return evaluated
 	}
-	return resolved
+	return value
 }
 
 func isRepositoryWorkflowPath(path string) bool {

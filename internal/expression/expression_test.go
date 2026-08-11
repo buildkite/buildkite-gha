@@ -639,6 +639,16 @@ func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 	}
 }
 
+func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.T) {
+	got, err := EvaluateAvailableCompileTemplate("echo ${{ 'target' }} ${{ github.ref }}", CompileContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "echo target ${{ github.ref }}"; got != want {
+		t.Fatalf("EvaluateAvailableCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
 func TestEvaluateCompileFailsClosed(t *testing.T) {
 	tests := []struct {
 		expression string
