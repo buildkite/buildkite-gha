@@ -31,6 +31,21 @@ type downloadStore struct {
 	download    func(context.Context, string) error
 }
 
+type countingReaderAt struct {
+	reader io.ReaderAt
+	reads  []readAtCall
+}
+
+type readAtCall struct {
+	offset int64
+	size   int
+}
+
+func (r *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	r.reads = append(r.reads, readAtCall{offset: off, size: len(p)})
+	return r.reader.ReadAt(p, off)
+}
+
 func (s *downloadStore) UploadArtifactFrom(context.Context, string, string) error { return nil }
 func (s *downloadStore) DownloadArtifact(ctx context.Context, path, destination, jobID string) error {
 	s.path = path
@@ -436,66 +451,181 @@ func TestDownloadArtifactPreflightsCentralDirectoryBeforeZIPAllocation(t *testin
 }
 
 func TestDownloadArtifactPreflightRejectsPerEntryZIP64(t *testing.T) {
-	t.Run("sentinel offset", func(t *testing.T) {
-		name, _, _ := testDownloadZIP(t, "result.txt")
-		contents, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		eocd := len(contents) - 22
-		central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
-		if central < 0 || central+46 > eocd || binary.LittleEndian.Uint32(contents[central:]) != 0x02014b50 {
-			t.Fatal("test ZIP central directory is malformed")
-		}
-		binary.LittleEndian.PutUint32(contents[central+42:], 1<<32-1)
-		if err := os.WriteFile(name, contents, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		f, err := os.Open(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := preflightZIPDirectory(f, int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
-			t.Fatalf("per-entry ZIP64 sentinel error = %v", err)
-		}
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
-	})
+	for _, test := range []struct {
+		name   string
+		offset int
+		width  int
+	}{
+		{name: "compressed size", offset: 20, width: 4},
+		{name: "uncompressed size", offset: 24, width: 4},
+		{name: "disk start", offset: 34, width: 2},
+		{name: "local header offset", offset: 42, width: 4},
+	} {
+		t.Run(test.name+" sentinel", func(t *testing.T) {
+			name, _, _ := testDownloadZIP(t, "result.txt")
+			contents, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eocd := len(contents) - 22
+			central := int(binary.LittleEndian.Uint32(contents[eocd+16:]))
+			if central < 0 || central+46 > eocd || binary.LittleEndian.Uint32(contents[central:]) != 0x02014b50 {
+				t.Fatal("test ZIP central directory is malformed")
+			}
+			if test.width == 2 {
+				binary.LittleEndian.PutUint16(contents[central+test.offset:], 1<<16-1)
+			} else {
+				binary.LittleEndian.PutUint32(contents[central+test.offset:], 1<<32-1)
+			}
+			if err := os.WriteFile(name, contents, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := preflightZIPDirectory(f, int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+				t.Fatalf("per-entry ZIP64 sentinel error = %v", err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 
-	t.Run("extra field", func(t *testing.T) {
-		name := filepath.Join(t.TempDir(), "zip64-extra.zip")
-		out, err := os.Create(name)
-		if err != nil {
-			t.Fatal(err)
+	for _, test := range []struct {
+		name  string
+		extra []byte
+		want  string
+	}{
+		{name: "chained ZIP64 extra", extra: []byte{0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00}, want: "ZIP64"},
+		{name: "truncated extra header", extra: []byte{0x02, 0x00, 0x00}, want: "malformed"},
+		{name: "extra size overrun", extra: []byte{0x02, 0x00, 0x04, 0x00, 0x00}, want: "malformed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := filepath.Join(t.TempDir(), "zip64-extra.zip")
+			out, err := os.Create(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zw := zip.NewWriter(out)
+			header := &zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: test.extra}
+			member, err := zw.CreateHeader(header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := member.Write([]byte("payload")); err != nil {
+				t.Fatal(err)
+			}
+			if err := errors.Join(zw.Close(), out.Close()); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.Open(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := f.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := preflightZIPDirectory(f, info.Size()); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("per-entry extra error = %v, want %q", err, test.want)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactPreflightRejectsEOCDZIP64Forms(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		offset int
+		width  int
+		value  uint32
+	}{
+		{name: "entry count sentinel", offset: 10, width: 2, value: 1<<16 - 1},
+		{name: "directory size Go locator sentinel", offset: 12, width: 4, value: 1<<16 - 1},
+		{name: "directory size ZIP64 sentinel", offset: 12, width: 4, value: 1<<32 - 1},
+		{name: "directory offset sentinel", offset: 16, width: 4, value: 1<<32 - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name, _, _ := testDownloadZIP(t, "result.txt")
+			contents, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eocd := len(contents) - 22
+			if test.width == 2 {
+				binary.LittleEndian.PutUint16(contents[eocd+test.offset:], uint16(test.value))
+			} else {
+				binary.LittleEndian.PutUint32(contents[eocd+test.offset:], test.value)
+			}
+			if test.name == "directory size Go locator sentinel" {
+				binary.LittleEndian.PutUint32(contents[eocd-20:], 0x07064b50)
+			}
+			if err := preflightZIPDirectory(bytes.NewReader(contents), int64(len(contents))); err == nil || !strings.Contains(err.Error(), "ZIP64") {
+				t.Fatalf("EOCD ZIP64 error = %v", err)
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactPreflightRejectsShortCentralDirectoryResidue(t *testing.T) {
+	name, _, _ := testDownloadZIP(t, "result.txt")
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eocd := len(contents) - 22
+	binary.LittleEndian.PutUint32(contents[eocd+12:], 1)
+	binary.LittleEndian.PutUint32(contents[eocd+16:], uint32(eocd-1))
+	reader := &countingReaderAt{reader: bytes.NewReader(contents)}
+	if err := preflightZIPDirectory(reader, int64(len(contents))); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("short central directory error = %v", err)
+	}
+	if len(reader.reads) != 1 {
+		t.Fatalf("ReaderAt calls = %#v, want only the EOCD tail read", reader.reads)
+	}
+}
+
+func TestDownloadArtifactPreflightReadsEachExtraAreaOnce(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "many-extras.zip")
+	out, err := os.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(out)
+	extra := bytes.Repeat([]byte{0x02, 0x00, 0x00, 0x00}, 100)
+	member, err := zw.CreateHeader(&zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := member.Write([]byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(zw.Close(), out.Close()); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &countingReaderAt{reader: bytes.NewReader(contents)}
+	if err := preflightZIPDirectory(reader, int64(len(contents))); err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.reads) != 3 {
+		t.Fatalf("ReaderAt calls = %#v, want tail, central header, and one complete extra-area read", reader.reads)
+	}
+	eocd := len(contents) - 22
+	central := int64(binary.LittleEndian.Uint32(contents[eocd+16:]))
+	for _, call := range reader.reads[1:] {
+		if call.offset < central || call.offset+int64(call.size) > int64(eocd) {
+			t.Fatalf("central-directory read %#v is outside [%d, %d)", call, central, eocd)
 		}
-		zw := zip.NewWriter(out)
-		header := &zip.FileHeader{Name: "result.txt", Method: zip.Store, Extra: []byte{0x01, 0x00, 0x00, 0x00}}
-		member, err := zw.CreateHeader(header)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := member.Write([]byte("payload")); err != nil {
-			t.Fatal(err)
-		}
-		if err := errors.Join(zw.Close(), out.Close()); err != nil {
-			t.Fatal(err)
-		}
-		f, err := os.Open(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		info, err := f.Stat()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := preflightZIPDirectory(f, info.Size()); err == nil || !strings.Contains(err.Error(), "ZIP64") {
-			t.Fatalf("per-entry ZIP64 extra error = %v", err)
-		}
-		if err := f.Close(); err != nil {
-			t.Fatal(err)
-		}
-	})
+	}
 }
 
 func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {

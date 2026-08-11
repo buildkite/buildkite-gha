@@ -257,6 +257,7 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	const (
 		eocdSize      = 22
 		maxZIPComment = 1<<16 - 1
+		maxZIPExtra   = 1<<16 - 1
 		centralHeader = 46
 		eocdSignature = 0x06054b50
 		centralSig    = 0x02014b50
@@ -299,7 +300,7 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 	entries := binary.LittleEndian.Uint16(record[10:])
 	centralSize := binary.LittleEndian.Uint32(record[12:])
 	centralOffset := binary.LittleEndian.Uint32(record[16:])
-	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
+	if binary.LittleEndian.Uint16(record[4:]) != 0 || binary.LittleEndian.Uint16(record[6:]) != 0 || entriesDisk != entries || entries == zip16Sentinel || centralSize == zip16Sentinel || centralSize == zip32Sentinel || centralOffset == zip32Sentinel {
 		return fmt.Errorf("multi-disk or ZIP64 artifact is unsupported")
 	}
 	if entries == 0 || int(entries) > transport.MaxResultArtifactFileCount {
@@ -311,7 +312,11 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 		return fmt.Errorf("artifact ZIP central directory is out of bounds")
 	}
 	count := 0
+	extra := make([]byte, maxZIPExtra)
 	for position < end {
+		if end-position < centralHeader {
+			return fmt.Errorf("artifact ZIP central directory is malformed")
+		}
 		var header [centralHeader]byte
 		if _, err := reader.ReadAt(header[:], position); err != nil {
 			return err
@@ -329,22 +334,24 @@ func preflightZIPDirectory(reader io.ReaderAt, size int64) error {
 		if extraPosition < position || extraEnd < extraPosition || extraEnd > end {
 			return fmt.Errorf("artifact ZIP central directory exceeds bounds")
 		}
-		for extraPosition < extraEnd {
-			if extraEnd-extraPosition < 4 {
-				return fmt.Errorf("artifact ZIP central directory extra field is malformed")
-			}
-			var extraHeader [4]byte
-			if _, err := reader.ReadAt(extraHeader[:], extraPosition); err != nil {
+		fields := extra[:extraSize]
+		if extraSize > 0 {
+			if _, err := reader.ReadAt(fields, extraPosition); err != nil {
 				return err
 			}
-			fieldSize := int64(binary.LittleEndian.Uint16(extraHeader[2:]))
-			if binary.LittleEndian.Uint16(extraHeader[:]) == 0x0001 {
-				return fmt.Errorf("ZIP64 artifact member is unsupported")
-			}
-			extraPosition += 4 + fieldSize
-			if extraPosition > extraEnd {
+		}
+		for len(fields) > 0 {
+			if len(fields) < 4 {
 				return fmt.Errorf("artifact ZIP central directory extra field is malformed")
 			}
+			fieldSize := int(binary.LittleEndian.Uint16(fields[2:]))
+			if fieldSize > len(fields)-4 {
+				return fmt.Errorf("artifact ZIP central directory extra field is malformed")
+			}
+			if binary.LittleEndian.Uint16(fields[:]) == 0x0001 {
+				return fmt.Errorf("ZIP64 artifact member is unsupported")
+			}
+			fields = fields[4+fieldSize:]
 		}
 		position += centralHeader + nameSize + extraSize + commentSize
 		count++
