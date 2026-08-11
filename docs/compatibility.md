@@ -106,7 +106,7 @@ service.
 | Dockerfile actions | Supported subset | Only compiler-verified local or public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
-| `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
+| `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and bounded direct or recursive GitHub submodules. Repository-provider credentials remain command- and repository-path-scoped. Unknown commits, unsafe manifests, and unsupported inputs fail closed. |
 | `actions/upload-artifact` | Supported subset | Exactly v4.6.2, v5.0.0, v6.0.0, and v7.0.1 are adapted at the immutable commits listed below, root entrypoint only and ZIP mode only. Bounded literal paths and final-component file globs, ZIP compression 0–9, hidden-file selection, no-file behavior, and advisory `retention-days` are supported. Recursive globs, exclusions, symlinks, effective retention control, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
 | `actions/download-artifact` | Supported subset | Six exact audited release commits from v4.3.0 through v8.0.1 are adapted in one common exact-name ZIP mode. Selection is limited to one uniquely named artifact from verified direct `needs`; broader selection, raw, REST, and cross-run/repository modes fail closed. See the exact matrix below. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
@@ -304,7 +304,7 @@ otherwise compilation fails closed.
 | `fetch-tags` | omitted, true, or false | Default false suppresses tags for depth 1. True adds an explicit tag refspec. Depth 0 always includes tags. |
 | `show-progress` | omitted, true, or false | Defaults to true and controls `git fetch --progress`. |
 | `lfs` | omitted or false | LFS is not installed or fetched. |
-| `submodules` | omitted or false | `true` and `recursive` are rejected. See the product decision below. |
+| `submodules` | omitted, false, true, or recursive | Values are trimmed and compared case-insensitively. `true` materializes direct gitlinks; `recursive` repeats bounded validation and exact-gitlink checkout for nested manifests. Other values are treated as false upstream but fail closed here. See the security matrix below. |
 | `set-safe-directory` | omitted or true | Accepted as default-equivalent; the adapter uses isolated Git config and does not mutate the user's global `safe.directory`. |
 | `github-server-url` | omitted, empty, or `https://github.com` | GitHub Enterprise Server and alternate hosts are rejected. |
 | `allow-unsafe-pr-checkout` | omitted or false | Alternate fork repository/ref selection is already impossible; true is rejected. |
@@ -335,28 +335,85 @@ backend decides whether to issue credentials for the concrete repository URL
 requested by Git. If neither signal is enabled, checkout is anonymous; the CLI
 does not try to infer repository visibility.
 
-The helper is configured only on the verified fetch command, with HTTP-path
-matching enabled. It is not persisted in Git config. The runtime passes the
+The helper is configured only on each verified `github.com` fetch command, with
+HTTP-path matching enabled. It is not persisted in Git config. The runtime passes the
 upper- and lower-case HTTP proxy variables captured from the job process before
 workflow execution to that credentialed fetch, but does not add its job
 credential to ordinary workflow subprocess environments. This command scoping
 limits accidental inheritance; it is not an OS-level isolation boundary between
 hostile processes in the same job. The Buildkite repository-provider backend
 remains authoritative for whether it issues credentials for the concrete URL.
-This checkout path does not populate
+For a submodule the backend receives the canonical concrete
+`github.com/owner/repository.git` request and remains authoritative for whether
+that path is public or whether this job may read a private repository. Helper
+denial is terminal. This checkout path does not populate
 `GITHUB_TOKEN` or `github.token`, use workflow `permissions`, enable private
 actions, or add support for alternate repositories or refs. The deprecated
 `--private-checkout` option is temporarily accepted as a no-op for compatibility.
 
-Public-HTTPS submodules are deliberately **not** implemented. An honest bounded
-implementation would need to validate every `.gitmodules` URL and path before
-Git follows it, distinguish direct from recursive updates, revalidate nested
-manifests, prevent symlink/path escapes, preserve depth 1/0 semantics, and ensure
-the event-repository helper is never offered to submodule hosts or paths. Git's
-ordinary recursive update performs network access before that complete policy
-can be established. Rather than broaden credential authority or special-case
-the jq corpus, both `submodules: true` and `submodules: recursive` fail closed;
-public, private, relative, and SSH submodules are all unsupported.
+The adapter does not use Git's submodule porcelain. Before any child network
+request it reads the committed `.gitmodules` blob from the selected commit's
+object database, parses it with Git includes disabled, and admits only one
+unambiguous `path` and `url` per entry. Every path must be a clean relative
+workspace path and must resolve to an exact mode-`160000` gitlink in that same
+commit. Directories, manifests, entries, aggregate bytes, paths, recursion, and
+selected submodules are bounded. Duplicate, case-colliding, prefix-colliding,
+absolute, traversal, drive, UNC, backslash, control, `.git`, symlink, and
+non-gitlink forms fail before child authority is granted. Installation uses
+pinned no-follow directory descriptors and no-replace renames; published child
+repositories roll back on sibling failure or cancellation. Empty ancestor
+directories created while publishing may remain after failure rather than risk
+deleting a path replaced by a concurrent same-UID process.
+
+Each child is fetched into private staging with system/global config, hooks,
+prompts, redirects, SSH, local/file, `ext`, and all non-HTTPS transports
+disabled. The exact gitlink commit is checked out detached and verified before
+publication. Recursive mode validates the child's committed manifest before
+fetching its children. Staging and command-scoped credentials are removed on
+success, failure, and cancellation. Child repositories intentionally retain an
+embedded `.git` directory rather than upstream's absorbed `.git/modules`
+layout; no credential helper, token, header, or conditional include is retained.
+
+The source-backed contract and deliberate differences are:
+
+| Area | Adapter-compatible behavior | Deliberate Buildkite safety boundary |
+| --- | --- | --- |
+| `submodules: false` or omitted | No manifest traversal or child fetch. | None. |
+| `submodules: true` | Direct manifest entries are fetched at their exact gitlink commits. Nested manifests are left uninitialized. | Manifest keys other than `path` and `url` fail closed rather than being ignored or interpreted. |
+| `submodules: recursive` | Every admitted nested manifest is revalidated before its children are fetched; exact detached gitlinks are preserved to depth 8 and 256 total children. | Bounds are stricter than upstream's unbounded recursive porcelain. |
+| `fetch-depth: 1` | Each child fetch requests its exact gitlink with depth 1. | Servers that prohibit exact reachable-SHA wants are unsupported. |
+| `fetch-depth: 0` | Each child fetch includes all heads, all tags, and the exact gitlink refspec. | `fetch-tags` affects only the superproject, matching upstream's submodule command construction. |
+| Canonical public GitHub HTTPS | Supported anonymously when provider credentials are unavailable. | Redirects are disabled and no ambient credential helper is inherited. |
+| Same-provider relative URL | `./` and `../` resolve against the immediate parent's canonical GitHub remote, then pass the full URL policy again. | Resolution outside canonical `github.com/owner/repository` fails closed. |
+| Private GitHub submodule | Adapter-compatible when the Buildkite repository-provider backend authorizes the exact child repository path. | Cross-repository backend authorization has controlled helper tests but is not yet production-runtime-proven in this repository. |
+| `git@github.com:owner/repository` | Rewritten to canonical HTTPS when no SSH key is supplied, matching upstream's no-key rewrite. | Other SCP users/hosts and `ssh://` are rejected. |
+| `ssh-key`, known-hosts, SSH agent | Not supported. | The current product has no confined per-submodule SSH credential authority; non-empty `ssh-key` fails at compile and runtime validation. |
+| External HTTPS, GHES, `git://`, file/local, `ext`, remote helpers | Not supported. | There is no DNS/connect-time external-host authority or credential policy, so these fail before Git sees the URL. |
+| `persist-credentials` | Omitted or false remains accepted. | Credentials are never persisted, intentionally differing from upstream's `true` metadata default; explicit true fails closed. |
+| Post cleanup | No adapter-owned credential configuration survives the fetch; failed or cancelled staging is removed and process groups are terminated. | The upstream Node post action is not registered because its main action is not executed. |
+
+The exact upstream sources audited for all five admitted commits are the
+[`submodules` parser](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/input-helper.ts#L143-L176),
+[`sync` and `update` execution order](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/git-source-provider.ts#L274-L325),
+[`--depth` and `--recursive` command construction](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/git-command-manager.ts#L435-L467),
+[`git@github.com:` HTTPS rewriting](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/git-auth-helper.ts#L55-L73), and
+[`persist-credentials` cleanup](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/git-auth-helper.ts#L432-L515).
+The immutable parser sources are also linked directly for
+[`11d5960` (v4)](https://github.com/actions/checkout/blob/11d5960a326750d5838078e36cf38b85af677262/src/input-helper.ts),
+[`fbc6f39` (v5)](https://github.com/actions/checkout/blob/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09/src/input-helper.ts),
+[`d23441a` (v6)](https://github.com/actions/checkout/blob/d23441a48e516b6c34aea4fa41551a30e30af803/src/input-helper.ts),
+[`9c091bb` (v7.0.0)](https://github.com/actions/checkout/blob/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/src/input-helper.ts), and
+[`3d3c42e` (v7.0.1)](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/input-helper.ts).
+The v4/v5 direct-config model and v6+ isolated-credentials transition are visible
+in the exact [`fbc6f39…d23441a` comparison](https://github.com/actions/checkout/compare/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09...d23441a48e516b6c34aea4fa41551a30e30af803),
+and v7.0.1's cleanup hardening is in the
+[`9c091bb…3d3c42e` comparison](https://github.com/actions/checkout/compare/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0...3d3c42e5aac5ba805825da76410c181273ba90b1).
+
+These labels remain distinct: this matrix describes **adapter-compatible**
+behavior; static validation makes a workflow **workflow-compilable**; policy
+evaluation makes it **profile-admitted**; only execution on the target Buildkite
+queue is **runtime-proven**. The pinned jq Valgrind workflow is now
+profile-admitted, but the corpus profile does not execute its checkout or build.
 
 ### Effective permissions provide a scoped workflow token
 

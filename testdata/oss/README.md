@@ -21,7 +21,7 @@ The initial ten cases deliberately mix outcomes:
 | `bat-changelog` | Pull-request shell and output workflow | — | Admitted; runtime needs a faithful real PR event. |
 | `p-map-main` | Two-entry Node matrix | [Success](https://github.com/sindresorhus/p-map/actions/runs/29779845179) | Admitted by profile evaluation; runtime remains unproven. |
 | `fzf-linux` | Go, Ruby, multiple shells, and host package setup | [Success](https://github.com/junegunn/fzf/actions/runs/31253573599) | Admitted; checkout's requested full history is supported. Runtime remains unproven. |
-| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Checkout requests unsupported submodules and fails closed. |
+| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Profile-admitted with bounded direct submodules; emits `W_ACTION_RUNTIME_UNKNOWN` because static action metadata cannot prove independence from every GitHub-only runtime service. The profile does not execute the checkout or build. |
 | `go-task-ci` | Five-job Go matrix | [Success](https://github.com/go-task/task/actions/runs/31330279154) | Compound concurrency expression is unsupported. |
 | `gum-build` | Remote reusable workflow | — | Remote reuse and runtime secret forwarding are unsupported. |
 | `just-ci` | Rust and a mixed-OS matrix | [Success](https://github.com/casey/just/actions/runs/31140381397) | Non-Linux runner rows are unsupported. |

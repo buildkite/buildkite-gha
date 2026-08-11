@@ -241,6 +241,8 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		},
 		{"ref": "", "github-server-url": ""},
 		{"fetch-depth": "0"},
+		{"submodules": " TrUe "},
+		{"submodules": " ReCuRsIvE "},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)
@@ -251,8 +253,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"token":                {"token": ""},
 		"foreign repository":   {"repository": "other/repository"},
 		"foreign ref":          {"ref": strings.Repeat("b", 40)},
-		"submodules":           {"submodules": "true"},
-		"recursive submodules": {"submodules": "recursive"},
+		"invalid submodules":   {"submodules": "yes"},
 		"path":                 {"path": "nested"},
 		"filter":               {"filter": "blob:none"},
 		"sparse checkout":      {"sparse-checkout": "src"},

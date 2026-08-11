@@ -496,8 +496,13 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 			if uploadArtifactTrue(value) {
 				continue
 			}
-		case "lfs", "submodules", "allow-unsafe-pr-checkout":
+		case "lfs", "allow-unsafe-pr-checkout":
 			if uploadArtifactFalse(value) {
+				continue
+			}
+		case "submodules":
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "", "false", "true", "recursive":
 				continue
 			}
 		case "fetch-tags", "show-progress":
