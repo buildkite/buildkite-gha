@@ -1,5 +1,6 @@
 env:
   MISE_JOBS: "1"
+  MISE_LOCKED: "1"
 
 agents:
   queue: "hosted"

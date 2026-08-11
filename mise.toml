@@ -7,6 +7,9 @@ shellcheck = "0.11.0"
 goreleaser = "2.17.0"
 svu = "3.4.1"
 
+[settings]
+lockfile = true
+
 [env]
 GOTOOLCHAIN = "local"
 
