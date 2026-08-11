@@ -149,8 +149,11 @@ func TestUploadArtifactBoundedGlobAndAdvisoryRetention(t *testing.T) {
 	}
 	if _, err := r.runUploadArtifact(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{
 		"path": "tests/*.log", "name": "directory-match",
-	}); err == nil || !strings.Contains(err.Error(), "may match only regular files") {
-		t.Fatalf("directory glob error = %v", err)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUploadZIP(t, uploader.uploads[1].data); !reflect.DeepEqual(got, map[string]string{"first.log": "first"}) {
+		t.Fatalf("directory-matching glob entries = %#v", got)
 	}
 }
 
@@ -241,6 +244,46 @@ func TestUploadArtifactCanIncludeHiddenFiles(t *testing.T) {
 	}
 	if got := readUploadZIP(t, uploader.uploads[0].data); !reflect.DeepEqual(got, map[string]string{".hidden": "included"}) {
 		t.Fatalf("archive entries = %#v", got)
+	}
+}
+
+func TestCollectUploadFilesExpandsBoundedGlobs(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "core/build/reports/check.html", "check")
+	writeFixtureFile(t, workspace, "core/build/reports/check.txt", "not selected")
+	writeFixtureFile(t, workspace, ".hidden/build/reports/hidden.html", "hidden")
+	writeFixtureFile(t, workspace, "clients/build/reports/tests/unit/index.html", "unit")
+
+	files, err := collectUploadFiles(context.Background(), workspace, []string{"**/build/**/*.html"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, file := range files {
+		names = append(names, file.name)
+	}
+	want := []string{"clients/build/reports/tests/unit/index.html", "core/build/reports/check.html"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("recursive glob files = %#v, want %#v", names, want)
+	}
+
+	files, err = collectUploadFiles(context.Background(), workspace, []string{"**/build/reports/tests/*"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].name != "clients/build/reports/tests/unit/index.html" {
+		t.Fatalf("directory-matching glob files = %#v", files)
+	}
+}
+
+func TestCollectUploadFilesGlobRejectsMatchedSymlink(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "outside/report.html", "report")
+	if err := os.Symlink(filepath.Join(workspace, "outside", "report.html"), filepath.Join(workspace, "report.html")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collectUploadFiles(context.Background(), workspace, []string{"*.html"}, false); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("matched glob symlink error = %v", err)
 	}
 }
 

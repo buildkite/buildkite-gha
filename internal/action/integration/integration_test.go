@@ -58,7 +58,8 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 	}
 	for name, inputs := range map[string]map[string]string{
 		"all": nil, "absolute": {"name": "x", "path": "/tmp"},
-		"merge": {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
+		"name and pattern": {"name": "x", "pattern": "x-*", "merge-multiple": "true"},
+		"merge":            {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
 		"duplicate": {"name": "x", "Name": "y"}, "token": {"name": "x", "github-token": ""},
 		"drive path": {"name": "x", "path": "C:/out"},
 	} {
@@ -150,6 +151,7 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 			"if-no-files-found": "${{ matrix.no_files }}", "include-hidden-files": "${{ matrix.hidden }}",
 			"compression-level": "${{ matrix.compression }}", "overwrite": "${{ matrix.overwrite }}", "archive": "${{ matrix.archive }}",
 		}},
+		{UploadArtifactCommit, map[string]string{"path": "**/build/**/*.html"}},
 	} {
 		if err := ValidateUploadArtifactInputs(test.commit, test.inputs); err != nil {
 			t.Fatalf("ValidateUploadArtifactInputs(%s, %#v) = %v", test.commit, test.inputs, err)
@@ -158,11 +160,11 @@ func TestValidateUploadArtifactInputs(t *testing.T) {
 
 	rejected := map[string]map[string]string{
 		"missing path":        nil,
-		"recursive glob":      {"path": "payload/**/*.log"},
-		"question glob":       {"path": "tests/?.log"},
-		"character class":     {"path": "tests/[!a].log"},
 		"extglob":             {"path": "tests/+(a|b).log"},
 		"glob comment":        {"path": "#tests/*.log"},
+		"exclusion":           {"path": "!payload/**"},
+		"invalid glob":        {"path": "payload/["},
+		"brace expansion":     {"path": "payload/{one,two}"},
 		"too many roots":      {"path": strings.Repeat("payload\n", MaxUploadArtifactRoots+1)},
 		"bad retention":       {"path": "payload", "retention-days": "-1"},
 		"overwrite":           {"path": "payload", "overwrite": "true"},
@@ -241,6 +243,9 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		},
 		{"ref": "", "github-server-url": ""},
 		{"fetch-depth": "0"},
+		{"fetch-depth": "100"},
+		{"ref": strings.Repeat("b", 40)},
+		{"ref": "test-catalog", "path": "test-catalog", "fetch-depth": "100"},
 	} {
 		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)
@@ -250,19 +255,23 @@ func TestValidateCheckoutInputs(t *testing.T) {
 	for name, inputs := range map[string]map[string]string{
 		"token":                {"token": ""},
 		"foreign repository":   {"repository": "other/repository"},
-		"foreign ref":          {"ref": strings.Repeat("b", 40)},
+		"SHA-256 ref":          {"ref": strings.Repeat("b", 64)},
 		"submodules":           {"submodules": "true"},
 		"recursive submodules": {"submodules": "recursive"},
-		"path":                 {"path": "nested"},
+		"path":                 {"path": "nested/path"},
 		"filter":               {"filter": "blob:none"},
 		"sparse checkout":      {"sparse-checkout": "src"},
 		"lfs":                  {"lfs": "true"},
-		"fetch depth":          {"fetch-depth": "2"},
+		"fetch depth":          {"fetch-depth": "-1"},
 		"ssh key":              {"ssh-key": "key"},
 		"GHES":                 {"github-server-url": "https://github.example"},
 		"unknown":              {"future-input": "value"},
 		"persist credentials":  {"persist-credentials": "true"},
 		"case-colliding names": {"Repository": repository, "repository": repository},
+		"uppercase SHA":        {"ref": strings.Repeat("B", 40)},
+		"tag ref":              {"ref": "refs/tags/v1"},
+		"option ref":           {"ref": "-branch"},
+		"git metadata path":    {"path": ".git"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "Phase 6") {

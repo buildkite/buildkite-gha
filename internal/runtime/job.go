@@ -1228,6 +1228,9 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			if err != nil {
 				return result, err
 			}
+			if err := validateCheckoutRefProvenance(step.With, inputs, job.Event.SHA); err != nil {
+				return result, err
+			}
 			return r.runCheckout(ctx, processor, workspace, job, inputs)
 		}
 		if usesUploadArtifactAdapter(lock) {

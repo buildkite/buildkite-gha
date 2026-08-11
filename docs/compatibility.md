@@ -84,8 +84,8 @@ service.
 | Runtime expression interpolation | Supported subset | Direct references to retained `github` identity fields, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports are supported where that context is available. General expression operators and functions are not supported in interpolated values. Production upload rejects ordinary secret requirements. |
 | Step and job outputs | Supported subset | Step outputs, job outputs, and `needs` consumption are supported. A job may publish at most 64 outputs and each value is limited to 1 KiB; ambiguous matrix output values fail closed. |
 | Timeouts and `continue-on-error` | Supported subset | Literal step/job timeouts up to 360 minutes and step-level `continue-on-error` are supported. Expression-valued settings and job-level `continue-on-error` are not supported. |
-| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting entries instead of replacing GitHub's pending entry. Workflow-level literal `cancel-in-progress: true` emits a warning but does not cancel; job-level true and expression-valued cancellation are not supported. |
-| Local reusable workflows | Supported subset | Statically resolvable `./.github/workflows/...` calls, typed static inputs, nesting, caller-visible aggregate results, and declared outputs mapped directly from `jobs.<job>.outputs.<name>` are supported. Literal/compound output mappings, call-level conditions, call secrets, remote source, dynamic paths/inputs/matrices, and called-workflow top-level concurrency are not supported. |
+| Workflow and job concurrency | Supported subset | Statically resolvable groups become repository-scoped, case-insensitive Buildkite concurrency groups. Workflow groups use an ordered opening/closing gate; job groups use `concurrency: 1`. Buildkite queues all waiting entries instead of replacing GitHub's pending entry. Workflow-level literal or statically resolvable `cancel-in-progress: true` emits a warning but does not cancel; job-level cancellation is not supported. |
+| Local reusable workflows | Supported subset | Statically resolvable `./.github/workflows/...` calls, typed static inputs, nesting, `secrets: inherit`, caller-visible aggregate results, and declared outputs mapped directly from `jobs.<job>.outputs.<name>` are supported. Literal/compound output mappings, call-level conditions, explicit call secret mappings, required call secrets, remote source, dynamic paths/inputs/matrices, and called-workflow top-level concurrency are not supported. |
 | `permissions` | Supported subset | Canonical permission maps are carried only for a statically referenced `secrets.GITHUB_TOKEN` or an effective action metadata input default that statically references `github.token`. Omitted permissions use the product's narrow `contents: read` default; explicit job permissions replace workflow permissions and local reusable workflows may only narrow them. `{}`, maps containing only `none`, `read-all`, `write-all`, and `id-token` do not grant authority. |
 | Job and service containers | Not admitted | Literal Linux container images, environment, ports, persistent job containers, and services are implemented and runtime-proven. Production `hosted-tokenless` upload rejects job/service-container provenance. Credentials, volumes, arbitrary options, private images, and privileged containers are not supported. |
 | Dynamic graph expansion | Not supported | Matrices or `needs` derived from runtime outputs and other runtime-created jobs are rejected. |
@@ -101,14 +101,14 @@ service.
 | Step summaries | Supported | Summaries publish as bounded job-scoped Buildkite annotations. Requires Buildkite Agent v3.112 or newer. Oversized per-step summaries are skipped; the aggregate job summary is limited to 1 MiB. |
 | Local actions | Supported subset | Workspace actions are digest-locked and reverified. JavaScript, composite, and compiler-verified Dockerfile runtimes are supported; other action runtimes are not. |
 | Public GitHub actions | Supported subset | Hosted importers use an available job-scoped Buildkite GitHub token only to resolve mutable tags and branches through the GitHub API; token-minting or redaction failure emits a sanitized warning before anonymous fallback, and local profile evaluation remains anonymous. Lowercase full commit SHAs require no REST resolution, and exact-commit archives are fetched anonymously and directly from codeload during import and runtime. Sources remain exact-commit locked, complete trees are digest-verified, and JavaScript/composite/Dockerfile runtime rules still apply. Private actions and actions that require unavailable GitHub services are not supported merely because source resolution succeeds. |
-| JavaScript actions | Supported | `node16` declarations run on exact managed, digest-verified Node 16.20.2. Invoked Node 16 actions are named in one end-of-job warning, matching GitHub Actions' historical deprecation behavior. `node20` and `node24` declarations run on managed Node 24.18.0, matching GitHub-hosted runners' current Node 20 deprecation behavior. The temporary `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` opt-out is not supported. Pre/main/post lifecycle, inputs, outputs, state, LIFO post ordering, and the standard cache-v2 environment are supported. A direct `job.status` action-metadata input default is refreshed with the final status before post execution; workflow-authored `job.status` and compound defaults that reference it are not supported. Other Node action runtime declarations are not. |
+| JavaScript actions | Supported | `node16` declarations run on exact managed, digest-verified Node 16.20.2. Invoked Node 16 actions are named in one end-of-job warning, matching GitHub Actions' historical deprecation behavior. `node20` and `node24` declarations run on managed Node 24.18.0, matching GitHub-hosted runners' current Node 20 deprecation behavior. The temporary `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` opt-out is not supported. Pre/main/post lifecycle, inputs, outputs, state, LIFO post ordering, and the standard cache-v2 environment are supported. A direct `job.status` action-metadata input default and zero-argument `success()`, `failure()`, `cancelled()`, and `always()` defaults are refreshed with the final status before post execution; workflow-authored `job.status`, status-function defaults with arguments, and compound defaults that reference job status are not supported. Other Node action runtime declarations are not. |
 | Composite actions | Supported subset | Nested shell/action steps, outputs, and global pre/main/post ordering are supported. Composite `run` steps must select `bash` or `sh`. |
 | Dockerfile actions | Supported subset | Only compiler-verified local or public Dockerfile actions are admitted. The standard cache-v2 environment is available inside the action container. Lifecycle overrides, arbitrary Docker options, other credentials, volumes, private images, and privileged execution are not supported. |
 | `docker://` actions and action `entrypoint`/`args` overrides | Not supported | Validation rejects these forms. |
 | Concurrent step controls | Supported | GitHub Actions `background`, `wait`, `wait-all`, `cancel`, and `parallel` controls run inside one job with at most ten active background steps. Effects and failures become visible at covering waits, remaining work is joined before cleanup, and cancellation targets the complete process group rather than only the direct process. |
-| `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out the `github.com` event repository's exact SHA at the workspace root with depth 1 or 0, optional shallow tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
-| `actions/upload-artifact` | Supported subset | Exactly v4.6.2, v5.0.0, v6.0.0, and v7.0.1 are adapted at the immutable commits listed below, root entrypoint only and ZIP mode only. Bounded literal paths and final-component file globs, ZIP compression 0–9, hidden-file selection, no-file behavior, and advisory `retention-days` are supported. Recursive globs, exclusions, symlinks, effective retention control, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
-| `actions/download-artifact` | Supported subset | Six exact audited release commits from v4.3.0 through v8.0.1 are adapted in one common exact-name ZIP mode. Selection is limited to one uniquely named artifact from verified direct `needs`; broader selection, raw, REST, and cross-run/repository modes fail closed. See the exact matrix below. |
+| `actions/checkout` | Supported subset | Only the [audited commits](#actionscheckout-native-adapter) from current v4-v7 are admitted. The adapter checks out a detached commit or static branch from the `github.com` event repository at the workspace root or a clean top-level directory, with bounded or full history, optional tags, and command-scoped Buildkite repository-provider credentials. Unknown commits and unsupported inputs fail closed. |
+| `actions/upload-artifact` | Supported subset | Exactly v4.6.2, v5.0.0, v6.0.0, and v7.0.1 are adapted at the immutable commits listed below, root entrypoint only and ZIP mode only. Bounded literal paths and `*`, `?`, character-class, and `**` file globs, ZIP compression 0–9, hidden-file selection, no-file behavior, and advisory `retention-days` are supported. Exclusions, symlinks, effective retention control, overwrite, v7 raw uploads, merge, and GitHub URLs are not supported. |
+| `actions/download-artifact` | Supported subset | Six exact audited release commits from v4.3.0 through v8.0.1 are adapted. One exact name, or a bounded artifact-name pattern with `merge-multiple: true`, is resolved only from verified direct `needs`; all-artifact, raw, REST, and cross-run/repository modes fail closed. See the exact matrix below. |
 | `actions/cache` | Supported subset | Only the audited v6.1.0 commit, including its `restore` and `save` entry points, is admitted. It runs the stock Node 24 cache-v2 client with fresh job-bound credentials and the official Buildkite Results service by default. v4/v5 and unrecognized v6 commits are not supported. |
 | Cache clients bundled into actions | Supported subset | JavaScript and Docker action invocations receive fresh job-bound cache-v2 credentials when the service is available, matching the environment expected by setup actions such as `actions/setup-go`. The action remains responsible for its own key, version, paths, save/restore lifecycle, and cache-miss behavior. Ordinary `run` steps and native adapters do not receive cache credentials. |
 | Runner tool cache | Supported subset | By default, the runtime points `RUNNER_TOOL_CACHE` at a fresh job-private directory and does not expose an agent or Hosted shared cache as executable authority. When pipeline configuration selects an immutable runtime image with `BUILDKITE_GHA_RUNTIME_IMAGE`, generated jobs use that image's baked `/opt/hostedtoolcache` facade instead. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`. The shared Hosted cache volume is never used for executable tools because stock action tool-cache clients trust a writable entry and completion marker without verifying its contents. |
@@ -150,25 +150,28 @@ lines are consumed and their decoded messages remain visible in the job log.
 ### Concurrency groups queue instead of canceling
 
 Literal workflow and job `concurrency` shorthand is supported, as is the
-mapping form when `cancel-in-progress` is omitted or the literal `false`.
-Workflow-level literal `true` is also accepted, but only the group is enforced:
+mapping form when `cancel-in-progress` is omitted, the literal `false`, or a
+workflow-level expression that resolves to a boolean during compilation.
+Workflow-level `true` is also accepted, but only the group is enforced:
 
 ```yaml
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 
 jobs:
   deploy:
     concurrency: deploy-${{ matrix.target }}
 ```
 
-Groups must resolve during compilation. Direct substitutions can use `vars`,
-concrete `matrix` values for job groups, statically substituted `inputs` in jobs
-from local reusable workflows, and the available `github` fields: `actor`,
-`event`, `event_name`, `ref`, `repository`, `repository_owner`, `sha`, and
-`workflow`. Other fields and expression operators/functions fail closed; for
-example, `github.head_ref || github.run_id` is not available. Runtime
+Groups must resolve during compilation. Substitutions and boolean/equality
+expressions can use `vars`, concrete `matrix` values for job groups, statically
+substituted `inputs` in jobs from local reusable workflows, and the available
+`github` fields: `actor`, `event`, `event_name`, `ref`, `repository`,
+`repository_owner`, `sha`, and `workflow`. Compile-time expressions also support
+logical operators, equality comparisons, `fromJSON`, and case-insensitive
+`startsWith`. Other fields, operators, and functions fail closed; for example,
+`github.head_ref || github.run_id` is not available. Runtime
 `needs`/`strategy` values and workflow-level concurrency in a called reusable
 workflow also fail closed. A matrix job may combine
 `strategy.max-parallel` with concurrency only when every matrix entry resolves
@@ -185,16 +188,15 @@ This is queue compatibility, not cancellation parity. Buildkite retains all
 waiting entries in FIFO order, while GitHub's default concurrency mode replaces
 an existing pending entry. The newer GitHub `queue` property is not yet accepted
 by the pinned syntax frontend; generated Buildkite groups always queue all
-entries. Workflow-level literal `cancel-in-progress: true` retains the
-workflow gate and emits
+entries. Workflow-level literal or expression-resolved
+`cancel-in-progress: true` retains the workflow gate and emits
 `W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED`; it does not cancel an
 older Buildkite build. Configure **Cancel Intermediate Builds** in the
 Buildkite pipeline's Builds settings for running builds and **Skip Intermediate
 Builds** for builds that have not started. Those pipeline-level, same-branch
 controls approximate GitHub cancellation only when that scope matches the
 workflow's concurrency group; arbitrary groups do not map exactly. Job-level
-literal `true` and every expression-valued `cancel-in-progress` still fail
-compilation.
+literal and expression-valued cancellation still fail compilation.
 
 For a workflow-level gate, cancel the Buildkite build rather than one generated
 job: an individually canceled dependency does not execute the closing gate
@@ -283,24 +285,24 @@ are case-insensitive and case-colliding duplicates are rejected. GitHub Actions
 boolean spellings (`true`, `True`, `TRUE` and corresponding false forms) are
 accepted where shown. The compiler validates admitted static values, and the
 runtime repeats validation after expression evaluation. A dynamic value cannot
-widen the event repository, SHA, or credential boundary. Checkout input
-expressions must currently resolve during compilation to an admitted literal;
-otherwise compilation fails closed.
+widen the event repository, SHA, or credential boundary. A direct `github.sha`
+or `needs.<job>.outputs.<name>` ref must resolve at runtime to the exact event
+SHA; other checkout input expressions fail closed.
 
 | Input | Admitted values | Native decision |
 | --- | --- | --- |
 | `repository` | omitted, or the event `owner/repo` (case-insensitive) | Alternate repositories and an explicit empty value are rejected. |
-| `ref` | omitted, empty, or the exact lowercase 40-hex event SHA | Branches, tags, other SHAs, and SHA-256 object IDs are rejected. Checkout is always detached at the event SHA. |
+| `ref` | omitted, empty, a lowercase 40-hex commit, or a static branch in the event repository | Commit and branch checkouts are detached. Compile-time admission also allows a direct `github.sha` or `needs.<job>.outputs.<name>` expression; the runtime value must equal the exact event SHA. Tags, SHA-256 object IDs, other dynamic refs, and non-branch `refs/...` values are rejected. Branch heads are resolved when the job runs, matching GitHub's mutable branch semantics. |
 | `token` | omitted only | Explicit values, including empty, are rejected. The upstream `${{ github.token }}` default is not used. |
 | `ssh-key`, `ssh-known-hosts` | omitted or empty | Non-empty SSH configuration is rejected; no SSH transport is attempted. |
 | `ssh-strict` | omitted or true | Default-equivalent only. |
 | `ssh-user` | omitted or `git` | Default-equivalent only. |
 | `persist-credentials` | omitted or false | Credentials are never persisted. This intentionally differs from upstream's `true` default. |
-| `path` | omitted or empty | Only the workspace root is supported. |
-| `clean` | omitted or true | The workspace must already be empty. Existing files are rejected, not reset or deleted. |
+| `path` | omitted, empty, or a clean top-level workspace directory | A nested checkout may use one non-`.git` path segment, allowing multiple repository checkouts without path traversal or parent-symlink ambiguity. |
+| `clean` | omitted or true | A root checkout requires an empty workspace; a path checkout requires that path not to exist. Existing files are rejected, not reset or deleted. |
 | `filter`, `sparse-checkout` | omitted or empty | Partial and sparse clones are rejected. |
 | `sparse-checkout-cone-mode` | omitted or true | Accepted only as an inert default while sparse checkout is absent. |
-| `fetch-depth` | omitted, `1`, or `0` | Default/`1` fetches only the exact SHA with depth 1. `0` fetches all heads, tags, and an explicit exact-event refspec before detached checkout. Other values are rejected rather than normalized. |
+| `fetch-depth` | omitted or a non-negative integer | The default fetches only the requested SHA or branch with depth 1. A positive value fetches the requested number of commits; `0` fetches all heads and tags. Invalid and negative values are rejected. |
 | `fetch-tags` | omitted, true, or false | Default false suppresses tags for depth 1. True adds an explicit tag refspec. Depth 0 always includes tags. |
 | `show-progress` | omitted, true, or false | Defaults to true and controls `git fetch --progress`. |
 | `lfs` | omitted or false | LFS is not installed or fetched. |
@@ -311,10 +313,12 @@ otherwise compilation fails closed.
 
 The adapter does not execute upstream's Node main/post lifecycle. It initializes
 an isolated Git repository, disables system/global Git config and hooks for its
-commands, fetches over public HTTPS, and verifies `.git/HEAD` is the exact event
-SHA. It emits the upstream v4+ `ref` and `commit` step outputs from the immutable
-event. An omitted or empty `ref` outputs the event ref; an explicitly supplied
-event SHA outputs an empty `ref`, matching upstream's commit classification. It
+commands, fetches over public HTTPS, and verifies that `.git/HEAD` is a detached
+SHA. Commit inputs remain immutable; static branch inputs fetch only a branch
+in the same event repository. It emits the upstream v4+ `ref` and `commit` step
+outputs from the resulting checkout. An omitted or empty `ref` outputs the event
+ref; an explicitly supplied commit SHA outputs an empty `ref`, while a branch
+outputs that branch name. It
 does not emit matcher commands or post state, configure credentials
 for later steps, clean an existing checkout, choose a local branch, fall back to
 the REST archive API, or modify global safe-directory configuration.
@@ -439,7 +443,7 @@ The root upload input decisions are:
 | Input | Upstream version/default | Native decision |
 | --- | --- | --- |
 | `name` | v4-v7; `artifact` | Supported after expression evaluation. Explicit empty, invalid upstream characters, invalid UTF-8, and names over 255 bytes fail. Names are unique case-insensitively within a job and at most 64 artifacts may be published. |
-| `path` | v4-v7; required; upstream `@actions/glob` supports multiline globs/exclusions/comments and follows symlinks | Required. At most 32 newline-separated, workspace-relative literal files/directories or final-component `*` file globs such as `tests/*.log`. A leading `./` is normalized; a trailing `/` is preserved as directory-only intent, so `file/` is a no-match rather than selecting `file`. `..` components, `?`, character classes, globstar, braces, extglobs, recursive/directory globs, exclusions, leading glob comments, absolute paths, backslashes, symlinks, and special files fail closed. Expressions are admitted statically and the evaluated value is revalidated and normalized at runtime. |
+| `path` | v4-v7; required; upstream `@actions/glob` supports multiline globs/exclusions/comments and follows symlinks | Required. At most 32 newline-separated, workspace-relative literal files/directories or valid `*`, `?`, character-class, and `**` file globs such as `**/build/**/*.html`. A leading `./` is normalized for literals; a trailing `/` preserves directory-only intent. `..` components, braces, extglobs, exclusions, leading glob comments, absolute paths, backslashes, symlinks, and special files fail closed. Expressions are admitted statically and the evaluated value is revalidated and normalized at runtime. |
 | `if-no-files-found` | v4-v7; `warn` | `warn`, `error`, and `ignore` are supported exactly; other spellings fail. |
 | `retention-days` | v4-v7; omitted or `0` uses repository settings | A non-negative integer, including `0`, is accepted as advisory compatibility. The runtime always emits a warning because Buildkite, not this action, controls effective artifact retention. Invalid or negative values fail. |
 | `compression-level` | v4-v7; `6` | Levels 0–9 are supported. Level 0 creates a stored ZIP; it is not raw upload. Other values fail. |
@@ -456,7 +460,7 @@ overwrite, or an invalid value.
 
 For matched paths, one selected directory becomes the archive root; one
 selected file uses its parent; and multiple matched roots use their common
-ancestor. A bounded file glob uses its literal parent as the root. Empty and
+ancestor. A bounded file glob uses its literal prefix as the root. Empty and
 unmatched directories are omitted and do not widen the archive root.
 Files are sorted lexically and ZIP headers use fixed timestamps and modes, so
 identical inputs and compression levels produce deterministic bytes. Selection
@@ -507,24 +511,25 @@ single-result ID/pattern destination layout; v6 and v7 changed the artifact
 client and Node runtime; v8 added raw/direct downloads, content-type-sensitive
 ZIP handling, `skip-decompress`, and configurable digest mismatch behavior;
 v8.0.1 fixed CJK filename/content-disposition handling. None of those changes
-altered the exact-name, one-ZIP, direct-to-`path` profile below. The adapter's
+altered the bounded ZIP extraction profile below. The adapter's
 own UTF-8 path handling is covered independently and does not depend on the
 bundled client.
 
 | Upstream input or default | Native decision |
 | --- | --- |
-| `name` omitted or explicitly empty | Rejected. Upstream selects all artifacts; run-wide listing is outside the producer-bound bridge. |
-| `name: <exact value>` | Required. Leading/trailing whitespace is trimmed like `@actions/core`; the resulting UTF-8 name must satisfy the bounded upload name rules. Lookup is case-sensitive and must find exactly one artifact across all direct-needs manifests. Duplicate names, including matrix producers, are ambiguous and rejected. |
+| Both `name` and `pattern` omitted, empty, or supplied together | Rejected. Upstream all-artifact selection is outside the producer-bound bridge, and selection modes cannot be combined. |
+| `name: <exact value>` | Leading/trailing whitespace is trimmed like `@actions/core`; the resulting UTF-8 name must satisfy the bounded upload name rules. Lookup is case-sensitive and must find exactly one artifact across all direct-needs manifests. Duplicate names, including matrix producers, are ambiguous and rejected. |
+| `pattern: <glob>` | A bounded literal artifact-name glob may select one or more artifacts from verified direct-needs manifests only. Exclusions, path separators, braces, invalid UTF-8, control characters, and patterns without a glob operator are rejected. |
 | `path` omitted or explicitly empty | Workspace root, matching upstream fallback. The `download-path` output is its absolute logical path. |
 | `path: <value>` | Trimmed, literal, workspace-relative slash path only. A leading `./` and trailing slash are normalized (`./` means the workspace root and `./out/` means `out`). Absolute, drive, UNC, backslash, traversal, other unclean spellings, oversized values, and expression-authored paths are rejected rather than reproducing upstream tilde/absolute-path expansion. |
-| `merge-multiple` omitted | `false`, matching every admitted release. |
-| `merge-multiple: false` | Accepted with the toolkit's `false`, `False`, or `FALSE` spellings after trimming. Empty or true values are rejected. Since exactly one artifact is allowed, this is only explicit-default compatibility. |
-| `artifact-ids`, `pattern` | Rejected, including empty values. ID, pattern, one-result pattern/ID layout, all-artifact selection, and partial missing-ID behavior are not implemented. |
+| `merge-multiple` with exact `name` | Omitted or false with the toolkit's accepted case spellings. True is rejected. |
+| `merge-multiple` with `pattern` | Required true. Matched ZIPs are installed into one destination in deterministic artifact-name/producer/path order. Colliding members follow the hardened destination collision rules rather than silently widening selection. |
+| `artifact-ids` | Rejected, including empty values. ID, all-artifact selection, and partial missing-ID behavior are not implemented. |
 | `github-token`, `repository`, `run-id` | Rejected, including explicit empty/default-shaped values. The GitHub REST cross-run/cross-repository path is not emulated. |
 | v8 `skip-decompress` omitted or `false` | ZIP extraction. Explicit false accepts the toolkit's three case spellings. `true` and empty are rejected; raw archive download and direct non-ZIP artifacts are unsupported. The input itself is rejected for v4–v7 because it is not in those releases' metadata. |
 | v8 `digest-mismatch` omitted or `error` | Digest mismatch is fatal. `ignore`, `info`, and `warn` are rejected. The input itself is rejected for v4–v7; their upstream warning-only mismatch behavior is deliberately tightened by the bridge. |
 | Any other or future input | Rejected. Input names that collide case-insensitively are also rejected. |
-| Expressions in supported inputs | `name` may contain workflow expressions and must evaluate at runtime to one valid exact artifact name; for example, `${{ github.sha }}` is supported. Expressions remain rejected in `path` and mode-selecting inputs. Runtime validation is repeated after evaluation and rejects unresolved or invalid names. |
+| Expressions in supported inputs | `name` or `pattern` may contain workflow expressions and must evaluate at runtime to one valid selector; for example, `${{ github.sha }}` is supported. Expressions remain rejected in `path` and mode-selecting inputs. Runtime validation is repeated after evaluation and rejects unresolved or invalid selectors. |
 
 The only upstream output is `download-path`. The adapter sets it after a
 successful install, exposes it through normal step-output and environment-file
@@ -537,17 +542,19 @@ compiler-selected direct `needs`. Each artifact remains bound to its plan,
 build, generated producer step, and unique producer job UUID. The runtime asks
 Buildkite Agent for that exact native artifact path under the bound UUID; it
 does not search by user-controlled artifact name or trust metadata mirrors.
-Zero matches and every duplicate exact-name match fail. Failed, skipped, or
-cancelled producers expose only a terminal manifest they actually published;
+Exact-name lookup requires exactly one match; pattern lookup requires at least
+one match and remains bounded by the manifest artifact count. Failed, skipped,
+or cancelled producers expose only a terminal manifest they actually published;
 a producer cancellation that prevents publication makes hydration fail rather
 than silently widening the search. Retrying one producer can make producer
 selection ambiguous, so retry the whole build.
 
 Matrix jobs do not broaden that boundary. Every downstream matrix instance
 that directly `needs` a producer matrix receives the verified manifests for
-that producer group. If only one producer conditionally publishes the requested
-exact name, every consumer may select it; if two producers publish that name,
-every consumer rejects the ambiguous match. This covers the download-side
+that producer group. If only one producer conditionally publishes a requested
+exact name, every consumer may select it; duplicate exact names remain
+ambiguous. Pattern mode may deliberately merge distinct matching names. This
+covers the download-side
 invocation used by
 [`mastodon/mastodon`'s pinned v7 consumers](https://github.com/mastodon/mastodon/blob/7d9b24bba24eb46a23a207882718feb61138fada/.github/workflows/test-ruby.yml),
 which use `${{ github.sha }}` and `path: './'`, without granting run-wide

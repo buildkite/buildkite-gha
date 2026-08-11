@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -26,7 +27,9 @@ import (
 
 type downloadStore struct {
 	archive     string
+	archives    map[string]string
 	path        string
+	paths       []string
 	jobID       string
 	destination string
 	extra       bool
@@ -51,6 +54,7 @@ func (r *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
 func (s *downloadStore) UploadArtifactFrom(context.Context, string, string) error { return nil }
 func (s *downloadStore) DownloadArtifact(ctx context.Context, path, destination, jobID string) error {
 	s.path = path
+	s.paths = append(s.paths, path)
 	s.jobID = jobID
 	s.destination = destination
 	if s.download != nil {
@@ -60,7 +64,11 @@ func (s *downloadStore) DownloadArtifact(ctx context.Context, path, destination,
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	b, err := os.ReadFile(s.archive)
+	archive := s.archive
+	if s.archives != nil {
+		archive = s.archives[path]
+	}
+	b, err := os.ReadFile(archive)
 	if err != nil {
 		return err
 	}
@@ -224,6 +232,41 @@ func TestNativeArtifactRoundTripTrimsNameAndAcceptsHighCompression(t *testing.T)
 	got, err := os.ReadFile(filepath.Join(downloadWorkspace, "zeros.bin"))
 	if err != nil || !bytes.Equal(got, contents) {
 		t.Fatalf("high-compression roundtrip bytes = %d, error = %v", len(got), err)
+	}
+}
+
+func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
+	firstArchive, firstSize, firstDigest := testDownloadZIP(t, "first.xml")
+	secondArchive, secondSize, secondDigest := testDownloadZIP(t, "nested/second.xml")
+	firstPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("1", 64) + ".zip"
+	secondPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("2", 64) + ".zip"
+	ignoredPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("3", 64) + ".zip"
+	first := plan.NeedArtifact{Name: "junit-xml-25-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	second := plan.NeedArtifact{Name: "junit-xml-25-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	ignored := first
+	ignored.Name, ignored.Path = "junit-xml-17-a", ignoredPath
+	store := &downloadStore{archives: map[string]string{firstPath: firstArchive, secondPath: secondArchive}}
+	workspace := t.TempDir()
+	result, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+		map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{second, ignored, first}}},
+		actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "junit-xml-25-*", "path": "junit-xml", "merge-multiple": "true"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(store.paths, []string{firstPath, secondPath}) {
+		t.Fatalf("download order = %#v", store.paths)
+	}
+	for _, file := range []string{"first.xml", "nested/second.xml"} {
+		if got, err := os.ReadFile(filepath.Join(workspace, "junit-xml", filepath.FromSlash(file))); err != nil || string(got) != "payload" {
+			t.Fatalf("merged file %q = %q, %v", file, got, err)
+		}
+	}
+	want, _ := filepath.Abs(filepath.Join(workspace, "junit-xml"))
+	if result.Outputs["download-path"] != want {
+		t.Fatalf("download-path = %q, want %q", result.Outputs["download-path"], want)
 	}
 }
 

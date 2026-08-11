@@ -132,12 +132,22 @@ esac
 		t.Fatalf("checkout HEAD = %q, %v", got, err)
 	}
 
-	job.Actions[0].Commit = strings.Repeat("0", 40)
-	unknownWorkspace := t.TempDir()
-	previousLog := filepath.Join(filepath.Dir(gitLog), "successful.log")
-	if err := os.Rename(gitLog, previousLog); err != nil {
+	job.Steps[0].With = map[string]string{"ref": "${{ needs.configure.outputs.sha }}"}
+	job.Needs = map[string]plan.Need{"configure": {Result: "success", Outputs: map[string]string{"sha": strings.Repeat("b", 40)}}}
+	if err := os.Remove(gitLog); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, t.TempDir()); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+		t.Fatalf("dynamic checkout ref error = %v", err)
+	}
+	if _, err := os.Stat(gitLog); !os.IsNotExist(err) {
+		t.Fatalf("Git ran before dynamic checkout ref rejection: %v", err)
+	}
+	job.Steps[0].With = nil
+	job.Needs = nil
+
+	job.Actions[0].Commit = strings.Repeat("0", 40)
+	unknownWorkspace := t.TempDir()
 	if _, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, unknownWorkspace); err == nil || !strings.Contains(err.Error(), "does not admit") {
 		t.Fatalf("unknown checkout commit error = %v", err)
 	}
@@ -185,11 +195,21 @@ func TestCheckoutFetchDepth(t *testing.T) {
 	}{
 		{name: "default shallow with progress", want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha},
 		{name: "explicit shallow", inputs: map[string]string{"fetch-depth": "1"}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha},
+		{name: "explicit history", inputs: map[string]string{"fetch-depth": "100"}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=100 origin " + sha},
+		{name: "other commit", inputs: map[string]string{"ref": strings.Repeat("b", 40)}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + strings.Repeat("b", 40)},
 		{name: "shallow tags", inputs: map[string]string{"fetch-tags": "TRUE"}, want: "fetch --no-tags --no-recurse-submodules --progress --depth=1 origin " + sha + " +refs/tags/*:refs/tags/*"},
 		{name: "progress disabled", inputs: map[string]string{"show-progress": "false"}, want: "fetch --no-tags --no-recurse-submodules --depth=1 origin " + sha},
 		{
+			name: "bounded branch", inputs: map[string]string{"ref": "test-catalog", "fetch-depth": "100"},
+			want: "fetch --no-tags --no-recurse-submodules --progress --depth=100 origin +refs/heads/test-catalog:refs/remotes/origin/test-catalog",
+		},
+		{
 			name: "all branches and tags", inputs: map[string]string{"Fetch-Depth": "0"},
 			want: "fetch --no-tags --no-recurse-submodules --progress --prune origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +" + sha + ":refs/buildkite-gha/event",
+		},
+		{
+			name: "all branches for explicit branch", inputs: map[string]string{"ref": "refs/heads/test-catalog", "fetch-depth": "0"},
+			want: "fetch --no-tags --no-recurse-submodules --progress --prune origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -211,6 +231,7 @@ func TestCheckoutRefOutput(t *testing.T) {
 		{name: "omitted", want: eventRef},
 		{name: "explicit empty", inputs: map[string]string{"REF": ""}, want: eventRef},
 		{name: "explicit SHA", inputs: map[string]string{"ref": sha}, want: ""},
+		{name: "branch", inputs: map[string]string{"ref": "test-catalog"}, want: "test-catalog"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := checkoutRefOutput(test.inputs, eventRef); got != test.want {
@@ -236,27 +257,38 @@ func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 	}
 	runTestGit(t, sourceRoot, "tag", "old", commits[0])
 	runTestGit(t, sourceRoot, "tag", "tip", commits[2])
+	runTestGit(t, sourceRoot, "branch", "test-catalog", commits[1])
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	runTestGit(t, "", "clone", "--bare", sourceRoot, remote)
 
 	for _, test := range []struct {
-		name       string
-		inputs     map[string]string
-		wantCount  string
-		wantTagTip bool
+		name        string
+		inputs      map[string]string
+		wantCount   string
+		wantTagTip  bool
+		otherCommit bool
 	}{
 		{name: "depth one exact detached SHA", wantCount: "1"},
+		{name: "bounded history", inputs: map[string]string{"fetch-depth": "100", "show-progress": "false"}, wantCount: "2"},
 		{name: "depth zero history and tags", inputs: map[string]string{"fetch-depth": "0", "show-progress": "false"}, wantCount: "2", wantTagTip: true},
 		{name: "shallow explicit tags", inputs: map[string]string{"fetch-tags": "true", "show-progress": "false"}, wantCount: "1", wantTagTip: true},
+		{name: "bounded branch", inputs: map[string]string{"ref": "test-catalog", "fetch-depth": "100", "show-progress": "false"}, wantCount: "2"},
+		{name: "other exact commit", inputs: map[string]string{"show-progress": "false"}, wantCount: "1", otherCommit: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			eventSHA, wantSHA := commits[1], commits[1]
+			inputs := test.inputs
+			if test.otherCommit {
+				wantSHA = commits[0]
+				inputs = map[string]string{"ref": wantSHA, "show-progress": "false"}
+			}
 			workspace := t.TempDir()
 			runTestGit(t, workspace, "init", "--initial-branch=main")
 			runTestGit(t, workspace, "remote", "add", "origin", remote)
-			runTestGit(t, workspace, checkoutFetchArgs(test.inputs, commits[1])...)
-			runTestGit(t, workspace, "checkout", "--detach", commits[1])
-			if got := strings.TrimSpace(runTestGit(t, workspace, "rev-parse", "HEAD")); got != commits[1] {
-				t.Fatalf("HEAD = %s, want exact event SHA %s", got, commits[1])
+			runTestGit(t, workspace, checkoutFetchArgs(inputs, eventSHA)...)
+			runTestGit(t, workspace, "checkout", "--detach", checkoutRevision(inputs, eventSHA))
+			if got := strings.TrimSpace(runTestGit(t, workspace, "rev-parse", "HEAD")); got != wantSHA {
+				t.Fatalf("HEAD = %s, want exact SHA %s", got, wantSHA)
 			}
 			if got := strings.TrimSpace(runTestGit(t, workspace, "rev-list", "--count", "HEAD")); got != test.wantCount {
 				t.Fatalf("reachable commit count = %s, want %s", got, test.wantCount)
@@ -266,6 +298,24 @@ func TestCheckoutFetchArgsAgainstRealRepository(t *testing.T) {
 				t.Fatalf("tip tag present = %t, want %t (error %v)", err == nil, test.wantTagTip, err)
 			}
 		})
+	}
+}
+
+func TestPrepareCheckoutDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	root, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "test-catalog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(workspace, "test-catalog")
+	if root != want {
+		t.Fatalf("checkout directory = %q, want %q", root, want)
+	}
+	if info, err := os.Lstat(root); err != nil || !info.IsDir() {
+		t.Fatalf("checkout directory state = %#v, %v", info, err)
+	}
+	if _, err := prepareCheckoutDirectory(workspace, map[string]string{"path": "test-catalog"}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second checkout path error = %v", err)
 	}
 }
 
@@ -295,6 +345,11 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 
 func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
 	workspace := t.TempDir()
+	checkoutDirectory := filepath.Join(workspace, "test-catalog")
+	poisonedGlobalConfig := []byte("[url \"https://attacker.invalid/\"]\n\tinsteadOf = https://github.com/\n")
+	if err := os.WriteFile(filepath.Join(workspace, ".no-global-gitconfig"), poisonedGlobalConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	sha := strings.Repeat("a", 40)
 	repositoryToken := "ghs_repository_token"
 	proxyEnvironment := map[string]string{
@@ -339,6 +394,8 @@ printf 'username=token\npassword=%s\n' ` + shellTestQuote(repositoryToken) + `
 	git := filepath.Join(t.TempDir(), "git")
 	script := `#!/bin/sh
 set -eu
+test "$GIT_CONFIG_GLOBAL" = "$PWD/.no-global-gitconfig"
+test ! -e "$GIT_CONFIG_GLOBAL"
 assert_no_proxy_environment() {
   test -z "${HTTP_PROXY+x}"
   test -z "${HTTPS_PROXY+x}"
@@ -407,7 +464,7 @@ case "$operation" in
     printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD
     ;;
 esac
-printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 `
 	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -428,7 +485,7 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	for name := range proxyEnvironment {
 		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
-	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil)
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, map[string]string{"path": "test-catalog"})
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
@@ -447,6 +504,46 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	}
 	if strings.Count(string(gitBytes), "git-credentials-helper") != 1 {
 		t.Fatalf("credential helper was not confined to one Git command: %q", gitBytes)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(gitBytes)), "\n") {
+		if !strings.HasPrefix(line, checkoutDirectory+"|") {
+			t.Fatalf("Git command ran outside checkout path %q: %q", checkoutDirectory, line)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(workspace, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("path checkout mutated the workspace root: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace, ".no-global-gitconfig")); err != nil || !bytes.Equal(got, poisonedGlobalConfig) {
+		t.Fatalf("path checkout changed poisoned root Git config: %q, %v", got, err)
+	}
+}
+
+func TestValidateCheckoutRefProvenance(t *testing.T) {
+	eventSHA := strings.Repeat("a", 40)
+	otherSHA := strings.Repeat("b", 40)
+	tests := []struct {
+		name      string
+		sourceRef string
+		value     string
+		wantError bool
+	}{
+		{name: "literal branch", sourceRef: "test-catalog", value: "test-catalog"},
+		{name: "literal commit", sourceRef: otherSHA, value: otherSHA},
+		{name: "github sha", sourceRef: "${{ github.sha }}", value: eventSHA},
+		{name: "need event sha", sourceRef: "${{ needs.configure.outputs.sha }}", value: eventSHA},
+		{name: "need other commit", sourceRef: "${{ needs.configure.outputs.sha }}", value: otherSHA, wantError: true},
+		{name: "need branch", sourceRef: "${{ needs.configure.outputs.sha }}", value: "test-catalog", wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateCheckoutRefProvenance(map[string]string{"Ref": test.sourceRef}, map[string]string{"ref": test.value}, eventSHA)
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "exact event SHA")) {
+				t.Fatalf("validateCheckoutRefProvenance() error = %v, want exact event SHA error", err)
+			}
+			if !test.wantError && err != nil {
+				t.Fatalf("validateCheckoutRefProvenance() error = %v", err)
+			}
+		})
 	}
 }
 

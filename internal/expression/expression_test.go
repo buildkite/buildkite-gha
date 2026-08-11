@@ -100,13 +100,14 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 	for _, template := range []string{
 		"${{ github.server_url == 'https://github.com' && github.token || '' }}",
 		"${{ job.status }}",
+		"${{ toJSON(matrix) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
 	} {
 		if err := ValidateActionInputDefault(template); err != nil {
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ toJSON(matrix.value) }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -160,6 +161,17 @@ func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	}
 	if _, err := Evaluate("${{ job.status }}", Context{JobStatus: "success"}); err == nil {
 		t.Fatal("Evaluate() accepted action-default-only job.status")
+	}
+}
+
+func TestEvaluateActionInputDefaultSupportsMatrixJSON(t *testing.T) {
+	got, err := EvaluateActionInputDefault("${{ toJSON(matrix) }}", Context{Matrix: map[string]any{"scala": "2.13", "jdk": 17}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"jdk\": 17,\n  \"scala\": \"2.13\"\n}"
+	if got != want {
+		t.Fatalf("EvaluateActionInputDefault(toJSON(matrix)) = %q, want %q", got, want)
 	}
 }
 
@@ -557,7 +569,12 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
+		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
+		{expression: "${{ github.ref == 'refs/pull/42/merge' }}", want: true},
+		{expression: "${{ startsWith(github.ref, 'REFS/PULL/') }}", want: true},
 	}
+	context.GitHub["ref"] = "refs/pull/42/merge"
+	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
 	for _, test := range tests {
 		expr, err := Parse(test.expression, 1, 1)
 		if err != nil {
@@ -586,6 +603,42 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	}
 }
 
+func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"event_name": "pull_request",
+		"event":      map[string]any{"pull_request": map[string]any{"draft": false}},
+	}}
+	got, err := EvaluateCompileCondition("github.event_name == 'pull_request' && github.event.pull_request.draft", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got {
+		t.Fatal("draft condition evaluated true for a non-draft event")
+	}
+	if _, err := EvaluateCompileCondition("needs.build.result == 'success'", context); err == nil || !strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
+		t.Fatalf("runtime condition error = %v", err)
+	}
+	usesEvent, err := ReferencesGitHubEvent("github.event_name == 'pull_request' && github.event.pull_request.draft")
+	if err != nil || !usesEvent {
+		t.Fatalf("ReferencesGitHubEvent() = %v, %v", usesEvent, err)
+	}
+	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
+		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
+	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs.label }}"
+	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "${{ !false && matrix.run-new && 'inputs.enabled' || 'it''''s ready' }}"
+	if got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
 func TestEvaluateCompileFailsClosed(t *testing.T) {
 	tests := []struct {
 		expression string
@@ -594,6 +647,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ vars.MISSING }}", want: `unavailable value "vars.missing"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
+		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
 		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
 		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
 	}

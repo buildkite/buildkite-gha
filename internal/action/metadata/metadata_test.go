@@ -128,6 +128,26 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 		}
 	})
 
+	t.Run("kebab-case input deprecation message", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "inputs:\n  version:\n    deprecation-message: Use version-file instead\nruns:\n  using: node24\n  main: dist/index.js\n")
+		action, err := Load(root, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if action.Inputs["version"].DeprecationMessage != "Use version-file instead" {
+			t.Fatalf("Load() deprecation message = %q", action.Inputs["version"].DeprecationMessage)
+		}
+	})
+
+	t.Run("duplicate input deprecation message spellings", func(t *testing.T) {
+		root := t.TempDir()
+		writeAction(t, root, "action.yml", "inputs:\n  version:\n    deprecation-message: Use version-file instead\n    deprecationMessage: Duplicate\nruns:\n  using: node24\n  main: dist/index.js\n")
+		if _, err := Load(root, "."); err == nil || !strings.Contains(err.Error(), "declares both") {
+			t.Fatalf("Load() error = %v, want duplicate spelling rejection", err)
+		}
+	})
+
 	t.Run("unknown field", func(t *testing.T) {
 		root := t.TempDir()
 		writeAction(t, root, "action.yml", "unexpected: true\nruns:\n  using: node24\n")
@@ -311,6 +331,32 @@ func TestValidateEntrypointsRejectsNestedGitMetadata(t *testing.T) {
 			t.Fatalf("ValidateEntrypoints() = %v, want nil", err)
 		}
 	})
+}
+
+func TestValidateEntrypointsAllowsRemoteActionRepositoryBuildOutput(t *testing.T) {
+	repository := t.TempDir()
+	action := filepath.Join(repository, "setup-gradle")
+	entrypoint := filepath.Join(repository, "dist", "setup-gradle", "main", "index.js")
+	if err := os.MkdirAll(action, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entrypoint, []byte("entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := Metadata{
+		Path: action, SourceRoot: repository,
+		Runs: Runs{Using: "node24", Main: "../dist/setup-gradle/main/index.js"},
+	}
+	if err := metadata.ValidateEntrypoints(RuntimeNode24); err != nil {
+		t.Fatalf("ValidateEntrypoints() = %v, want repository-confined entry point", err)
+	}
+	metadata.SourceRoot = action
+	if err := metadata.ValidateEntrypoints(RuntimeNode24); err == nil || !strings.Contains(err.Error(), "escapes action source") {
+		t.Fatalf("workspace-confined ValidateEntrypoints() error = %v", err)
+	}
 }
 
 func writeAction(t *testing.T, root, name, contents string) {

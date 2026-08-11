@@ -180,7 +180,7 @@ func ParseWorkflow(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
-	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency, false)}, nil
 }
 
 func expansionReport(expanded expansionResult, warnings []Warning) Report {
@@ -208,11 +208,13 @@ func Validate(path string, source []byte) (Report, error) {
 	context := compileContext(event, nil, path, parsed.Name)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
+	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -244,18 +246,20 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 		}
 		return Report{
 			LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed),
-			Warnings: compilerWarnings(parsed.Concurrency), NotEvaluatedJobs: notEvaluatedJobs,
+			Warnings: compilerWarnings(parsed.Concurrency, false), NotEvaluatedJobs: notEvaluatedJobs,
 		}, errors.Join(parseErr, eventErr, optionsErr)
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, expandErr); err != nil {
-		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
+	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
 	}
-	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -393,6 +397,8 @@ instances:
 			requiresMise := len(actionRefs) != 0
 			var capabilities []string
 			var authorization PlanAuthorization
+			var actionRequiredSecrets []string
+			actionInputsInspected := false
 			lockActions := options.ResolveActions
 			if len(actionRefs) != 0 && !lockActions {
 				lockActions = true
@@ -414,6 +420,8 @@ instances:
 				actionCapabilities := compiledActions.capabilities
 				requiresMise = compiledActions.requiresMise
 				actionRequiresGitHubToken = compiledActions.requiresGitHubToken
+				actionRequiredSecrets = compiledActions.requiredSecrets
+				actionInputsInspected = true
 				locksByID := make(map[string]plan.ActionLock, len(locks))
 				for _, lock := range locks {
 					locksByID[lock.ID] = lock
@@ -427,7 +435,18 @@ instances:
 					}
 					descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 					if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
-						if err := actionintegration.ValidateCheckoutInputs(instance.Steps[stepIndex].With, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
+						checkoutInputs := cloneMap(instance.Steps[stepIndex].With)
+						for name, value := range checkoutInputs {
+							if !strings.EqualFold(name, "ref") {
+								continue
+							}
+							root, path, refErr := expression.ReferencePath(value)
+							if refErr == nil && (strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "sha") ||
+								strings.EqualFold(root, "needs") && len(path) == 3 && strings.EqualFold(path[1], "outputs")) {
+								checkoutInputs[name] = ir.Event.SHA
+							}
+						}
+						if err := actionintegration.ValidateCheckoutInputs(checkoutInputs, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
 							span := instance.Steps[stepIndex].Span.Start
 							return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 						}
@@ -516,7 +535,7 @@ instances:
 					jobSchema = plan.SchemaV5
 				}
 			}
-			secrets, err := requiredSecrets(instance)
+			secrets, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
 			if err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 			}
@@ -632,7 +651,7 @@ func planConstructionFinding(instance JobInstance, err error) error {
 	}
 }
 
-func requiredSecrets(instance JobInstance) ([]string, error) {
+func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, error) {
 	found := map[string]string{}
 	collect := func(value string) error {
 		names, err := expression.SecretReferences(value)
@@ -662,13 +681,20 @@ func requiredSecrets(instance JobInstance) ([]string, error) {
 				return nil, err
 			}
 		}
-		for _, values := range []map[string]string{step.Env, step.With} {
+		valuesToInspect := []map[string]string{step.Env}
+		if step.Kind != "uses" || !actionInputsInspected {
+			valuesToInspect = append(valuesToInspect, step.With)
+		}
+		for _, values := range valuesToInspect {
 			for _, name := range sortedValueKeys(values) {
 				if err := collect(values[name]); err != nil {
 					return nil, err
 				}
 			}
 		}
+	}
+	for _, name := range actionRequired {
+		found[name] = name
 	}
 	names := make([]string, 0, len(found))
 	for name := range found {
@@ -705,6 +731,8 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	context := compileContext(event, vars, path, parsed.Name)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
+	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
+	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
@@ -712,18 +740,18 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
 		Event:    event,
 		Vars:     vars,
-		Warnings: compilerWarnings(parsed.Concurrency),
+		Warnings: compilerWarnings(parsed.Concurrency, cancelInProgress),
 		Execution: ExecutionBoundary{
 			Supported: true,
 			Reason:    "run-job supports the fail-closed Phase 0 shell and local-action subset",
 		},
 		Jobs: expanded.instances,
 	}
-	return ir, errors.Join(concurrencyErr, expandErr)
+	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
 }
 
-func compilerWarnings(concurrency *workflow.Concurrency) []Warning {
-	if concurrency == nil || !concurrency.CancelInProgress {
+func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) []Warning {
+	if concurrency == nil || !cancelInProgress {
 		return nil
 	}
 	position := concurrency.CancelInProgressPosition
@@ -806,7 +834,7 @@ func canonicalWorkflowName(path string) string {
 }
 
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, err := resolveReusableWorkflows(path, source, parsed)
+	resolved, err := resolveReusableWorkflows(path, source, parsed, context)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
@@ -889,6 +917,14 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
+			instanceJob := resolveCompileTimeConditions(job, context, matrix)
+			conditionValidationJob := instanceJob
+			conditionContext := context
+			conditionContext.Matrix = matrix
+			if resolved, err := expression.EvaluateCompileCondition(instanceJob.If, conditionContext); err == nil && !resolved {
+				instanceJob.If = "false"
+				instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
+			}
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
@@ -907,10 +943,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Matrix:                  matrix,
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
-				Steps:                   append([]workflow.Step(nil), job.Steps...),
-				Env:                     cloneMap(job.Env),
+				Steps:                   append([]workflow.Step(nil), instanceJob.Steps...),
+				Env:                     cloneMap(instanceJob.Env),
 				Permissions:             permissionScopes(job.Permissions),
-				If:                      job.If,
+				If:                      instanceJob.If,
 				TimeoutMinutes:          job.TimeoutMinutes,
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
@@ -925,7 +961,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			result.candidates = append(result.candidates, candidate)
 
 			valid := true
-			if err := supportedConditions(jobPath, job, matrix, true); err != nil {
+			if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, err))
 				valid = false
 			}
@@ -1067,6 +1103,23 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 	return group, nil
 }
 
+func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
+	if concurrency == nil || concurrency.CancelInProgressExpression == nil {
+		return concurrency != nil && concurrency.CancelInProgress, nil
+	}
+	value, err := expression.EvaluateCompile(*concurrency.CancelInProgressExpression, context)
+	if err != nil {
+		position := concurrency.CancelInProgressPosition
+		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress cannot be resolved at compile time: %v", path, position.Line, position.Column, err)
+	}
+	cancelInProgress, ok := value.(bool)
+	if !ok {
+		position := concurrency.CancelInProgressPosition
+		return false, fmt.Errorf("%s:%d:%d: workflow concurrency cancel-in-progress resolved to %T, want boolean", path, position.Line, position.Column, value)
+	}
+	return cancelInProgress, nil
+}
+
 func canonicalConcurrencyGroup(group string) string {
 	return strings.ToLower(group)
 }
@@ -1096,6 +1149,26 @@ func supported(path string, job workflow.Job) error {
 		}
 	}
 	return nil
+}
+
+func resolveCompileTimeConditions(job workflow.Job, context expression.CompileContext, matrix map[string]any) workflow.Job {
+	context.Matrix = matrix
+	if usesEvent, _ := expression.ReferencesGitHubEvent(job.If); usesEvent {
+		if resolved, err := expression.EvaluateCompileCondition(job.If, context); err == nil {
+			job.If = strconv.FormatBool(resolved)
+		}
+	}
+	job.Steps = append([]workflow.Step(nil), job.Steps...)
+	for i := range job.Steps {
+		step := &job.Steps[i]
+		if usesEvent, _ := expression.ReferencesGitHubEvent(step.If); usesEvent {
+			resolved, err := expression.EvaluateCompileCondition(step.If, context)
+			if err == nil {
+				step.If = strconv.FormatBool(resolved)
+			}
+		}
+	}
+	return job
 }
 
 func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {
