@@ -60,6 +60,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 
 	owned := &Workflow{}
+	owned.Triggers = adaptTriggers(parsed.On)
 	if parsed.Name != nil {
 		owned.Name = parsed.Name.Value
 	}
@@ -161,6 +162,85 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, fmt.Errorf("%s:%d:%d: concurrent step did not match the pinned actionlint syntax tree", path, position.Line, position.Column)
 	}
 	return owned, nil
+}
+
+func adaptTriggers(events []actionlint.Event) []Trigger {
+	out := make([]Trigger, 0, len(events))
+	values := func(f *actionlint.WebhookEventFilter) []string {
+		if f == nil {
+			return nil
+		}
+		v := make([]string, len(f.Values))
+		for i, s := range f.Values {
+			v[i] = s.Value
+		}
+		return v
+	}
+	stringsOf := func(in []*actionlint.String) []string {
+		if in == nil {
+			return nil
+		}
+		out := make([]string, len(in))
+		for i, s := range in {
+			out[i] = s.Value
+		}
+		return out
+	}
+	for _, event := range events {
+		t := Trigger{Event: event.EventName()}
+		switch e := event.(type) {
+		case *actionlint.WebhookEvent:
+			t.Types, t.Branches, t.BranchesIgnore = stringsOf(e.Types), values(e.Branches), values(e.BranchesIgnore)
+			t.Tags, t.TagsIgnore, t.Paths, t.PathsIgnore = values(e.Tags), values(e.TagsIgnore), values(e.Paths), values(e.PathsIgnore)
+			t.Workflows = stringsOf(e.Workflows)
+		case *actionlint.ScheduledEvent:
+			for _, s := range e.Schedules {
+				x := Schedule{}
+				if s.Cron != nil {
+					x.Cron = s.Cron.Value
+				}
+				if s.Timezone != nil {
+					x.Timezone = s.Timezone.Value
+				}
+				t.Schedules = append(t.Schedules, x)
+			}
+		case *actionlint.WorkflowDispatchEvent:
+			names := make([]string, 0, len(e.Inputs))
+			for name := range e.Inputs {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			t.Dispatch = &DispatchTrigger{}
+			for _, name := range names {
+				input := e.Inputs[name]
+				owned := DispatchInput{Name: name, Options: stringsOf(input.Options)}
+				if input.Description != nil {
+					owned.Description = input.Description.Value
+				}
+				if input.Required != nil {
+					owned.Required = input.Required.Value
+				}
+				if input.Default != nil {
+					owned.Default = input.Default.Value
+				}
+				switch input.Type {
+				case actionlint.WorkflowDispatchEventInputTypeString:
+					owned.Type = "string"
+				case actionlint.WorkflowDispatchEventInputTypeNumber:
+					owned.Type = "number"
+				case actionlint.WorkflowDispatchEventInputTypeBoolean:
+					owned.Type = "boolean"
+				case actionlint.WorkflowDispatchEventInputTypeChoice:
+					owned.Type = "choice"
+				case actionlint.WorkflowDispatchEventInputTypeEnvironment:
+					owned.Type = "environment"
+				}
+				t.Dispatch.Inputs = append(t.Dispatch.Inputs, owned)
+			}
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
