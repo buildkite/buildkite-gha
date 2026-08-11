@@ -125,11 +125,13 @@ type NeedOutput struct {
 
 // Report summarizes successful workflow validation.
 type Report struct {
-	LogicalJobs int
-	Instances   int
-	Warnings    []Warning
-	Jobs        []JobInstance
-	ParsedJobs  []ParsedJob
+	LogicalJobs           int
+	Instances             int
+	Warnings              []Warning
+	Jobs                  []JobInstance
+	ParsedJobs            []ParsedJob
+	NotEvaluatedJobs      map[string]bool
+	NotEvaluatedInstances map[string]bool
 }
 
 // ParsedJob is the source identity retained before expansion succeeds.
@@ -140,9 +142,11 @@ type ParsedJob struct {
 }
 
 type expansionResult struct {
-	instances  []JobInstance
-	candidates []JobInstance
-	jobs       []ParsedJob
+	instances             []JobInstance
+	candidates            []JobInstance
+	jobs                  []ParsedJob
+	notEvaluatedJobs      map[string]bool
+	notEvaluatedInstances map[string]bool
 }
 
 func parsedJobs(path string, parsed *workflow.Workflow) []ParsedJob {
@@ -169,6 +173,24 @@ func processingJobs(path string, parsed *workflow.Workflow, resolved []sourcedJo
 	return jobs
 }
 
+// ParseWorkflow reports only event-independent workflow syntax and job
+// identities. Later stages deliberately remain unevaluated.
+func ParseWorkflow(path string, source []byte) (Report, error) {
+	parsed, err := workflow.Parse(path, source)
+	if err != nil {
+		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
+	}
+	return Report{LogicalJobs: len(parsed.Jobs), ParsedJobs: parsedJobs(path, parsed), Warnings: compilerWarnings(parsed.Concurrency)}, nil
+}
+
+func expansionReport(expanded expansionResult, warnings []Warning) Report {
+	return Report{
+		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
+		Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: warnings,
+		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
+	}
+}
+
 // Validate parses and validates the supported static graph without requiring an
 // event snapshot.
 func Validate(path string, source []byte) (Report, error) {
@@ -188,9 +210,9 @@ func Validate(path string, source []byte) (Report, error) {
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, expandErr); err != nil {
-		return Report{LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates), Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: compilerWarnings(parsed.Concurrency)}, err
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
 	}
-	return Report{LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates), Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
 }
 
 // ValidateEvent validates both the supported static graph and its event input.
@@ -220,9 +242,9 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	if err := errors.Join(concurrencyErr, expandErr); err != nil {
-		return Report{LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates), Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: compilerWarnings(parsed.Concurrency)}, err
+		return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), err
 	}
-	return Report{LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates), Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: compilerWarnings(parsed.Concurrency)}, nil
+	return expansionReport(expanded, compilerWarnings(parsed.Concurrency)), nil
 }
 
 // Compile parses a workflow and event, expands its static graph, and returns
@@ -774,13 +796,17 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	if err != nil {
 		return expansionResult{jobs: parsedJobs(path, parsed)}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
-	result := expansionResult{jobs: processingJobs(path, parsed, resolved)}
+	result := expansionResult{
+		jobs:             processingJobs(path, parsed, resolved),
+		notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
+	}
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
 	var diagnostics []error
+	failedJobs := make(map[string]bool, len(resolved))
 	for _, sourced := range resolved {
 		job := sourced.Job
 		if _, exists := jobs[job.ID]; exists {
@@ -794,6 +820,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
 			diagnostics = append(diagnostics, err)
+			failedJobs[job.ID] = true
 		}
 	}
 	order, err := topologicalOrder(path, jobs)
@@ -810,6 +837,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		if matrixErr != nil {
 			diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", sourcePaths[id], 0, 0, job.ID, "", "", 0, matrixErr))
 			failedMatrices[id] = true
+			failedJobs[id] = true
 			continue
 		}
 		matricesByJob[id] = matrices
@@ -823,16 +851,27 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		if failedMatrices[id] {
 			continue
 		}
+		jobBlocked := false
+		for _, binding := range needBindings[id] {
+			for _, member := range binding.members {
+				if failedJobs[member] {
+					jobBlocked = true
+				}
+			}
+		}
+		jobFailed := failedJobs[id]
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
 		for _, matrix := range matrices {
 			key, err := instanceKey(job.ID, matrix)
 			if err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
+				jobFailed = true
 				continue
 			}
 			if existingJob, exists := instanceKeys[key]; exists {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("deterministic instance key %q collides with another instance from job %q", key, existingJob))))
+				jobFailed = true
 				continue
 			}
 			instanceKeys[key] = job.ID
@@ -892,6 +931,12 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
 			}
 			if !valid {
+				jobFailed = true
+				continue
+			}
+			if jobBlocked {
+				result.notEvaluatedJobs[id] = true
+				result.notEvaluatedInstances[key] = true
 				continue
 			}
 			instance := candidate
@@ -899,6 +944,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance.RunsOn = labels
 			instance.Queue = queue
 			instance.ConcurrencyGroup = concurrencyGroup
+			dependencyFailed := false
 			for _, need := range sortedKeys(needBindings[id]) {
 				binding := needBindings[id][need]
 				var members []string
@@ -909,8 +955,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				}
 				sort.Strings(members)
 				if len(members) == 0 {
-					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))))
-					continue
+					diagnostics = append(diagnostics, attributedProcessingFinding(StageGraph, CodeGraphInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("prerequisite %q has no expanded instances", need))))
+					dependencyFailed = true
+					break
 				}
 				if instance.NeedGroups == nil {
 					instance.NeedGroups = make(map[string][]string, len(needBindings[id]))
@@ -948,6 +995,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					instance.NeedOutputs[need] = projected
 				}
 			}
+			if dependencyFailed {
+				jobFailed = true
+				continue
+			}
 			sort.Strings(instance.Needs)
 			instance.Needs = slices.Compact(instance.Needs)
 			byLogicalID[id] = append(byLogicalID[id], instance)
@@ -955,7 +1006,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		if job.MaxParallel != nil && len(concurrencyGroups) > 1 {
 			position := job.Concurrency.Span.Start
 			diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, "", "", 0, locatedJobError(jobPath, job, position.Line, position.Column, "concurrency groups that vary by matrix cannot be combined with strategy.max-parallel")))
+			jobFailed = true
 		}
+		failedJobs[id] = jobFailed || jobBlocked
 	}
 
 	var instances []JobInstance

@@ -502,7 +502,7 @@ func TestCommandsEmitVersionedReportWhenEventInputCannotBeRead(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, "workflow.yml")
 	missingEventPath := filepath.Join(root, "missing-event.json")
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.runner }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -520,7 +520,7 @@ func TestCommandsEmitVersionedReportWhenEventInputCannotBeRead(t *testing.T) {
 		for _, stage := range report.Stages {
 			stages[stage.ID] = stage.Result
 		}
-		if report.Schema != compatibility.ProcessingSchema || report.Status != compatibility.Failed || stages[stageWorkflowParsing] != compatibility.Passed || stages[stageEventValidation] != compatibility.NotEvaluated || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_ENVIRONMENT" || report.Diagnostics[0].Stage != "" {
+		if report.Schema != compatibility.ProcessingSchema || report.Result != "indeterminate" || report.Status != compatibility.Failed || stages[stageWorkflowParsing] != compatibility.Passed || stages[stageEventValidation] != compatibility.NotEvaluated || stages[stageExpressions] != compatibility.NotEvaluated || report.Instances != 0 || len(report.Jobs) != 1 || report.Jobs[0].Result != compatibility.NotEvaluated || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_ENVIRONMENT" || report.Diagnostics[0].Stage != "" {
 			t.Fatalf("report = %#v", report)
 		}
 	})
@@ -537,6 +537,69 @@ func TestCommandsEmitVersionedReportWhenEventInputCannotBeRead(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestProcessingReportLeavesDependentsOfFailedMatrixNotEvaluated(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "failed-prerequisite.yml")
+	workflow := []byte(`on: push
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - id: matrix
+        run: true
+  upstream:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - run: true
+  downstream:
+    needs: upstream
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	stages := map[string]string{}
+	for _, stage := range report.Stages {
+		stages[stage.ID] = stage.Result
+	}
+	if stages[stageGraph] != compatibility.Passed || stages[stageMatrix] != compatibility.Failed {
+		t.Fatalf("stages = %#v", stages)
+	}
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == compiler.CodeGraphInvalid || diagnostic.Job == "downstream" {
+			t.Fatalf("cascading graph diagnostic = %#v", diagnostic)
+		}
+	}
+	logical, instance := "", ""
+	for _, job := range report.Jobs {
+		if job.ID != "downstream" {
+			continue
+		}
+		if job.Instance == "" {
+			logical = job.Result
+		} else {
+			instance = job.Result
+		}
+	}
+	if logical != compatibility.NotEvaluated || instance != compatibility.NotEvaluated {
+		t.Fatalf("downstream results = logical %q, instance %q; jobs = %#v", logical, instance, report.Jobs)
+	}
 }
 
 func TestProcessingReportRetainsEveryExpandedMatrixCandidate(t *testing.T) {

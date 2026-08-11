@@ -32,14 +32,22 @@ func initialProcessingReport(path, profile string, eventEvaluated bool, report c
 	out.Compile = compatibility.Stage{Result: "compilable", LogicalJobs: report.LogicalJobs, Instances: report.Instances}
 	out.Admission = compatibility.Stage{Result: compatibility.NotEvaluated}
 	for _, job := range report.ParsedJobs {
+		result := compatibility.Passed
+		if report.NotEvaluatedJobs[job.ID] {
+			result = compatibility.NotEvaluated
+		}
 		out.Jobs = append(out.Jobs, compatibility.JobResult{
-			ID: job.ID, Result: compatibility.Passed,
+			ID: job.ID, Result: result,
 			Location: sourceLocation(job.Path, job.Source.Start.Line, job.Source.Start.Column),
 		})
 	}
 	for _, instance := range report.Jobs {
+		result := compatibility.Passed
+		if report.NotEvaluatedInstances[instance.Key] {
+			result = compatibility.NotEvaluated
+		}
 		out.Jobs = append(out.Jobs, compatibility.JobResult{
-			ID: instance.LogicalJobID, Instance: instance.Key, Result: compatibility.Passed,
+			ID: instance.LogicalJobID, Instance: instance.Key, Result: result,
 			Location: sourceLocation(instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column),
 		})
 		for i, step := range instance.Steps {
@@ -139,14 +147,21 @@ func environmentProcessingReport(path, profile, message string) compatibility.Pr
 }
 
 func eventInputProcessingReport(path, profile string, source []byte, message string) compatibility.ProcessingReport {
-	validation, validationErr := compiler.Validate(path, source)
-	report := initialProcessingReport(path, profile, false, validation, validationErr)
-	if validationErr != nil {
-		report.Result = "incompatible"
-	} else {
-		report.Result = "indeterminate"
-		report.Compile.Result = compatibility.NotEvaluated
+	parsed, parseErr := compiler.ParseWorkflow(path, source)
+	report := compatibility.NewProcessingReport(path, profile)
+	report.LogicalJobs = parsed.LogicalJobs
+	for _, job := range parsed.ParsedJobs {
+		report.Jobs = append(report.Jobs, compatibility.JobResult{
+			ID: job.ID, Result: compatibility.NotEvaluated,
+			Location: sourceLocation(job.Path, job.Source.Start.Line, job.Source.Start.Column),
+		})
 	}
+	if parseErr != nil {
+		addProcessingFailure(&report, path, stageWorkflowParsing, compiler.CodeWorkflowSyntax, "syntax", parseErr)
+	} else {
+		report.SetStage(stageWorkflowParsing, compatibility.Passed)
+	}
+	report.Result = "indeterminate"
 	addEnvironmentFailure(&report, message)
 	return report
 }
