@@ -9,6 +9,16 @@ mise trust mise.toml
 mise install
 ```
 
+`mise.lock` pins platform-specific download URLs and checksums so cold CI jobs
+do not need GitHub release API discovery. Buildkite sets `MISE_LOCKED=1`, making
+missing lock entries fail closed instead of falling back to provider APIs.
+Regenerate the lock with mise 2026.5.12, the oldest version supported by CI,
+and commit it whenever tool versions change:
+
+```sh
+mise lock --platform linux-x64,linux-x64-musl,linux-arm64,linux-arm64-musl,macos-x64,macos-arm64,windows-x64
+```
+
 Run the complete repository check with:
 
 ```sh
