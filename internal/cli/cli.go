@@ -1499,9 +1499,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		if label == "" {
 			label = input.CanonicalPath
 		}
+		displayLabel := label + " (" + bundle.IR.Event.Event + ")"
 		generated := bundle.GeneratedWorkflow
-		generated.GroupLabel = label
+		generated.GroupLabel = displayLabel
 		generated.GroupKey = "gha-workflow-" + input.Identity
+		generated.CheckName = "Buildkite / " + displayLabel
 		generated.Condition = condition
 		generatedWorkflows = append(generatedWorkflows, generated)
 		planArtifacts = append(planArtifacts, bundle.Plans...)

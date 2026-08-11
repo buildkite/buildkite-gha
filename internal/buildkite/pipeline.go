@@ -45,10 +45,12 @@ type Pipeline struct {
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
-// pipeline. GroupLabel and GroupKey are required for aggregate emission.
+// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate
+// emission.
 type Workflow struct {
 	GroupLabel      string
 	GroupKey        string
+	CheckName       string
 	Condition       string
 	ConcurrencyGate *ConcurrencyGate
 	Jobs            []Job
@@ -136,6 +138,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if !validStepKey(workflow.GroupKey) {
 				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
 			}
+			if workflow.CheckName == "" {
+				return nil, fmt.Errorf("workflow %q requires a GitHub Check name", workflow.GroupKey)
+			}
 			if workflow.Condition == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition", workflow.GroupKey)
 			}
@@ -197,12 +202,21 @@ type preparedWorkflow struct {
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
 	stepIndent := "  "
 	if workflow.Grouped {
-		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(workflow.GroupLabel))
+		groupLabel := workflow.GroupLabel
+		if workflow.Aggregate {
+			groupLabel = ":github: " + groupLabel
+		}
+		_, _ = fmt.Fprintf(out, "  - group: %s\n", yamlScalar(groupLabel))
 		if workflow.GroupKey != "" {
 			_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		}
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
+		}
+		if workflow.CheckName != "" {
+			out.WriteString("    notify:\n")
+			out.WriteString("      - github_check:\n")
+			_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
 		}
 		if workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
