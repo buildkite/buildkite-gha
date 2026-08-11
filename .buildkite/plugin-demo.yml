@@ -55,7 +55,7 @@ steps:
       automatic: false
     plugins:
       - github-actions#v0.2.2:
-          workflow: testdata/poc/.github/workflows/cache.yml
+          workflow: testdata/plugin-demo/.github/workflows/cache.yml
 
   - label: ":white_check_mark: Cache plugin demo complete"
     key: "plugin-demo-cache-terminal"

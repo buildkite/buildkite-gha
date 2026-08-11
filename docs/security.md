@@ -96,7 +96,5 @@ or pre-job credential broker rather than more `.gitmodules` parsing.
 7. Keep unsupported secrets, private actions, OIDC, and protected queues out of
    imported workflows.
 
-For implementation detail, see the
-[plan-envelope trust ADR](architecture/0002-plan-envelope-trust-boundary.md) and
-the proposed
+For implementation detail, see the proposed
 [protected-capability control-plane ADR](architecture/0003-protected-capability-control-plane.md).

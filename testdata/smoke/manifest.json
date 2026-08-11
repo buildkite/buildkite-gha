@@ -38,25 +38,25 @@
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "migration-poc-basic",
+      "id": "example-basic",
       "workflow": ".github/workflows/example-basic.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
-      "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
+      "evidence": "Exact-commit Buildkite build 290 passed the complete example suite.",
       "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, checkout, setup-go, shell tests, conditions, outputs, and the summary-producing workflow all completed on the hosted runtime; the dedicated summary-annotation fixture owns independent persistence evidence.",
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "migration-poc-artifacts",
+      "id": "example-artifacts",
       "workflow": ".github/workflows/example-artifacts.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
-      "evidence": "Exact-commit Buildkite build 290 passed the complete migration POC suite.",
+      "evidence": "Exact-commit Buildkite build 290 passed the complete example suite.",
       "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, build, job outputs, exact-name direct-needs artifact transfer, and downloaded binary execution all passed on the hosted runtime.",
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "migration-poc-advanced",
+      "id": "example-advanced",
       "workflow": ".github/workflows/example-advanced.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
@@ -65,8 +65,8 @@
       "action_preflight": "hosted-tokenless"
     },
     {
-      "id": "migration-poc-cache",
-      "workflow": "testdata/poc/.github/workflows/cache.yml",
+      "id": "plugin-demo-cache",
+      "workflow": "testdata/plugin-demo/.github/workflows/cache.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "Published-plugin Buildkite build 337 passed the stable cache-v2 fixture and all generated jobs.",
@@ -133,7 +133,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
       "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
-      "note": "This minimal fixture remains compile-only conformance coverage. The stable migration-poc-cache fixture has published-plugin runtime evidence from Buildkite build 337.",
+      "note": "This minimal fixture remains compile-only conformance coverage. The stable plugin-demo-cache fixture has published-plugin runtime evidence from Buildkite build 337.",
       "action_preflight": "hosted-tokenless"
     },
     {

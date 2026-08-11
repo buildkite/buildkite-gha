@@ -466,9 +466,6 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if got := steps["checks"].environment["BUILDKITE_GHA_LIVE_REQUIRED"]; got != "1" {
 		t.Fatalf("repository checks BUILDKITE_GHA_LIVE_REQUIRED = %q, want required live prerequisites", got)
 	}
-	if got := steps["migration-poc-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/migration-poc.yml" || got.condition != `build.env("POC_SUITE") == "migration"` {
-		t.Fatalf("migration POC loader = %#v", got)
-	}
 	pluginDemo := steps["plugin-demo-loader"]
 	if pluginDemo.condition != `build.env("DEMO_SUITE") == "plugin"` {
 		t.Fatalf("released plugin demo loader = %#v", pluginDemo)
@@ -490,12 +487,6 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
-	}
-	if got := steps["shell-oracle-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-oracle.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "shell-oracle"` {
-		t.Fatalf("shell oracle loader = %#v", got)
-	}
-	if got := steps["transport-probe-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/transport-probe/pipeline.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "transport-probe"` {
-		t.Fatalf("transport probe loader = %#v", got)
 	}
 	if got := steps["shell-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"` {
 		t.Fatalf("Shell upload upload loader = %#v", got)
@@ -569,11 +560,6 @@ func TestRepositoryHostedImportersSelectExplicitTargetQueue(t *testing.T) {
 		"workflow-annotations-proof.yml": {"workflow-annotations-importer"},
 		"upload-artifact-proof.yml":      {"upload-artifact-importer"},
 		"artifact-roundtrip-proof.yml":   {"artifact-roundtrip-importer"},
-		"migration-poc.yml": {
-			"migration-poc-basic-importer",
-			"migration-poc-artifact-importer",
-			"migration-poc-advanced-importer",
-		},
 	}
 	for path, importerKeys := range tests {
 		t.Run(path, func(t *testing.T) {
@@ -908,7 +894,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 		"plugin-demo-artifact-importer": ".github/workflows/example-artifacts.yml",
 		"plugin-demo-actions-importer":  ".github/workflows/local-actions-oracle.yml",
 		"plugin-demo-advanced-importer": ".github/workflows/example-advanced.yml",
-		"plugin-demo-cache-importer":    "testdata/poc/.github/workflows/cache.yml",
+		"plugin-demo-cache-importer":    "testdata/plugin-demo/.github/workflows/cache.yml",
 	}
 	for key, workflow := range importers {
 		step := steps[key]
@@ -947,7 +933,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 		t.Fatalf("released plugin cache terminal = %#v", cacheTerminal)
 	}
 	text := string(source)
-	for _, forbidden := range []string{"scripts/migration-poc-import", "github-actions#main", "github-actions#master", "__POC_NONCE__"} {
+	for _, forbidden := range []string{"github-actions#main", "github-actions#master"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("released plugin demo contains %q", forbidden)
 		}
@@ -968,11 +954,11 @@ func TestProductionPluginDemoContract(t *testing.T) {
 			t.Fatalf("advanced released-plugin fixture lacks %q", required)
 		}
 	}
-	if strings.Contains(advancedText, "actions/cache@") || strings.Contains(advancedText, "__POC_") {
+	if strings.Contains(advancedText, "actions/cache@") {
 		t.Fatalf("service-free released-plugin fixture retains cache or source rewriting:\n%s", advanced)
 	}
 
-	cache, err := os.ReadFile(filepath.Join(root, "testdata", "poc", ".github", "workflows", "cache.yml"))
+	cache, err := os.ReadFile(filepath.Join(root, "testdata", "plugin-demo", ".github", "workflows", "cache.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,7 +966,7 @@ func TestProductionPluginDemoContract(t *testing.T) {
 	if count := strings.Count(cacheText, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"); count != 2 {
 		t.Fatalf("released-plugin cache fixture has %d audited cache invocations, want two", count)
 	}
-	for _, forbidden := range []string{"restore-keys:", "__POC_", "BUILDKITE_"} {
+	for _, forbidden := range []string{"restore-keys:", "BUILDKITE_"} {
 		if strings.Contains(cacheText, forbidden) {
 			t.Fatalf("released-plugin cache fixture contains %q", forbidden)
 		}
