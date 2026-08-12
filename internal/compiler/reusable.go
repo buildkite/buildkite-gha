@@ -124,6 +124,7 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	if depth >= maxReusableWorkflowDepth {
+		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasReusableCall(parsed)
 		return
 	}
 	for _, job := range parsed.Jobs {

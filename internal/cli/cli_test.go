@@ -939,6 +939,40 @@ jobs:
 		}
 	})
 
+	depthBoundaryWorkflow := filepath.Join(workflowDirectory, "depth-boundary-with-graph-failure.yml")
+	if err := os.WriteFile(depthBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-invalid-reusable:
+    uses: ./.github/workflows/not-callable-order.yml
+  z-deep:
+    uses: ./.github/workflows/depth-1.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, next := range []string{"depth-2.yml", "depth-3.yml", "depth-4.yml", "runtime-matrix.yml"} {
+		name := fmt.Sprintf("depth-%d.yml", i+1)
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+jobs:
+  delegated:
+    uses: ./.github/workflows/%s
+`, next)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("depth-limited reusable discovery fails closed before event metadata", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", depthBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("depth-limited runtime matrix discovery made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-invalid-reusable: failed") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
 	malformedBoundaryWorkflow := filepath.Join(workflowDirectory, "malformed-boundary-with-graph-failure.yml")
 	if err := os.WriteFile(malformedBoundaryWorkflow, []byte(`on: push
 jobs:
