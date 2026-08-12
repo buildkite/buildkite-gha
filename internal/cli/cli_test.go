@@ -132,6 +132,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	configuration, err := parsePluginConfiguration(`{
   "workflow": ".github/workflows/ci.yml",
   "version": "0.8.0",
+  "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
   "runners": [
     {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `"},

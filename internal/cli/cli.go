@@ -213,7 +213,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "runners", "version", "minimum-release-age":
+		case "workflow", "runners", "version", "source-ref", "minimum-release-age":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}

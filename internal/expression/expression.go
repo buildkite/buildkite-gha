@@ -1087,6 +1087,12 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 	return nil, fmt.Errorf("condition references unavailable value %s.%s", root, strings.Join(path, "."))
 }
 
+// The condition* helpers are the strict evaluation family used by runtime
+// conditions: mixed-type equality is an error rather than a coercion, so
+// unsupported comparisons fail closed instead of silently converting. The
+// actionInputDefault* family implements GitHub's loose coercion for action
+// input defaults; the two families are deliberately separate and must not
+// be unified.
 func conditionTruthy(value any) bool {
 	switch value := value.(type) {
 	case nil:
@@ -1130,6 +1136,10 @@ func conditionEqual(left, right any) (bool, error) {
 	return false, fmt.Errorf("mixed-type condition equality is unsupported")
 }
 
+// conditionNumber converts native numeric representations to a rational.
+// It is shared infrastructure for both the strict condition family and the
+// loose actionInputDefault family and does not by itself imply coercion:
+// callers decide whether non-numeric values become numbers.
 func conditionNumber(value any) (*big.Rat, bool) {
 	var source string
 	switch value := value.(type) {
@@ -1533,6 +1543,11 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	}
 }
 
+// The actionInputDefault* helpers are the loose coercion family that mirrors
+// GitHub's expression semantics for action input defaults: nil and empty
+// strings coerce to zero, booleans coerce to numbers, and same-typed
+// aggregates compare by identity. Runtime conditions deliberately use the
+// strict condition* family instead; keep the two separate.
 func actionInputDefaultTruthy(value any) bool {
 	switch value := value.(type) {
 	case nil:

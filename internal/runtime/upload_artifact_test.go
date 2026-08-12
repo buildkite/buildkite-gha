@@ -531,21 +531,30 @@ func TestUploadArtifactRejectsSameSizeFileReplacement(t *testing.T) {
 	}
 }
 
-func TestUploadArtifactRejectsSymlinkReplacementToSelectedInode(t *testing.T) {
-	workspace := t.TempDir()
-	writeFixtureFile(t, workspace, "payload", "selected")
-	files, err := collectUploadFiles(context.Background(), workspace, []string{"payload"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(workspace, "payload"), filepath.Join(workspace, "moved")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("moved", filepath.Join(workspace, "payload")); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := writeUploadZIP(context.Background(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil {
-		t.Fatal("symlink replacement to the selected inode was followed")
+func TestUploadArtifactRejectsSymlinkComponentReplacementToSelectedInode(t *testing.T) {
+	for _, test := range []struct {
+		name, path, link, target string
+	}{
+		{name: "file", path: "payload", link: "payload", target: "moved"},
+		{name: "directory", path: "selected/payload", link: "selected", target: "moved"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, test.path, "selected")
+			files, err := collectUploadFiles(context.Background(), workspace, []string{test.path}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(workspace, test.link), filepath.Join(workspace, test.target)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(test.target, filepath.Join(workspace, test.link)); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := writeUploadZIP(context.Background(), filepath.Join(t.TempDir(), "payload.zip"), workspace, files, 0); err == nil || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("symlink replacement error = %v", err)
+			}
+		})
 	}
 }
 
