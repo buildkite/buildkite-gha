@@ -51,7 +51,7 @@ var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runtime-queue hosted] <workflow>\n",
-	"run-job":  "Usage: buildkite-gha run-job --plan <path> [--result <path>] [--hosted-tool-cache]\n",
+	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {
@@ -196,19 +196,36 @@ func runJob(args []string, stdout, stderr io.Writer, version string, agent trans
 }
 
 func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	planPath, resultPath, hostedToolCache, err := runJobArgs(args)
+	options, err := runJobArgs(args)
 	if err != nil {
 		return usageError(stderr, "run-job: %v", err)
 	}
-	source, err := os.ReadFile(planPath)
+	if options.planProducer != "" {
+		planRoot, mkdirErr := os.MkdirTemp("", "buildkite-gha-plan-")
+		if mkdirErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create plan directory: %v\n", mkdirErr)
+			return 1
+		}
+		defer func() { _ = os.RemoveAll(planRoot) }()
+		if err := agent.DownloadArtifact(ctx, options.planPath, planRoot, options.planProducer); err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: download plan: %v\n", err)
+			return 1
+		}
+		options.planPath = filepath.Join(planRoot, filepath.FromSlash(options.planPath))
+	}
+	source, err := os.ReadFile(options.planPath)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
 	planDigest := transport.Digest(source)
-	if expected := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST"); expected != "" {
-		if planDigest != expected {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", planDigest, expected)
+	expectedPlanDigest := options.planDigest
+	if expectedPlanDigest == "" {
+		expectedPlanDigest = os.Getenv("BUILDKITE_GHA_PLAN_DIGEST")
+	}
+	if expectedPlanDigest != "" {
+		if planDigest != expectedPlanDigest {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan digest %q does not match expected digest %q\n", planDigest, expectedPlanDigest)
 			return 1
 		}
 	}
@@ -225,7 +242,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
-	producer, publish, err := resultProducer(job, planDigest)
+	producer, publish, err := resultProducer(job, planDigest, expectedPlanDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
@@ -299,7 +316,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	runnerToolCache := ""
-	if hostedToolCache {
+	if options.hostedToolCache {
 		runnerToolCache = buildkitepipeline.HostedToolCachePath
 	}
 	runner := gharuntime.Runner{
@@ -356,8 +373,8 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if result.Conclusion == "" {
 		result.Conclusion = terminalErrorConclusion(ctx)
 	}
-	if resultPath != "" && result.Conclusion != "" {
-		if err := writeJobResult(resultPath, result); err != nil {
+	if options.resultPath != "" && result.Conclusion != "" {
+		if err := writeJobResult(options.resultPath, result); err != nil {
 			runErr = errors.Join(runErr, err)
 			result.Conclusion = terminalErrorConclusion(ctx)
 		}
@@ -810,14 +827,13 @@ func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
 	return required, nil
 }
 
-func resultProducer(job plan.Job, planDigest string) (transport.Producer, bool, error) {
+func resultProducer(job plan.Job, planDigest, expectedDigest string) (transport.Producer, bool, error) {
 	if os.Getenv("BUILDKITE") == "" {
 		if len(job.NeedSources) != 0 {
 			return transport.Producer{}, false, fmt.Errorf("plans with prerequisites require Buildkite result identity")
 		}
 		return transport.Producer{}, false, nil
 	}
-	expectedDigest := os.Getenv("BUILDKITE_GHA_PLAN_DIGEST")
 	if expectedDigest == "" {
 		return transport.Producer{}, false, fmt.Errorf("result publication in Buildkite requires BUILDKITE_GHA_PLAN_DIGEST")
 	}
@@ -864,39 +880,64 @@ func publishTerminalResult(agent transport.Agent, root string, job plan.Job, pla
 	return gharuntime.PublishJobResult(ctx, agent, root, workflow, job.Target.StepKey, planDigest, producer, result)
 }
 
-func runJobArgs(args []string) (planPath, resultPath string, hostedToolCache bool, err error) {
+type runJobOptions struct {
+	planPath        string
+	planDigest      string
+	planProducer    string
+	resultPath      string
+	hostedToolCache bool
+}
+
+func runJobArgs(args []string) (runJobOptions, error) {
+	var options runJobOptions
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--hosted-tool-cache":
 			if seen[args[i]] {
-				return "", "", false, fmt.Errorf("%s may only be specified once", args[i])
+				return runJobOptions{}, fmt.Errorf("%s may only be specified once", args[i])
 			}
 			seen[args[i]] = true
-			hostedToolCache = true
-		case "--plan", "--result":
+			options.hostedToolCache = true
+		case "--plan", "--plan-digest", "--plan-producer", "--result":
 			option := args[i]
 			if seen[option] {
-				return "", "", false, fmt.Errorf("%s may only be specified once", option)
+				return runJobOptions{}, fmt.Errorf("%s may only be specified once", option)
 			}
 			seen[option] = true
 			i++
 			if i == len(args) {
-				return "", "", false, fmt.Errorf("%s requires a path", option)
+				return runJobOptions{}, fmt.Errorf("%s requires a value", option)
 			}
-			if option == "--plan" {
-				planPath = args[i]
-			} else {
-				resultPath = args[i]
+			switch option {
+			case "--plan":
+				options.planPath = args[i]
+			case "--plan-digest":
+				options.planDigest = args[i]
+			case "--plan-producer":
+				options.planProducer = args[i]
+			case "--result":
+				options.resultPath = args[i]
 			}
 		default:
-			return "", "", false, fmt.Errorf("unknown option %q", args[i])
+			return runJobOptions{}, fmt.Errorf("unknown option %q", args[i])
 		}
 	}
-	if planPath == "" {
-		return "", "", false, fmt.Errorf("--plan is required")
+	if options.planPath != "" {
+		if options.planDigest != "" || options.planProducer != "" {
+			return runJobOptions{}, fmt.Errorf("--plan cannot be combined with --plan-digest or --plan-producer")
+		}
+		return options, nil
 	}
-	return planPath, resultPath, hostedToolCache, nil
+	if options.planDigest == "" || options.planProducer == "" {
+		return runJobOptions{}, fmt.Errorf("--plan or both --plan-digest and --plan-producer are required")
+	}
+	planPath, err := buildkitepipeline.PlanPath(options.planDigest)
+	if err != nil {
+		return runJobOptions{}, err
+	}
+	options.planPath = planPath
+	return options, nil
 }
 
 func verifyBuildkiteTarget(job plan.Job) error {

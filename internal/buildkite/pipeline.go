@@ -122,10 +122,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Start workflow concurrency", gateOpenKey, pipeline.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
 	}
 	for _, job := range jobs {
-		planPath, err := PlanPath(job.PlanDigest)
-		if err != nil {
-			return nil, fmt.Errorf("job %q: %w", job.Key, err)
-		}
 		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
 		if pipeline.RuntimeImage != "" {
@@ -136,14 +132,12 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
 			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
 			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
-			"buildkite-agent artifact download " + shellQuote(planPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
-			"plan=\"$bootstrap_dir/" + planPath + `"`,
 			`actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"`,
 			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
-		runJob := `"$distribution" run-job --plan "$plan"`
+		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(pipeline.CompilerStep)
 		if pipeline.RuntimeImage != "" {
 			runJob += " --hosted-tool-cache"
 		}
@@ -161,11 +155,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
 			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
 		}
-		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
-		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
 		if job.RequiresMise {
+			_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
 		}
 		if job.Concurrency != 0 {

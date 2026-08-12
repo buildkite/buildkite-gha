@@ -77,22 +77,25 @@ func TestEmitGolden(t *testing.T) {
 				t.Fatalf("step %q logical dependency is strict: %#v", step.Key, dependency)
 			}
 		}
-		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`) ||
+		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
+			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
+			!strings.Contains(step.Command, `artifact download '.buildkite-gha/distributions/`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `test "$actual_distribution_digest" = `+shellQuote(pipeline.DistributionDigest)) ||
-			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
-			t.Fatalf("step %q does not bootstrap and verify its exact distribution:\n%s", step.Key, step.Command)
+			!strings.Contains(step.Command, `run-job --plan-digest `) ||
+			!strings.Contains(step.Command, `--plan-producer 'gha-importer'`) {
+			t.Fatalf("step %q does not verify its distribution before delegated plan acquisition:\n%s", step.Key, step.Command)
 		}
 	}
 	if !strings.Contains(string(first), `artifact download '.buildkite-gha/distributions/`) ||
-		!strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		strings.Contains(string(first), `.buildkite-gha/bootstrap/`) ||
 		strings.Contains(string(first), "go run") ||
 		strings.Contains(string(first), "cache:") ||
 		strings.Contains(string(first), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("generated jobs are not self-contained:\n%s", first)
 	}
-	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
-		t.Fatalf("generated artifact downloads are not constrained to the exact importer:\n%s", first)
+	if strings.Count(string(first), `--step 'gha-importer'`) != 3 {
+		t.Fatalf("generated distribution downloads are not constrained to the exact importer:\n%s", first)
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
@@ -287,7 +290,7 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 	if len(document.Steps) != 1 || document.Steps[0].Image != image {
 		t.Fatalf("runtime image = %#v, want %q", document.Steps, image)
 	}
-	if !strings.Contains(document.Steps[0].Command, "run-job --plan \"$plan\" --hosted-tool-cache") {
+	if !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
 		t.Fatalf("run-job command does not select hosted tool cache: %q", document.Steps[0].Command)
 	}
 }
