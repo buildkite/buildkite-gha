@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -94,6 +95,18 @@ func envPointer(name string) *string {
 		return &v
 	}
 	return nil
+}
+
+func testFileLock(file *os.File, lock bool) error {
+	operation := syscall.LOCK_UN
+	if lock {
+		operation = syscall.LOCK_EX
+	}
+	return syscall.Flock(int(file.Fd()), operation)
+}
+
+func testExec(path string, args, env []string) error {
+	return syscall.Exec(path, args, env)
 }
 
 func TestJobContainerFakeDockerProcess(t *testing.T) {
