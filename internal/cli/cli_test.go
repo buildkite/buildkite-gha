@@ -2440,7 +2440,7 @@ jobs:
 		}
 	})
 
-	t.Run("upload annotates before artifact or pipeline calls", func(t *testing.T) {
+	t.Run("upload annotates and generates a failing step", func(t *testing.T) {
 		requireImporterHost(t)
 		t.Setenv("BUILDKITE", "true")
 		t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
@@ -2448,11 +2448,25 @@ jobs:
 		runner := &cliCaptureRunner{}
 		var stdout, stderr bytes.Buffer
 		args := []string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}
-		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 		}
-		if len(runner.commands) != 1 || runner.commands[0].args[0] != "annotate" || runner.commands[0].args[8] != "error" {
-			t.Fatalf("unsupported condition commands = %#v, want one error annotation", runner.commands)
+		if len(runner.commands) < 2 || runner.commands[0].args[0] != "annotate" || runner.commands[0].args[8] != "error" {
+			t.Fatalf("unsupported condition commands = %#v, want an error annotation before pipeline upload", runner.commands)
+		}
+		var pipeline struct {
+			Steps []struct {
+				Skip  string `yaml:"skip"`
+				Steps []struct {
+					Command string `yaml:"command"`
+				} `yaml:"steps"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+			t.Fatal(err)
+		}
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 1 || !strings.Contains(pipeline.Steps[0].Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Steps[0].Command, " && exit 1") {
+			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
 }
@@ -3447,27 +3461,62 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 	}
 }
 
-func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
+func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T) {
 	requireImporterHost(t)
-	workflowPath := filepath.Join(t.TempDir(), "invalid-push.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.missing_runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	directory := t.TempDir()
+	workflowPath := filepath.Join(directory, "invalid-push.yml")
+	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n"
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	const sentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
+	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{"runner": sentinel})
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "fatal-applicable-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "failing-applicable-importer")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "missing_runner") {
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	if len(runner.uploaded) != 0 {
-		t.Fatalf("applicable compile failure uploaded artifacts: %#v", runner.uploaded)
+	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+		t.Fatalf("event-derived runner leaked to output: stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
-	for _, command := range runner.commands {
-		if len(command.args) >= 2 && command.args[0] == "pipeline" && command.args[1] == "upload" {
-			t.Fatalf("applicable compile failure uploaded a pipeline: %#v", command)
+	var pipeline struct {
+		Steps []struct {
+			Skip  string `yaml:"skip"`
+			Steps []struct {
+				Label    string `yaml:"label"`
+				Command  string `yaml:"command"`
+				Checkout struct {
+					Skip bool `yaml:"skip"`
+				} `yaml:"checkout"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 2 {
+		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	wantLabels := []string{
+		"Compiler error: alpha [E_EXPRESSION_INVALID]",
+		"Compiler error: beta [E_EXPRESSION_INVALID]",
+	}
+	const safeReason = "resolved runner target is not admitted by policy: runner label is not mapped by policy"
+	for i, step := range pipeline.Steps[0].Steps {
+		if step.Label != wantLabels[i] || step.Command != `printf '%s\n' '`+safeReason+`' && exit 1` || !step.Checkout.Skip {
+			t.Fatalf("compiler failure step %d = %#v", i, step)
 		}
+		command := exec.Command("sh", "-c", step.Command)
+		printed, err := command.CombinedOutput()
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != safeReason+"\n" {
+			t.Fatalf("compiler failure command %d output/error = %q / %v", i, printed, err)
+		}
+	}
+	if strings.Contains(string(pipelineCommand.stdin), sentinel) {
+		t.Fatalf("event-derived runner leaked to aggregate pipeline: %s", pipelineCommand.stdin)
 	}
 }
 

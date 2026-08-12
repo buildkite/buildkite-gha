@@ -1491,11 +1491,11 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedProfile, input.Source, effectiveEvent.Source, true, &validationOptions)
-		if !ok {
-			return 1
+		validation, validationErr := compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
+		if validationErr != nil {
+			processingReports[i].Result = "incompatible"
 		}
-		processingReports[i] = processingReport
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
@@ -1511,8 +1511,8 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	}
 	importerDistribution := runtimeDistribution{contents: executableContents, digest: distributionDigest}
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
-	for _, input := range workflows {
-		if !input.Applicable {
+	for i, input := range workflows {
+		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
@@ -1585,6 +1585,37 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				GroupKey:   "gha-workflow-" + input.Identity,
 				CheckName:  "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")",
 				SkipReason: input.SkipReason,
+			})
+			continue
+		}
+		if processingReportHasErrors(processingReports[i]) {
+			label := input.Name
+			if label == "" {
+				label = input.CanonicalPath
+			}
+			failures := make([]buildkitepipeline.Failure, 0, len(processingReports[i].Diagnostics))
+			for _, diagnostic := range processingReports[i].Diagnostics {
+				if diagnostic.Level != "error" {
+					continue
+				}
+				failureLabel := "Compiler error"
+				if diagnostic.Job != "" {
+					failureLabel += ": " + diagnostic.Job
+				}
+				if diagnostic.Step != 0 {
+					failureLabel += fmt.Sprintf(", step %d", diagnostic.Step)
+				}
+				if diagnostic.Code != "" {
+					failureLabel += " [" + diagnostic.Code + "]"
+				}
+				failures = append(failures, buildkitepipeline.Failure{Label: failureLabel, Message: diagnostic.Message})
+			}
+			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
+				GroupLabel: label,
+				GroupKey:   "gha-workflow-" + input.Identity,
+				CheckName:  "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")",
+				Condition:  input.TriggerCondition,
+				Failures:   failures,
 			})
 			continue
 		}
@@ -1674,6 +1705,15 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
+}
+
+func processingReportHasErrors(report compatibility.ProcessingReport) bool {
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			return true
+		}
+	}
+	return false
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {

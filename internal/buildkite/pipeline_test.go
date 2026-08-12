@@ -265,6 +265,54 @@ func TestEmitAggregateSkippedWorkflowGroup(t *testing.T) {
 	}
 }
 
+func TestEmitAggregateWorkflowFailures(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep: "importer",
+		Workflows: []Workflow{{
+			GroupLabel: "CI",
+			GroupKey:   "gha-workflow-1111111111111111",
+			CheckName:  "Buildkite / CI (push)",
+			Condition:  "true",
+			Failures: []Failure{
+				{Label: "Compiler error: alpha [E_EXPRESSION_INVALID]", Message: "runner isn't admitted"},
+				{Label: "Compiler error: beta [E_EXPRESSION_INVALID]", Message: "matrix could not be expanded"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Skip  string `yaml:"skip"`
+			Steps []struct {
+				Label    string `yaml:"label"`
+				Command  string `yaml:"command"`
+				Checkout struct {
+					Skip bool `yaml:"skip"`
+				} `yaml:"checkout"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || document.Steps[0].Skip != "" || len(document.Steps[0].Steps) != 2 {
+		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
+	}
+	want := []struct {
+		label, command string
+	}{
+		{label: "Compiler error: alpha [E_EXPRESSION_INVALID]", command: `printf '%s\n' 'runner isn'"'"'t admitted' && exit 1`},
+		{label: "Compiler error: beta [E_EXPRESSION_INVALID]", command: `printf '%s\n' 'matrix could not be expanded' && exit 1`},
+	}
+	for i, step := range document.Steps[0].Steps {
+		if step.Label != want[i].label || step.Command != want[i].command || !step.Checkout.Skip {
+			t.Fatalf("failure step %d = %#v, want %#v", i, step, want[i])
+		}
+	}
+}
+
 func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
