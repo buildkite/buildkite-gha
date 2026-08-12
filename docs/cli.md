@@ -136,7 +136,7 @@ Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file ins
 
 All selected directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
 
-Safe event-dependent validation errors produce one failing child step per redacted diagnostic instead of aborting or skipping the workflow group. Parse, trigger translation, event-input, action-resolution, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
+Every applicable workflow is compiled. A workflow with safe compilation errors produces one failing child step instead of aborting or skipping its group. The step prints all redacted diagnostics, then exits with status 1. Compilation continues for later workflows, and successfully compiled workflows retain their normal jobs. Parse, trigger translation, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
 
 ### Select the effective event
 
@@ -154,9 +154,9 @@ The selected snapshot establishes one effective GitHub event for applicability, 
 
 Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as skipped groups with an ignored placeholder and no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with an ignored-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
-Unsupported trigger events, path filters, inexact filters, and malformed event data remain fatal to the importer. Safe validation errors in an applicable workflow become failing generated child steps. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+Unsupported trigger events, path filters, inexact filters, and malformed event data remain fatal to the importer. Safe compilation errors in an applicable workflow become one failing generated child step for that workflow. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
 
-After applicable workflows either pass or produce safe validation diagnostics, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets

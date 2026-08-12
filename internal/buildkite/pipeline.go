@@ -59,7 +59,7 @@ type Workflow struct {
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
-	Failures        []Failure
+	Failure         *Failure
 	Jobs            []Job
 }
 
@@ -142,7 +142,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
 	usedDigests := make(map[string]string)
 	for i, workflow := range workflows {
-		if len(workflow.Jobs) == 0 && len(workflow.Failures) == 0 && (!aggregate || workflow.SkipReason == "") {
+		if len(workflow.Jobs) == 0 && workflow.Failure == nil && (!aggregate || workflow.SkipReason == "") {
 			return nil, fmt.Errorf("workflow %d requires at least one generated job", i+1)
 		}
 		if aggregate {
@@ -161,7 +161,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Condition != "" && workflow.SkipReason != "" {
 				return nil, fmt.Errorf("workflow %q cannot have both a trigger condition and skip reason", workflow.GroupKey)
 			}
-			if workflow.SkipReason != "" && len(workflow.Failures) != 0 {
+			if workflow.SkipReason != "" && workflow.Failure != nil {
 				return nil, fmt.Errorf("workflow %q cannot have both failures and skip reason", workflow.GroupKey)
 			}
 			if utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
@@ -172,9 +172,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			}
 			usedKeys[workflow.GroupKey] = "workflow group"
 		}
-		for j, failure := range workflow.Failures {
-			if failure.Label == "" || failure.Message == "" {
-				return nil, fmt.Errorf("workflow %d failure %d requires a label and message", i+1, j+1)
+		if workflow.Failure != nil {
+			if workflow.Failure.Label == "" || workflow.Failure.Message == "" {
+				return nil, fmt.Errorf("workflow %d failure requires a label and message", i+1)
 			}
 		}
 		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
@@ -262,7 +262,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		return nil
 	}
-	for _, failure := range workflow.Failures {
+	if failure := workflow.Failure; failure != nil {
 		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(failure.Label))
 		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
