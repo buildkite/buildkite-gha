@@ -1955,7 +1955,7 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 		if compileErr != nil {
 			t.Fatalf("compile %s: %v", test.name, compileErr)
 		}
-		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV7 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV8 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
 			t.Fatalf("compiled %s boundary = %#v", test.name, bundle.Plans)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
