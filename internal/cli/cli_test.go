@@ -2153,7 +2153,7 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 }
 
 func TestMarkdownCodeContainsWorkflowBackticks(t *testing.T) {
-	if got, want := markdownCode("action` **not bold** ``tail"), "``` action` **not bold** ``tail ```"; got != want {
+	if got, want := markdownCode("action` **not bold** & <tag> ``tail"), "``` action` **not bold** & <tag> ``tail ```"; got != want {
 		t.Fatalf("markdownCode() = %q, want %q", got, want)
 	}
 }
