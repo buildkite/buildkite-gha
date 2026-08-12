@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
@@ -88,35 +89,28 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	out.WriteString(markdownText(report.Workflow))
 	out.WriteString("\n")
 	for _, diagnostic := range diagnostics {
-		out.WriteString("\n- **")
-		out.WriteString(strings.ToUpper(diagnostic.Level))
-		out.WriteString(" ")
-		out.WriteString(markdownText(diagnostic.Code))
-		out.WriteString("**")
+		heading, message := annotationDiagnosticPresentation(diagnostic)
+		out.WriteString("\n#### ")
+		out.WriteString(heading)
+		out.WriteString("\n\n")
+		out.WriteString(markdownCode(diagnostic.Code))
 		if diagnostic.Location != nil {
 			out.WriteString(" · ")
-			out.WriteString(markdownText(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
-		}
-		out.WriteString("\n  ")
-		out.WriteString(markdownText(annotationDiagnosticMessage(diagnostic)))
-		if diagnostic.Stage != "" {
-			out.WriteString(" · stage: ")
-			out.WriteString(markdownText(diagnostic.Stage))
+			out.WriteString(markdownCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
 		}
 		if diagnostic.Job != "" {
-			out.WriteString(" · job: ")
-			out.WriteString(markdownText(diagnostic.Job))
-		}
-		if diagnostic.Instance != "" {
-			out.WriteString(" · instance: ")
-			out.WriteString(markdownText(diagnostic.Instance))
-		}
-		if diagnostic.Action != "" {
-			out.WriteString(" · action: ")
-			out.WriteString(markdownText(diagnostic.Action))
+			out.WriteString(" · Job ")
+			out.WriteString(markdownCode(diagnostic.Job))
 		}
 		if diagnostic.Step != 0 {
-			_, _ = fmt.Fprintf(&out, " · step: %d", diagnostic.Step)
+			_, _ = fmt.Fprintf(&out, " · Step %d", diagnostic.Step)
+		}
+		out.WriteString("\n\n")
+		for i, sentence := range annotationSentences(message) {
+			if i != 0 {
+				out.WriteString("  \n")
+			}
+			out.WriteString(markdownText(sentence))
 		}
 		out.WriteString("\n")
 	}
@@ -141,6 +135,63 @@ func annotationDiagnosticMessage(diagnostic compatibility.Diagnostic) string {
 	}
 	prefix := fmt.Sprintf("%s:%d:%d: ", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
 	return strings.TrimPrefix(diagnostic.Message, prefix)
+}
+
+func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (heading, message string) {
+	message = annotationDiagnosticMessage(diagnostic)
+	if diagnostic.Action != "" {
+		for _, presentation := range []struct {
+			prefix  string
+			heading string
+		}{
+			{fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action), "Unsupported action"},
+			{fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action), "Action could not be resolved"},
+		} {
+			if strings.HasPrefix(message, presentation.prefix) {
+				return presentation.heading + ": **" + markdownText(diagnostic.Action) + "**", upperFirst(strings.TrimPrefix(message, presentation.prefix))
+			}
+		}
+		return "Action compatibility: **" + markdownText(diagnostic.Action) + "**", message
+	}
+	switch {
+	case strings.HasPrefix(message, "Runner label"):
+		heading = "Unsupported runner"
+	case strings.Contains(message, "job or service containers"):
+		heading = "Unsupported hosted container"
+	case strings.Contains(message, "needs GITHUB_TOKEN"):
+		heading = "Unsupported GITHUB_TOKEN configuration"
+	case diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN":
+		heading = "Third-party action runtime compatibility"
+	case diagnostic.Stage == string(compiler.StageAdmission):
+		heading = "Hosted profile incompatibility"
+	case diagnostic.Level == "warning":
+		heading = "Compatibility warning"
+	default:
+		heading = "Workflow incompatibility"
+	}
+	return heading, message
+}
+
+func annotationSentences(message string) []string {
+	parts := strings.Split(strings.Join(strings.Fields(message), " "), ". ")
+	for i := range parts[:len(parts)-1] {
+		parts[i] += "."
+	}
+	return parts
+}
+
+func upperFirst(value string) string {
+	if value == "" {
+		return value
+	}
+	first, size := utf8.DecodeRuneInString(value)
+	return string(unicode.ToUpper(first)) + value[size:]
+}
+
+func markdownCode(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "`", "\\`").Replace(value)
+	return "`" + value + "`"
 }
 
 func markdownText(value string) string {
