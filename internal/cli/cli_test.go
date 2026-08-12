@@ -2100,13 +2100,13 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
 	report := compatibility.NewProcessingReport("<workflow>|name", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-		Level: "error", Code: "E_TEST", Message: "line one\n<script>*unsafe*</script> " + strings.Repeat("界", processingAnnotationBodyLimit),
+		Level: "error", Code: "E_TEST", Message: "line one\n<script>*unsafe*</script> runs-on target \"windows-latest\" for job's step " + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
 	style, body := processingAnnotation(report)
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
-	for _, want := range []string{"&lt;workflow&gt;\\|name", "&lt;script&gt;\\*unsafe\\*&lt;/script&gt;", "Additional diagnostics omitted"} {
+	for _, want := range []string{"\\<workflow\\>\\|name", "\\<script\\>\\*unsafe\\*\\</script\\>", "Additional diagnostics omitted", "runs-on target \"windows-latest\" for job's step"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation lacks %q", want)
 		}

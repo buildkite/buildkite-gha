@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"os"
 	"strings"
@@ -137,10 +136,9 @@ func truncateProcessingAnnotation(body string) string {
 
 func markdownText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
-	value = html.EscapeString(value)
 	replacer := strings.NewReplacer(
 		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",
+		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|", "&", "\\&",
 	)
 	return replacer.Replace(value)
 }
