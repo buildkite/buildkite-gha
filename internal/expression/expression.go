@@ -44,6 +44,7 @@ type Context struct {
 	Vars         map[string]string
 	Env          map[string]string
 	GitHub       map[string]any
+	Runner       map[string]string
 	Services     map[string]map[string]string
 	JobStatus    string
 }
@@ -67,6 +68,7 @@ type ConditionContext struct {
 	Vars         map[string]string
 	Matrix       map[string]any
 	GitHub       map[string]any
+	Runner       map[string]string
 	Services     map[string]map[string]string
 	Failure      bool
 	Cancelled    bool
@@ -99,6 +101,7 @@ const (
 	runtimeReferenceStepStatus
 	runtimeReferenceNeedOutput
 	runtimeReferenceNeedResult
+	runtimeReferenceRunner
 )
 
 // CompileContext contains the non-secret values available while constructing
@@ -848,6 +851,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 		reference += "." + strings.Join(path, ".")
 	}
 	switch strings.ToLower(root) {
+	case "runner":
+		if len(path) == 1 && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")) {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected runner.os or runner.arch", reference)
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
@@ -1025,6 +1033,10 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 
 func resolveConditionReference(root string, path []string, context ConditionContext) (any, error) {
 	switch {
+	case len(path) == 1 && strings.EqualFold(root, "runner"):
+		if value, ok := findStringValue(context.Runner, path[0]); ok {
+			return value, nil
+		}
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return resolveServicePort(context.Services, path[1], path[3], "condition")
 	case strings.EqualFold(root, "github"):
@@ -1596,6 +1608,11 @@ func actionInputDefaultNumber(value any) (*big.Rat, bool) {
 
 func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
 	switch classifyRuntimeReference(root, path) {
+	case runtimeReferenceRunner:
+		if value, ok := findStringValue(context.Runner, path[0]); ok {
+			return value, nil
+		}
+		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
 	case runtimeReferenceGitHub:
@@ -1658,6 +1675,8 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 
 func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 	switch {
+	case len(path) == 1 && strings.EqualFold(root, "runner") && (strings.EqualFold(path[0], "os") || strings.EqualFold(path[0], "arch")):
+		return runtimeReferenceRunner
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
 	case len(path) >= 1 && strings.EqualFold(root, "github"):
@@ -1718,12 +1737,17 @@ func lookupRuntimeValue(value any, path []string) (any, bool) {
 }
 
 func findString(values map[string]string, name string) string {
+	value, _ := findStringValue(values, name)
+	return value
+}
+
+func findStringValue(values map[string]string, name string) (string, bool) {
 	for candidate, value := range values {
 		if strings.EqualFold(candidate, name) {
-			return value
+			return value, true
 		}
 	}
-	return ""
+	return "", false
 }
 
 func findOutputs(values map[string]map[string]string, name string) (map[string]string, bool) {

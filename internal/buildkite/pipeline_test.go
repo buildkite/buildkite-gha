@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -256,11 +257,56 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 		t.Fatalf("generated action job still transports mise:\n%s", command)
 	}
 	step := document.Steps[0]
-	if step.Cache.Name != runtimeCacheName || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != runtimeCachePath {
+	if step.Cache.Name != runtimeCacheName+"-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != platformMiseCachePath("linux/amd64") {
 		t.Fatalf("mise cache volume = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir() {
 		t.Fatalf("mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	}
+}
+
+func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep: "importer",
+		Jobs: []Job{{
+			Key:                "macos",
+			Label:              "macOS",
+			Queue:              "macos",
+			Platform:           "darwin/arm64",
+			DistributionDigest: testDigest("darwin distribution"),
+			PlanDigest:         testDigest("darwin plan"),
+			RequiresMise:       true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Image   string `yaml:"image"`
+			Command string `yaml:"command"`
+			Cache   struct {
+				Paths []string `yaml:"paths"`
+				Name  string   `yaml:"name"`
+			} `yaml:"cache"`
+			Env map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	step := document.Steps[0]
+	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/cache/bkcache/buildkite-gha/mise/darwin-arm64"}) {
+		t.Fatalf("Darwin runtime placement = %#v", step)
+	}
+	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") {
+		t.Fatalf("Darwin mise data directory = %q", step.Env["BUILDKITE_GHA_MISE_DATA_DIR"])
+	}
+	if !strings.Contains(step.Command, `shasum -a 256 "$distribution"`) || strings.Contains(step.Command, "--hosted-tool-cache") || strings.Contains(step.Command, HostedToolCachePath) {
+		t.Fatalf("Darwin bootstrap is not native and portable:\n%s", step.Command)
 	}
 }
 
@@ -293,8 +339,11 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 }
 
 func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
-	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/"+MinimumMiseVersion {
+	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir() = %q", got)
+	}
+	if got := MiseDataDir("darwin/arm64"); got != "/cache/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
+		t.Fatalf("MiseDataDir(darwin/arm64) = %q", got)
 	}
 }
 
@@ -485,7 +534,7 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if strings.Contains(pluginDemo.command, "BUILDKITE_GHA_CACHE_URL") {
 		t.Fatalf("released plugin demo loader still requires a cache Results URL:\n%s", pluginDemo.command)
 	}
-	if got := steps["plugin-source-smoke-importer"]; got.condition != `build.env("DEMO_SUITE") != "plugin"` {
+	if got := steps["plugin-source-smoke-importer"]; got.condition != `build.env("DEMO_SUITE") != "plugin"` || got.command != "mise exec -- go run ./cmd/buildkite-gha plugin" || got.environment["BUILDKITE_PLUGIN_CONFIGURATION"] != `{"workflow":".github/workflows/example-basic.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}` {
 		t.Fatalf("exact-source plugin smoke = %#v", got)
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
@@ -552,41 +601,24 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 }
 
-func TestRepositoryHostedImportersSelectExplicitTargetQueue(t *testing.T) {
-	tests := map[string][]string{
-		"pipeline.yml":                   {"plugin-source-smoke-importer"},
-		"shell-upload-proof.yml":         {"shell-upload-importer"},
-		"concurrent-steps-proof.yml":     {"concurrent-steps-importer"},
-		"public-actions-proof.yml":       {"public-actions-importer"},
-		"dockerfile-action-proof.yml":    {"dockerfile-action-importer"},
-		"summary-annotation-proof.yml":   {"summary-annotation-importer"},
-		"workflow-annotations-proof.yml": {"workflow-annotations-importer"},
-		"upload-artifact-proof.yml":      {"upload-artifact-importer"},
-		"artifact-roundtrip-proof.yml":   {"artifact-roundtrip-importer"},
-	}
-	for path, importerKeys := range tests {
+func TestRepositoryHostedImportersUseExplicitRunnerProfiles(t *testing.T) {
+	for _, path := range []string{
+		"shell-upload-proof.yml",
+		"concurrent-steps-proof.yml",
+		"public-actions-proof.yml",
+		"dockerfile-action-proof.yml",
+		"summary-annotation-proof.yml",
+		"workflow-annotations-proof.yml",
+		"upload-artifact-proof.yml",
+		"artifact-roundtrip-proof.yml",
+	} {
 		t.Run(path, func(t *testing.T) {
 			source, err := os.ReadFile(filepath.Join("..", "..", ".buildkite", path))
 			if err != nil {
 				t.Fatal(err)
 			}
-			var document struct {
-				Steps []struct {
-					Key string            `yaml:"key"`
-					Env map[string]string `yaml:"env"`
-				} `yaml:"steps"`
-			}
-			if err := yaml.Unmarshal(source, &document); err != nil {
-				t.Fatal(err)
-			}
-			steps := make(map[string]map[string]string, len(document.Steps))
-			for _, step := range document.Steps {
-				steps[step.Key] = step.Env
-			}
-			for _, key := range importerKeys {
-				if got := steps[key]["BUILDKITE_GHA_TARGET_QUEUE"]; got != "hosted" {
-					t.Fatalf("importer %q target queue = %q, want hosted", key, got)
-				}
+			if !bytes.Contains(source, []byte("--runner-queue ubuntu-latest=hosted")) || bytes.Contains(source, []byte("BUILDKITE_GHA_TARGET_QUEUE")) {
+				t.Fatalf("%s does not use the explicit runner profile:\n%s", path, source)
 			}
 		})
 	}
@@ -788,7 +820,6 @@ func TestUploadExamplesScript(t *testing.T) {
 			`github-actions#v0.4.4`,
 			`workflow: ".github/workflows/example-basic.yml"`,
 			`buildkite-gha-source-ref: "` + commit + `"`,
-			`queue: "hosted"`,
 			`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
 		} {
 			if !strings.Contains(pipeline, required) {
@@ -988,7 +1019,7 @@ func TestShellUploadProofUsesPinnedUnprivilegedPath(t *testing.T) {
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`testdata/smoke/.github/workflows/shell.yml`,
 	} {
 		if !strings.Contains(text, required) {
@@ -1083,7 +1114,7 @@ func TestConcurrentStepsProofPreservesSeparateContinuationLoader(t *testing.T) {
 		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
 		`mise exec -- go build -trimpath -buildvcs=false`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`testdata/smoke/.github/workflows/concurrent.yml`,
 	} {
 		if !strings.Contains(text, required) {
@@ -1172,7 +1203,7 @@ func TestPublicActionsProofUsesTrustedManagedActionsPath(t *testing.T) {
 		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
 		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
 		`"$$distribution_root/buildkite-gha" upload`,
-		`--event-path testdata/public-actions/events/public-checkout.json`, `--runtime-queue hosted`,
+		`--event-path testdata/public-actions/events/public-checkout.json`, `--runner-queue ubuntu-latest=hosted`,
 		`testdata/public-actions/.github/workflows/public-actions.yml`,
 	} {
 		if !strings.Contains(text, required) {
@@ -1307,7 +1338,7 @@ func TestDockerfileActionUploadProofContract(t *testing.T) {
 		`BUILDKITE_GHA_NODE20="$$(mise where node@20)/bin/node"`,
 		`BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node"`,
 		`"$$proof_root/buildkite-gha" upload`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`"$$proof_root/.github/workflows/docker-action.yml"`,
 	} {
 		if !strings.Contains(text, fragment) {
@@ -1459,7 +1490,7 @@ func TestSummaryAnnotationProofContract(t *testing.T) {
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`"$$distribution_root/buildkite-gha" upload`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`testdata/smoke/.github/workflows/summary-annotation.yml`,
 	} {
 		if !strings.Contains(text, fragment) {
@@ -1551,7 +1582,7 @@ func TestWorkflowCommandAnnotationProofContract(t *testing.T) {
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`"$$distribution_root/buildkite-gha" upload`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`testdata/smoke/.github/workflows/workflow-command-annotations.yml`,
 	} {
 		if !strings.Contains(text, fragment) {
@@ -1645,7 +1676,7 @@ func TestUploadArtifactProofContract(t *testing.T) {
 		`go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version"`,
 		`"$$distribution_root/buildkite-gha" upload`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`testdata/smoke/.github/workflows/upload-artifact.yml`,
 	} {
 		if !strings.Contains(text, fragment) {
@@ -1752,7 +1783,7 @@ func TestArtifactRoundtripProofContract(t *testing.T) {
 		`! grep -q '__ARTIFACT_ROUNDTRIP_NONCE__' "$$proof_workflow"`,
 		`"$$distribution_root/buildkite-gha" upload`,
 		`--event-path testdata/smoke/events/push.json`,
-		`--runtime-queue hosted`,
+		`--runner-queue ubuntu-latest=hosted`,
 		`"$$proof_workflow"`,
 	} {
 		if !strings.Contains(text, fragment) {

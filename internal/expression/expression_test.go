@@ -61,6 +61,8 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"${{ secrets.TOKEN }}",
 		"${{ vars.RELEASE }}",
 		"${{ env.PATH }}",
+		"${{ runner.os }}",
+		"${{ runner['arch'] }}",
 		"${{ steps.build.outputs.release }}",
 		"${{ steps.build.outcome }}",
 		"${{ steps.build.conclusion }}",
@@ -93,6 +95,24 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
+	runner := map[string]string{"os": "macOS", "arch": "ARM64"}
+	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateCondition("runner.os == 'macOS' && runner.arch == 'ARM64'", ConditionContext{Runner: runner}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.os == 'macOS' && runner.arch || 'X64' }}", Context{Runner: runner}); err != nil || got != "ARM64" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	for _, reference := range []string{"runner.name", "runner.os.extra", "runner"} {
+		if err := validateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
+			t.Errorf("validateRuntimeTemplate(%q) unexpectedly succeeded", reference)
+		}
 	}
 }
 
@@ -362,6 +382,7 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
 		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
+		{name: "runner identity", source: "runner.os == 'Linux' && runner.arch == 'X64'", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {

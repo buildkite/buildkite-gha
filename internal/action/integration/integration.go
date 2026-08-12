@@ -74,6 +74,9 @@ const (
 	MaxUploadArtifactNameBytes = 255
 	MaxUploadArtifactRoots     = 32
 	MaxUploadArtifactPathBytes = 4096
+
+	MaxDownloadArtifactPatternAlternatives = 8
+	MaxDownloadArtifactPatternBytes        = MaxUploadArtifactNameBytes
 )
 
 // Service identifies an Actions runtime service used by a known action.
@@ -244,8 +247,13 @@ func validateDownloadArtifactInputs(commit string, inputs map[string]string, all
 	if hasName && !hasNameExpression && ValidateUploadArtifactName(name) != nil {
 		return fmt.Errorf("required input %q must be an exact literal artifact name", "name")
 	}
-	if hasPattern && (strings.Contains(pattern, "${{") && !allowNameExpression || !strings.Contains(pattern, "${{") && !validDownloadArtifactPattern(pattern)) {
+	if hasPattern && strings.Contains(pattern, "${{") && !allowNameExpression {
 		return fmt.Errorf("input %q must be a bounded literal artifact-name glob", "pattern")
+	}
+	if hasPattern && !strings.Contains(pattern, "${{") {
+		if _, err := DownloadArtifactPatterns(pattern); err != nil {
+			return fmt.Errorf("input %q must be a bounded literal artifact-name glob: %w", "pattern", err)
+		}
 	}
 	if value, ok := inputFold(inputs, "path"); ok {
 		if _, err := NormalizeDownloadArtifactPath(value); err != nil {
@@ -381,8 +389,48 @@ func validateUploadArtifactInputs(commit string, inputs map[string]string, evalu
 	return nil
 }
 
+// DownloadArtifactPatterns expands an optional leading group of literal
+// artifact-name prefixes into independently validated bounded globs.
+func DownloadArtifactPatterns(pattern string) ([]string, error) {
+	if !strings.ContainsAny(pattern, "{}") {
+		if !validDownloadArtifactPattern(pattern) {
+			return nil, fmt.Errorf("invalid artifact-name glob")
+		}
+		return []string{pattern}, nil
+	}
+	if !strings.HasPrefix(pattern, "{") || strings.Count(pattern, "{") != 1 || strings.Count(pattern, "}") != 1 {
+		return nil, fmt.Errorf("alternation must be one leading, non-nested prefix group")
+	}
+	close := strings.IndexByte(pattern, '}')
+	if close < 0 || close == len(pattern)-1 {
+		return nil, fmt.Errorf("alternation must be followed by an artifact-name glob suffix")
+	}
+	alternatives := strings.Split(pattern[1:close], ",")
+	if len(alternatives) < 2 || len(alternatives) > MaxDownloadArtifactPatternAlternatives {
+		return nil, fmt.Errorf("alternation has %d alternatives, require 2 through %d", len(alternatives), MaxDownloadArtifactPatternAlternatives)
+	}
+	suffix := pattern[close+1:]
+	expanded := make([]string, 0, len(alternatives))
+	seen := make(map[string]struct{}, len(alternatives))
+	for _, alternative := range alternatives {
+		if alternative == "" || strings.ContainsAny(alternative, "*?[]{}") {
+			return nil, fmt.Errorf("alternation alternatives must be non-empty literal prefixes")
+		}
+		candidate := alternative + suffix
+		if !validDownloadArtifactPattern(candidate) {
+			return nil, fmt.Errorf("expanded alternative is not a valid artifact-name glob")
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		expanded = append(expanded, candidate)
+	}
+	return expanded, nil
+}
+
 func validDownloadArtifactPattern(pattern string) bool {
-	if pattern == "" || len(pattern) > MaxUploadArtifactNameBytes || !utf8.ValidString(pattern) || strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\/:<>|{}\r\n") || !strings.ContainsAny(pattern, "*?[") {
+	if pattern == "" || len(pattern) > MaxDownloadArtifactPatternBytes || !utf8.ValidString(pattern) || strings.HasPrefix(pattern, "!") || strings.ContainsAny(pattern, "\\/:<>|{}\r\n") || !strings.ContainsAny(pattern, "*?[") {
 		return false
 	}
 	for _, r := range pattern {

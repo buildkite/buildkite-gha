@@ -1874,7 +1874,7 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	}
 	for _, artifact := range bundle.Plans {
 		job := artifact.Job
-		if job.Schema != plan.SchemaV7 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+		if job.Schema != plan.SchemaV8 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
 			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
 		}
 		wantSources := []string{"dockerfile-actions", "service-containers"}
@@ -1955,7 +1955,7 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 		if compileErr != nil {
 			t.Fatalf("compile %s: %v", test.name, compileErr)
 		}
-		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV7 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV8 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
 			t.Fatalf("compiled %s boundary = %#v", test.name, bundle.Plans)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

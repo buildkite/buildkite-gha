@@ -155,7 +155,7 @@ func parseWebhookPayload(source []byte) (map[string]any, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
-	value, err := decodeWebhookValue(decoder)
+	value, err := decodeJSONValue(decoder)
 	if err != nil {
 		return nil, fmt.Errorf("parse buildkite:webhook: %w", err)
 	}
@@ -172,7 +172,7 @@ func parseWebhookPayload(source []byte) (map[string]any, error) {
 	return payload, nil
 }
 
-func decodeWebhookValue(decoder *json.Decoder) (any, error) {
+func decodeJSONValue(decoder *json.Decoder) (any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -196,7 +196,7 @@ func decodeWebhookValue(decoder *json.Decoder) (any, error) {
 			if _, exists := object[key]; exists {
 				return nil, fmt.Errorf("conflicting duplicate object key %q", key)
 			}
-			object[key], err = decodeWebhookValue(decoder)
+			object[key], err = decodeJSONValue(decoder)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +208,7 @@ func decodeWebhookValue(decoder *json.Decoder) (any, error) {
 	case '[':
 		array := []any{}
 		for decoder.More() {
-			value, err := decodeWebhookValue(decoder)
+			value, err := decodeJSONValue(decoder)
 			if err != nil {
 				return nil, err
 			}
