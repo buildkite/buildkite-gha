@@ -33,23 +33,23 @@ steps:
     key: "gha-ci"
     plugins:
       - github-actions#v0.9.3:
-          workflow: .github/workflows/ci.yml
+          workflows:
+            - .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
     depends_on: "gha-ci"
     command: .buildkite/deploy.sh
 ```
 
-The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship.
-
-Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`.
+The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. List every workflow to import explicitly; plugin configuration does not accept directories or glob patterns.
 
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
 ```yaml
 plugins:
   - github-actions#v0.9.3:
-      workflow: .github/workflows/ci.yml
+      workflows:
+        - .github/workflows/ci.yml
       version: "0.10.1"
 ```
 
@@ -60,7 +60,8 @@ labels with a native Darwin/arm64 queue:
 ```yaml
 plugins:
   - github-actions#v0.9.3:
-      workflow: .github/workflows/ci.yml
+      workflows:
+        - .github/workflows/ci.yml
       runners:
         - runs-on: ubuntu-latest
           queue: hosted
@@ -72,7 +73,7 @@ Configured Linux profiles use the matching Noble or Jammy hosted-toolchains
 image. A macOS label selects native Darwin/arm64, not a GitHub image or Xcode
 inventory.
 
-The imported workflow is a dynamic part of the Buildkite pipeline. Upload can take one tracked workflow glob or a list of explicit workflow paths and creates one aggregate group per directly runnable workflow in a single transaction. Workflows that do not declare the selected event become skipped groups. Each `:github: <workflow>` group depends on the importer; its GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
+The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per explicitly listed, directly runnable workflow in a single transaction. Workflows that do not declare the selected event become skipped groups. Each `:github: <workflow>` group depends on the importer; its GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
 Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, manual/API, and scheduled builds to `push`, `pull_request`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, and pull request activity filters. Cross-event workflows are excluded before event-dependent compilation and retained as skipped groups.
 

@@ -178,7 +178,7 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	}
 	return uploadParsed(parsedUploadArgs{
 		workflowOperands:      configuration.Workflows,
-		explicitWorkflowPaths: configuration.explicitWorkflowPaths,
+		explicitWorkflowPaths: true,
 		runnerTargets:         configuration.runnerTargets,
 		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
@@ -192,9 +192,8 @@ func validateImporterPlatform(goos, goarch string) error {
 }
 
 type pluginConfiguration struct {
-	Workflows             []string
-	explicitWorkflowPaths bool
-	runnerTargets         map[string]compiler.RunnerTarget
+	Workflows     []string
+	runnerTargets map[string]compiler.RunnerTarget
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -229,7 +228,6 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 		return pluginConfiguration{}, fmt.Errorf("%s workflow and workflows are mutually exclusive", pluginConfigurationEnvironment)
 	}
 	var workflows []string
-	explicitWorkflowPaths := false
 	if hasLegacyWorkflow {
 		workflow, ok := legacyWorkflow.(string)
 		if !ok || strings.TrimSpace(workflow) == "" {
@@ -244,7 +242,6 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			}
 		case []any:
 			if len(value) != 0 {
-				explicitWorkflowPaths = true
 				workflows = make([]string, len(value))
 				for index, entry := range value {
 					workflow, ok := entry.(string)
@@ -303,7 +300,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, explicitWorkflowPaths: explicitWorkflowPaths, runnerTargets: targets}, nil
+	return pluginConfiguration{Workflows: workflows, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {

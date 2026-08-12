@@ -163,9 +163,6 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
-	if !configuration.explicitWorkflowPaths {
-		t.Fatal("workflows array did not retain explicit path semantics")
-	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux target = %#v", got)
 	}
@@ -173,7 +170,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
 	minimal, err := parsePluginConfiguration(`{"workflows":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.explicitWorkflowPaths || len(minimal.runnerTargets) != 0 {
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
 	}
 	legacy, err := parsePluginConfiguration(`{"workflow":"legacy.yml"}`)
@@ -366,35 +363,48 @@ func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	}
 }
 
-func TestPluginRejectsGlobInSingleEntryWorkflowList(t *testing.T) {
+func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 	requireImporterHost(t)
-	configuration, err := json.Marshal(map[string]any{
-		"workflows": []string{filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*.yml")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-glob")
-	runner := &cliCaptureRunner{}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "explicit paths") {
-		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
-	}
-	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-		t.Fatalf("invalid workflow list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	workflowDirectory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
+	for _, test := range []struct {
+		name      string
+		field     string
+		workflows any
+		want      string
+	}{
+		{name: "all shorthand", field: "workflows", workflows: "*", want: "explicit paths"},
+		{name: "legacy all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
+		{name: "string glob", field: "workflows", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
+		{name: "array glob", field: "workflows", workflows: []string{filepath.Join(workflowDirectory, "*.yml")}, want: "explicit paths"},
+		{name: "directory", field: "workflows", workflows: workflowDirectory, want: "does not name a regular tracked file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration, err := json.Marshal(map[string]any{test.field: test.workflows})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(pluginConfigurationEnvironment, string(configuration))
+			setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-explicit")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("invalid workflow selection reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+			}
+		})
 	}
 }
 
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
-	root := t.TempDir()
-	workflowPath := filepath.Join(root, "mixed.yml")
-	workflow := []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n",
+	})
+	t.Chdir(repository)
+	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
 	linuxPath, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -409,7 +419,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
 	}
-	darwinPath := filepath.Join(root, "buildkite-gha-darwin")
+	darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
 	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -487,10 +497,23 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			Command string
 		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
 	}
-	if linux := steps["gha-linux"]; linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+	var linux, macos struct {
+		Image   string
+		Queue   string
+		Command string
+	}
+	for key, step := range steps {
+		switch {
+		case strings.HasSuffix(key, "-linux"):
+			linux = step
+		case strings.HasSuffix(key, "-macos"):
+			macos = step
+		}
+	}
+	if linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("Linux pipeline step = %#v", linux)
 	}
-	if macos := steps["gha-macos"]; macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+	if macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
 	}
 }
