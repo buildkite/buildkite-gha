@@ -16,7 +16,7 @@ const planDirectory = ".buildkite-gha/plans"
 const distributionDirectory = ".buildkite-gha/distributions"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
-const runtimeCachePath = "/cache/bkcache/buildkite-gha"
+const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
 
 // HostedToolCachePath is the trusted, image-baked Actions tool-cache facade
 // used by explicitly selected runtime images.
@@ -33,10 +33,12 @@ var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 // Pipeline is the validated input required to emit generated compatibility jobs.
 type Pipeline struct {
-	CompilerStep       string
+	CompilerStep string
+	// DistributionDigest and RuntimeImage retain the single-platform emitter
+	// contract for direct callers. Mixed-platform bundles set these per Job.
 	DistributionDigest string
-	GroupLabel         string
 	RuntimeImage       string
+	GroupLabel         string
 	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
 }
@@ -57,24 +59,29 @@ func DistributionPath(digest string) (string, error) {
 	return distributionDirectory + "/" + strings.TrimPrefix(digest, "sha256:") + "/buildkite-gha", nil
 }
 
-// MiseDataDir returns the runtime-owned managed cache path for the required
-// mise version. Hosted Agents mount this path automatically; other agent
-// environments fall back to an ephemeral cache when it is unavailable. Cache
-// contents are an accelerator, never an authority.
-func MiseDataDir() string {
-	return runtimeCachePath + "/mise/" + MinimumMiseVersion
+// MiseDataDir returns the platform-isolated managed cache path for the required
+// mise version. Cache contents are an accelerator, never an authority.
+func MiseDataDir(platforms ...string) string {
+	platform := "linux/amd64"
+	if len(platforms) != 0 {
+		platform = platforms[0]
+	}
+	return runtimeCacheRoot + "/mise/" + platformCacheKey(platform) + "/" + MinimumMiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
 type Job struct {
-	Key              string
-	Label            string
-	Queue            string
-	PlanDigest       string
-	Dependencies     []string
-	RequiresMise     bool
-	ConcurrencyGroup string
-	Concurrency      int
+	Key                string
+	Label              string
+	Queue              string
+	Platform           string
+	DistributionDigest string
+	RuntimeImage       string
+	PlanDigest         string
+	Dependencies       []string
+	RequiresMise       bool
+	ConcurrencyGroup   string
+	Concurrency        int
 }
 
 // PlanPath returns the fixed local path for a content-addressed job plan.
@@ -100,13 +107,6 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	if err := validateConcurrencyGate(pipeline.ConcurrencyGate); err != nil {
 		return nil, err
 	}
-	if pipeline.RuntimeImage != "" && !runtimeImagePattern.MatchString(pipeline.RuntimeImage) {
-		return nil, fmt.Errorf("runtime image %q must be an immutable registry sha256 reference", pipeline.RuntimeImage)
-	}
-	distributionPath, err := DistributionPath(pipeline.DistributionDigest)
-	if err != nil {
-		return nil, err
-	}
 	var out bytes.Buffer
 	out.WriteString("steps:\n")
 	stepIndent := "  "
@@ -122,14 +122,39 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Start workflow concurrency", gateOpenKey, pipeline.ConcurrencyGate, []dependency{{Step: pipeline.CompilerStep}})
 	}
 	for _, job := range jobs {
+		platform := job.Platform
+		if platform == "" {
+			platform = "linux/amd64"
+		}
+		distributionDigest := job.DistributionDigest
+		if distributionDigest == "" {
+			distributionDigest = pipeline.DistributionDigest
+		}
+		runtimeImage := job.RuntimeImage
+		if runtimeImage == "" {
+			runtimeImage = pipeline.RuntimeImage
+		}
+		distributionPath, err := DistributionPath(distributionDigest)
+		if err != nil {
+			return nil, fmt.Errorf("job %q: %w", job.Key, err)
+		}
+		if platform != "linux/amd64" && platform != "darwin/arm64" {
+			return nil, fmt.Errorf("job %q has unsupported runtime platform %q", job.Key, platform)
+		}
+		if runtimeImage != "" && !runtimeImagePattern.MatchString(runtimeImage) {
+			return nil, fmt.Errorf("job %q runtime image %q must be an immutable registry sha256 reference", job.Key, runtimeImage)
+		}
+		if platform == "darwin/arm64" && runtimeImage != "" {
+			return nil, fmt.Errorf("job %q cannot select a container runtime image on darwin/arm64", job.Key)
+		}
 		planPath, err := PlanPath(job.PlanDigest)
 		if err != nil {
 			return nil, fmt.Errorf("job %q: %w", job.Key, err)
 		}
 		_, _ = fmt.Fprintf(&out, "%s- label: %s\n", stepIndent, yamlScalar(job.Label))
 		_, _ = fmt.Fprintf(&out, "%skey: %s\n", attributeIndent, yamlScalar(job.Key))
-		if pipeline.RuntimeImage != "" {
-			_, _ = fmt.Fprintf(&out, "%simage: %s\n", attributeIndent, yamlScalar(pipeline.RuntimeImage))
+		if runtimeImage != "" {
+			_, _ = fmt.Fprintf(&out, "%simage: %s\n", attributeIndent, yamlScalar(runtimeImage))
 		}
 		commands := []string{
 			"set -euo pipefail",
@@ -139,12 +164,12 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			"buildkite-agent artifact download " + shellQuote(planPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
 			"plan=\"$bootstrap_dir/" + planPath + `"`,
-			`actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"`,
-			"test \"$actual_distribution_digest\" = " + shellQuote(pipeline.DistributionDigest),
+			`if command -v sha256sum >/dev/null 2>&1; then actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_distribution_digest="$(shasum -a 256 "$distribution" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
+			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
 		runJob := `"$distribution" run-job --plan "$plan"`
-		if pipeline.RuntimeImage != "" {
+		if runtimeImage != "" {
 			runJob += " --hosted-tool-cache"
 		}
 		commands = append(commands, runJob)
@@ -158,15 +183,15 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if job.RequiresMise {
 			_, _ = fmt.Fprintf(&out, "%scache:\n", attributeIndent)
 			_, _ = fmt.Fprintf(&out, "%s  paths:\n", attributeIndent)
-			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(runtimeCachePath))
-			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName))
+			_, _ = fmt.Fprintf(&out, "%s    - %s\n", attributeIndent, yamlScalar(platformMiseCachePath(platform)))
+			_, _ = fmt.Fprintf(&out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName+"-"+platformCacheKey(platform)))
 		}
 		_, _ = fmt.Fprintf(&out, "%senv:\n", attributeIndent)
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_DIGEST: %s\n", attributeIndent, yamlScalar(job.PlanDigest))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PATH: %s\n", attributeIndent, yamlScalar(planPath))
 		_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_PLAN_PRODUCER: %s\n", attributeIndent, yamlScalar(pipeline.CompilerStep))
 		if job.RequiresMise {
-			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir()))
+			_, _ = fmt.Fprintf(&out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
 		}
 		if job.Concurrency != 0 {
 			_, _ = fmt.Fprintf(&out, "%sconcurrency: %d\n", attributeIndent, job.Concurrency)
@@ -190,6 +215,14 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		emitConcurrencyGateStep(&out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", gateCloseKey, pipeline.ConcurrencyGate, dependencies)
 	}
 	return out.Bytes(), nil
+}
+
+func platformCacheKey(platform string) string {
+	return strings.ReplaceAll(platform, "/", "-")
+}
+
+func platformMiseCachePath(platform string) string {
+	return runtimeCacheRoot + "/mise/" + platformCacheKey(platform)
 }
 
 type dependency struct {

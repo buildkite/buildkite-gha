@@ -706,8 +706,8 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("tokenless action plans are not deterministic")
 	}
-	if len(first) != 3 || first[0].Schema != plan.SchemaV7 || first[1].Schema != plan.SchemaV7 || first[2].Schema != plan.SchemaV2 {
-		t.Fatalf("plan schemas = %#v, want two action v7 plans and one shell v2 plan", []string{first[0].Schema, first[1].Schema, first[2].Schema})
+	if len(first) != 3 || first[0].Schema != plan.SchemaV8 || first[1].Schema != plan.SchemaV8 || first[2].Schema != plan.SchemaV8 {
+		t.Fatalf("plan schemas = %#v, want v8 plans", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
 	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
@@ -770,7 +770,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.SchemaV7 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.SchemaV8 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -1368,7 +1368,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV7 || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("public action plan = %#v", plans)
 	}
 	wantCommits := map[string]string{

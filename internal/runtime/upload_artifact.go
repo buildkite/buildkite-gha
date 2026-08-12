@@ -17,12 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/transport"
+	"golang.org/x/sys/unix"
 )
 
 // ArtifactStore is the narrow native storage boundary shared by both adapters.
@@ -580,29 +580,29 @@ func openUploadFileNoFollow(workspace, relative string) (*os.File, error) {
 	if len(components) == 0 || components[0] == "." || components[0] == ".." {
 		return nil, fmt.Errorf("invalid upload source path %q", relative)
 	}
-	dir, err := syscall.Open(workspace, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	dir, err := unix.Open(workspace, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	for _, component := range components[:len(components)-1] {
-		next, openErr := syscall.Openat(dir, component, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		closeErr := syscall.Close(dir)
+		next, openErr := unix.Openat(dir, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		closeErr := unix.Close(dir)
 		if openErr != nil {
 			return nil, errors.Join(openErr, closeErr)
 		}
 		if closeErr != nil {
-			_ = syscall.Close(next)
+			_ = unix.Close(next)
 			return nil, closeErr
 		}
 		dir = next
 	}
-	fd, openErr := syscall.Openat(dir, components[len(components)-1], syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	closeErr := syscall.Close(dir)
+	fd, openErr := unix.Openat(dir, components[len(components)-1], unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	closeErr := unix.Close(dir)
 	if openErr != nil {
 		return nil, errors.Join(openErr, closeErr)
 	}
 	if closeErr != nil {
-		_ = syscall.Close(fd)
+		_ = unix.Close(fd)
 		return nil, closeErr
 	}
 	return os.NewFile(uintptr(fd), relative), nil

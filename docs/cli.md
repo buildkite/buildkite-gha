@@ -4,9 +4,15 @@ The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/githu
 
 ## Before you begin
 
-Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the matching GitHub [release](https://github.com/buildkite/buildkite-gha/releases). Verify the checksum, then extract `buildkite-gha` to a stable path.
+Install `buildkite-gha` with `mise` 2026.5.12 or newer:
 
-Jobs with JavaScript actions require `mise` 2026.5.12 or newer. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
+```sh
+mise use -g github:buildkite/buildkite-gha
+```
+
+Append `@<version>` to install an exact release. A custom importer that runs macOS jobs must also download and verify the same release's Darwin/arm64 distribution.
+
+Jobs with JavaScript actions require `mise`. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
 
 Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requirement.
 
@@ -89,9 +95,12 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
-The hidden `buildkite-gha plugin` entry point provides the dedicated GitHub Actions plugin integration boundary. It reads the workflow from `BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW`, accepts no arguments, and is intentionally absent from ordinary CLI help.
+The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow` and
+`runners` from `BUILDKITE_PLUGIN_CONFIGURATION`; it also accepts the plugin-owned
+`version` and `minimum-release-age` fields. The Linux/amd64 importer fetches the
+same release's Darwin runtime only when the workflow requires it.
 
 Event source precedence is:
 
@@ -109,30 +118,27 @@ The command uploads the exact executable and content-addressed plans before runn
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
 ```
 
-### Choose a queue
+### Choose runners and runtimes
 
-Uploads inherit agent targeting from the importer. Set one queue on the importer when needed:
+Use repeatable mappings before the workflow path:
 
-```yaml
-env:
-  BUILDKITE_GHA_TARGET_QUEUE: gha-untrusted
+```sh
+buildkite-gha upload \
+  --runner-queue ubuntu-latest=hosted \
+  --runner-queue macos-14=macos-sonoma-arm64 \
+  --runtime-distribution darwin/arm64=/opt/buildkite-gha-darwin \
+  .github/workflows/ci.yml
 ```
 
-Every accepted Linux runner label maps to that queue. The queue must provide whole-job isolation and no ambient protected credentials.
+Configured `ubuntu-latest` and `ubuntu-24.04` profiles default to the Noble
+hosted-toolchains image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image`
+with an immutable digest to override the default. Unmapped Linux labels keep
+default targeting without an image. Every macOS label requires a queue and
+rejects images. Runtime distribution paths must be absolute executables; Linux
+defaults to the importer and Darwin has no direct-upload default.
+`BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
+supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
-
-### Choose an immutable runtime image
-
-Set an image by digest:
-
-```yaml
-env:
-  # Renovate resolves this Docker Hub tag; Namespace must preserve its manifest digest.
-  # renovate: datasource=docker depName=buildkite/agent-base tag=ubuntu-noble-hosted-toolchains
-  BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24
-```
-
-Tags and other mutable references are rejected. The image may provide a baked `/opt/hostedtoolcache` inventory.
 
 `run-job` is internal. Users should not invoke it directly.

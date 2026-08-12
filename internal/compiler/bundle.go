@@ -93,6 +93,13 @@ func CompileBundlePlansContext(ctx context.Context, path string, source, eventSo
 		if job.Target.StepKey != ir.Jobs[i].Key || job.Target.Queue != ir.Jobs[i].Queue {
 			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d target %q/%q does not match job instance %q/%q", i, job.Target.StepKey, job.Target.Queue, ir.Jobs[i].Key, ir.Jobs[i].Queue))
 		}
+		expectedRuntimeDigest := options.RuntimeDistributions[ir.Jobs[i].Platform]
+		if expectedRuntimeDigest == "" && ir.Jobs[i].Platform == PlatformLinuxAMD64 {
+			expectedRuntimeDigest = compilerDistributionDigest
+		}
+		if job.Runtime == nil || job.Runtime.DistributionDigest != expectedRuntimeDigest {
+			return bundle, processingFinding(StagePlans, CodePlanConstruction, "compatibility", fmt.Errorf("plan %d runtime distribution does not match job platform %s", i, ir.Jobs[i].Platform))
+		}
 		contents, err := plan.Encode(job)
 		if err != nil {
 			return bundle, &ProcessingFinding{Stage: StagePlans, Code: CodePlanConstruction, Category: "compatibility", Job: job.Workflow.LogicalJobID, Instance: ir.Jobs[i].Key, Err: fmt.Errorf("encode plan for job %q: %w", job.Workflow.LogicalJobID, err)}
@@ -120,12 +127,20 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 	for i, artifact := range artifacts {
 		job := artifact.Job
 		jobs[i] = buildkitepipeline.Job{
-			Key:          ir.Jobs[i].Key,
-			Label:        ir.Jobs[i].Label,
-			Queue:        ir.Jobs[i].Queue,
-			PlanDigest:   artifact.Digest,
-			Dependencies: append([]string(nil), ir.Jobs[i].Needs...),
-			RequiresMise: job.NeedsMise(),
+			Key:                ir.Jobs[i].Key,
+			Label:              ir.Jobs[i].Label,
+			Queue:              ir.Jobs[i].Queue,
+			Platform:           ir.Jobs[i].Platform.String(),
+			DistributionDigest: job.RuntimeDistributionDigest(),
+			PlanDigest:         artifact.Digest,
+			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
+			RequiresMise:       job.NeedsMise(),
+		}
+		if ir.Jobs[i].Platform == PlatformLinuxAMD64 {
+			jobs[i].RuntimeImage = ir.Jobs[i].RuntimeImage
+			if jobs[i].RuntimeImage == "" {
+				jobs[i].RuntimeImage = options.RuntimeImage
+			}
 		}
 		if ir.Jobs[i].ConcurrencyGroup != "" {
 			jobs[i].Concurrency = 1
@@ -143,12 +158,10 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 		}
 	}
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
-		CompilerStep:       compilerStep,
-		DistributionDigest: compilerDistributionDigest,
-		GroupLabel:         options.GroupLabel,
-		RuntimeImage:       options.RuntimeImage,
-		ConcurrencyGate:    concurrencyGate,
-		Jobs:               jobs,
+		CompilerStep:    compilerStep,
+		GroupLabel:      options.GroupLabel,
+		ConcurrencyGate: concurrencyGate,
+		Jobs:            jobs,
 	})
 	if err != nil {
 		return bundle, processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", fmt.Errorf("emit Buildkite pipeline: %w", err))

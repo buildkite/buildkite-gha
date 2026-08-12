@@ -23,6 +23,7 @@ const (
 	SchemaV5 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v5.schema.json"
 	SchemaV6 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v6.schema.json"
 	SchemaV7 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json"
+	SchemaV8 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v8.schema.json"
 	Schema   = SchemaV2
 )
 
@@ -32,6 +33,7 @@ const MaxNeedOutputs = 64
 const maxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var compilerVersionPattern = regexp.MustCompile(`^[ -~]{1,256}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var logicalJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 var secretNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -78,6 +80,11 @@ type ActionLock struct {
 
 type Compiler struct {
 	Version            string `json:"version"`
+	DistributionDigest string `json:"distribution_digest"`
+}
+
+// Runtime binds a job plan to the exact executable permitted to run it.
+type Runtime struct {
 	DistributionDigest string `json:"distribution_digest"`
 }
 
@@ -179,6 +186,7 @@ type GitHubToken struct {
 type Job struct {
 	Schema               string                  `json:"schema"`
 	Compiler             Compiler                `json:"compiler"`
+	Runtime              *Runtime                `json:"runtime,omitempty"`
 	Workflow             Workflow                `json:"workflow"`
 	Event                Event                   `json:"event"`
 	Target               Target                  `json:"target"`
@@ -218,6 +226,15 @@ func (job Job) NeedsMise() bool {
 		return false
 	}
 	return job.RequiresMise == nil || *job.RequiresMise
+}
+
+// RuntimeDistributionDigest returns the executable digest bound to this plan.
+// Plans before v8 used the compiler executable as their runtime executable.
+func (job Job) RuntimeDistributionDigest() string {
+	if job.Schema == SchemaV8 && job.Runtime != nil {
+		return job.Runtime.DistributionDigest
+	}
+	return job.Compiler.DistributionDigest
 }
 
 // Decode rejects unknown fields and trailing JSON so schema drift fails closed.
@@ -346,26 +363,33 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 {
+	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
+	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
 		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
 	}
-	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && (job.Container != nil || len(job.Services) != 0) {
+	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && (job.Container != nil || len(job.Services) != 0) {
 		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
 	}
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.NeedOutputs != nil {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.NeedOutputs != nil {
 		return fmt.Errorf("job plan %s does not support prerequisite output projections", job.Schema)
 	}
-	if job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.GitHubToken != nil {
+	if job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.GitHubToken != nil {
 		return fmt.Errorf("job plan %s does not support GitHub workflow tokens", job.Schema)
 	}
-	if job.Schema == SchemaV7 && job.RequiresMise == nil {
+	if (job.Schema == SchemaV7 || job.Schema == SchemaV8) && job.RequiresMise == nil {
 		return fmt.Errorf("job plan %s requires an explicit requires_mise decision", job.Schema)
 	}
-	if job.Schema != SchemaV7 && job.RequiresMise != nil {
+	if job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.RequiresMise != nil {
 		return fmt.Errorf("job plan %s does not support requires_mise", job.Schema)
+	}
+	if job.Schema == SchemaV8 {
+		if job.Runtime == nil || !digestPattern.MatchString(job.Runtime.DistributionDigest) {
+			return fmt.Errorf("job plan runtime distribution digest is required")
+		}
+	} else if job.Runtime != nil {
+		return fmt.Errorf("job plan %s does not support a separate runtime distribution", job.Schema)
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
 		for _, step := range job.Steps {
@@ -374,7 +398,7 @@ func (job Job) Validate() error {
 			}
 		}
 	}
-	if job.Compiler.Version == "" || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
+	if !compilerVersionPattern.MatchString(job.Compiler.Version) || !digestPattern.MatchString(job.Compiler.DistributionDigest) {
 		return fmt.Errorf("job plan compiler version and distribution digest are required")
 	}
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
@@ -389,7 +413,7 @@ func (job Job) Validate() error {
 	if !targetPattern.MatchString(job.Target.StepKey) {
 		return fmt.Errorf("job plan requires a target step key")
 	}
-	if job.Schema != SchemaV7 && !targetPattern.MatchString(job.Target.Queue) {
+	if job.Schema != SchemaV7 && job.Schema != SchemaV8 && !targetPattern.MatchString(job.Target.Queue) {
 		return fmt.Errorf("job plan %s requires a target queue", job.Schema)
 	}
 	if job.Target.Queue != "" && !targetPattern.MatchString(job.Target.Queue) {
@@ -485,7 +509,7 @@ func (job Job) Validate() error {
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
 	maxNeedProducers := MaxNeedProducers
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 {
+	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 {
 		maxNeedProducers = maxLegacyNeedProducers
 	}
 	for name, sources := range job.NeedSources {
@@ -615,7 +639,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6 || job.Schema == SchemaV7) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
+	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6 || job.Schema == SchemaV7 || job.Schema == SchemaV8) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}

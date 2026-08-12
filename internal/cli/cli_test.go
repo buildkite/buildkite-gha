@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -56,8 +57,8 @@ func TestRunHelpAndVersion(t *testing.T) {
 		{name: "help flag", args: []string{"--help"}, wantOutput: "validate"},
 		{name: "help command", args: []string{"help"}, wantOutput: "run-job"},
 		{name: "command help", args: []string{"help", "compile"}, wantOutput: "buildkite-gha compile --event-path"},
-		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "default agent targeting"},
-		{name: "upload help flag", args: []string{"upload", "--help"}, wantOutput: "default agent targeting"},
+		{name: "upload help", args: []string{"help", "upload"}, wantOutput: "--runner-queue"},
+		{name: "upload help flag", args: []string{"upload", "--help"}, wantOutput: "--runner-queue"},
 		{name: "command help flag", args: []string{"run-job", "--help"}, wantOutput: "--plan <path>"},
 		{name: "version flag", args: []string{"--version"}, wantOutput: "buildkite-gha test-version\n"},
 	}
@@ -87,12 +88,12 @@ func TestUploadHelpFormsMatch(t *testing.T) {
 		}
 		outputs = append(outputs, stdout.String())
 	}
-	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], targetQueueEnvironment) {
-		t.Fatalf("upload help outputs differ or omit target queue environment:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
+	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "--runner-image") {
+		t.Fatalf("upload help outputs differ or omit runner profile options:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
 	}
 }
 
-func TestPluginIsHiddenFromHelp(t *testing.T) {
+func TestPluginIsHiddenAndZeroArgument(t *testing.T) {
 	for _, args := range [][]string{{"--help"}, {"help"}} {
 		var stdout, stderr bytes.Buffer
 		if code := Run(args, &stdout, &stderr, "test-version"); code != 0 {
@@ -102,7 +103,6 @@ func TestPluginIsHiddenFromHelp(t *testing.T) {
 			t.Fatalf("Run(%q) exposed plugin command: %q", args, stdout.String())
 		}
 	}
-
 	for _, args := range [][]string{{"help", "plugin"}, {"plugin", "--help"}} {
 		var stdout, stderr bytes.Buffer
 		if code := Run(args, &stdout, &stderr, "test-version"); code != 2 {
@@ -114,54 +114,408 @@ func TestPluginIsHiddenFromHelp(t *testing.T) {
 	}
 }
 
-func TestPluginRequiresCanonicalWorkflowWithoutSideEffects(t *testing.T) {
-	t.Setenv(pluginWorkflowEnvironment, "")
-	t.Setenv("WORKFLOW", "legacy.yml")
+func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
+	t.Setenv(pluginConfigurationEnvironment, "")
+	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
 		t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), pluginWorkflowEnvironment+" is required") || len(runner.commands) != 0 {
+	if !strings.Contains(stderr.String(), pluginConfigurationEnvironment+" is required") || len(runner.commands) != 0 {
 		t.Fatalf("stderr = %q, commands = %#v", stderr.String(), runner.commands)
 	}
 }
 
-func TestPluginDelegatesCanonicalWorkflowToUpload(t *testing.T) {
-	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
-	t.Setenv(pluginWorkflowEnvironment, workflowPath)
+func TestParsePluginConfiguration(t *testing.T) {
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	configuration, err := parsePluginConfiguration(`{
+  "workflow": ".github/workflows/ci.yml",
+  "version": "0.8.0",
+  "minimum-release-age": "24h",
+  "runners": [
+    {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `"},
+    {"runs-on":"macos-14","queue":"macos-sonoma-arm64"}
+  ]
+}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.Workflow != ".github/workflows/ci.yml" || len(configuration.runnerTargets) != 2 {
+		t.Fatalf("configuration = %#v", configuration)
+	}
+	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
+		t.Fatalf("Linux target = %#v", got)
+	}
+	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
+		t.Fatalf("Darwin target = %#v", got)
+	}
+	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
+	if err != nil || minimal.Workflow != "workflow.yml" || len(minimal.runnerTargets) != 0 {
+		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "malformed", source: `{`, want: "decode"},
+		{name: "missing workflow", source: `{}`, want: "workflow is required"},
+		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
+		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
+		{name: "retired source acquisition field", source: `{"workflow":"ci.yml","buildkite-gha-source-ref":"latest"}`, want: "unknown field"},
+		{name: "null runners", source: `{"workflow":"ci.yml","runners":null}`, want: "non-empty array"},
+		{name: "empty runners", source: `{"workflow":"ci.yml","runners":[]}`, want: "non-empty array"},
+		{name: "unknown runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","extra":true}]}`, want: "unknown field"},
+		{name: "case alias runner field", source: `{"workflow":"ci.yml","runners":[{"Runs-On":"ubuntu-latest","queue":"hosted"}]}`, want: "unknown field"},
+		{name: "duplicate runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"windows-latest","runs-on":"ubuntu-latest","queue":"hosted"}]}`, want: "duplicate object key"},
+		{name: "duplicate runner", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"one"},{"runs-on":"UBUNTU-LATEST","queue":"two"}]}`, want: "only be configured once"},
+		{name: "missing queue", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest"}]}`, want: "queue must be a string"},
+		{name: "empty image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":""}]}`, want: "immutable registry"},
+		{name: "null image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":null}]}`, want: "immutable registry"},
+		{name: "mutable image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","image":"ubuntu:latest"}]}`, want: "immutable registry"},
+		{name: "Darwin image", source: `{"workflow":"ci.yml","runners":[{"runs-on":"macos-14","queue":"macos","image":"` + image + `"}]}`, want: "unsupported on darwin/arm64"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parsePluginConfiguration(test.source); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("parsePluginConfiguration() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) {
+	for _, test := range []struct {
+		label string
+		image string
+	}{
+		{label: "ubuntu-latest", image: defaultNobleRunnerImage},
+		{label: "ubuntu-24.04", image: defaultNobleRunnerImage},
+		{label: "ubuntu-22.04", image: defaultJammyRunnerImage},
+	} {
+		t.Run(test.label, func(t *testing.T) {
+			canonical, target, err := configuredRunnerTarget(test.label, "hosted", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canonical != test.label || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
+				t.Fatalf("configuredRunnerTarget() = %q, %#v", canonical, target)
+			}
+		})
+	}
+
+	override := "registry.example.com/custom@sha256:" + strings.Repeat("0", 64)
+	_, target, err := configuredRunnerTarget("ubuntu-latest", "hosted", override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Image != override {
+		t.Fatalf("explicit image = %q, want %q", target.Image, override)
+	}
+}
+
+func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "linux.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "plugin-importer")
-	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
-	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
-	t.Setenv("BUILDKITE_BRANCH", "main")
-	t.Setenv("BUILDKITE_TAG", "")
-	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_STEP_KEY", "darwin-importer")
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "Linux graph", args: []string{workflowPath}},
+		{name: "explicit runtimes", args: []string{
+			"--runtime-distribution", "linux/amd64=/tmp/buildkite-gha-linux",
+			"--runtime-distribution", "darwin/arm64=/tmp/buildkite-gha-darwin",
+			workflowPath,
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := uploadFromPlatform("darwin", "arm64", test.args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
+				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
+			}
+			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64, running on darwin/arm64\n" {
+				t.Fatalf("stderr = %q", got)
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("Darwin importer performed work: stdout = %q, commands = %d, uploads = %d", stdout.String(), len(runner.commands), len(runner.uploaded))
+			}
+		})
+	}
+}
 
-	t.Run("uploads through the existing implementation", func(t *testing.T) {
-		runner := &cliCaptureRunner{}
-		var stdout, stderr bytes.Buffer
-		if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
-			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
-		}
-		if len(runner.commands) == 0 || runner.commands[0].name != "buildkite-agent" || !slices.Equal(runner.commands[0].args, []string{"meta-data", "get", "buildkite:webhook"}) {
-			t.Fatalf("commands = %#v, want upload event acquisition first", runner.commands)
-		}
-		if len(runner.uploaded) != 4 || !strings.Contains(stdout.String(), "Uploaded 3 jobs") {
-			t.Fatalf("uploads = %d, stdout = %q", len(runner.uploaded), stdout.String())
-		}
+func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := json.Marshal(map[string]any{
+		"workflow": workflowPath,
+		"version":  "0.8.0",
+		"runners": []map[string]string{
+			{"runs-on": "ubuntu-latest", "queue": "hosted"},
+		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "ignored.yml")
+	_ = executable // The plugin uses the already-opened running executable, not an environment path.
+	setCLIPluginBuildkiteEnvironment(t, "plugin-linux")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 3 jobs") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range pipeline.Steps {
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("plugin profile was not applied: %#v", step)
+		}
+	}
+}
 
-	t.Run("propagates upload failure", func(t *testing.T) {
-		runner := &cliCaptureRunner{failAt: 1}
-		var stdout, stderr bytes.Buffer
-		if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 {
-			t.Fatalf("run() code = %d, want 1; stderr = %q", code, stderr.String())
-		}
-		if !strings.Contains(stderr.String(), "injected failure") || len(runner.uploaded) != 0 {
-			t.Fatalf("stderr = %q, uploads = %#v", stderr.String(), runner.uploaded)
-		}
+func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
+	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "mixed.yml")
+	workflow := []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linuxPath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	darwinContents := []byte{
+		0xcf, 0xfa, 0xed, 0xfe,
+		0x0c, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00,
+		0x02, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	}
+	darwinPath := filepath.Join(root, "buildkite-gha-darwin")
+	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	configuration, err := json.Marshal(map[string]any{
+		"workflow": workflowPath,
+		"runners": []map[string]any{
+			{"runs-on": "ubuntu-latest", "queue": "linux", "image": image},
+			{"runs-on": "macos-15", "queue": "macos"},
+		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	_ = linuxPath // The plugin's Linux runtime is always its running executable.
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, darwinPath)
+	setCLIPluginBuildkiteEnvironment(t, "plugin-mixed")
+	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	darwinDigest := transport.Digest(darwinContents)
+	planRuntimes := map[string]string{}
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.Event.SHA != fullCommit {
+			t.Fatalf("plan event SHA = %q, want normalized commit %q", job.Event.SHA, fullCommit)
+		}
+		planRuntimes[job.Workflow.LogicalJobID] = job.RuntimeDistributionDigest()
+	}
+	if planRuntimes["linux"] != cliTestRuntimeDigest() || planRuntimes["macos"] != darwinDigest {
+		t.Fatalf("plan runtime digests = %#v", planRuntimes)
+	}
+	distributionPath, err := buildkitepipeline.DistributionPath(darwinDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(runner.uploaded[distributionPath], darwinContents) {
+		t.Fatal("Darwin runtime distribution was not published")
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	steps := make(map[string]struct {
+		Image   string
+		Queue   string
+		Command string
+	}, len(pipeline.Steps))
+	for _, step := range pipeline.Steps {
+		steps[step.Key] = struct {
+			Image   string
+			Queue   string
+			Command string
+		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
+	}
+	if linux := steps["gha-linux"]; linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+		t.Fatalf("Linux pipeline step = %#v", linux)
+	}
+	if macos := steps["gha-macos"]; macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+		t.Fatalf("Darwin pipeline step = %#v", macos)
+	}
+}
+
+func TestPluginDevDarwinInjectionIsRequiredAndReleaseRejectsIt(t *testing.T) {
+	linux := runtimeDistribution{contents: []byte("linux"), digest: "sha256:linux"}
+	required := map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), required, linux); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("dev acquisition error = %v", err)
+	}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, filepath.Join(t.TempDir(), "injected"))
+	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(context.Background(), map[compiler.Platform]bool{}, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("release injection error = %v", err)
+	}
+}
+
+func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
+	linux := runtimeDistribution{contents: []byte("running executable"), digest: "sha256:running"}
+	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
+	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, linux)
+	if err != nil || got[compiler.PlatformLinuxAMD64].digest != linux.digest {
+		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)
+	}
+
+	darwin := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	archive := pluginTestArchive(t, darwin, false)
+	archiveDigest := sha256.Sum256(archive)
+	requests := map[string]int{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests[request.URL.Path]++
+		switch filepath.Base(request.URL.Path) {
+		case "checksums.txt":
+			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginDarwinAsset)
+		case pluginDarwinAsset:
+			_, _ = response.Write(archive)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	cache := filepath.Join(t.TempDir(), pluginDarwinAsset)
+	distribution, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := transport.Digest(darwin)
+	if distribution.digest != wantDigest || !bytes.Equal(distribution.contents, darwin) {
+		t.Fatalf("Darwin distribution = %q, %x", distribution.digest, distribution.contents)
+	}
+	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache); err != nil {
+		t.Fatal(err)
+	}
+	if requests["/v1.2.3/checksums.txt"] != 2 || requests["/v1.2.3/"+pluginDarwinAsset] != 1 {
+		t.Fatalf("requests = %#v; verified cache did not avoid an archive download", requests)
+	}
+	if err := os.WriteFile(cache, []byte("untrusted cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache); err != nil {
+		t.Fatal(err)
+	}
+	if requests["/v1.2.3/checksums.txt"] != 3 || requests["/v1.2.3/"+pluginDarwinAsset] != 2 {
+		t.Fatalf("requests = %#v; cache was trusted without live checksum or invalid cache was used", requests)
+	}
+}
+
+func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
+	validBinary := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	archive := pluginTestArchive(t, validBinary, false)
+	digest := sha256.Sum256(archive)
+	if _, err := pluginAssetChecksum([]byte(fmt.Sprintf("%x  %s\n%x  %s\n", digest, pluginDarwinAsset, digest, pluginDarwinAsset)), pluginDarwinAsset); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("duplicate checksum error = %v", err)
+	}
+	if _, err := extractPluginDarwin(pluginTestArchive(t, validBinary, true)); err == nil || !strings.Contains(err.Error(), "unexpected member") {
+		t.Fatalf("unsafe archive error = %v", err)
+	}
+	wrong := pluginTestArchive(t, []byte("not Mach-O"), false)
+	wrongDigest := sha256.Sum256(wrong)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if filepath.Base(request.URL.Path) == "checksums.txt" {
+			_, _ = fmt.Fprintf(response, "%x  %s\n", wrongDigest, pluginDarwinAsset)
+			return
+		}
+		_, _ = response.Write(wrong)
+	}))
+	defer server.Close()
+	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
+		t.Fatalf("wrong binary error = %v", err)
+	}
+}
+
+func pluginTestArchive(t *testing.T, executable []byte, extra bool) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	gzipWriter := gzip.NewWriter(&output)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for _, member := range []struct {
+		name string
+		mode int64
+		body []byte
+	}{{"buildkite-gha", 0o755, executable}, {"LICENSE", 0o644, []byte("license")}} {
+		if err := tarWriter.WriteHeader(&tar.Header{Name: member.name, Mode: member.mode, Size: int64(len(member.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tarWriter.Write(member.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if extra {
+		body := []byte("extra")
+		if err := tarWriter.WriteHeader(&tar.Header{Name: "../extra", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = tarWriter.Write(body)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func TestNormalizePluginCommit(t *testing.T) {
@@ -177,7 +531,6 @@ func TestNormalizePluginCommit(t *testing.T) {
 			t.Fatalf("normalizePluginCommit() error = %v, set calls = %d, commands = %#v", err, setCalls, runner.commands)
 		}
 	})
-
 	t.Run("resolves symbolic commit from HEAD", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
 		name, value := "", ""
@@ -192,7 +545,6 @@ func TestNormalizePluginCommit(t *testing.T) {
 			t.Fatalf("commands = %#v, want exact git rev-parse HEAD invocation", runner.commands)
 		}
 	})
-
 	t.Run("propagates resolution failure", func(t *testing.T) {
 		runner := &cliCaptureRunner{gitErr: errors.New("no checkout")}
 		err := normalizePluginCommit(context.Background(), func(string) string { return "HEAD" }, os.Setenv, runner)
@@ -200,6 +552,17 @@ func TestNormalizePluginCommit(t *testing.T) {
 			t.Fatalf("normalizePluginCommit() error = %v", err)
 		}
 	})
+}
+
+func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
+	t.Helper()
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", stepKey)
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", "0123456789abcdef0123456789abcdef01234567")
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 }
 
 func TestRunValidateAndCompile(t *testing.T) {
@@ -277,6 +640,25 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 		if report.Result != "admitted" || report.Profile != "hosted-tokenless" || report.Compile.Instances != 3 || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
 			t.Fatalf("profile report = %#v", report)
+		}
+	})
+
+	t.Run("validate hosted tokenless macOS profile requires upload mapping", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "macos.yml")
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy" {
+			t.Fatalf("macOS profile report = %#v", report)
 		}
 	})
 
@@ -1356,7 +1738,7 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	}
 
 	t.Setenv("BUILDKITE_GHA_NODE20", filepath.Join(root, "missing-node20"))
-	t.Setenv(targetQueueEnvironment, "not a queue")
+	t.Setenv("BUILDKITE_GHA_TARGET_QUEUE", "not a queue")
 	stdout.Reset()
 	stderr.Reset()
 	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
@@ -1452,6 +1834,114 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
 			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
+		}
+	}
+}
+
+func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
+	root := t.TempDir()
+	workflowPath := filepath.Join(root, "mixed.yml")
+	workflow := []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	_, importerContents, importerDigest, err := executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	linuxContents := append(bytes.Clone(importerContents), 0)
+	linuxPath := filepath.Join(root, "buildkite-gha-linux")
+	if err := os.WriteFile(linuxPath, linuxContents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	darwinContents := []byte{
+		0xcf, 0xfa, 0xed, 0xfe, // 64-bit little-endian Mach-O
+		0x0c, 0x00, 0x00, 0x01, // CPU_TYPE_ARM64
+		0x00, 0x00, 0x00, 0x00, // CPU subtype
+		0x02, 0x00, 0x00, 0x00, // MH_EXECUTE
+		0x00, 0x00, 0x00, 0x00, // load command count
+		0x00, 0x00, 0x00, 0x00, // load command size
+		0x00, 0x00, 0x00, 0x00, // flags
+		0x00, 0x00, 0x00, 0x00, // reserved
+	}
+	darwinPath := filepath.Join(root, "buildkite-gha-darwin")
+	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linuxDigest := transport.Digest(linuxContents)
+	darwinDigest := transport.Digest(darwinContents)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "mixed-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	args := []string{
+		"upload", "--event-path", eventPath,
+		"--runner-queue", "ubuntu-latest=linux",
+		"--runner-queue", "macos-15=macos",
+		"--runtime-distribution", "linux/amd64=" + linuxPath,
+		"--runtime-distribution", "darwin/arm64=" + darwinPath,
+		workflowPath,
+	}
+	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	wantDistributionDigests := []string{importerDigest, linuxDigest, darwinDigest}
+	for _, digest := range wantDistributionDigests {
+		path, err := buildkitepipeline.DistributionPath(digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := runner.uploaded[path]; !ok {
+			t.Errorf("runtime distribution %s was not uploaded", digest)
+		}
+	}
+	artifactUploads := map[string]int{}
+	for _, command := range runner.commands {
+		if len(command.args) == 3 && slices.Equal(command.args[:2], []string{"artifact", "upload"}) {
+			artifactUploads[command.args[2]]++
+		}
+	}
+	if len(runner.uploaded) != 5 {
+		t.Fatalf("uploaded artifacts = %#v, want importer, two runtimes, and two plans", runner.uploaded)
+	}
+	for path, count := range artifactUploads {
+		if count != 1 {
+			t.Errorf("artifact %q uploaded %d times", path, count)
+		}
+	}
+
+	planRuntime := map[string]string{}
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode plan %q: %v", path, err)
+		}
+		planRuntime[job.Workflow.LogicalJobID] = job.RuntimeDistributionDigest()
+	}
+	if planRuntime["linux"] != linuxDigest || planRuntime["macos"] != darwinDigest {
+		t.Fatalf("plan runtime digests = %#v", planRuntime)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key     string `yaml:"key"`
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	commands := map[string]string{}
+	for _, step := range pipeline.Steps {
+		commands[step.Key] = step.Command
+	}
+	for jobID, digest := range planRuntime {
+		if !strings.Contains(commands["gha-"+jobID], strings.TrimPrefix(digest, "sha256:")) {
+			t.Errorf("job %q does not download its plan-bound runtime:\n%s", jobID, commands["gha-"+jobID])
 		}
 	}
 }
@@ -1569,11 +2059,37 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	redactor := &cliRedactor{}
 	var warnings bytes.Buffer
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", "", "", authentication); err != nil {
+	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
 		t.Fatal(err)
 	}
 	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
 		t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+	}
+}
+
+func TestCompileHostedTokenlessRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilerDigest := "sha256:" + strings.Repeat("0", 64)
+	darwinDigest := "sha256:" + strings.Repeat("1", 64)
+	_, err = compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), `runner label "macos-15" is not mapped by policy`) {
+		t.Fatalf("missing macOS queue error = %v", err)
+	}
+	macOSTarget := map[string]compiler.RunnerTarget{"macos-15": {Queue: "macos", Platform: compiler.PlatformDarwinARM64}}
+	_, err = compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
+		t.Fatalf("missing macOS runtime error = %v", err)
+	}
+	compiled, err := compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Target.Queue != "macos" || compiled.Bundle.Plans[0].Job.RuntimeDistributionDigest() != darwinDigest || !bytes.Contains(compiled.Bundle.Pipeline, []byte("queue: \"macos\"")) {
+		t.Fatalf("macOS compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
 	}
 }
 
@@ -1606,17 +2122,18 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
-	t.Setenv(targetQueueEnvironment, "hosted")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 
 	var pipeline struct {
 		Steps []struct {
-			Key    string            `yaml:"key"`
-			Agents map[string]string `yaml:"agents"`
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
@@ -1628,6 +2145,9 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	for _, step := range pipeline.Steps {
 		if step.Agents["queue"] != "hosted" {
 			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
+		}
+		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("step %q image = %q, command = %q", step.Key, step.Image, step.Command)
 		}
 	}
 
@@ -1656,10 +2176,9 @@ func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "runtime-image-importer")
-	t.Setenv(runtimeImageEnvironment, image)
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--runner-image", "ubuntu-latest=" + image, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	var pipeline struct {
@@ -1681,35 +2200,77 @@ func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
 	}
 }
 
-func TestRunUploadRejectsInvalidTargetQueueEnvironment(t *testing.T) {
+func TestRunnerProfileDoesNotAffectOtherLinuxLabels(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  selected:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo selected
+  default:
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo default
+`)
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	targets := map[string]compiler.RunnerTarget{
+		"ubuntu-latest": {Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image},
+	}
+	compiled, err := compileHostedTokenless(context.Background(), "profiles.yml", workflow, event, "dev", "sha256:"+strings.Repeat("1", 64), "importer", "", targets, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(compiled.Bundle.Pipeline, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	steps := make(map[string]struct {
+		Image   string
+		Agents  map[string]string
+		Command string
+	}, len(pipeline.Steps))
+	for _, step := range pipeline.Steps {
+		steps[step.Key] = struct {
+			Image   string
+			Agents  map[string]string
+			Command string
+		}{Image: step.Image, Agents: step.Agents, Command: step.Command}
+	}
+	selected, defaulted := steps["gha-selected"], steps["gha-default"]
+	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") {
+		t.Fatalf("selected profile step = %#v", selected)
+	}
+	if defaulted.Image != "" || len(defaulted.Agents) != 0 || strings.Contains(defaulted.Command, "--hosted-tool-cache") {
+		t.Fatalf("unmapped Linux step inherited selected profile = %#v", defaulted)
+	}
+}
+
+func TestRunUploadRejectsLegacyTargetingEnvironment(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	for _, test := range []struct {
-		name  string
-		queue string
-	}{
-		{name: "empty", queue: ""},
-		{name: "malformed", queue: "not a queue"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+	for _, environment := range []string{legacyTargetQueueEnvironment, legacyRuntimeImageEnvironment} {
+		t.Run(environment, func(t *testing.T) {
 			t.Setenv("BUILDKITE", "true")
-			t.Setenv("BUILDKITE_STEP_KEY", "invalid-queue-importer")
-			t.Setenv(targetQueueEnvironment, test.queue)
+			t.Setenv("BUILDKITE_STEP_KEY", "legacy-targeting-importer")
+			t.Setenv(environment, "stale-policy")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code == 0 {
-				t.Fatalf("run() code = 0, want invalid target queue failure")
+			if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 2 {
+				t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
 			}
-			if len(runner.commands) != 0 {
-				t.Fatalf("commands = %#v, stderr = %q", runner.commands, stderr.String())
-			}
-			if test.name == "empty" && !strings.Contains(stderr.String(), targetQueueEnvironment) {
-				t.Fatalf("stderr = %q, want environment name", stderr.String())
-			}
-			if test.name == "malformed" {
-				if !strings.Contains(stderr.String(), "[E_ENVIRONMENT] workflow-processing configuration is invalid") || strings.Contains(stderr.String(), "[E_EXPRESSION_INVALID]") || strings.Contains(stderr.String(), test.queue) {
-					t.Fatalf("stderr = %q, want redacted environment diagnostic without expression failure", stderr.String())
-				}
+			if !strings.Contains(stderr.String(), environment+" is no longer supported") || len(runner.commands) != 0 {
+				t.Fatalf("stderr = %q, commands = %#v", stderr.String(), runner.commands)
 			}
 		})
 	}
@@ -1972,7 +2533,7 @@ func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing
 		t.Fatalf("generated pipeline still transports runtime tools:\n%s", command)
 	}
 	step := pipeline.Steps[0]
-	if step.Cache.Name != "buildkite-gha" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha" {
+	if step.Cache.Name != "buildkite-gha-linux-amd64" || len(step.Cache.Paths) != 1 || step.Cache.Paths[0] != "/cache/bkcache/buildkite-gha/mise/linux-amd64" {
 		t.Fatalf("generated action cache = %#v", step.Cache)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != buildkitepipeline.MiseDataDir() {
@@ -2362,8 +2923,32 @@ func TestInstallRuntimeMiseLiveRelease(t *testing.T) {
 	if filepath.Dir(got) != privateRuntime {
 		t.Fatalf("installed mise path = %q, want job-private root %q", got, privateRuntime)
 	}
-	if _, err := validateRuntimeMise(context.Background(), got, runtimeMiseBinaryDigest); err != nil {
+	selected, err := selectRuntimeMiseRelease(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRuntimeMise(context.Background(), got, selected.binaryDigest); err != nil {
 		t.Fatalf("validate installed mise release: %v", err)
+	}
+}
+
+func TestSelectRuntimeMiseRelease(t *testing.T) {
+	for _, test := range []struct {
+		goos, goarch, asset, cacheKey, archiveDigest, binaryDigest string
+	}{
+		{"linux", "amd64", "linux-x64", "linux-amd64", runtimeMiseArchiveDigest, runtimeMiseBinaryDigest},
+		{"darwin", "arm64", "macos-arm64", "darwin-arm64", runtimeMiseDarwinARM64ArchiveDigest, runtimeMiseDarwinARM64BinaryDigest},
+	} {
+		selected, err := selectRuntimeMiseRelease(test.goos, test.goarch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if selected.asset != test.asset || selected.cacheKey != test.cacheKey || selected.archiveDigest != test.archiveDigest || selected.binaryDigest != test.binaryDigest {
+			t.Fatalf("selectRuntimeMiseRelease(%s/%s) = %#v", test.goos, test.goarch, selected)
+		}
+	}
+	if _, err := selectRuntimeMiseRelease("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("selectRuntimeMiseRelease() unsupported platform error = %v", err)
 	}
 }
 
@@ -2867,13 +3452,16 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(workflowSource)
+	requiresMise := false
 	job := plan.Job{
-		Schema: plan.Schema, Compiler: plan.Compiler{Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow: plan.Workflow{Path: "workflow.yml", Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "cli"},
-		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
-		Target:   plan.Target{StepKey: "gha-cli", Queue: "ubuntu-latest"},
-		Outputs:  map[string]string{"result": "${{ steps.produce.outputs.result }}"},
-		Steps:    []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
+		Schema: plan.SchemaV8, Compiler: plan.Compiler{Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
+		Runtime:      &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
+		Workflow:     plan.Workflow{Path: "workflow.yml", Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "cli"},
+		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:       plan.Target{StepKey: "gha-cli", Queue: "ubuntu-latest"},
+		Outputs:      map[string]string{"result": "${{ steps.produce.outputs.result }}"},
+		Steps:        []plan.Step{{ID: "produce", Kind: "run", Command: `echo "result=cli-ok" >> "$GITHUB_OUTPUT"`}},
+		RequiresMise: &requiresMise,
 	}
 	encoded, err := plan.Encode(job)
 	if err != nil {
@@ -2918,6 +3506,22 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
 		t.Fatalf("Run() code = %d, stderr = %q, want digest mismatch", code, stderr.String())
 	}
+	job.Runtime.DistributionDigest = "sha256:" + strings.Repeat("0", 64)
+	encoded, err = plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planDigest = sha256.Sum256(encoded)
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+hex.EncodeToString(planDigest[:]))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "runtime distribution digest") {
+		t.Fatalf("Run() code = %d, stderr = %q, want runtime digest mismatch", code, stderr.String())
+	}
+	job.Runtime.DistributionDigest = cliTestRuntimeDigest()
 	job.Compiler.Version = "0.0.0-other"
 	encoded, err = plan.Encode(job)
 	if err != nil {
@@ -3383,6 +3987,75 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 }
 
+func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	parsed, err := parseUploadArgs([]string{
+		"--runner-queue", "ubuntu-latest=hosted",
+		"--runner-image", "ubuntu-latest=" + image,
+		"--runner-queue", "macos-14=macos-sonoma-arm64",
+		"--runtime-distribution", "linux/amd64=/tmp/buildkite-gha-linux",
+		"--event-path", "event.json",
+		"--runtime-distribution", "darwin/arm64=/tmp/buildkite-gha-darwin",
+		"workflow.yml",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.workflowPath != "workflow.yml" || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" {
+		t.Fatalf("parseUploadArgs() = %#v", parsed)
+	}
+	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
+		t.Fatalf("Linux runner target = %#v", got)
+	}
+	if got := parsed.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
+		t.Fatalf("macOS runner target = %#v", got)
+	}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"--runtime-distribution", "darwin/amd64=/tmp/runtime", "workflow.yml"}, want: "unsupported runtime platform"},
+		{args: []string{"--runtime-distribution", "darwin/arm64=relative", "workflow.yml"}, want: "must use an absolute path"},
+		{args: []string{"--runtime-distribution", "darwin/arm64=/tmp/one", "--runtime-distribution", "darwin/arm64=/tmp/two", "workflow.yml"}, want: "may only be specified once"},
+		{args: []string{"--runtime-distribution", "darwin/arm64", "workflow.yml"}, want: "requires platform=absolute-path"},
+		{args: []string{"--runner-queue", "ubuntu-latest=one", "--runner-queue", "UBUNTU-LATEST=two", "workflow.yml"}, want: "may only be specified once"},
+		{args: []string{"--runner-image", "ubuntu-latest=" + image, "workflow.yml"}, want: "requires --runner-queue"},
+		{args: []string{"--runner-queue", "macos-14=macos", "--runner-image", "macos-14=" + image, "workflow.yml"}, want: "unsupported on darwin/arm64"},
+		{args: []string{"--runner-queue", "windows-latest=windows", "workflow.yml"}, want: "unsupported runner label"},
+		{args: []string{"--runner-queue", "ubuntu-20.04=hosted", "workflow.yml"}, want: "unsupported runner label"},
+		{args: []string{"--runner-queue", "ubuntu-latest=not a queue", "workflow.yml"}, want: "runner queue"},
+		{args: []string{"--runner-queue", "ubuntu-latest=hosted", "--runner-image", "ubuntu-latest=ubuntu:latest", "workflow.yml"}, want: "immutable registry sha256 reference"},
+	} {
+		if _, err := parseUploadArgs(test.args); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("parseUploadArgs(%#v) error = %v, want %q", test.args, err, test.want)
+		}
+	}
+}
+
+func TestLoadRuntimeDistributionsValidatesPlatformBinaryAndSymlink(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformLinuxAMD64: executable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := distributions[compiler.PlatformLinuxAMD64].digest; got != cliTestRuntimeDigest() {
+		t.Fatalf("runtime digest = %q, want %q", got, cliTestRuntimeDigest())
+	}
+	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformDarwinARM64: executable}); err == nil || !strings.Contains(err.Error(), "Mach-O") {
+		t.Fatalf("Darwin runtime accepted Linux executable: %v", err)
+	}
+	symlink := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Symlink(executable, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformLinuxAMD64: symlink}); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("runtime symlink error = %v", err)
+	}
+}
+
 func TestRepositoryProviderGitCredentialsUseServerEnvironment(t *testing.T) {
 	values := map[string]string{}
 	getenv := func(name string) string { return values[name] }
@@ -3411,7 +4084,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
-			DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+			DistributionDigest: cliTestRuntimeDigest(),
 		},
 		Workflow: plan.Workflow{
 			Path:         "missing-workflow.yml",
@@ -3456,7 +4129,7 @@ func cliRunJobPlan() plan.Job {
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
-			DistributionDigest: "sha256:" + strings.Repeat("2", 64),
+			DistributionDigest: cliTestRuntimeDigest(),
 		},
 		Workflow: plan.Workflow{
 			Path:         "workflow.yml",
@@ -3468,6 +4141,14 @@ func cliRunJobPlan() plan.Job {
 		RequiredCapabilities: []string{},
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
 	}
+}
+
+func cliTestRuntimeDigest() string {
+	digest, err := executableDigest()
+	if err != nil {
+		panic(err)
+	}
+	return digest
 }
 
 func writeCLIJobPlan(t *testing.T, job plan.Job) (string, string) {
