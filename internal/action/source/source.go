@@ -110,7 +110,7 @@ type config struct {
 	api                                 *url.URL
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
-	credential                          *scopedCredential
+	credential                          *actionSourceCredential
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -126,16 +126,16 @@ func defaults() config {
 // never be populated from workflow input.
 type Option func(*config) error
 
-// WithScopedGitHubTokenProvider authenticates mutable-ref API requests using a
+// WithGitHubActionSourceTokenProvider authenticates mutable-ref API requests using a
 // credential provisioned at the first such request and cached for this client.
 // Returning an empty token selects anonymous resolution. Full lowercase SHAs
 // never invoke the provider.
-func WithScopedGitHubTokenProvider(repository string, provider func(context.Context) (string, error)) Option {
+func WithGitHubActionSourceTokenProvider(repository string, provider func(context.Context) (string, error)) Option {
 	return func(c *config) error {
 		if provider == nil || !validRepository(repository) {
-			return fmt.Errorf("invalid scoped GitHub credential provider")
+			return fmt.Errorf("invalid GitHub action source credential provider")
 		}
-		c.credential = &scopedCredential{repository: strings.ToLower(repository), provider: provider}
+		c.credential = &actionSourceCredential{repository: strings.ToLower(repository), provider: provider}
 		return nil
 	}
 }
@@ -145,7 +145,7 @@ func validRepository(repository string) bool {
 	return len(parts) == 2 && ownerRE.MatchString(parts[0]) && repoRE.MatchString(parts[1]) && !strings.HasSuffix(parts[1], ".git")
 }
 
-type scopedCredential struct {
+type actionSourceCredential struct {
 	repository string
 	provider   func(context.Context) (string, error)
 	once       sync.Once
@@ -153,7 +153,7 @@ type scopedCredential struct {
 	err        error
 }
 
-func (c *scopedCredential) provision(ctx context.Context) error {
+func (c *actionSourceCredential) provision(ctx context.Context) error {
 	if c == nil || c.provider == nil {
 		return nil
 	}
@@ -323,7 +323,7 @@ func githubAPIGet(ctx context.Context, client *http.Client, cfg config, parts []
 	if err != nil {
 		return err
 	}
-	setAPIHeaders(req, scopedToken(cfg, parts))
+	setAPIHeaders(req, actionSourceToken(cfg, parts))
 	c := *client
 	c.Jar = nil
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -370,7 +370,7 @@ func ensurePublic(ctx context.Context, client *http.Client, cfg config, ref Refe
 	}
 	return nil
 }
-func scopedToken(cfg config, parts []string) string {
+func actionSourceToken(cfg config, parts []string) string {
 	if cfg.credential == nil {
 		return ""
 	}

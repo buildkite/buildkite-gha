@@ -53,27 +53,30 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	}
 }
 
-func TestAgentGitHubTokensMintsScopedSourceTokenWithoutWorkflow(t *testing.T) {
+func TestAgentGitHubTokensMintsActionSourceTokenWithRepositoryOnly(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_scoped_access_token" {
+		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_action_source_access_token" {
 			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("request = %s headers %#v", r.Method, r.Header)
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != `{"repo_url":"https://github.com/actions/checkout","permissions":{"contents":"read"}}` {
+		if string(body) != `{"repo_url":"https://github.com/actions/checkout"}` {
 			t.Errorf("request body = %s", body)
 		}
-		_, _ = io.WriteString(w, `{"token":"ghs_scoped"}`)
+		_, _ = io.WriteString(w, `{"token":"ghs_action_source"}`)
 	}))
 	defer server.Close()
 	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token, err := provider.ScopedToken(context.Background(), "actions/checkout", map[string]string{"contents": "read"}); err != nil || token != "ghs_scoped" {
-		t.Fatalf("ScopedToken() = %q, %v", token, err)
+	if token, err := provider.ActionSourceToken(context.Background(), "actions/checkout"); err != nil || token != "ghs_action_source" {
+		t.Fatalf("ActionSourceToken() = %q, %v", token, err)
 	}
 }
 
@@ -139,6 +142,9 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
 		if _, err := provider.WorkflowToken(context.Background(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
 			t.Fatalf("WorkflowToken(%q) succeeded", repository)
+		}
+		if _, err := provider.ActionSourceToken(context.Background(), repository); err == nil {
+			t.Fatalf("ActionSourceToken(%q) succeeded", repository)
 		}
 	}
 }
@@ -231,8 +237,11 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := provider.ScopedToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"})
+	token, err := provider.ActionSourceToken(ctx, "buildkite/buildkite-gha")
 	if err != nil {
+		if strings.Contains(err.Error(), "not enabled") || strings.Contains(err.Error(), "temporarily unavailable") {
+			t.Skipf("GitHub action source token rollout is unavailable: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if err := (AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")}).AddRedaction(ctx, token); err != nil {

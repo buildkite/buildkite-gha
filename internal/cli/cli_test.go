@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -3537,9 +3538,9 @@ func TestRunUploadRejectsAllReusableExplicitPaths(t *testing.T) {
 	}
 }
 
-func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *testing.T) {
-	const token = "ghs_job_scoped"
-	provider := &cliWorkflowTokenProvider{token: token}
+func TestActionSourceAuthenticationUsesDedicatedTokenAndFallsBackAnonymously(t *testing.T) {
+	const token = "ghs_action_source"
+	provider := &cliActionSourceTokenProvider{token: token}
 	redactor := &cliRedactor{}
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor}
 	option := authentication.option("buildkite/buildkite-gha")
@@ -3575,7 +3576,7 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !reflect.DeepEqual(provider.permissions, map[string]string{"contents": "read"}) || !slices.Equal(redactor.values, []string{token}) {
+	if _, err := resolver.Resolve(context.Background(), ref); err != nil || requests != 2 || provider.calls != 1 || provider.repository != "buildkite/buildkite-gha" || !slices.Equal(redactor.values, []string{token}) {
 		t.Fatalf("Resolve() error/requests = %v / %d", err, requests)
 	}
 	second, _ := actionsource.Parse("o/r@v2")
@@ -3585,19 +3586,19 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 
 	for _, test := range []struct {
 		name          string
-		provider      *cliWorkflowTokenProvider
+		provider      *cliActionSourceTokenProvider
 		redactor      *cliRedactor
 		cancelContext bool
 		wantContext   bool
 	}{
 		{name: "unavailable", redactor: &cliRedactor{}},
-		{name: "mint failure", provider: &cliWorkflowTokenProvider{err: errors.New("secret backend details")}, redactor: &cliRedactor{}},
-		{name: "redaction failure", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("secret backend details")}},
-		{name: "mint client timeout", provider: &cliWorkflowTokenProvider{err: context.DeadlineExceeded}, redactor: &cliRedactor{}},
-		{name: "redaction client timeout", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.DeadlineExceeded}},
+		{name: "mint failure", provider: &cliActionSourceTokenProvider{err: errors.New("secret backend details")}, redactor: &cliRedactor{}},
+		{name: "redaction failure", provider: &cliActionSourceTokenProvider{token: token}, redactor: &cliRedactor{err: errors.New("secret backend details")}},
+		{name: "mint client timeout", provider: &cliActionSourceTokenProvider{err: context.DeadlineExceeded}, redactor: &cliRedactor{}},
+		{name: "redaction client timeout", provider: &cliActionSourceTokenProvider{token: token}, redactor: &cliRedactor{err: context.DeadlineExceeded}},
 		{name: "pre-cancelled while unavailable", redactor: &cliRedactor{}, cancelContext: true, wantContext: true},
-		{name: "mint cancellation", provider: &cliWorkflowTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, wantContext: true},
-		{name: "redaction cancellation", provider: &cliWorkflowTokenProvider{token: token}, redactor: &cliRedactor{err: context.Canceled}, wantContext: true},
+		{name: "mint cancellation", provider: &cliActionSourceTokenProvider{err: context.Canceled}, redactor: &cliRedactor{}, wantContext: true},
+		{name: "redaction cancellation", provider: &cliActionSourceTokenProvider{token: token}, redactor: &cliRedactor{err: context.Canceled}, wantContext: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var warnings bytes.Buffer
@@ -3625,6 +3626,56 @@ func TestActionSourceAuthenticationUsesJobScopedTokenAndFallsBackAnonymously(t *
 	}
 }
 
+func TestActionSourceAuthenticationReusesOneTokenAcrossConcurrentWorkflowResolvers(t *testing.T) {
+	const token = "ghs_action_source"
+	provider := &cliActionSourceTokenProvider{token: token}
+	redactor := &cliRedactor{}
+	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/o/r" {
+			_, _ = io.WriteString(w, `{"private":false,"visibility":"public"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+	}))
+	defer server.Close()
+
+	const resolverCount = 11
+	resolvers := make([]*actionsource.Resolver, resolverCount)
+	for i := range resolvers {
+		resolver, err := actionsource.NewResolver(server.Client(), authentication.option("buildkite/buildkite-gha"), actionsource.WithTestEndpoints(server.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolvers[i] = resolver
+	}
+	ref, err := actionsource.Parse("o/r@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, resolverCount)
+	for _, resolver := range resolvers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := resolver.Resolve(context.Background(), ref)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if provider.calls != 1 || !slices.Equal(redactor.values, []string{token}) {
+		t.Fatalf("provider calls/redactions = %d / %#v, want one importer-job mint and redaction", provider.calls, redactor.values)
+	}
+}
+
 func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "local.yml")
@@ -3646,7 +3697,7 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := &cliWorkflowTokenProvider{token: "must-not-be-minted"}
+	provider := &cliActionSourceTokenProvider{token: "must-not-be-minted"}
 	redactor := &cliRedactor{}
 	var warnings bytes.Buffer
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
@@ -3692,7 +3743,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_JOB_ID", "")
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "")
 	var warnings bytes.Buffer
-	authentication := jobScopedActionSourceAuthentication(&warnings)
+	authentication := importerJobActionSourceAuthentication(&warnings)
 	token, err := authentication.token(context.Background(), "buildkite/buildkite-gha")
 	if err != nil || token != "" || authentication.provider != nil || !strings.Contains(warnings.String(), "authentication is unavailable") {
 		t.Fatalf("ambient GitHub token authentication = provider %v, token %q, error %v, warnings %q", authentication.provider != nil, token, err, warnings.String())
@@ -3703,7 +3754,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	if authentication := jobScopedActionSourceAuthentication(io.Discard); authentication.provider == nil {
+	if authentication := importerJobActionSourceAuthentication(io.Discard); authentication.provider == nil {
 		t.Fatal("job-scoped Agent configuration did not configure action-source authentication")
 	}
 }
@@ -4993,27 +5044,31 @@ type cliCaptureRunner struct {
 	contextErrors  []error
 }
 
-type cliWorkflowTokenProvider struct {
-	token       string
-	err         error
-	repository  string
-	permissions map[string]string
-	calls       int
+type cliActionSourceTokenProvider struct {
+	mu         sync.Mutex
+	token      string
+	err        error
+	repository string
+	calls      int
 }
 
-func (p *cliWorkflowTokenProvider) ScopedToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+func (p *cliActionSourceTokenProvider) ActionSourceToken(_ context.Context, repository string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.calls++
 	p.repository = repository
-	p.permissions = permissions
 	return p.token, p.err
 }
 
 type cliRedactor struct {
+	mu     sync.Mutex
 	values []string
 	err    error
 }
 
 func (r *cliRedactor) AddRedaction(_ context.Context, value string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.values = append(r.values, value)
 	return r.err
 }
