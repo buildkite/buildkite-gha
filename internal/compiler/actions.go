@@ -112,11 +112,12 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				continue
 			}
 			position := step.Span.Start
+			message, action := actionResolutionMessage(step.Uses, err)
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
-				Job: instance.LogicalJobID, Instance: instance.Key, Action: step.Uses, Step: i + 1,
-				Message: actionResolutionMessage(step.Uses, err),
+				Job: instance.LogicalJobID, Instance: instance.Key, Action: action, Step: i + 1,
+				Message: message,
 				Err:     fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
 			})
 		}
@@ -124,10 +125,19 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 	return evidence, errors.Join(diagnostics...)
 }
 
-func actionResolutionMessage(reference string, err error) string {
-	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", reference))
+func actionResolutionMessage(reference string, err error) (message, action string) {
+	action = reference
+	for {
+		var childErr *actionChildError
+		if !errors.As(err, &childErr) {
+			break
+		}
+		action = childErr.child
+		err = childErr.err
+	}
+	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {
-		return fmt.Sprintf("Action %q could not be resolved: %s", reference, reason[strings.Index(reason, ": ")+2:])
+		return fmt.Sprintf("Action %q could not be resolved: %s", action, reason[strings.Index(reason, ": ")+2:]), action
 	}
 	if start := strings.Index(reason, "parse action metadata \""); start >= 0 {
 		pathStart := start + len("parse action metadata \"")
@@ -138,8 +148,16 @@ func actionResolutionMessage(reference string, err error) string {
 	if fields := unsupportedMetadataFields(reason); fields != "" {
 		reason = "action metadata uses " + fields
 	}
-	return fmt.Sprintf("Action %q is unsupported: %s", reference, reason)
+	return fmt.Sprintf("Action %q is unsupported: %s", action, reason), action
 }
+
+type actionChildError struct {
+	child string
+	err   error
+}
+
+func (e *actionChildError) Error() string { return fmt.Sprintf("child action %q: %v", e.child, e.err) }
+func (e *actionChildError) Unwrap() error { return e.err }
 
 func unsupportedMetadataFields(reason string) string {
 	if !strings.Contains(reason, "yaml: unmarshal errors:") {
@@ -302,7 +320,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 			}
 			child, err := b.add(ctx, step.Uses, depth+1)
 			if err != nil {
-				return nil, fmt.Errorf("action %q child %q: %w", raw, step.Uses, err)
+				return nil, &actionChildError{child: step.Uses, err: err}
 			}
 			if n.lock.Children == nil {
 				n.lock.Children = map[string]plan.ActionSelector{}

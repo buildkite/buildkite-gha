@@ -181,7 +181,20 @@ func upperFirst(value string) string {
 
 func markdownCode(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
-	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "`", "\\`").Replace(value)
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
+	if strings.Contains(value, "`") {
+		longest, current := 0, 0
+		for _, r := range value {
+			if r == '`' {
+				current++
+				longest = max(longest, current)
+			} else {
+				current = 0
+			}
+		}
+		delimiter := strings.Repeat("`", longest+1)
+		return delimiter + " " + value + " " + delimiter
+	}
 	return "`" + value + "`"
 }
 

@@ -2152,6 +2152,12 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	}
 }
 
+func TestMarkdownCodeContainsWorkflowBackticks(t *testing.T) {
+	if got, want := markdownCode("action` **not bold** ``tail"), "``` action` **not bold** ``tail ```"; got != want {
+		t.Fatalf("markdownCode() = %q, want %q", got, want)
+	}
+}
+
 func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{

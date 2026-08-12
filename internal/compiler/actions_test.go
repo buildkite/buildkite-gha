@@ -84,16 +84,30 @@ func writeAction(t *testing.T, root, name, body string) {
 func TestActionResolutionMessageExplainsUnsupportedMetadata(t *testing.T) {
 	err := errors.New("compile action \"owner/action@v1\": parse action metadata \"/tmp/download/action.yml\": yaml: unmarshal errors:\n  line 11: field type not found in type metadata.Input\n  line 16: field type not found in type metadata.Input")
 	want := `Action "owner/action@v1" is unsupported: action metadata uses unsupported field "type" at lines 11, 16`
-	if got := actionResolutionMessage("owner/action@v1", err); got != want {
-		t.Fatalf("actionResolutionMessage() = %q, want %q", got, want)
+	if got, action := actionResolutionMessage("owner/action@v1", err); got != want || action != "owner/action@v1" {
+		t.Fatalf("actionResolutionMessage() = %q, %q; want %q, %q", got, action, want, "owner/action@v1")
 	}
 }
 
 func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 	err := errors.New("resolve action reference: tag v1 was not found")
 	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
-	if got := actionResolutionMessage("owner/action@v1", err); got != want {
-		t.Fatalf("actionResolutionMessage() = %q, want %q", got, want)
+	if got, action := actionResolutionMessage("owner/action@v1", err); got != want || action != "owner/action@v1" {
+		t.Fatalf("actionResolutionMessage() = %q, %q; want %q, %q", got, action, want, "owner/action@v1")
+	}
+}
+
+func TestActionResolutionMessageIdentifiesNestedChild(t *testing.T) {
+	err := &actionChildError{
+		child: "owner/composite@v1",
+		err: &actionChildError{
+			child: "owner/missing@v2",
+			err:   errors.New(`compile action "owner/missing@v2": resolve action reference: tag v2 was not found`),
+		},
+	}
+	want := `Action "owner/missing@v2" could not be resolved: tag v2 was not found`
+	if got, action := actionResolutionMessage("owner/root@v1", err); got != want || action != "owner/missing@v2" {
+		t.Fatalf("actionResolutionMessage() = %q, %q; want %q, %q", got, action, want, "owner/missing@v2")
 	}
 }
 
