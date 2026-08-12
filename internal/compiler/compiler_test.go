@@ -1939,6 +1939,53 @@ jobs:
 	}
 }
 
+func TestValidateResolvesRuntimeMatrixReusableWorkflowOutputProjection(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  producer:
+    uses: ./.github/workflows/producer.yml
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.name }}"
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      include:
+        value: ${{ jobs.build.outputs.matrix }}
+jobs:
+  auxiliary:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - id: build
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+`)
+
+	report, err := Validate(callerPath, readFile(t, callerPath))
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	descriptor := report.RuntimeMatrices[0]
+	if descriptor.Job != "generated" || descriptor.ProducerJob != "producer.build" || descriptor.ProducerStepKey != "gha-producer-build" || descriptor.ProducerOutput != "matrix" {
+		t.Fatalf("projected runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
 func TestValidateRuntimeMatrixDescriptorRejectsUnsupportedSourceBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name     string

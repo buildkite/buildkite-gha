@@ -56,6 +56,19 @@ func TestExpandRuntimeMatrixOutputAcceptsBoundedMatrixObject(t *testing.T) {
 	}
 }
 
+func TestExpandRuntimeMatrixOutputCanonicalizesEquivalentNumbers(t *testing.T) {
+	descriptor := validRuntimeMatrixDescriptor(RuntimeMatrixShapeInclude)
+	for _, source := range []string{`[{"group":1}]`, `[{"group":1.0}]`, `[{"group":1e0}]`} {
+		matrices, err := ExpandRuntimeMatrixOutput(descriptor, []byte(source), 0)
+		if err != nil {
+			t.Fatalf("ExpandRuntimeMatrixOutput(%s): %v", source, err)
+		}
+		if len(matrices) != 1 || matrices[0]["group"] != json.Number("1") {
+			t.Fatalf("ExpandRuntimeMatrixOutput(%s) = %#v, want canonical number 1", source, matrices)
+		}
+	}
+}
+
 func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testing.T) {
 	include := validRuntimeMatrixDescriptor(RuntimeMatrixShapeInclude)
 	object := validRuntimeMatrixDescriptor(RuntimeMatrixShapeObject)
@@ -77,6 +90,7 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 		{name: "duplicate key", descriptor: include, source: `[{"os":"one","os":"two"}]`, want: "duplicate JSON key"},
 		{name: "ambiguous key", descriptor: include, source: `[{"os":"one","OS":"two"}]`, want: "ambiguous properties"},
 		{name: "duplicate instance", descriptor: include, source: `[{"os":"one"},{"os":"one"}]`, want: "duplicate instances"},
+		{name: "numerically equivalent instances", descriptor: include, source: `[{"group":1},{"group":1.0},{"group":1e0}]`, want: "duplicate instances"},
 		{name: "empty entry", descriptor: include, source: `[{}]`, want: "between 1 and"},
 		{name: "wrong matrix root", descriptor: object, source: `[]`, want: "want object"},
 		{name: "empty matrix object", descriptor: object, source: `{}`, want: "between 1 and"},
@@ -88,6 +102,7 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 		{name: "exclude dimension case ambiguity", descriptor: object, source: `{"os":["linux"],"exclude":[{"OS":"linux"}]}`, want: "ambiguous with dimension"},
 		{name: "instance key case ambiguity", descriptor: include, source: `[{"os":"linux"},{"OS":"macos"}]`, want: "ambiguous property spellings"},
 		{name: "huge number", descriptor: include, source: `[{"group":1e9999}]`, want: "finite range"},
+		{name: "number exponent underflow", descriptor: include, source: `[{"group":1.0e-9223372036854775808}]`, want: "finite range"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

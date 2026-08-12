@@ -77,15 +77,28 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, ne
 		return RuntimeMatrixDescriptor{}, true, errors.New("runtime matrix include output must be the complete matrix definition")
 	}
 
-	producerID, err := exactRuntimeMatrixNeed(needs, reference.Job)
+	binding, err := exactRuntimeMatrixNeed(needs, reference.Job)
 	if err != nil {
 		return RuntimeMatrixDescriptor{}, true, err
+	}
+	producerID := ""
+	requestedOutput := reference.Output
+	if binding.projectOutputs {
+		producerID, requestedOutput, err = exactRuntimeMatrixProjectedOutput(binding, reference.Output)
+		if err != nil {
+			return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q: %w", reference.Job, err)
+		}
+	} else {
+		if len(binding.members) != 1 {
+			return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q must resolve to exactly one job", reference.Job)
+		}
+		producerID = binding.members[0]
 	}
 	producer, exists := jobs[producerID]
 	if !exists {
 		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q is unavailable after graph resolution", reference.Job)
 	}
-	output, err := exactRuntimeMatrixOutput(producer.Outputs, reference.Output)
+	output, err := exactRuntimeMatrixOutput(producer.Outputs, requestedOutput)
 	if err != nil {
 		return RuntimeMatrixDescriptor{}, true, fmt.Errorf("runtime matrix producer %q: %w", producerID, err)
 	}
@@ -117,25 +130,39 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, ne
 	return descriptor, true, nil
 }
 
-func exactRuntimeMatrixNeed(needs map[string]needBinding, requested string) (string, error) {
+func exactRuntimeMatrixNeed(needs map[string]needBinding, requested string) (needBinding, error) {
 	var matched *needBinding
 	for _, need := range sortedKeys(needs) {
 		if !strings.EqualFold(need, requested) {
 			continue
 		}
 		if matched != nil {
-			return "", fmt.Errorf("runtime matrix producer %q is ambiguous", requested)
+			return needBinding{}, fmt.Errorf("runtime matrix producer %q is ambiguous", requested)
 		}
 		binding := needs[need]
 		matched = &binding
 	}
 	if matched == nil {
-		return "", fmt.Errorf("runtime matrix producer %q must be a direct prerequisite in needs", requested)
+		return needBinding{}, fmt.Errorf("runtime matrix producer %q must be a direct prerequisite in needs", requested)
 	}
-	if len(matched.members) != 1 {
-		return "", fmt.Errorf("runtime matrix producer %q must resolve to exactly one job", requested)
+	return *matched, nil
+}
+
+func exactRuntimeMatrixProjectedOutput(binding needBinding, requested string) (string, string, error) {
+	var matched *needOutputBinding
+	for i := range binding.outputs {
+		if !strings.EqualFold(binding.outputs[i].name, requested) {
+			continue
+		}
+		if matched != nil {
+			return "", "", fmt.Errorf("output %q is ambiguous", requested)
+		}
+		matched = &binding.outputs[i]
 	}
-	return matched.members[0], nil
+	if matched == nil {
+		return "", "", fmt.Errorf("output %q is not declared", requested)
+	}
+	return matched.member, matched.output, nil
 }
 
 func exactRuntimeMatrixOutput(outputs map[string]string, requested string) (string, error) {
@@ -515,12 +542,57 @@ func runtimeMatrixScalar(value any) (any, error) {
 		if err != nil || math.IsInf(number, 0) || math.IsNaN(number) {
 			return nil, fmt.Errorf("number %q is outside the supported finite range", value)
 		}
-		return value, nil
+		canonical, err := canonicalRuntimeMatrixNumber(value)
+		if err != nil {
+			return nil, fmt.Errorf("number %q is outside the supported finite range", value)
+		}
+		return canonical, nil
 	case nil:
 		return nil, errors.New("null values are unsupported")
 	default:
 		return nil, fmt.Errorf("nested %T values are unsupported", value)
 	}
+}
+
+func canonicalRuntimeMatrixNumber(value json.Number) (json.Number, error) {
+	text := value.String()
+	sign := ""
+	if strings.HasPrefix(text, "-") {
+		sign = "-"
+		text = strings.TrimPrefix(text, "-")
+	}
+	exponent := int64(0)
+	if index := strings.IndexAny(text, "eE"); index >= 0 {
+		parsed, err := strconv.ParseInt(text[index+1:], 10, 64)
+		if err != nil {
+			return "", err
+		}
+		exponent = parsed
+		text = text[:index]
+	}
+	if index := strings.IndexByte(text, '.'); index >= 0 {
+		fractionDigits := int64(len(text) - index - 1)
+		if exponent < math.MinInt64+fractionDigits {
+			return "", errors.New("number exponent underflows")
+		}
+		exponent -= fractionDigits
+		text = text[:index] + text[index+1:]
+	}
+	digits := strings.TrimLeft(text, "0")
+	if digits == "" {
+		return json.Number("0"), nil
+	}
+	for strings.HasSuffix(digits, "0") {
+		digits = strings.TrimSuffix(digits, "0")
+		if exponent == math.MaxInt64 {
+			return "", errors.New("number exponent overflows")
+		}
+		exponent++
+	}
+	if exponent == 0 {
+		return json.Number(sign + digits), nil
+	}
+	return json.Number(sign + digits + "e" + strconv.FormatInt(exponent, 10)), nil
 }
 
 func validateRuntimeMatrixKey(key string) error {
