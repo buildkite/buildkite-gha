@@ -273,7 +273,8 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 			GroupKey:   "gha-workflow-1111111111111111",
 			CheckName:  "Buildkite / CI (push)",
 			Condition:  "true",
-			Failure:    &Failure{Label: "Compiler errors", Message: "runner isn't admitted\nmatrix could not be expanded"},
+			SkipReason: "This workflow is not triggered by a `push` event",
+			Failure:    &Failure{Message: "runner isn't admitted\nmatrix could not be expanded"},
 		}},
 	})
 	if err != nil {
@@ -281,24 +282,32 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	}
 	var document struct {
 		Steps []struct {
-			Skip  string `yaml:"skip"`
-			Steps []struct {
-				Label    string `yaml:"label"`
-				Command  string `yaml:"command"`
-				Checkout struct {
-					Skip bool `yaml:"skip"`
-				} `yaml:"checkout"`
-			} `yaml:"steps"`
+			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
+			Key       string `yaml:"key"`
+			Condition string `yaml:"if"`
+			Skip      string `yaml:"skip"`
+			Command   string `yaml:"command"`
+			DependsOn string `yaml:"depends_on"`
+			Notify    []struct {
+				GitHubCheck struct {
+					Name string `yaml:"name"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			Steps []any `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 1 || document.Steps[0].Skip != "" || len(document.Steps[0].Steps) != 1 {
+	if len(document.Steps) != 1 {
 		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
 	}
-	step := document.Steps[0].Steps[0]
-	if step.Label != "Compiler errors" || step.Command != `printf '%s\n' 'runner isn'"'"'t admitted
+	step := document.Steps[0]
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != "Buildkite / CI (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Command != `printf '%s\n' 'runner isn'"'"'t admitted
 matrix could not be expanded' && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
 	}

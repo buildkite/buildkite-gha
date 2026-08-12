@@ -2217,16 +2217,16 @@ jobs:
 		}
 		var pipeline struct {
 			Steps []struct {
-				Skip  string `yaml:"skip"`
-				Steps []struct {
-					Command string `yaml:"command"`
-				} `yaml:"steps"`
+				Group   string `yaml:"group"`
+				Label   string `yaml:"label"`
+				Command string `yaml:"command"`
+				Steps   []any  `yaml:"steps"`
 			} `yaml:"steps"`
 		}
 		if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 			t.Fatal(err)
 		}
-		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 1 || !strings.Contains(pipeline.Steps[0].Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Steps[0].Command, " && exit 1") {
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || !strings.HasPrefix(pipeline.Steps[0].Label, "Buildkite / ") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
 			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
@@ -3229,21 +3229,20 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Skip  string `yaml:"skip"`
-			Steps []struct {
-				Label    string `yaml:"label"`
-				Command  string `yaml:"command"`
-				Checkout struct {
-					Skip bool `yaml:"skip"`
-				} `yaml:"checkout"`
-			} `yaml:"steps"`
+			Group    string `yaml:"group"`
+			Label    string `yaml:"label"`
+			Command  string `yaml:"command"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			Steps []any `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	wantReasons := []string{
@@ -3251,9 +3250,9 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		`[E_EXPRESSION_INVALID] job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties {job=beta}`,
 		`[E_EXPRESSION_INVALID] job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON {job=gamma}`,
 	}
-	step := pipeline.Steps[0].Steps[0]
+	step := pipeline.Steps[0]
 	wantMessage := strings.Join(wantReasons, "\n")
-	if step.Label != "Compiler errors" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
+	if step.Label != "Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	command := exec.Command("sh", "-c", step.Command)
@@ -3302,9 +3301,10 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group string `yaml:"group"`
-			Skip  string `yaml:"skip"`
-			Steps []struct {
+			Group   string `yaml:"group"`
+			Label   string `yaml:"label"`
+			Command string `yaml:"command"`
+			Steps   []struct {
 				Label   string `yaml:"label"`
 				Key     string `yaml:"key"`
 				Command string `yaml:"command"`
@@ -3317,17 +3317,17 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	if len(pipeline.Steps) != 3 {
 		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
 	}
-	for i, group := range pipeline.Steps[:2] {
-		if group.Skip != "" || len(group.Steps) != 1 || group.Steps[0].Label != "Compiler errors" || !strings.HasSuffix(group.Steps[0].Command, " && exit 1") {
-			t.Fatalf("failed workflow group %d = %#v", i, group)
+	for i, step := range pipeline.Steps[:2] {
+		if step.Group != "" || len(step.Steps) != 0 || !strings.HasPrefix(step.Label, "Buildkite / ") || !strings.HasSuffix(step.Command, " && exit 1") {
+			t.Fatalf("failed workflow step %d = %#v", i, step)
 		}
 	}
-	firstFailureCommand := pipeline.Steps[0].Steps[0].Command
+	firstFailureCommand := pipeline.Steps[0].Command
 	if !strings.Contains(firstFailureCommand, "[E_EXPRESSION_INVALID] resolved runner target is not admitted by policy: unsupported operating system {job=first}") ||
 		!strings.Contains(firstFailureCommand, "[E_EXPRESSION_INVALID] resolved runner target is not admitted by policy: runner label is not mapped by policy {job=second}") {
-		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Steps[0].Command)
+		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Command)
 	}
-	if actionFailureCommand := pipeline.Steps[1].Steps[0].Command; !strings.Contains(actionFailureCommand, "[E_ACTION_RESOLUTION] action could not be resolved or validated {job=action, step=1}") {
+	if actionFailureCommand := pipeline.Steps[1].Command; !strings.Contains(actionFailureCommand, "[E_ACTION_RESOLUTION] action could not be resolved or validated {job=action, step=1}") {
 		t.Fatalf("action failure command = %q", actionFailureCommand)
 	}
 	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {

@@ -1696,7 +1696,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		GroupKey:   "gha-workflow-" + input.Identity,
 		CheckName:  "Buildkite / " + label + " (" + event + ")",
 		Condition:  input.TriggerCondition,
-		Failure:    &buildkitepipeline.Failure{Label: "Compiler errors", Message: strings.Join(messages, "\n")},
+		Failure:    &buildkitepipeline.Failure{Message: strings.Join(messages, "\n")},
 	}
 }
 
