@@ -8,7 +8,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.8.0:
+      - github-actions#v0.9.3:
           workflow: .github/workflows/example-basic.yml
 
   - label: ":package: Artifact released-plugin demo"
@@ -17,7 +17,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.8.0:
+      - github-actions#v0.9.3:
           workflow: .github/workflows/example-artifacts.yml
 
   - label: ":javascript: Actions released-plugin demo"
@@ -26,8 +26,21 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.8.0:
+      - github-actions#v0.9.3:
           workflow: .github/workflows/local-actions-oracle.yml
+
+  - label: ":mac: Native macOS released-plugin proof"
+    key: "plugin-demo-macos-importer"
+    timeout_in_minutes: 15
+    retry:
+      automatic: false
+    plugins:
+      - github-actions#v0.9.3:
+          workflow: .github/workflows/macos-actions-proof.yml
+          source-ref: "$DEMO_COMMIT"
+          runners:
+            - runs-on: macos-14
+              queue: mac-small
 
   - label: ":rocket: Advanced released-plugin demo"
     key: "plugin-demo-advanced-importer"
@@ -35,7 +48,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.8.0:
+      - github-actions#v0.9.3:
           workflow: .github/workflows/example-advanced.yml
 
   - label: ":white_check_mark: Service-free plugin demo complete"
@@ -44,8 +57,9 @@ steps:
       - "plugin-demo-basic-importer"
       - "plugin-demo-artifact-importer"
       - "plugin-demo-actions-importer"
+      - "plugin-demo-macos-importer"
       - "plugin-demo-advanced-importer"
-    command: "echo 'The released plugin and CLI completed all service-free workflows.'"
+    command: "echo 'The released plugin completed all service-free workflows. Linux used the released CLI; macOS used the CLI source from DEMO_COMMIT.'"
 
   - label: ":package: Cache released-plugin demo"
     key: "plugin-demo-cache-importer"
@@ -54,7 +68,7 @@ steps:
     retry:
       automatic: false
     plugins:
-      - github-actions#v0.8.0:
+      - github-actions#v0.9.3:
           workflow: testdata/plugin-demo/.github/workflows/cache.yml
 
   - label: ":white_check_mark: Cache plugin demo complete"

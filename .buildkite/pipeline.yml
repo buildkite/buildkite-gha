@@ -65,6 +65,7 @@ steps:
     steps:
       - label: ":go: Repository checks"
         key: "checks"
+        if: build.env("DEMO_SUITE") != "plugin"
         cache: ".buildkite/cache-volume"
         env:
           BUILDKITE_GHA_LIVE_REQUIRED: "1"
