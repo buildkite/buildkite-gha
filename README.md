@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and static matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64. Runtime v0.9.0 also includes native macOS arm64 support, which requires the companion plugin release. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64 and native macOS arm64. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
 
 ## How it works
 
@@ -32,8 +32,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.8.0:
-          version: "0.9.0"
+      - github-actions#v0.9.3:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -49,21 +48,18 @@ To hold the CLI at a specific release instead, set `version` to an exact stable 
 
 ```yaml
 plugins:
-  - github-actions#v0.8.0:
+  - github-actions#v0.9.3:
       workflow: .github/workflows/ci.yml
-      version: "0.9.0"
+      version: "0.10.1"
 ```
 
 Runtime v0.9.0 adds `runner.os` and `runner.arch`. They resolve to `Linux` and
-`X64` through the released plugin path. Native macOS runtime support is also in
-v0.9.0, but released plugin v0.8.0 does not declare or support `runners` and
-schema validation rejects that configuration. The companion plugin change must
-ship before using this macOS configuration in production:
+`X64` on Linux and `macOS` and `ARM64` on native macOS. Configure macOS runner
+labels with a native Darwin/arm64 queue:
 
 ```yaml
 plugins:
-  - github-actions#main:
-      version: "0.9.0"
+  - github-actions#v0.9.3:
       workflow: .github/workflows/ci.yml
       runners:
         - runs-on: ubuntu-latest
@@ -86,7 +82,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 jobs using `bash` or `sh` | Native macOS through a released plugin until the companion plugin release; Windows, Linux arm64, or macOS x86-64 |
+| Linux x86-64 and native macOS arm64 jobs using `bash` or `sh` | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | Ordinary workflow secrets, GitHub-compatible OIDC, or protected queues |

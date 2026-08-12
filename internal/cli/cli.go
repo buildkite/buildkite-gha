@@ -176,7 +176,7 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		return 1
 	}
 	return uploadParsed(parsedUploadArgs{
-		workflowOperands:  []string{configuration.Workflow},
+		workflowOperands:  configuration.Workflows,
 		runnerTargets:     configuration.runnerTargets,
 		pluginAcquisition: &pluginRuntimeAcquisition{version: version},
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
@@ -190,7 +190,7 @@ func validateImporterPlatform(goos, goarch string) error {
 }
 
 type pluginConfiguration struct {
-	Workflow      string
+	Workflows     []string
 	runnerTargets map[string]compiler.RunnerTarget
 }
 
@@ -215,14 +215,44 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "runners", "version", "source-ref", "minimum-release-age":
+		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
 	}
-	workflow, ok := encoded["workflow"].(string)
-	if !ok || strings.TrimSpace(workflow) == "" {
-		return pluginConfiguration{}, fmt.Errorf("%s workflow is required", pluginConfigurationEnvironment)
+	legacyWorkflow, hasLegacyWorkflow := encoded["workflow"]
+	workflowsValue, hasWorkflows := encoded["workflows"]
+	if hasLegacyWorkflow && hasWorkflows {
+		return pluginConfiguration{}, fmt.Errorf("%s workflow and workflows are mutually exclusive", pluginConfigurationEnvironment)
+	}
+	var workflows []string
+	if hasLegacyWorkflow {
+		workflow, ok := legacyWorkflow.(string)
+		if !ok || strings.TrimSpace(workflow) == "" {
+			return pluginConfiguration{}, fmt.Errorf("%s workflow must be a non-empty string", pluginConfigurationEnvironment)
+		}
+		workflows = []string{workflow}
+	} else {
+		switch value := workflowsValue.(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				workflows = []string{value}
+			}
+		case []any:
+			if len(value) != 0 {
+				workflows = make([]string, len(value))
+				for index, entry := range value {
+					workflow, ok := entry.(string)
+					if !ok || strings.TrimSpace(workflow) == "" {
+						return pluginConfiguration{}, fmt.Errorf("%s workflows entry %d must be a non-empty string", pluginConfigurationEnvironment, index)
+					}
+					workflows[index] = workflow
+				}
+			}
+		}
+		if len(workflows) == 0 {
+			return pluginConfiguration{}, fmt.Errorf("%s workflows is required and must be a non-empty string or array of non-empty strings", pluginConfigurationEnvironment)
+		}
 	}
 	targets := make(map[string]compiler.RunnerTarget)
 	if runnersValue, configured := encoded["runners"]; configured {
@@ -268,7 +298,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflow: workflow, runnerTargets: targets}, nil
+	return pluginConfiguration{Workflows: workflows, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
