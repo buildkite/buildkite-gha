@@ -304,6 +304,17 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return jobResult, fmt.Errorf("canonicalize workspace: %w", err)
 	}
+	hashRoot, err := os.OpenRoot(workspace)
+	if err != nil {
+		return jobResult, fmt.Errorf("open hashFiles workspace: %w", err)
+	}
+	defer func() { runJobErr = errors.Join(runJobErr, hashRoot.Close()) }()
+	eval.HashFilesContext = func(ctx context.Context, patterns []string) (string, error) {
+		return hashWorkspaceRootFilesWithLimits(ctx, hashRoot, patterns, defaultHashFilesLimits, goruntime.GOOS == "windows")
+	}
+	eval.HashFiles = func(patterns []string) (string, error) {
+		return eval.HashFilesContext(runCtx, patterns)
+	}
 	if job.HasCapability("docker") {
 		workspaceDir, err := os.Open(workspace)
 		if err != nil {
@@ -471,7 +482,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
-			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, eval, &posts, actions, prepared, &preStatus, nil)
+			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, eval, &posts, actions, prepared, &preStatus, true, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -520,7 +531,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil, HashFiles: eval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
@@ -1118,9 +1129,15 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, inheritedEvalErr error) (Result, error) {
+func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
+	evaluate := evaluateMap
+	if workflowStep {
+		evaluate = evaluateStepMap
+	} else {
+		eval.HashFiles = nil
+	}
 	source, err := actions.source(*step.Action)
 	if err != nil {
 		return result, err
@@ -1171,7 +1188,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			if inheritedEvalErr != nil {
 				return result, inheritedEvalErr
 			}
-			inputs, err := evaluateMap(step.With, eval)
+			inputs, err := evaluate(step.With, eval)
 			if err != nil {
 				return result, err
 			}
@@ -1179,7 +1196,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			if err != nil {
 				return result, err
 			}
-			stepEnv, err := evaluateMap(step.Env, eval)
+			stepEnv, err := evaluate(step.Env, eval)
 			if err != nil {
 				return result, err
 			}
@@ -1203,13 +1220,13 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		stepEnv := map[string]string{}
 		compositeEvalErr := inheritedEvalErr
 		if compositeEvalErr == nil {
-			inputs, compositeEvalErr = evaluateMap(step.With, eval)
+			inputs, compositeEvalErr = evaluate(step.With, eval)
 		}
 		if compositeEvalErr == nil {
 			inputs, compositeEvalErr = resolveActionInputs(action, inputs, eval)
 		}
 		if compositeEvalErr == nil {
-			stepEnv, compositeEvalErr = evaluateMap(step.Env, eval)
+			stepEnv, compositeEvalErr = evaluate(step.Env, eval)
 		}
 		eval.Inputs = inputs
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
@@ -1225,7 +1242,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, compositeEvalErr)
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase
@@ -1247,22 +1264,24 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 }
 
 func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
-	stepEnv, err := evaluateMap(step.Env, eval)
+	stepEnv, err := evaluateStepMap(step.Env, eval)
 	if err != nil {
 		return newResult(), err
 	}
 	environment := r.invocationEnvironment(jobEnv, stepEnv)
 	result := newResult()
 	if step.Kind == "run" {
-		script, err := expression.Evaluate(step.Command, eval)
+		script, err := expression.EvaluateStep(step.Command, eval)
 		if err != nil {
 			return result, err
 		}
 		shell := step.Shell
 		if shell == "" {
 			shell = job.DefaultShell
+			shell, err = expression.Evaluate(shell, eval)
+		} else {
+			shell, err = expression.EvaluateStep(shell, eval)
 		}
-		shell, err = expression.Evaluate(shell, eval)
 		if err != nil {
 			return result, err
 		}
@@ -1276,8 +1295,10 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		workingDirectory := step.WorkingDirectory
 		if workingDirectory == "" {
 			workingDirectory = job.DefaultWorkingDirectory
+			workingDirectory, err = expression.Evaluate(workingDirectory, eval)
+		} else {
+			workingDirectory, err = expression.EvaluateStep(workingDirectory, eval)
 		}
-		workingDirectory, err = expression.Evaluate(workingDirectory, eval)
 		if err != nil {
 			return result, err
 		}
@@ -1306,7 +1327,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		action, actionLock = resolvedAction, &lock
 		if usesCheckoutAdapter(lock) {
-			inputs, err := evaluateMap(step.With, eval)
+			inputs, err := evaluateStepMap(step.With, eval)
 			if err != nil {
 				return result, err
 			}
@@ -1316,14 +1337,14 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return r.runCheckout(ctx, processor, workspace, job, inputs)
 		}
 		if usesUploadArtifactAdapter(lock) {
-			inputs, err := evaluateMap(step.With, eval)
+			inputs, err := evaluateStepMap(step.With, eval)
 			if err != nil {
 				return result, err
 			}
 			return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
 		}
 		if usesDownloadArtifactAdapter(lock) {
-			inputs, err := evaluateMap(step.With, eval)
+			inputs, err := evaluateStepMap(step.With, eval)
 			if err != nil {
 				return result, err
 			}
@@ -1363,7 +1384,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
 	}
 	actionStack = append(append([]string(nil), actionStack...), actionIdentity)
-	inputs, err := evaluateMap(step.With, eval)
+	inputs, err := evaluateStepMap(step.With, eval)
 	if err != nil {
 		return result, err
 	}
@@ -1465,6 +1486,10 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, actionPath string, action metadata.Metadata, inputs map[string]string, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionLock *plan.ActionLock, actionStack []string) (Result, error) {
 	result := newResult()
+	// hashFiles is a workflow-step surface. Do not extend it into action
+	// metadata expressions while executing a composite action.
+	eval.HashFiles = nil
+	eval.HashFilesContext = nil
 	eval.Inputs = inputs
 	eval.Steps = make(map[string]map[string]string)
 	eval.StepStatuses = make(map[string]expression.StepStatus)
@@ -1577,6 +1602,18 @@ func evaluateMap(values map[string]string, context expression.Context) (map[stri
 	for _, name := range sortedKeys(values) {
 		value := values[name]
 		resolved, err := expression.Evaluate(value, context)
+		if err != nil {
+			return nil, fmt.Errorf("evaluate %q: %w", name, err)
+		}
+		out[name] = resolved
+	}
+	return out, nil
+}
+
+func evaluateStepMap(values map[string]string, context expression.Context) (map[string]string, error) {
+	out := make(map[string]string, len(values))
+	for _, name := range sortedKeys(values) {
+		resolved, err := expression.EvaluateStep(values[name], context)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate %q: %w", name, err)
 		}

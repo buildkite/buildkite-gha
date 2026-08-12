@@ -161,6 +161,11 @@ func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *comma
 	if step.TimeoutMinutes > 0 {
 		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
 	}
+	if eval.HashFilesContext != nil {
+		eval.HashFiles = func(patterns []string) (string, error) {
+			return eval.HashFilesContext(stepCtx, patterns)
+		}
+	}
 	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared)
 	cancelStep()
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
@@ -226,19 +231,21 @@ func commitResultEnvironment(env map[string]string, result Result) {
 
 func cloneExpressionContext(in expression.Context) expression.Context {
 	return expression.Context{
-		Inputs:       cloneStrings(in.Inputs),
-		Matrix:       cloneAnyMap(in.Matrix),
-		Steps:        cloneNestedStrings(in.Steps),
-		StepStatuses: cloneStepStatuses(in.StepStatuses),
-		Needs:        cloneNestedStrings(in.Needs),
-		NeedResults:  cloneStrings(in.NeedResults),
-		Secrets:      cloneStrings(in.Secrets),
-		Vars:         cloneStrings(in.Vars),
-		Env:          cloneStrings(in.Env),
-		GitHub:       cloneAnyMap(in.GitHub),
-		Runner:       cloneStrings(in.Runner),
-		Services:     cloneNestedStrings(in.Services),
-		JobStatus:    in.JobStatus,
+		Inputs:           cloneStrings(in.Inputs),
+		Matrix:           cloneAnyMap(in.Matrix),
+		Steps:            cloneNestedStrings(in.Steps),
+		StepStatuses:     cloneStepStatuses(in.StepStatuses),
+		Needs:            cloneNestedStrings(in.Needs),
+		NeedResults:      cloneStrings(in.NeedResults),
+		Secrets:          cloneStrings(in.Secrets),
+		Vars:             cloneStrings(in.Vars),
+		Env:              cloneStrings(in.Env),
+		GitHub:           cloneAnyMap(in.GitHub),
+		Runner:           cloneStrings(in.Runner),
+		Services:         cloneNestedStrings(in.Services),
+		JobStatus:        in.JobStatus,
+		HashFiles:        in.HashFiles,
+		HashFilesContext: in.HashFilesContext,
 	}
 }
 

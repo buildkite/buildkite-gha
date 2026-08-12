@@ -4703,6 +4703,35 @@ jobs:
 	}
 }
 
+func TestCompiledWorkflowUsesHashFilesAfterWorkspacePreparation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "hash-files.yml")
+	workflow := []byte(`on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    steps:
+      - run: printf 'runtime contents' > payload
+      - if: hashFiles('payload') != ''
+        env:
+          PAYLOAD_HASH: ${{ hashFiles('payload') }}
+        run: test "$PAYLOAD_HASH" = "93f7a1af9e76c89675b5bc8c5f5c6aa62f1c78bc0c95693f0296b25274843527"
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/hash-files.yml", string(workflow))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "hosted")
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compile hashFiles workflow = %#v, %v", plans, err)
+	}
+	result, err := (Runner{}).RunJob(context.Background(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestRunJobDockerUsesSharedMasking(t *testing.T) {
 	docker := requireDocker(t)
 	workspace := fixturePath(t)

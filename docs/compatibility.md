@@ -419,11 +419,11 @@ Three expression modes intentionally support different syntax.
 | `!`, `&&`, `\|\|`, `==`, `!=` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
 | `fromJSON()`, case-insensitive `startsWith()` | 🟡 Compile time only | ❌ Unsupported | 🟡 When the result resolves fully |
-| `hashFiles()` | ❌ Unsupported | ❌ Unsupported | ❌ Unsupported |
+| `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
 
-Job and step `if` conditions support literals and the syntax listed above. Ordered comparisons, other functions, and function arguments are unsupported.
+Job and step `if` conditions support literals and the syntax listed above. Ordered comparisons and other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step conditions only.
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
@@ -442,7 +442,7 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
+Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. Top-level workflow step `run`, `env`, `with`, explicit `shell`, and explicit `working-directory` fields also support `hashFiles()` with literal or direct-reference arguments. Job fields, job outputs, job defaults, step names, and action metadata keep the direct-reference-only rule.
 
 The only runner references are `runner.os` and `runner.arch`. They resolve to
 `Linux`/`X64` or `macOS`/`ARM64`. Runtime interpolation does not evaluate
@@ -457,6 +457,12 @@ run: echo "${{ needs.build.outputs.image }}"
 ```
 
 At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repository`, and `github.sha` are retained. `github.event` is unavailable.
+
+`hashFiles()` evaluates when its step field is consumed. A step condition and normal step execution observe earlier steps such as checkout. A JavaScript action's `with` and `env` values can also be evaluated for its `pre` phase, then reevaluated for `main`. Patterns apply in argument order. `!` excludes matches, and a later positive pattern can include them again. Directory matches include descendants, hidden files match normally, overlapping patterns hash each path once, and matching is case-insensitive on Windows only. An empty match returns an empty string.
+
+For each matched file, `hashFiles()` calculates SHA-256 over its contents. It calculates the final lowercase digest over the concatenated binary file digests. Files use deterministic lexical path order; GitHub Runner's current glob traversal order is unspecified, so a multi-file digest can differ when that traversal is not lexical.
+
+Patterns cannot be absolute, contain a `..` path segment, or contain ASCII control characters. Hashing pins the workspace directory and confines file opens to it. It does not traverse symlinked directories. A matched symlink, including one targeting another workspace file, or matched non-regular file fails the step. GitHub Runner can hash a matched file symlink and supports an optional symlink-following mode; this runtime deliberately does neither.
 
 ### Compile-time expressions
 
@@ -676,6 +682,10 @@ immutable image with `/opt/hostedtoolcache`. macOS images are unsupported.
 | Files per uploaded artifact | 10,000 |
 | Uploaded source data or ZIP | 1 GiB |
 | Job summary | 1 MiB |
+| `hashFiles()` patterns | 255 per call; 1 KiB each; 64 KiB total |
+| `hashFiles()` workspace entries | 100,000 per call |
+| `hashFiles()` matched files | 10,000 per call |
+| `hashFiles()` selected bytes | 1 GiB per call |
 
 ## Validation
 

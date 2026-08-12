@@ -2,7 +2,9 @@
 package expression
 
 import (
+	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -10,19 +12,21 @@ import (
 
 // Context contains the compile-time values available while evaluating a template.
 type Context struct {
-	Inputs       map[string]string
-	Matrix       map[string]any
-	Steps        map[string]map[string]string
-	StepStatuses map[string]StepStatus
-	Needs        map[string]map[string]string
-	NeedResults  map[string]string
-	Secrets      map[string]string
-	Vars         map[string]string
-	Env          map[string]string
-	GitHub       map[string]any
-	Runner       map[string]string
-	Services     map[string]map[string]string
-	JobStatus    string
+	Inputs           map[string]string
+	Matrix           map[string]any
+	Steps            map[string]map[string]string
+	StepStatuses     map[string]StepStatus
+	Needs            map[string]map[string]string
+	NeedResults      map[string]string
+	Secrets          map[string]string
+	Vars             map[string]string
+	Env              map[string]string
+	GitHub           map[string]any
+	Runner           map[string]string
+	Services         map[string]map[string]string
+	JobStatus        string
+	HashFiles        func([]string) (string, error)
+	HashFilesContext func(context.Context, []string) (string, error)
 }
 
 type runtimeReferenceKind uint8
@@ -63,6 +67,12 @@ func validateRuntimeTemplate(template string) error {
 // Evaluate substitutes direct runtime references in a template once.
 func Evaluate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
+}
+
+// EvaluateStep substitutes direct runtime references and hashFiles calls in a
+// workflow step template. Other runtime surfaces remain direct-reference only.
+func EvaluateStep(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
 
 func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
@@ -109,6 +119,70 @@ func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, 
 		return nil, err
 	}
 	return resolveRuntimeReference(root, path, context)
+}
+
+func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "hashFiles") {
+		return evaluateDirectRuntimeNode(node, context)
+	}
+	if context.HashFiles == nil {
+		return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
+	}
+	patterns, err := evaluateHashFilesArguments(call.Args, func(argument actionlint.ExprNode) (any, error) {
+		return evaluateRuntimeHashFilesArgument(argument, context)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return context.HashFiles(patterns)
+}
+
+func evaluateHashFilesArguments(nodes []actionlint.ExprNode, evaluate func(actionlint.ExprNode) (any, error)) ([]string, error) {
+	if len(nodes) == 0 || len(nodes) > 255 {
+		return nil, fmt.Errorf("function %q requires 1 to 255 arguments", "hashFiles")
+	}
+	patterns := make([]string, len(nodes))
+	for i, node := range nodes {
+		value, err := evaluate(node)
+		if err != nil {
+			return nil, fmt.Errorf("hashFiles argument %d: %w", i+1, err)
+		}
+		patterns[i] = runtimeString(value)
+	}
+	return patterns, nil
+}
+
+func evaluateRuntimeHashFilesArgument(node actionlint.ExprNode, context Context) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return nil, nil
+	case *actionlint.BoolNode:
+		return node.Value, nil
+	case *actionlint.IntNode:
+		return node.Value, nil
+	case *actionlint.FloatNode:
+		return node.Value, nil
+	case *actionlint.StringNode:
+		return node.Value, nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		return evaluateDirectRuntimeNode(node, context)
+	default:
+		return nil, fmt.Errorf("arguments must be literals or direct context references")
+	}
+}
+
+func runtimeString(value any) string {
+	switch value := value.(type) {
+	case nil:
+		return ""
+	case bool:
+		return strconv.FormatBool(value)
+	case string:
+		return value
+	default:
+		return fmt.Sprint(value)
+	}
 }
 
 func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
