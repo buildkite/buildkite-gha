@@ -1,4 +1,4 @@
-// Package plan owns the versioned job-plan boundary between compilation and execution.
+// Package plan owns the job-plan boundary between compilation and execution.
 package plan
 
 import (
@@ -15,20 +15,9 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 )
 
-const (
-	SchemaV1 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v1.schema.json"
-	SchemaV2 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v2.schema.json"
-	SchemaV3 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v3.schema.json"
-	SchemaV4 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v4.schema.json"
-	SchemaV5 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v5.schema.json"
-	SchemaV6 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v6.schema.json"
-	SchemaV7 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v7.schema.json"
-	SchemaV8 = "https://buildkite.com/schemas/buildkite-gha/job-plan-v8.schema.json"
-	Schema   = SchemaV2
-)
+const Schema = "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json"
 
 const MaxNeedProducers = 1024
-const maxLegacyNeedProducers = 256
 const MaxNeedOutputs = 64
 const maxStepTargets = 256
 
@@ -220,14 +209,14 @@ type Job struct {
 	Needs                   map[string]Need   `json:"-"`
 	Env                     map[string]string `json:"env,omitempty"`
 	Condition               string            `json:"condition,omitempty"`
+	ContinueOnError         bool              `json:"continue_on_error,omitempty"`
 	TimeoutMinutes          float64           `json:"timeout_minutes,omitempty"`
 	DefaultShell            string            `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string            `json:"default_working_directory,omitempty"`
 	Outputs                 map[string]string `json:"outputs,omitempty"`
 	Steps                   []Step            `json:"steps"`
 	Actions                 []ActionLock      `json:"actions,omitempty"`
-	// RequiresMise is compiler-resolved action runtime metadata. Nil preserves
-	// fail-closed behavior for older and unresolved action plans.
+	// RequiresMise is the compiler's explicit action-runtime decision.
 	RequiresMise *bool                `json:"requires_mise,omitempty"`
 	Container    *Container           `json:"container,omitempty"`
 	Services     map[string]Container `json:"services,omitempty"`
@@ -246,20 +235,16 @@ func (job Job) NeedsMise() bool {
 }
 
 // RuntimeDistributionDigest returns the executable digest bound to this plan.
-// Plans before v8 used the compiler executable as their runtime executable.
 func (job Job) RuntimeDistributionDigest() string {
-	if job.Schema == SchemaV8 && job.Runtime != nil {
+	if job.Runtime != nil {
 		return job.Runtime.DistributionDigest
 	}
-	return job.Compiler.DistributionDigest
+	return ""
 }
 
 // Decode rejects unknown fields and trailing JSON so schema drift fails closed.
 func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
-		return Job{}, fmt.Errorf("decode job plan: %w", err)
-	}
-	if err := rejectLegacyActionFields(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	var job Job
@@ -282,26 +267,6 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, err
 	}
 	return job, nil
-}
-
-func rejectLegacyActionFields(data []byte) error {
-	var envelope struct {
-		Schema string                       `json:"schema"`
-		Steps  []map[string]json.RawMessage `json:"steps"`
-	}
-	var root map[string]json.RawMessage
-	if json.Unmarshal(data, &root) != nil || json.Unmarshal(data, &envelope) != nil || envelope.Schema != SchemaV1 && envelope.Schema != SchemaV2 {
-		return nil
-	}
-	if _, ok := root["actions"]; ok {
-		return fmt.Errorf("field actions is not supported by legacy schemas")
-	}
-	for _, step := range envelope.Steps {
-		if _, ok := step["action"]; ok {
-			return fmt.Errorf("field action is not supported by legacy schemas")
-		}
-	}
-	return nil
 }
 
 func rejectDuplicateKeys(source []byte) error {
@@ -380,33 +345,14 @@ func Encode(job Job) ([]byte, error) {
 }
 
 func (job Job) Validate() error {
-	if job.Schema != SchemaV1 && job.Schema != SchemaV2 && job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 {
+	if job.Schema != Schema {
 		return fmt.Errorf("unsupported job plan schema %q", job.Schema)
 	}
-	if job.Schema != SchemaV3 && job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && (len(job.Actions) != 0 || hasStepActions(job.Steps)) {
-		return fmt.Errorf("job plan %s does not support action locks", job.Schema)
+	if job.RequiresMise == nil {
+		return fmt.Errorf("job plan requires an explicit requires_mise decision")
 	}
-	if job.Schema != SchemaV4 && job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && (job.Container != nil || len(job.Services) != 0) {
-		return fmt.Errorf("job plan %s does not support containers or services", job.Schema)
-	}
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.NeedOutputs != nil {
-		return fmt.Errorf("job plan %s does not support prerequisite output projections", job.Schema)
-	}
-	if job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.GitHubToken != nil {
-		return fmt.Errorf("job plan %s does not support GitHub workflow tokens", job.Schema)
-	}
-	if (job.Schema == SchemaV7 || job.Schema == SchemaV8) && job.RequiresMise == nil {
-		return fmt.Errorf("job plan %s requires an explicit requires_mise decision", job.Schema)
-	}
-	if job.Schema != SchemaV7 && job.Schema != SchemaV8 && job.RequiresMise != nil {
-		return fmt.Errorf("job plan %s does not support requires_mise", job.Schema)
-	}
-	if job.Schema == SchemaV8 {
-		if job.Runtime == nil || !digestPattern.MatchString(job.Runtime.DistributionDigest) {
-			return fmt.Errorf("job plan runtime distribution digest is required")
-		}
-	} else if job.Runtime != nil {
-		return fmt.Errorf("job plan %s does not support a separate runtime distribution", job.Schema)
+	if job.Runtime == nil || !digestPattern.MatchString(job.Runtime.DistributionDigest) {
+		return fmt.Errorf("job plan runtime distribution digest is required")
 	}
 	if job.RequiresMise != nil && !*job.RequiresMise {
 		for _, step := range job.Steps {
@@ -429,9 +375,6 @@ func (job Job) Validate() error {
 	}
 	if !targetPattern.MatchString(job.Target.StepKey) {
 		return fmt.Errorf("job plan requires a target step key")
-	}
-	if job.Schema != SchemaV7 && job.Schema != SchemaV8 && !targetPattern.MatchString(job.Target.Queue) {
-		return fmt.Errorf("job plan %s requires a target queue", job.Schema)
 	}
 	if job.Target.Queue != "" && !targetPattern.MatchString(job.Target.Queue) {
 		return fmt.Errorf("job plan has invalid target queue %q", job.Target.Queue)
@@ -525,12 +468,8 @@ func (job Job) Validate() error {
 	}
 	needIDs := make(map[string]struct{}, len(job.NeedSources))
 	sourcedDependencies := make(map[string]struct{}, len(job.Dependencies))
-	maxNeedProducers := MaxNeedProducers
-	if job.Schema != SchemaV5 && job.Schema != SchemaV6 && job.Schema != SchemaV7 && job.Schema != SchemaV8 {
-		maxNeedProducers = maxLegacyNeedProducers
-	}
 	for name, sources := range job.NeedSources {
-		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > maxNeedProducers {
+		if len(name) > 255 || !logicalJobIDPattern.MatchString(name) || len(sources) == 0 || len(sources) > MaxNeedProducers {
 			return fmt.Errorf("job plan contains invalid prerequisite %q", name)
 		}
 		id := strings.ToLower(name)
@@ -621,9 +560,6 @@ func (job Job) Validate() error {
 		if len(step.Condition) > 65536 {
 			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
 		}
-		if job.Schema == SchemaV1 && (step.Background || len(step.Targets) != 0 || step.Kind != "run" && step.Kind != "uses") {
-			return fmt.Errorf("job plan v1 step %q contains concurrent-step fields", step.ID)
-		}
 		switch step.Kind {
 		case "run":
 			if strings.TrimSpace(step.Command) == "" {
@@ -656,7 +592,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("step %q has unsupported kind %q", step.ID, step.Kind)
 		}
 	}
-	if job.Schema == SchemaV3 || job.Schema == SchemaV4 || ((job.Schema == SchemaV5 || job.Schema == SchemaV6 || job.Schema == SchemaV7 || job.Schema == SchemaV8) && (len(job.Actions) != 0 || hasStepActions(job.Steps))) {
+	if len(job.Actions) != 0 || hasStepActions(job.Steps) {
 		if err := validateActionLocks(job); err != nil {
 			return err
 		}

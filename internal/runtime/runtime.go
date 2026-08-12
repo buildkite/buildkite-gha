@@ -387,7 +387,7 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("owned Docker resources remain after cleanup"))
 			}
 		}
-		err = errors.Join(err, cleanupErr)
+		err = errors.Join(err, markHardJobFailure(cleanupErr))
 	}()
 	buildArgs := []string{"buildx", "build", "--builder", "default", "--load", "--tag", image, "--label", owner, "--file", filepath.Join(stage.action, "Dockerfile"), stage.action}
 	built = true // A failed build may still have created the tagged image.

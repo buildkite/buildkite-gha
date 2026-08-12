@@ -40,6 +40,71 @@ type JobResult struct {
 
 const maxJobOutputBytes = 1024
 
+type toleratedJobFailure struct {
+	err error
+}
+
+func (e *toleratedJobFailure) Error() string { return e.err.Error() }
+func (e *toleratedJobFailure) Unwrap() error { return e.err }
+
+type hardJobFailure struct {
+	err error
+}
+
+func (e *hardJobFailure) Error() string { return e.err.Error() }
+func (e *hardJobFailure) Unwrap() error { return e.err }
+
+type workflowJobFailure struct {
+	err error
+}
+
+func (e *workflowJobFailure) Error() string { return e.err.Error() }
+func (e *workflowJobFailure) Unwrap() error { return e.err }
+
+func markHardJobFailure(err error) error {
+	if err == nil || isHardJobFailure(err) {
+		return err
+	}
+	return &hardJobFailure{err: err}
+}
+
+func isHardJobFailure(err error) bool {
+	var target *hardJobFailure
+	return errors.As(err, &target)
+}
+
+func markWorkflowJobFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &workflowJobFailure{err: err}
+}
+
+func isWorkflowJobFailure(err error) bool {
+	var target *workflowJobFailure
+	return errors.As(err, &target)
+}
+
+// IsToleratedJobFailure reports whether err contains only a workflow failure
+// admitted by the job's continue-on-error setting. Joined cleanup, integrity,
+// transport, and publication errors deliberately return false.
+func IsToleratedJobFailure(err error) bool {
+	_, ok := err.(*toleratedJobFailure)
+	return ok
+}
+
+func tolerateJobSetupFailure(runCtx context.Context, job plan.Job, result JobResult, err error) (JobResult, error) {
+	if runCtx.Err() != nil {
+		result.Conclusion = "cancelled"
+		return result, errors.Join(err, runCtx.Err())
+	}
+	if job.ContinueOnError && isWorkflowJobFailure(err) && !isHardJobFailure(err) {
+		result.Conclusion = "success"
+		return result, &toleratedJobFailure{err: err}
+	}
+	return result, err
+}
+
 type registeredPost struct {
 	action     javaScriptAction
 	state      map[string]string
@@ -145,6 +210,11 @@ func verifyWorkflow(job plan.Job, workspace string) error {
 
 // RunJob executes the plan's ordered steps and always drains registered post actions.
 func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (final JobResult, runJobErr error) {
+	defer func() {
+		if final.Conclusion == "success" && runJobErr != nil && !IsToleratedJobFailure(runJobErr) {
+			final.Conclusion = "failure"
+		}
+	}()
 	callerWorkspace := workspace != ""
 	if r.nodeVerification == nil {
 		r.nodeVerification = &managedNodeVerification{paths: make(map[int]string, 2)}
@@ -271,13 +341,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if r.Mise == "" && r.ResolveMise != nil {
 		r.Mise, err = r.ResolveMise(runCtx)
 		if err != nil {
-			return jobResult, err
+			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 		}
 	}
 
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
-		return jobResult, err
+		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 	}
 	if job.GitHubToken != nil {
 		if secrets == nil {
@@ -285,7 +355,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.Workflow.Path, job.GitHubToken.Permissions)
 		if err != nil {
-			return jobResult, err
+			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 		}
 	}
 	eval.Secrets = secrets
@@ -308,7 +378,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return jobResult, fmt.Errorf("open hashFiles workspace: %w", err)
 	}
-	defer func() { runJobErr = errors.Join(runJobErr, hashRoot.Close()) }()
+	defer func() {
+		if err := hashRoot.Close(); err != nil {
+			runJobErr = errors.Join(runJobErr, err)
+		}
+	}()
 	eval.HashFilesContext = func(ctx context.Context, patterns []string) (string, error) {
 		return hashWorkspaceRootFilesWithLimits(ctx, hashRoot, patterns, defaultHashFilesLimits, goruntime.GOOS == "windows")
 	}
@@ -320,7 +394,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if err != nil {
 			return jobResult, err
 		}
-		defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Close()) }()
+		defer func() {
+			if err := workspaceDir.Close(); err != nil {
+				runJobErr = errors.Join(runJobErr, err)
+			}
+		}()
 		workspaceInfo, err := workspaceDir.Stat()
 		if err != nil {
 			return jobResult, err
@@ -329,12 +407,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, fmt.Errorf("make Docker workspace writable: %w", err)
 		}
 		if callerWorkspace {
-			defer func() { runJobErr = errors.Join(runJobErr, workspaceDir.Chmod(workspaceInfo.Mode().Perm())) }()
+			defer func() {
+				if err := workspaceDir.Chmod(workspaceInfo.Mode().Perm()); err != nil {
+					runJobErr = errors.Join(runJobErr, err)
+				}
+			}()
 		}
 	}
 	jobEnv, err := evaluateMap(job.Env, eval)
 	if err != nil {
-		return jobResult, fmt.Errorf("evaluate job environment: %w", err)
+		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
 	_, explicitJobPATH := jobEnv["PATH"]
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
@@ -386,14 +468,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
 			if resolveErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr))
 			}
 			actionRuntime, runtimeErr := action.Runtime()
 			if runtimeErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr))
 			}
 			if entrypointErr := action.ValidateEntrypoints(actionRuntime); entrypointErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
 		for _, step := range job.Steps {
@@ -401,10 +483,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			if source, sourceErr := actions.source(*step.Action); sourceErr != nil {
-				return jobResult, sourceErr
+				return tolerateJobSetupFailure(runCtx, job, jobResult, sourceErr)
 			} else if source == "github" {
 				if verifyErr := r.verifyRemoteActionTree(runCtx, actions, *step.Action, nil); verifyErr != nil {
-					return jobResult, fmt.Errorf("prepare action %q: %w", step.Uses, verifyErr)
+					return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action %q: %w", step.Uses, verifyErr))
 				}
 			}
 		}
@@ -412,25 +494,33 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			var mountErr error
 			containerMounts, mountErr = r.actionContainerMounts(runCtx, actions)
 			if mountErr != nil {
-				return jobResult, mountErr
+				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
 		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)
 		if setupErr != nil {
-			return jobResult, setupErr
+			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
 		r.jobContainer = backend
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
-		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
+		defer func() {
+			if err := backend.cleanup(); err != nil {
+				runJobErr = errors.Join(runJobErr, err)
+			}
+		}()
 	} else if len(job.Services) != 0 {
 		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, job.Services)
 		if setupErr != nil {
-			return jobResult, setupErr
+			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
 		r.jobDocker = backend
 		eval.Services = backend.servicePorts
-		defer func() { runJobErr = errors.Join(runJobErr, backend.cleanup()) }()
+		defer func() {
+			if err := backend.cleanup(); err != nil {
+				runJobErr = errors.Join(runJobErr, err)
+			}
+		}()
 	}
 	runtimeEnv := standardEnvironment(job, workspace, runnerTemp, toolCache)
 	jobResult.Env = mergeStepEnvironment(runtimeEnv, jobEnv)
@@ -454,29 +544,36 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 
 	var runErr error
+	hardFailure := false
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
 	preFailures := make(map[int]stepExecution)
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && len(job.Actions) != 0) {
+	if len(job.Actions) != 0 {
 		for stepIndex, step := range job.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			if step.Kind != "uses" {
 				continue
 			}
 			if step.Action == nil {
-				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: immutable selector is missing", step.Uses))
+				err := fmt.Errorf("prepare action %q: immutable selector is missing", step.Uses)
+				runErr = errors.Join(runErr, err)
+				hardFailure = true
 				break
 			}
 			source, err := actions.source(*step.Action)
 			if err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
+				err = fmt.Errorf("prepare action %q: %w", step.Uses, err)
+				runErr = errors.Join(runErr, err)
+				hardFailure = true
 				break
 			}
 			if source != "github" {
 				continue
 			}
 			if err := r.verifyRemoteActionTree(runCtx, actions, *step.Action, nil); err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("prepare action %q: %w", step.Uses, err))
+				err = fmt.Errorf("prepare action %q: %w", step.Uses, err)
+				runErr = errors.Join(runErr, err)
+				hardFailure = true
 				break
 			}
 			if entry := actions.locks[step.Action.Lock]; entry != nil && (usesUploadArtifactAdapter(entry.lock) || usesDownloadArtifactAdapter(entry.lock)) {
@@ -533,7 +630,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			outcome, conclusion := "success", "success"
 			if barrierErr != nil {
 				outcome = "failure"
-				if ctx.Err() != nil {
+				if runCtx.Err() != nil {
 					outcome = "cancelled"
 				}
 				conclusion = outcome
@@ -558,7 +655,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
-
 		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
 		stepEval := cloneExpressionContext(eval)
 		bindHashFilesContext(stepCtx, &stepEval)
@@ -570,7 +666,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: stepCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: stepCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("condition: %w", err))
@@ -596,16 +692,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 					defer cancelExecution()
 					executionEval := cloneExpressionContext(evalSnapshot)
 					bindHashFilesContext(stepCtx, &executionEval)
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, &posts, actions, prepared)
+					return r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, &posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
-					return cancelledStepExecution(ctx, stepCtx, step)
+					return cancelledStepExecution(runCtx, stepCtx, step)
 				},
 			)
 			continue
 		}
 		processor.logSection(stepDisplayName(step, evalSnapshot))
-		execution := r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
+		execution := r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
 		cancelStep()
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
@@ -629,7 +725,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			post.state = post.invocation.state
 			post.node = post.invocation.node
 		}
-		runPost, conditionErr := expression.EvaluateActionLifecycleCondition(post.condition, runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+		runPost, conditionErr := expression.EvaluateActionLifecycleCondition(post.condition, runErr != nil, runCtx.Err() != nil)
 		if conditionErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q condition: %w", post.action.Name, conditionErr))
 			continue
@@ -639,7 +735,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		if len(post.action.jobStatusInputs) != 0 {
 			post.action.Inputs = cloneStrings(post.action.Inputs)
-			status := jobStatusValue(runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+			status := jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			for _, name := range post.action.jobStatusInputs {
 				post.action.Inputs[name] = status
 			}
@@ -682,10 +778,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		jobResult.Outputs[name] = value
 	}
-	if ctx.Err() != nil {
+	if runCtx.Err() != nil {
 		jobResult.Conclusion = "cancelled"
 	} else if runErr == nil {
 		jobResult.Conclusion = "success"
+	} else if job.ContinueOnError && !hardFailure && !isHardJobFailure(runErr) {
+		jobResult.Conclusion = "success"
+		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
 }
@@ -1049,7 +1148,7 @@ func (r Runner) verifyRemoteActionTree(ctx context.Context, actions *actionLockR
 		}
 		childSelector, ok := lock.Children[child.Uses]
 		if !ok || childSelector.Lock == "" {
-			return fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses)
+			return markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, child.Uses))
 		}
 		if err := r.verifyRemoteActionTree(ctx, actions, childSelector, stack); err != nil {
 			return err
@@ -1268,7 +1367,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			}
 			selector, ok := lock.Children[childStep.Uses]
 			if !ok || selector.Lock == "" {
-				return result, fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses)
+				return result, markHardJobFailure(fmt.Errorf("composite action step %d child %q has no immutable selector", i+1, childStep.Uses))
 			}
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
@@ -1351,9 +1450,9 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 	var action metadata.Metadata
 	var actionLock *plan.ActionLock
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && len(job.Actions) != 0) {
+	if len(job.Actions) != 0 {
 		if step.Action == nil {
-			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
+			return result, markHardJobFailure(fmt.Errorf("action %q has no immutable selector", step.Uses))
 		}
 		resolvedAction, lock, err := actions.resolve(ctx, *step.Action)
 		if err != nil {
@@ -1569,7 +1668,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			if actionLock != nil {
 				selector, ok := actionLock.Children[step.Uses]
 				if !ok {
-					childErr = fmt.Errorf("composite action child %q has no immutable selector", step.Uses)
+					childErr = markHardJobFailure(fmt.Errorf("composite action child %q has no immutable selector", step.Uses))
 				} else {
 					child.Action = &plan.ActionSelector{Lock: selector.Lock}
 				}

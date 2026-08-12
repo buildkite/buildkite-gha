@@ -421,7 +421,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && hasGitHubActionLocks(job.Actions) {
+	if hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -563,6 +563,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	if runErr != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", runErr)
+		if gharuntime.IsToleratedJobFailure(runErr) {
+			return buildkitepipeline.ContinueOnErrorExitStatus
+		}
 		return 1
 	}
 	return 0

@@ -290,7 +290,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
 		{ID: "shell-after", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "ATTACKER_BIN": attackerBin}
 	job.Actions = []plan.ActionLock{
@@ -407,7 +407,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 		{ID: "poison", Kind: "run", Command: `rm -f "$LOOKUP_AGENT" && ln -s "$POISON_AGENT" "$LOOKUP_AGENT"`},
 		{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.Env = map[string]string{"LOOKUP_AGENT": lookupAgent, "POISON_AGENT": poisonAgent}
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "workspace", Path: actionPath,
@@ -439,7 +439,7 @@ func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
 	writeFixtureFile(t, workspace, actionPath+"/main.js", `for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"]) if (process.env[name]) throw new Error(name + " leaked");`)
 	lockID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}}})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "workspace", Path: actionPath,
 		SourceDigest: digestTree(t, filepath.Join(workspace, filepath.FromSlash(actionPath))),
@@ -470,7 +470,7 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 		{ID: "run", Kind: "run", Command: `: > "$MARKER"`},
 		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Action: &plan.ActionSelector{Lock: lockID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.Env = map[string]string{"MARKER": marker}
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "github", Repository: "actions/cache",

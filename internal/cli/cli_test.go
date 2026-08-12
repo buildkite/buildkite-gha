@@ -3689,7 +3689,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 			t.Fatalf("decode plan %q: %v", path, err)
 		}
 		planCount++
-		if job.Schema == plan.SchemaV7 || job.Target.Queue != "hosted" {
+		if job.Schema != plan.Schema || job.Target.Queue != "hosted" {
 			t.Fatalf("explicitly targeted plan = schema %q, target %#v", job.Schema, job.Target)
 		}
 	}
@@ -4561,7 +4561,7 @@ func runtimeMiseTestArchive(t *testing.T, binary []byte) []byte {
 
 func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Schema = plan.SchemaV7
+	job.Schema = plan.Schema
 	requiresMise := true
 	job.RequiresMise = &requiresMise
 	job.Actions = []plan.ActionLock{{
@@ -4607,7 +4607,7 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 		{name: "native plan does not resolve mise", job: actionJob(&no)},
 		{name: "JavaScript plan resolves mise", job: actionJob(&yes), want: true},
 		{name: "cache client plan resolves mise", job: cacheJob, want: true},
-		{name: "legacy or unknown action plan resolves mise", job: actionJob(nil), want: true},
+		{name: "missing action decision resolves mise", job: actionJob(nil), want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := test.job.NeedsMise(); got != test.want {
@@ -4619,7 +4619,7 @@ func TestRunJobMiseRequirementUsesCompilerDecisionAndFailsClosed(t *testing.T) {
 
 func TestRunJobSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 	job := cliRunJobPlan()
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.Condition = "${{ false }}"
 	job.Actions = []plan.ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
@@ -5049,7 +5049,7 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	digest := sha256.Sum256(workflowSource)
 	requiresMise := false
 	job := plan.Job{
-		Schema: plan.SchemaV8, Compiler: plan.Compiler{Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
+		Schema: plan.Schema, Compiler: plan.Compiler{Version: "dev", DistributionDigest: "sha256:" + strings.Repeat("9", 64)},
 		Runtime:      &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
 		Workflow:     plan.Workflow{Path: "workflow.yml", Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "cli"},
 		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
@@ -5356,18 +5356,28 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 		condition  string
 		command    string
 		cancel     bool
+		tolerate   bool
 		wantResult string
 		wantCode   int
 	}{
 		{name: "failure", command: "exit 7", wantResult: "failure", wantCode: 1},
+		{name: "tolerated failure", command: "exit 7", tolerate: true, wantResult: "success", wantCode: buildkitepipeline.ContinueOnErrorExitStatus},
 		{name: "skipped", condition: "${{ false }}", command: "true", wantResult: "skipped", wantCode: 0},
 		{name: "cancelled", command: "sleep 1", cancel: true, wantResult: "cancelled", wantCode: 1},
+		{name: "tolerated cancellation", command: "sleep 1", cancel: true, tolerate: true, wantResult: "cancelled", wantCode: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			job := cliRunJobPlan()
 			job.Condition = test.condition
 			job.Steps[0].Command = test.command
+			if test.tolerate {
+				job.Schema = plan.Schema
+				job.ContinueOnError = true
+				job.Runtime = &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()}
+				requiresMise := false
+				job.RequiresMise = &requiresMise
+			}
 			planPath, planDigest := writeCLIJobPlan(t, job)
 			setCLIJobIdentity(t, job, planDigest)
 			runner := &cliCaptureRunner{}
@@ -5752,12 +5762,14 @@ func TestRepositoryProviderGitCredentialsUseServerEnvironment(t *testing.T) {
 func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 	clearCLIJobIdentity(t)
 	workspace := t.TempDir()
+	requiresMise := false
 	job := plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
 			DistributionDigest: cliTestRuntimeDigest(),
 		},
+		Runtime: &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
 		Workflow: plan.Workflow{
 			Path:         "missing-workflow.yml",
 			Digest:       "sha256:" + strings.Repeat("1", 64),
@@ -5767,6 +5779,7 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 		Target:               plan.Target{StepKey: "gha-missing", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
+		RequiresMise:         &requiresMise,
 	}
 	encoded, err := plan.Encode(job)
 	if err != nil {
@@ -5797,12 +5810,14 @@ func TestRunJobExecutesPureRunPlanWithoutCheckout(t *testing.T) {
 }
 
 func cliRunJobPlan() plan.Job {
+	requiresMise := false
 	return plan.Job{
 		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version:            "dev",
 			DistributionDigest: cliTestRuntimeDigest(),
 		},
+		Runtime: &plan.Runtime{DistributionDigest: cliTestRuntimeDigest()},
 		Workflow: plan.Workflow{
 			Path:         "workflow.yml",
 			Digest:       "sha256:" + strings.Repeat("1", 64),
@@ -5812,6 +5827,7 @@ func cliRunJobPlan() plan.Job {
 		Target:               plan.Target{StepKey: "gha-cli", Queue: "gha-runtime"},
 		RequiredCapabilities: []string{},
 		Steps:                []plan.Step{{ID: "step-1", Kind: "run", Command: "true"}},
+		RequiresMise:         &requiresMise,
 	}
 }
 

@@ -185,7 +185,7 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 		execution.outcome = "cancelled"
 	}
 	execution.conclusion = execution.outcome
-	if step.ContinueOnError && execution.outcome == "failure" {
+	if step.ContinueOnError && execution.outcome == "failure" && !isHardJobFailure(err) {
 		execution.conclusion = "success"
 	}
 	return execution

@@ -252,7 +252,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
-| `continue-on-error` | ❌ Unsupported | Validation rejects the job-level key. Step-level `continue-on-error` is supported. |
+| `continue-on-error` | 🟡 Supported subset | Accepts literal booleans. Expressions are rejected. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
 | `environment` | ➖ Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
 | `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
@@ -306,6 +306,8 @@ jobs:
 ```
 
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
+
+A job with `continue-on-error: true` stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
 
 Runner labels do not select GitHub images. Configured Linux profiles default to
 the corresponding Noble or Jammy hosted-toolchains image; an explicit immutable

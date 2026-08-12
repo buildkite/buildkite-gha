@@ -480,7 +480,7 @@ func jobContainerPlan(t *testing.T, workspace string, steps []plan.Step) plan.Jo
 	}
 	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "jobs: {}\n")
 	j := runtimePlan(t, workspace, ".github/workflows/container.yml", steps)
-	j.Schema = plan.SchemaV4
+	j.Schema = plan.Schema
 	j.RequiredCapabilities = []string{"docker", "network"}
 	j.Container = &plan.Container{Image: "alpine:3.20"}
 	return j
@@ -642,6 +642,46 @@ func TestRunJobContainerServiceFailureDiagnosticsAreMasked(t *testing.T) {
 	}
 }
 
+func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
+	f := newJobDocker(t, "service-unhealthy")
+	w := t.TempDir()
+	job := jobContainerPlan(t, w, nil)
+	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ContinueOnError = true
+
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
+	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" || !strings.Contains(err.Error(), `service "db"`) {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T) {
+	f := newJobDocker(t, "service-starting")
+	w := t.TempDir()
+	job := jobContainerPlan(t, w, nil)
+	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ContinueOnError = true
+	job.TimeoutMinutes = 0.001
+
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
+	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobContinueOnErrorDoesNotTolerateMalformedServicePortEvidence(t *testing.T) {
+	f := newJobDocker(t, "malformed-port")
+	w := t.TempDir()
+	job := jobContainerPlan(t, w, nil)
+	job.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	job.ContinueOnError = true
+
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "malformed Docker port output") {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing.T) {
 	f := newJobDocker(t, "malformed-port")
 	w, tmp := t.TempDir(), t.TempDir()
@@ -760,7 +800,7 @@ func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
 		{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`},
 		{ID: "docker", Kind: "uses", Uses: "./actions/docker", With: map[string]string{"expected_file": "${{ job.services.redis.ports[6379] }}"}, Env: map[string]string{"SERVICE_PORT": "${{ job.services.redis.ports['6379'] }}"}, Action: &plan.ActionSelector{Lock: lockID}},
 	})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
@@ -866,11 +906,23 @@ func TestRunJobContainerReportsLeftoverAndVerificationFailure(t *testing.T) {
 			f := newJobDocker(t, s)
 			w := t.TempDir()
 			j := jobContainerPlan(t, w, nil)
-			_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w)
-			if err == nil || !strings.Contains(err.Error(), "verify owned Docker cleanup") {
-				t.Fatalf("error=%v", err)
+			j.ContinueOnError = true
+			result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w)
+			if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "verify owned Docker cleanup") {
+				t.Fatalf("result=%#v, error=%v", result, err)
 			}
 		})
+	}
+}
+
+func TestRunJobContainerToleratesWorkflowFailureAfterSuccessfulCleanup(t *testing.T) {
+	f := newJobDocker(t, "")
+	w := t.TempDir()
+	j := jobContainerPlan(t, w, []plan.Step{{ID: "fail", Kind: "run", Shell: "sh", Command: "exit 7"}})
+	j.ContinueOnError = true
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w)
+	if err == nil || !IsToleratedJobFailure(err) || result.Conclusion != "success" {
+		t.Fatalf("result=%#v, error=%v", result, err)
 	}
 }
 
@@ -1186,8 +1238,9 @@ esac
 	requiresMise := false
 	checkoutID, localID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	job := plan.Job{
-		Schema:   plan.SchemaV7,
+		Schema:   plan.Schema,
 		Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("1", 64)},
+		Runtime:  &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("1", 64)},
 		Workflow: plan.Workflow{Path: ".github/workflows/container.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "container"},
 		Event: plan.Event{
 			Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64),
@@ -1280,7 +1333,7 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 		With:   map[string]string{"message": "container", "order": "single"},
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{
@@ -1372,7 +1425,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
 		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_SEEN" = yes`},
 	})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
@@ -1409,7 +1462,7 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
 		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", digest, nil)}
@@ -1443,6 +1496,34 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action timeout\n")
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
+	job.ContinueOnError = true
+	job.TimeoutMinutes = 0.001
+	materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
+		<-ctx.Done()
+		return source.Materialized{}, ctx.Err()
+	}}
+
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if len(f.calls(t)) != 0 {
+		t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+	}
+}
+
 func TestRunJobContainerRemoteChildOfWorkspaceCompositeMountedBeforeCreate(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
@@ -1471,7 +1552,7 @@ echo NESTED_REMOTE=seen >> "$GITHUB_ENV"
 	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
 		ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: localID},
 	}})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{
@@ -1518,7 +1599,7 @@ func TestRunJobContainerWorkspaceActionRemainsLazy(t *testing.T) {
 		{ID: "populate", Kind: "run", Shell: "sh", Command: create},
 		{ID: "lazy", Kind: "uses", Uses: "./" + lazyDir, Action: &plan.ActionSelector{Lock: lockID}},
 	})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: lazyDir, SourceDigest: digestTree(t, actionSource)}}
@@ -1566,7 +1647,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
 			ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
 		}})
-		job.Schema = plan.SchemaV4
+		job.Schema = plan.Schema
 		job.RequiredCapabilities = []string{"docker", "network"}
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 		job.Env = map[string]string{"WORKSPACE_CHILD": filepath.Join(workspace, "child")}
@@ -1621,7 +1702,7 @@ func TestRunJobContainerRunsDockerActionsAsSiblings(t *testing.T) {
 		job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
 			ID: "docker", Kind: "uses", Uses: remoteLifecycleUses("docker"), Action: &plan.ActionSelector{Lock: lockID},
 		}})
-		job.Schema = plan.SchemaV4
+		job.Schema = plan.Schema
 		job.RequiredCapabilities = []string{"docker", "network"}
 		job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 		job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "docker", digest, nil)}
@@ -1656,7 +1737,7 @@ func TestRunJobContainerSiblingDockerFailureCleansActionAndJobResources(t *testi
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
 		ID: "docker", Kind: "uses", Uses: "./actions/docker", Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
@@ -1703,7 +1784,7 @@ func TestRunJobContainerJavaScriptCancellationRunsPost(t *testing.T) {
 		{ID: "await", Kind: "run", Shell: "sh", Command: `while [ ! -f "$READY" ]; do /bin/sleep .01; done`},
 		{ID: "cancel", Kind: "cancel", Targets: []string{"background"}},
 	})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
 	job.Env = map[string]string{"READY": ready, "POST_MARKER": postMarker}
@@ -1824,7 +1905,7 @@ runs:
 		{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite", Action: &plan.ActionSelector{Lock: compositeID}},
 		{ID: "verify", Kind: "run", Shell: "sh", Command: `test "$COMPOSITE_LIVE" = yes`},
 	})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &plan.Container{Image: "node:24-bookworm-slim"}
 	job.Actions = []plan.ActionLock{
@@ -1873,7 +1954,7 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	}
 	for _, artifact := range bundle.Plans {
 		job := artifact.Job
-		if job.Schema != plan.SchemaV8 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+		if job.Schema != plan.Schema || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
 			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
 		}
 		wantSources := []string{"dockerfile-actions", "service-containers"}
@@ -1954,7 +2035,7 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 		if compileErr != nil {
 			t.Fatalf("compile %s: %v", test.name, compileErr)
 		}
-		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV8 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.Schema || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
 			t.Fatalf("compiled %s boundary = %#v", test.name, bundle.Plans)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -1995,7 +2076,7 @@ CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/health.yml", "name: health diagnostics\n")
 	job := runtimePlan(t, workspace, ".github/workflows/health.yml", []plan.Step{{ID: "unreachable", Kind: "run", Shell: "sh", Command: "true"}})
-	job.Schema = plan.SchemaV4
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"unhealthy": {Image: image}}
 	var logs bytes.Buffer

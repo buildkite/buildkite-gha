@@ -762,7 +762,7 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 	}
 }
 
-func TestRunJobLegacyDockerPlanUsesFakeBackend(t *testing.T) {
+func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "success")
 	workspace := fixturePath(t)
@@ -770,6 +770,22 @@ func TestRunJobLegacyDockerPlanUsesFakeBackend(t *testing.T) {
 	job.RequiredCapabilities = []string{"docker", "network"}
 	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" || result.Env["DOCKER_RUNTIME_SEEN"] != "true" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
+	requireLinuxAMD64(t)
+	fake := newFakeDocker(t, "leftover")
+	workspace := fixturePath(t)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./actions/docker", ContinueOnError: true,
+	}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.ContinueOnError = true
+
+	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "owned Docker resources remain after cleanup") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
@@ -2159,7 +2175,7 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
 		ID: "use-token", Kind: "run", Shell: "sh", Command: `test "$GH_TOKEN" = "ghs_scoped_workflow_token" && printf '%s\n' "$GH_TOKEN"`,
 	}})
-	job.Schema = plan.SchemaV6
+	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
@@ -2187,7 +2203,7 @@ func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
 	workflowPath := ".github/workflows/nested/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
-	job.Schema = plan.SchemaV6
+	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
@@ -2367,7 +2383,7 @@ func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
 	const token = "ghs_redaction_failure_token"
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "never", Kind: "run", Command: "false"}})
-	job.Schema = plan.SchemaV6
+	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}}
@@ -2519,6 +2535,101 @@ func TestPostActionsRunLIFOAfterMainFailure(t *testing.T) {
 	two := strings.Index(logs.String(), "lifecycle:post:two")
 	if two < 0 || one < 0 || two > one {
 		t.Errorf("post logs are not LIFO: %q", logs.String())
+	}
+}
+
+func TestJobContinueOnErrorPreservesFailureLifecycleAndOutputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "test.yml")
+	workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      diagnostic: ${{ steps.fail.outputs.diagnostic }}
+    steps:
+      - uses: ./.github/actions/lifecycle
+      - id: fail
+        run: echo "diagnostic=failed" >> "$GITHUB_OUTPUT"; exit 7
+      - run: touch "$ORDINARY_MARKER"
+      - if: failure()
+        run: touch "$RECOVERY_MARKER"
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", string(workflow))
+	writeFixtureFile(t, workspace, ".github/actions/lifecycle/action.yml", "name: lifecycle\ninputs:\n  job_status:\n    default: ${{ job.status }}\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: failure()\n")
+	writeFixtureFile(t, workspace, ".github/actions/lifecycle/main.js", "")
+	writeFixtureFile(t, workspace, ".github/actions/lifecycle/post.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Schema != plan.Schema || !plans[0].ContinueOnError {
+		t.Fatalf("compiled plans = %#v, want one tolerated plan", plans)
+	}
+	ordinary := filepath.Join(workspace, "ordinary")
+	recovery := filepath.Join(workspace, "recovery")
+	post := filepath.Join(workspace, "post")
+	plans[0].Env = map[string]string{"ORDINARY_MARKER": ordinary, "RECOVERY_MARKER": recovery, "POST_MARKER": post}
+
+	result, runErr := (Runner{Node24: fakeNode}).RunJob(context.Background(), plans[0], workspace)
+	if runErr == nil || !IsToleratedJobFailure(runErr) || result.Conclusion != "success" || result.Outputs["diagnostic"] != "failed" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, runErr)
+	}
+	if _, err := os.Stat(ordinary); !os.IsNotExist(err) {
+		t.Fatalf("ordinary success-gated step ran after failure: %v", err)
+	}
+	if _, err := os.Stat(recovery); err != nil {
+		t.Fatalf("failure-gated step did not run: %v", err)
+	}
+	status, err := os.ReadFile(post)
+	if err != nil || strings.TrimSpace(string(status)) != "failure" {
+		t.Fatalf("post job.status = %q, %v, want failure", status, err)
+	}
+
+	if err := os.Remove(post); err != nil {
+		t.Fatal(err)
+	}
+	timedOut := plans[0]
+	timedOut.TimeoutMinutes = 0.001
+	timedOut.Steps = slices.Clone(timedOut.Steps)
+	timedOut.Steps[1].Command = "sleep 1"
+	result, runErr = (Runner{Node24: fakeNode}).RunJob(context.Background(), timedOut, workspace)
+	if !errors.Is(runErr, context.DeadlineExceeded) || IsToleratedJobFailure(runErr) || result.Conclusion != "cancelled" {
+		t.Fatalf("timed out RunJob() result = %#v, error = %v", result, runErr)
+	}
+	if _, err := os.Stat(post); !os.IsNotExist(err) {
+		t.Fatalf("failure-only post ran after job cancellation: %v", err)
+	}
+}
+
+func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: setup timeout\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.ContinueOnError = true
+	job.TimeoutMinutes = 0.001
+	runner := Runner{ResolveMise: func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+
+	result, err := runner.RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
 
@@ -2785,7 +2896,7 @@ sleep 30
 	}
 	started := time.Now()
 	result, err := runner.RunJob(context.Background(), job, workspace)
-	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "failure" {
+	if !errors.Is(err, context.DeadlineExceeded) || result.Conclusion != "cancelled" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	if _, err := os.Stat(postStarted); err != nil {
@@ -4241,7 +4352,7 @@ printf '%s:%s\n' "$action" "$phase" >> "$LIFECYCLE_LOG"
 		t.Fatal(err)
 	}
 	topID, compositeID, nestedID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.Steps[0].Action = &plan.ActionSelector{Lock: topID}
 	job.Steps[1].Action = &plan.ActionSelector{Lock: compositeID}
 	job.Actions = []plan.ActionLock{
@@ -4353,7 +4464,7 @@ test "$(command -v pre-tool)" = "$PRE_BIN/pre-tool"
 printf '%s\n' 'job:main' >> "$LIFECYCLE_LOG"`},
 		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "PRE_BIN": preBin}
 	job.Actions = []plan.ActionLock{
@@ -4440,7 +4551,7 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()"},
 		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
@@ -4507,7 +4618,7 @@ printf 'child:%s:%s\n' "$(basename "$1" .js)" "$INPUT_MESSAGE" >> "$LIFECYCLE_LO
 		{ID: "producer", Kind: "run", Command: `printf '%s\n' 'value=from-producer' >> "$GITHUB_OUTPUT"`},
 		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), With: map[string]string{"message": "${{ steps.producer.outputs.value }}"}, Action: &plan.ActionSelector{Lock: rootID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
@@ -4573,7 +4684,7 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 		{ID: "on-failure", Kind: "uses", Uses: remoteLifecycleUses("on-failure"), Action: &plan.ActionSelector{Lock: onFailureID}},
 		{ID: "on-success", Kind: "uses", Uses: remoteLifecycleUses("on-success"), Action: &plan.ActionSelector{Lock: onSuccessID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
@@ -4631,7 +4742,7 @@ fi
 		{ID: "fails", Kind: "uses", Uses: remoteLifecycleUses("fails"), Action: &plan.ActionSelector{Lock: failsID}, ContinueOnError: true},
 		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"MARKER": marker}
 	job.Actions = []plan.ActionLock{
@@ -4679,7 +4790,7 @@ if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
 		{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}, ContinueOnError: true},
 		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"MARKER": marker}
 	job.Actions = []plan.ActionLock{
@@ -4724,16 +4835,17 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 		{ID: "first", Kind: "uses", Uses: remoteLifecycleUses("first"), Action: &plan.ActionSelector{Lock: firstID}},
 		{ID: "broken", Kind: "uses", Uses: remoteLifecycleUses("broken"), Action: &plan.ActionSelector{Lock: brokenID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
 		remoteLifecycleLock(firstID, "first", digest, nil),
 		remoteLifecycleLock(brokenID, "broken", "sha256:"+strings.Repeat("f", 64), nil),
 	}
+	job.ContinueOnError = true
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
 	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
-	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "materialized source digest mismatch") {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 	events, readErr := os.ReadFile(lifecycle)
@@ -4742,6 +4854,27 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 	}
 	if got, want := string(events), "first:pre\nfirst:post\n"; got != want {
 		t.Fatalf("lifecycle = %q, want %q", got, want)
+	}
+}
+
+func TestJobContinueOnErrorDoesNotTolerateLazyWorkspaceActionIntegrityFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: lazy workspace integrity\n")
+	writeFixtureFile(t, workspace, ".github/actions/local/action.yml", "name: local\nruns:\n  using: node24\n  main: index.js\n")
+	writeFixtureFile(t, workspace, ".github/actions/local/index.js", "console.log('original')\n")
+	lockID := "a-0000000000000001"
+	lock := plan.ActionLock{ID: lockID, Source: "workspace", Path: ".github/actions/local", SourceDigest: digestTree(t, filepath.Join(workspace, ".github/actions/local"))}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "tamper", Kind: "run", Shell: "sh", Command: "printf tampered > .github/actions/local/index.js"},
+		{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: true},
+	})
+	job.Actions = []plan.ActionLock{lock}
+	job.ContinueOnError = true
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "workspace action digest mismatch") {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
 
@@ -4773,7 +4906,7 @@ printf '%s:%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .js)" >> "$LIF
 		{ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}},
 		{ID: "root/0", Kind: "uses", Uses: remoteLifecycleUses("direct"), Action: &plan.ActionSelector{Lock: directID}},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
@@ -4987,7 +5120,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.Schema || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("portable setup plans = %#v", plans)
 	}
 	if got := plans[0].Steps[0].With["node-version"]; got != "24" {
@@ -5098,11 +5231,15 @@ func runtimePlan(t *testing.T, workspace, workflowPath string, steps []plan.Step
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(source)
+	requiresMise := true
 	return plan.Job{
 		Schema: plan.Schema, Compiler: plan.Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
-		Workflow: plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
-		Event:    plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
-		Target:   plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"}, Steps: steps,
+		Runtime:      &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Workflow:     plan.Workflow{Path: workflowPath, Digest: "sha256:" + hex.EncodeToString(digest[:]), LogicalJobID: "fixture"},
+		Event:        plan.Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
+		Target:       plan.Target{StepKey: "gha-fixture", Queue: "ubuntu-latest"},
+		Steps:        steps,
+		RequiresMise: &requiresMise,
 	}
 }
 

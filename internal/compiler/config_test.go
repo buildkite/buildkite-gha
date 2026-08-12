@@ -245,7 +245,7 @@ func TestDefaultCompilePolicyIsUntrustedAndUsesBuildkiteDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.SchemaV8 {
+	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.Schema {
 		t.Fatalf("compileUntrustedPlans() explicit legacy target = %#v", plans)
 	}
 }

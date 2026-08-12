@@ -107,6 +107,7 @@ type JobInstance struct {
 	Env                     map[string]string       `json:"env,omitempty"`
 	Permissions             map[string]string       `json:"permissions,omitempty"`
 	If                      string                  `json:"if,omitempty"`
+	ContinueOnError         bool                    `json:"continue_on_error,omitempty"`
 	TimeoutMinutes          float64                 `json:"timeout_minutes,omitempty"`
 	DefaultShell            string                  `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                  `json:"default_working_directory,omitempty"`
@@ -532,7 +533,7 @@ instances:
 				return fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
 			}
 			job := plan.Job{
-				Schema: plan.SchemaV8,
+				Schema: plan.Schema,
 				Compiler: plan.Compiler{
 					Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 				},
@@ -558,6 +559,7 @@ instances:
 				NeedOutputs:             needOutputs,
 				Env:                     instance.Env,
 				Condition:               instance.If,
+				ContinueOnError:         instance.ContinueOnError,
 				TimeoutMinutes:          instance.TimeoutMinutes,
 				DefaultShell:            instance.DefaultShell,
 				DefaultWorkingDirectory: instance.DefaultWorkingDirectory,
@@ -976,6 +978,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Env:                     cloneMap(instanceJob.Env),
 				Permissions:             permissionScopes(job.Permissions),
 				If:                      instanceJob.If,
+				ContinueOnError:         job.ContinueOnError,
 				TimeoutMinutes:          job.TimeoutMinutes,
 				DefaultShell:            job.DefaultShell,
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,

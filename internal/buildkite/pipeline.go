@@ -19,6 +19,10 @@ const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
 
+// ContinueOnErrorExitStatus is reserved for a workflow failure that the job's
+// immutable plan explicitly allows Buildkite to soft-fail.
+const ContinueOnErrorExitStatus = 78
+
 // HostedToolCachePath is the trusted, image-baked Actions tool-cache facade
 // used by explicitly selected runtime images.
 const HostedToolCachePath = "/opt/hostedtoolcache"
@@ -95,6 +99,7 @@ type Job struct {
 	PlanDigest         string
 	Dependencies       []string
 	RequiresMise       bool
+	SoftFail           bool
 	ConcurrencyGroup   string
 	Concurrency        int
 }
@@ -307,6 +312,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "%s  paths:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s    - %s\n", attributeIndent, yamlScalar(platformMiseCachePath(platform)))
 			_, _ = fmt.Fprintf(out, "%s  name: %s\n", attributeIndent, yamlScalar(runtimeCacheName+"-"+platformCacheKey(platform)))
+		}
+		if job.SoftFail {
+			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
 		}
 		if job.RequiresMise {
 			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)

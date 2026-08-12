@@ -644,7 +644,7 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 		With:   map[string]string{"name": "payload", "path": "payload/result.txt", "if-no-files-found": "error"},
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Outputs = map[string]string{
 		"artifact_id":     "${{ steps.upload.outputs.artifact-id }}",
@@ -701,7 +701,7 @@ func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
 		},
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Event.SHA = strings.Repeat("a", 40)
 	job.Actions = []plan.ActionLock{{

@@ -1252,7 +1252,7 @@ func TestDownloadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) 
 		With:   map[string]string{"name": "payload", "path": "downloaded"},
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Outputs = map[string]string{"download_path": "${{ steps.download.outputs.download-path }}"}
 	job.Actions = []plan.ActionLock{{
@@ -1311,7 +1311,7 @@ func TestDownloadArtifactMatrixConsumersEvaluateNameAndNormalizeRootPath(t *test
 				ID: "download", Kind: "uses", Uses: "actions/download-artifact@" + actionintegration.DownloadArtifactV7Commit,
 				With: map[string]string{"name": "${{ github.sha }}", "path": "./"}, Action: &plan.ActionSelector{Lock: lockID},
 			}})
-			job.Schema = plan.SchemaV3
+			job.Schema = plan.Schema
 			job.RequiredCapabilities = []string{"network"}
 			job.Event.SHA = eventSHA
 			job.Matrix = map[string]any{"shard": shard}

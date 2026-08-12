@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"go.yaml.in/yaml/v4"
 )
@@ -119,11 +120,59 @@ func TestCompileBundlePreservesExplicitQueuePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Target.Queue != "customer-untrusted" || bundle.Plans[0].Job.Schema != plan.SchemaV8 {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Target.Queue != "customer-untrusted" || bundle.Plans[0].Job.Schema != plan.Schema {
 		t.Fatalf("explicitly targeted plan = %#v", bundle.Plans)
 	}
 	if !bytes.Contains(bundle.Pipeline, []byte("agents:\n      queue: \"customer-untrusted\"")) {
 		t.Fatalf("explicit queue absent from pipeline:\n%s", bundle.Pipeline)
+	}
+}
+
+func TestCompileBundleCarriesLiteralJobContinueOnError(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      diagnostic: ${{ steps.report.outputs.diagnostic }}
+    steps:
+      - id: report
+        run: echo "diagnostic=failed" >> "$GITHUB_OUTPUT"; exit 1
+  consume:
+    needs: report
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.report.result }}:${{ needs.report.outputs.diagnostic }}" = success:failed
+`)
+	bundle, err := CompileBundle("workflow.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 || bundle.Plans[0].Job.Schema != plan.Schema || !bundle.Plans[0].Job.ContinueOnError {
+		t.Fatalf("compiled plans = %#v, want tolerated producer", bundle.Plans)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key      string `yaml:"key"`
+			SoftFail []struct {
+				ExitStatus int `yaml:"exit_status"`
+			} `yaml:"soft_fail"`
+			DependsOn []struct {
+				Step         string `yaml:"step"`
+				AllowFailure bool   `yaml:"allow_failure"`
+			} `yaml:"depends_on"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 || pipeline.Steps[0].Key != "gha-report" || len(pipeline.Steps[0].SoftFail) != 1 || pipeline.Steps[0].SoftFail[0].ExitStatus != buildkitepipeline.ContinueOnErrorExitStatus {
+		t.Fatalf("pipeline = %s, want soft-failing report", bundle.Pipeline)
+	}
+	dependencies := pipeline.Steps[1].DependsOn
+	if len(dependencies) != 2 || dependencies[1].Step != "gha-report" || !dependencies[1].AllowFailure {
+		t.Fatalf("consumer dependencies = %#v, want failure-tolerant report dependency", dependencies)
 	}
 }
 
@@ -189,7 +238,7 @@ jobs:
 	plans := map[string]PlanArtifact{}
 	for _, artifact := range bundle.Plans {
 		plans[artifact.Job.Workflow.LogicalJobID] = artifact
-		if artifact.Job.Schema != plan.SchemaV8 || artifact.Job.Compiler.DistributionDigest != testDistributionDigest {
+		if artifact.Job.Schema != plan.Schema || artifact.Job.Compiler.DistributionDigest != testDistributionDigest {
 			t.Fatalf("plan identity = schema %q compiler %q", artifact.Job.Schema, artifact.Job.Compiler.DistributionDigest)
 		}
 		if bytes.Contains(artifact.Contents, []byte(`"platform"`)) || bytes.Contains(artifact.Contents, []byte("darwin/arm64")) {
@@ -716,7 +765,7 @@ jobs:
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact
 	}
 	token := jobs["token"]
-	if token.Job.Schema != plan.SchemaV8 || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
+	if token.Job.Schema != plan.Schema || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
 		t.Fatalf("GitHub workflow token plan = %#v", token.Job)
 	}
 	if !reflect.DeepEqual(token.Job.RequiredSecrets, []string{"OTHER"}) || !reflect.DeepEqual(token.Job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {

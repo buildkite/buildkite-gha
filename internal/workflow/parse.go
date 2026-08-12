@@ -449,7 +449,14 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 	}
 	if in.ContinueOnError != nil {
-		return Job{}, locatedError(path, in.Pos, in.ID.Value, "job continue-on-error is unsupported")
+		if in.ContinueOnError.Expression != nil {
+			return Job{}, locatedError(path, in.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued job continue-on-error is unsupported")
+		}
+		value, ok := scalars[Position{Line: in.ContinueOnError.Pos.Line, Column: in.ContinueOnError.Pos.Col}].(bool)
+		if !ok {
+			return Job{}, locatedError(path, in.ContinueOnError.Pos, in.ID.Value, "job continue-on-error must be a literal boolean")
+		}
+		out.ContinueOnError = value
 	}
 	if in.TimeoutMinutes != nil {
 		if in.TimeoutMinutes.Expression != nil {

@@ -127,6 +127,7 @@ type Job struct {
 	Permissions             *Permissions           `json:"permissions,omitempty"`
 	If                      string                 `json:"if,omitempty"`
 	IfSpan                  Span                   `json:"-"`
+	ContinueOnError         bool                   `json:"continue_on_error,omitempty"`
 	TimeoutMinutes          float64                `json:"timeout_minutes,omitempty"`
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	Container               *Container             `json:"container,omitempty"`

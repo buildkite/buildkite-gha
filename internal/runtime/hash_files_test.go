@@ -486,7 +486,7 @@ func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 		{ID: "invalid", Kind: "uses", Uses: remoteLifecycleUses("action"), Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}},
 		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
 	})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
@@ -573,7 +573,7 @@ func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
 		TimeoutMinutes: 0.001,
 		Env:            map[string]string{"HASH": "${{ hashFiles('large') }}"},
 	}})
-	job.Schema = plan.SchemaV3
+	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network"}
 	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}

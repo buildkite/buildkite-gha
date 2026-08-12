@@ -85,11 +85,13 @@ esac
 	workflowDigest := sha256.Sum256(workflowSource)
 	headDigest := githubHash(sha + "\n")
 	checkoutID, localID := "a-0000000000000001", "a-0000000000000002"
+	requiresMise := false
 	job := plan.Job{
-		Schema: plan.SchemaV3,
+		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version: "checkout-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
 		},
+		Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow: plan.Workflow{
 			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",
 		},
@@ -107,6 +109,7 @@ esac
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 			{ID: localID, Source: "workspace", Path: ".github/actions/local", SourceDigest: localDigest},
 		},
+		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 	result, err := (Runner{Git: git, Actions: materializer}).RunJob(context.Background(), job, workspace)
@@ -1091,11 +1094,13 @@ fi
 
 	workflowDigest := sha256.Sum256(workflowSource)
 	poisonID, checkoutID := "a-0000000000000001", "a-0000000000000002"
+	requiresMise := false
 	job := plan.Job{
-		Schema: plan.SchemaV3,
+		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version: "checkout-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
 		},
+		Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow: plan.Workflow{
 			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "checkout",
 		},
@@ -1118,6 +1123,7 @@ fi
 			{ID: poisonID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("b", 40), Path: "poison", SourceDigest: remoteDigest},
 			{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
 		},
+		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: remoteDigest}}
 	var logs bytes.Buffer
