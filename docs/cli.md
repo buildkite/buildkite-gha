@@ -4,7 +4,7 @@ The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/githu
 
 ## Before you begin
 
-Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the matching GitHub [release](https://github.com/buildkite/buildkite-gha/releases). Verify the checksum, then extract `buildkite-gha` to a stable path.
+Download `buildkite-gha_Linux_x86_64.tar.gz` and `checksums.txt` from the matching GitHub [release](https://github.com/buildkite/buildkite-gha/releases). Verify the checksum, then extract `buildkite-gha` to a stable path. Releases that run macOS jobs also contain a same-version `buildkite-gha_Darwin_arm64.tar.gz` distribution.
 
 Jobs with JavaScript actions require `mise` 2026.5.12 or newer. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
 
@@ -91,7 +91,19 @@ buildkite-gha upload .github/workflows/ci.yml
 
 It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
-The hidden `buildkite-gha plugin` entry point provides the dedicated GitHub Actions plugin integration boundary. It reads the workflow from `BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW`, accepts no arguments, and is intentionally absent from ordinary CLI help.
+The hidden zero-argument `buildkite-gha plugin` entry point provides the
+dedicated GitHub Actions plugin integration boundary. It strictly reads the
+plugin's `BUILDKITE_PLUGIN_CONFIGURATION` JSON. `workflow` is required;
+`runners` is an optional non-empty array whose entries require `runs-on` and
+`queue` and may include an immutable Linux `image`. Acquisition-only `version`
+and `minimum-release-age` fields are accepted and ignored by the CLI. Unknown
+behavioral fields, duplicate fields, and unknown runner fields are rejected.
+
+The plugin importer remains Linux/amd64. The exact selected release binary uses
+its own verified bytes for Linux jobs. It resolves the workflow graph before
+runtime acquisition, and downloads, checksum-verifies, caches, and validates the
+same release's `buildkite-gha_Darwin_arm64.tar.gz` only when the graph requires
+Darwin/arm64. Linux-only graphs do not request that asset.
 
 Event source precedence is:
 
@@ -111,26 +123,55 @@ buildkite-agent pipeline upload --no-interpolation --reject-secrets
 
 ### Choose a queue
 
-Uploads inherit agent targeting from the importer. Set one queue on the importer when needed:
+Use repeatable runner mappings before the workflow path:
 
-```yaml
-env:
-  BUILDKITE_GHA_TARGET_QUEUE: gha-untrusted
+```sh
+buildkite-gha upload \
+  --runner-queue ubuntu-latest=hosted \
+  --runner-queue macos-14=macos-sonoma-arm64 \
+  .github/workflows/ci.yml
 ```
 
-Every accepted Linux runner label maps to that queue. The queue must provide whole-job isolation and no ambient protected credentials.
+Unmapped supported Linux labels retain default Buildkite targeting. Every macOS
+label requires an explicit queue. Duplicate and unsupported labels are rejected.
+The old `BUILDKITE_GHA_TARGET_QUEUE` environment variable is rejected rather than
+silently losing an operator's isolation policy.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 
 ### Choose an immutable runtime image
 
-Set an image by digest:
+Pair `--runner-image` with the corresponding
+`--runner-queue`:
 
-```yaml
-env:
-  BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03
+```sh
+buildkite-gha upload \
+  --runner-queue ubuntu-latest=hosted \
+  --runner-image ubuntu-latest=buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03 \
+  .github/workflows/ci.yml
 ```
 
-Tags and other mutable references are rejected. The image may provide a baked `/opt/hostedtoolcache` inventory.
+Runtime images are Linux-only. macOS jobs run natively and reject image
+selection. Tags and other mutable references are rejected. The old
+`BUILDKITE_GHA_RUNTIME_IMAGE` environment variable is also rejected rather than
+silently dropping the configured image.
+
+### Supply runtime distributions
+
+Custom importers can bind each generated platform to a local executable:
+
+```sh
+buildkite-gha upload \
+  --runtime-distribution linux/amd64=/opt/buildkite-gha-linux \
+  --runtime-distribution darwin/arm64=/opt/buildkite-gha-darwin \
+  --runner-queue macos-14=macos-sonoma-arm64 \
+  .github/workflows/ci.yml
+```
+
+Paths must be absolute, non-symlink executable files. `upload` opens, validates,
+and hashes each distribution; generated schema-v8 plans bind the selected digest.
+Linux defaults to the running importer when omitted. Darwin has no direct-upload
+default. The production plugin performs its same-release lazy Darwin acquisition
+internally instead of translating plugin configuration into these flags.
 
 `run-job` is internal. Users should not invoke it directly.

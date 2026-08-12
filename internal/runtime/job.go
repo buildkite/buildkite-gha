@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -154,6 +155,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err := job.Validate(); err != nil {
 		return JobResult{}, err
 	}
+	if err := ValidateHost(job, goruntime.GOOS, goruntime.GOARCH); err != nil {
+		return JobResult{}, err
+	}
+	runnerContext, err := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
+	if err != nil {
+		return JobResult{}, err
+	}
 	for _, capability := range job.RequiredCapabilities {
 		if capability != "docker" && capability != "secrets" && capability != "network" && capability != "provider-token-read" && capability != "provider-token-write" {
 			return JobResult{}, fmt.Errorf("capability %q is unsupported in the job runtime", capability)
@@ -226,6 +234,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		Vars:         job.Vars,
 		GitHub:       githubContext(job),
 		JobStatus:    "success",
+		Runner:       runnerContext,
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
@@ -239,7 +248,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
-	jobCondition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub}
+	jobCondition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
 	for _, need := range job.Needs {
 		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
@@ -436,7 +445,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	var runErr error
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
 			if step.Kind != "uses" {
@@ -511,7 +520,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
@@ -801,6 +810,7 @@ func githubContext(job plan.Job) map[string]any {
 }
 
 func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) map[string]string {
+	runner, _ := canonicalRunnerContext(goruntime.GOOS, goruntime.GOARCH)
 	env := map[string]string{
 		"CI":                "true",
 		"GITHUB_ACTIONS":    "true",
@@ -812,7 +822,8 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 		"GITHUB_SERVER_URL": "https://github.com",
 		"GITHUB_SHA":        job.Event.SHA,
 		"GITHUB_WORKSPACE":  workspace,
-		"RUNNER_OS":         "Linux",
+		"RUNNER_OS":         runner["os"],
+		"RUNNER_ARCH":       runner["arch"],
 		"RUNNER_TEMP":       runnerTemp,
 		"RUNNER_TOOL_CACHE": toolCache,
 	}
@@ -822,7 +833,39 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 	return env
 }
 
+func canonicalRunnerContext(goos, goarch string) (map[string]string, error) {
+	switch {
+	case goos == "linux" && goarch == "amd64":
+		return map[string]string{"os": "Linux", "arch": "X64"}, nil
+	case goos == "darwin" && goarch == "arm64":
+		return map[string]string{"os": "macOS", "arch": "ARM64"}, nil
+	default:
+		return nil, fmt.Errorf("unsupported runner platform %s/%s", goos, goarch)
+	}
+}
+
+// ValidateHost rejects plans that the concrete runtime host cannot execute.
+func ValidateHost(job plan.Job, goos, goarch string) error {
+	if _, err := canonicalRunnerContext(goos, goarch); err != nil {
+		return err
+	}
+	if goos == "darwin" {
+		switch {
+		case job.HasCapability("docker"):
+			return fmt.Errorf("docker capability is unsupported on macOS runners")
+		case job.Container != nil:
+			return fmt.Errorf("job containers are unsupported on macOS runners")
+		case len(job.Services) != 0:
+			return fmt.Errorf("services are unsupported on macOS runners")
+		}
+	}
+	return nil
+}
+
 func runnerImageOS() string {
+	if goruntime.GOOS != "linux" {
+		return ""
+	}
 	osRelease, err := os.ReadFile("/etc/os-release")
 	if err != nil {
 		return ""
@@ -912,6 +955,7 @@ func isRuntimeContextEnvironment(name string) bool {
 		"GITHUB_SERVER_URL",
 		"GITHUB_SHA",
 		"GITHUB_WORKSPACE",
+		"RUNNER_ARCH",
 		"RUNNER_OS",
 		"RUNNER_TEMP",
 		"RUNNER_TOOL_CACHE":
@@ -1252,7 +1296,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 
 	var action metadata.Metadata
 	var actionLock *plan.ActionLock
-	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && len(job.Actions) != 0) {
+	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && len(job.Actions) != 0) {
 		if step.Action == nil {
 			return result, fmt.Errorf("action %q has no immutable selector", step.Uses)
 		}
@@ -1389,6 +1433,9 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		composite, err := r.runCompositeMetadata(ctx, processor, workspace, job, actionPath, action, inputs, invocationID, jobEnv, stepEnv, actionEval, posts, actions, prepared, actionLock, actionStack)
 		return composite, err
 	case metadata.RuntimeDocker:
+		if goruntime.GOOS == "darwin" {
+			return result, fmt.Errorf("docker action %q is unsupported on macOS runners", step.Uses)
+		}
 		if !job.HasCapability("docker") {
 			return result, fmt.Errorf("docker action %q requires the plan's docker capability", step.Uses)
 		}
@@ -1439,7 +1486,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
-		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
+		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))

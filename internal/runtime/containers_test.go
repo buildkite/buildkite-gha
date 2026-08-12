@@ -1874,7 +1874,7 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	}
 	for _, artifact := range bundle.Plans {
 		job := artifact.Job
-		if job.Schema != plan.SchemaV7 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+		if job.Schema != plan.SchemaV8 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
 			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
 		}
 		wantSources := []string{"dockerfile-actions", "service-containers"}

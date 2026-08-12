@@ -4,8 +4,6 @@ agents:
 steps:
   - label: ":pipeline: Dockerfile action importer"
     key: "dockerfile-action-importer"
-    env:
-      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 15
     retry:
       automatic: false
@@ -28,7 +26,7 @@ steps:
       BUILDKITE_GHA_NODE24="$$(mise where node@24)/bin/node" \
       "$$proof_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
-        --runtime-queue hosted \
+        --runner-queue ubuntu-latest=hosted \
         "$$proof_root/.github/workflows/docker-action.yml"
 
   - label: ":pipeline: Dockerfile action continuation loader"

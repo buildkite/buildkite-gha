@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and static matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview for Linux x86-64 workflows. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview for Linux x86-64 and native macOS arm64 workflows. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
 
 ## How it works
 
@@ -19,7 +19,7 @@ Buildkite creates the build. The plugin reads the workload from the workflow fil
 | Matrix entry | Buildkite command job |
 | `needs` | `depends_on` with verified result transport |
 | Step | Runs inside the job compatibility runtime |
-| `runs-on` | Linux compatibility check; Buildkite chooses the agent |
+| `runs-on` | Supported platform label; Buildkite queue mapping chooses the agent |
 
 Steps stay together because they share a workspace, environment changes, action state, and post-action cleanup. Local `workflow_call` remains useful for workflow composition, but `on:` never creates or filters a Buildkite build.
 
@@ -51,6 +51,27 @@ plugins:
       version: "0.8.0"
 ```
 
+Native macOS labels require an explicit queue mapping. Each mapping binds a
+`runs-on` label to a Buildkite queue; Linux mappings may also select an
+immutable digest-pinned image:
+
+```yaml
+plugins:
+  - github-actions#main:
+      version: "<release-with-linux-and-darwin-assets>"
+      workflow: .github/workflows/ci.yml
+      runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
+          image: buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03
+        - runs-on: macos-14
+          queue: macos-sonoma-arm64
+```
+
+The macOS queue must provide native Apple-silicon agents and the tools the
+workflow uses. A label such as `macos-14` does not promise GitHub's image or
+Xcode inventory.
+
 The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
 
 Configure branch, tag, pull request, schedule, and manual triggers in Buildkite. The plugin uses the `pull_request` context for pull request builds and the `push` context for other builds. Filters under `on:` do not create or filter Buildkite builds.
@@ -61,13 +82,13 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 jobs using `bash` or `sh` | Windows, macOS, or Linux arm64 |
-| Local and public JavaScript, composite, and verified Dockerfile actions | Private actions or arbitrary reusable-workflow source |
+| Linux x86-64 and native macOS arm64 jobs using `bash` or `sh` | Windows, Linux arm64, or macOS x86-64 |
+| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | Ordinary workflow secrets, GitHub-compatible OIDC, or protected queues |
 | Scoped `GITHUB_TOKEN` use allowed by Buildkite policy | Ambient or workflow-authored `github.token` use |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |
-| Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path |
+| Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path; all Docker use on macOS |
 
 Some features support a limited subset or behave differently on Buildkite. Check the matrix before migrating a workflow.
 

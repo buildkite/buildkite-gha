@@ -37,6 +37,14 @@ mise run smoke:local
 mise run release:check
 ```
 
+Native macOS changes must also cross-build the complete command and validate the
+paired GoReleaser configuration:
+
+```sh
+GOOS=darwin GOARCH=arm64 mise exec -- go build ./...
+mise exec -- goreleaser check
+```
+
 ### Understand smoke results
 
 `mise run smoke:local` is network-free. It validates the smoke inventory and compiles each workflow twice. A pass proves deterministic compilation, not runtime behavior.
@@ -85,6 +93,42 @@ bk build create --pipeline buildkite/buildkite-gha \
 
 Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer workflow. Mise must download and verify the public CLI release. The demo must not fall back to a local binary.
 
+Native macOS support requires a paired stable release before a live Hosted smoke:
+
+1. Merge an approved `buildkite-gha` change to `main`.
+1. With separate release approval, create the stable version/tag.
+1. Confirm the GitHub release contains
+   `buildkite-gha_Linux_x86_64.tar.gz`,
+   `buildkite-gha_Darwin_arm64.tar.gz`, and `checksums.txt`, with exactly one
+   matching checksum entry for each archive.
+1. Configure the released thin plugin with that exact CLI version and explicit
+   runner mappings:
+
+   ```yaml
+   plugins:
+     - github-actions#v0.8.0:
+         version: "<new-exact-buildkite-gha-version>"
+         workflow: .github/workflows/mixed.yml
+         runners:
+           - runs-on: ubuntu-latest
+             queue: hosted
+           - runs-on: macos-14
+             queue: macos-sonoma-arm64
+   ```
+
+1. Run a Linux-only Hosted smoke. Confirm the importer runs on Linux/amd64,
+   publishes its own exact runtime, and makes no Darwin archive request.
+1. Run a mixed Hosted smoke. Confirm the importer stays on Linux/amd64, fetches
+   and verifies the same release's Darwin archive, and sends each job to its
+   mapped native queue with its bound runtime digest.
+1. Run a Darwin-only workflow graph. Confirm only the Darwin job runtime is
+   needed by the generated graph while the importer remains Linux/amd64.
+1. Run negative proofs: an unmapped macOS label, macOS image, missing or
+   mismatched Darwin asset/checksum, and macOS container or Dockerfile action
+   must each fail closed before workflow execution.
+1. Record the native Hosted macOS result without claiming GitHub image, Xcode,
+   container, or service parity.
+
 For a side-by-side GitHub Actions and Buildkite UX check, run:
 
 ```sh
@@ -103,7 +147,7 @@ From a clean, up-to-date `main`, run:
 mise run release
 ```
 
-The task runs `check`, chooses the next conventional-commit-derived `v0` tag, and pushes it. The tag build reruns checks and publishes the GitHub release, archive, and checksum. Publication can be retried from the same tag build.
+The task runs `check`, chooses the next conventional-commit-derived `v0` tag, and pushes it. The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
 
 `GHA_GITHUB_RELEASE_TOKEN` must be a fine-grained, repository-scoped token with Contents read and write access. Store it as a Buildkite secret restricted to this release pipeline and webhook-created `v*` tag builds, with no access from ordinary branch or pull request builds. The publisher verifies the remote tag, checkout, and Buildkite commit before requesting the secret.
 
