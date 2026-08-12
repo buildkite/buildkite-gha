@@ -74,7 +74,7 @@ scripts/verify-artifact-roundtrip <build-number> <commit>
 
 ## Test released and native entry points
 
-Run the examples through the released plugin and its normal release installer:
+Run the examples through the released plugin and its default mise-based runtime resolution:
 
 ```sh
 commit=$(git rev-parse HEAD)
@@ -83,7 +83,7 @@ bk build create --pipeline buildkite/buildkite-gha \
   --env DEMO_SUITE=plugin --env DEMO_COMMIT="$commit" --yes
 ```
 
-Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer workflow. The plugin must download and checksum-verify its public CLI release. The demo must not fall back to a local binary.
+Add `--env DEMO_CACHE=1` to include the optional cache producer and consumer workflow. Mise must download and verify the public CLI release. The demo must not fall back to a local binary.
 
 For a side-by-side GitHub Actions and Buildkite UX check, run:
 
