@@ -774,6 +774,22 @@ func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	}
 }
 
+func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
+	requireLinuxAMD64(t)
+	fake := newFakeDocker(t, "leftover")
+	workspace := fixturePath(t)
+	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{
+		ID: "docker", Kind: "uses", Uses: "./actions/docker", ContinueOnError: true,
+	}})
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.ContinueOnError = true
+
+	result, err := (Runner{Docker: fake.path}).RunJob(context.Background(), job, workspace)
+	if err == nil || IsToleratedJobFailure(err) || result.Conclusion != "failure" || !strings.Contains(err.Error(), "owned Docker resources remain after cleanup") {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestSequentialRunControlsAndEnvironment(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
