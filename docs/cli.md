@@ -10,6 +10,8 @@ Install `buildkite-gha` with `mise` 2026.5.12 or newer:
 mise use -g --minimum-release-age 0s github:buildkite/buildkite-gha
 ```
 
+The `--minimum-release-age 0s` override prevents mise's default 24-hour delay from selecting an older release without an artifact for your platform.
+
 Append `@<version>` to install an exact release. A custom importer that runs macOS jobs must also download and verify the same release's Darwin/arm64 distribution.
 
 Jobs with JavaScript actions require `mise`. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
