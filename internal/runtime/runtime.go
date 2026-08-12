@@ -42,8 +42,8 @@ const (
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
 	workflowWarningAnnotationHeading = "<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n"
 	workflowErrorAnnotationHeading   = "<h2 class=\"h4 mb2\">GitHub Actions errors</h2>\n"
-	workflowCommandTableHeading      = "<div class=\"flex\"><table class=\"flex-auto mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-8 align-middle\">Message</th></tr></thead>\n<tbody>\n"
-	workflowCommandTableEnd          = "</tbody>\n</table></div>\n"
+	workflowCommandListHeading       = "<div class=\"mb2\">\n"
+	workflowCommandListEnd           = "</div>\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -1477,9 +1477,9 @@ func (p *commandProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflo
 	if buffer.truncated {
 		return
 	}
-	additional := len(renderWorkflowCommandTableRow(command))
+	additional := len(renderWorkflowCommandListItem(command))
 	if len(buffer.commands) == 0 {
-		additional += len(heading) + len(workflowCommandTableHeading) + len(workflowCommandTableEnd)
+		additional += len(heading) + len(workflowCommandListHeading) + len(workflowCommandListEnd)
 	}
 	if buffer.rendered+additional > maxJobAnnotationBytes-len(workflowCommandTruncationNotice) {
 		buffer.truncated = true
@@ -1643,13 +1643,13 @@ func renderWorkflowCommandAnnotation(heading string, commands []workflowCommandA
 
 	var rendered strings.Builder
 	rendered.WriteString(heading)
-	rendered.WriteString(workflowCommandTableHeading)
+	rendered.WriteString(workflowCommandListHeading)
 	for _, group := range groups {
 		for _, command := range group.commands {
-			rendered.WriteString(renderWorkflowCommandTableRow(command))
+			rendered.WriteString(renderWorkflowCommandListItem(command))
 		}
 	}
-	rendered.WriteString(workflowCommandTableEnd)
+	rendered.WriteString(workflowCommandListEnd)
 
 	var body string
 	var bodyTruncated bool
@@ -1657,7 +1657,7 @@ func renderWorkflowCommandAnnotation(heading string, commands []workflowCommandA
 	return body, bodyTruncated
 }
 
-func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
+func renderWorkflowCommandListItem(command workflowCommandAnnotation) string {
 	source := "General"
 	if command.file != "" {
 		location := filepath.Base(strings.ReplaceAll(command.file, "\\", "/"))
@@ -1670,7 +1670,8 @@ func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
 	if command.title != "" {
 		detail = "<strong>" + commandHTML(command.title) + ":</strong> " + detail
 	}
-	return "<tr><td>" + source + "</td><td>" + detail + "</td></tr>\n"
+	return "<div class=\"border-top py2\"><div>" + detail +
+		"</div><div class=\"mt1 muted\">" + source + "</div></div>\n"
 }
 
 func workflowCommandLocationLabel(properties map[string]string) string {
