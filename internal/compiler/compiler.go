@@ -393,6 +393,7 @@ instances:
 				requiresMise = compiledActions.requiresMise
 				actionRequiresGitHubToken = compiledActions.requiresGitHubToken
 				actionRequiredSecrets = compiledActions.requiredSecrets
+				authorization.GitHubTokenActions = append([]string(nil), compiledActions.githubTokenActions...)
 				actionInputsInspected = true
 				locksByID := make(map[string]plan.ActionLock, len(locks))
 				for _, lock := range locks {
@@ -523,6 +524,7 @@ instances:
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
+				authorization.GitHubTokenSecretReference = referencesGitHubTokenSecret
 			}
 			if len(secrets) != 0 {
 				capabilities = append(capabilities, "secrets")
@@ -1017,7 +1019,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					finding := &ProcessingFinding{
 						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
 						Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-						Job: job.ID, Instance: key, Message: runnerRejectionMessage(err),
+						Job: job.ID, Instance: key, Message: runnerRejectionMessage(err, reportableRunnerLabels(job, labels), options.Runners.supportedLabels()),
 						Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 					}
 					diagnostics = append(diagnostics, finding)
@@ -1512,6 +1514,34 @@ func resolveRunsOn(job workflow.Job, context expression.CompileContext, matrix m
 		labels[i] = resolved
 	}
 	return labels, nil
+}
+
+func reportableRunnerLabels(job workflow.Job, labels []string) []string {
+	if job.RunsOnExpr == nil {
+		for _, label := range job.RunsOn {
+			if strings.Contains(label, "${{") {
+				return nil
+			}
+		}
+		return labels
+	}
+	text := strings.TrimSpace(job.RunsOnExpr.Text)
+	if !strings.HasPrefix(text, "${{") || !strings.HasSuffix(text, "}}") || job.Matrix == nil {
+		return nil
+	}
+	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "${{"), "}}"))
+	if !strings.HasPrefix(strings.ToLower(body), "matrix.") || strings.ContainsAny(body, " []()|&") {
+		return nil
+	}
+	if job.Matrix.Expression != nil || job.Matrix.IncludeExpression != nil {
+		return nil
+	}
+	for _, row := range job.Matrix.Rows {
+		if row.Expression != nil {
+			return nil
+		}
+	}
+	return labels
 }
 
 func runsOnPosition(job workflow.Job) workflow.Position {

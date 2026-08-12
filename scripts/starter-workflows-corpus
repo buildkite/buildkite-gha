@@ -124,13 +124,15 @@ expand_template() {
 }
 
 record_report() {
-  local id=$1 status=$2 output=$3 result codes graph icon
+  local id=$1 status=$2 output=$3 result codes reason graph icon
   if result="$(jq -er '.result | select(type == "string")' "$output")"; then
     codes="$(jq -r '[.diagnostics[]?.code] | unique | join(", ")' "$output")"
+    reason="$(jq -r '[.diagnostics[]?.message | split(". ")[0] | gsub("\\s+"; " ")] | unique | if length == 0 then "" elif length == 1 then .[0] else .[0] + " (+" + ((length - 1) | tostring) + " more)" end | if length > 180 then .[:177] + "..." else . end' "$output")"
     graph="$(jq -r 'if has("compile") then .compile else . end | "\(.logical_jobs // 0) jobs, \(.instances // 0) instances"' "$output")"
   else
     result=invalid-report
     codes=E_REPORT
+    reason='report could not be read'
     graph='0 jobs, 0 instances'
   fi
   if [[ "$status" == 0 && "$result" == "$desired" ]]; then
@@ -145,7 +147,7 @@ record_report() {
     jq -r '.diagnostics[]? | "  \(.code): \(.message)"' "$output" >&2 || true
   fi
   if [[ -n "$codes" ]]; then
-    printf -- "- %s \`%s\`: \`%s\` — %s\n" "$icon" "$id" "$result" "$codes" >> "$summary"
+    printf -- "- %s \`%s\`: \`%s\` — %s: %s\n" "$icon" "$id" "$result" "$codes" "$reason" >> "$summary"
   else
     printf -- "- %s \`%s\`: \`%s\`\n" "$icon" "$id" "$result" >> "$summary"
   fi

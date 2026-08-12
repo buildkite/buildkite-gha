@@ -37,7 +37,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 	}
 	r, err := s.Resolver.Resolve(ctx, ref)
 	if err != nil {
-		return source.Resolved{}, source.Materialized{}, err
+		return source.Resolved{}, source.Materialized{}, fmt.Errorf("resolve action reference: %w", err)
 	}
 	identity := actionintegration.Identity{
 		Source:     "github",
@@ -50,7 +50,10 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 		}
 	}
 	m, err := s.Store.Materialize(ctx, r)
-	return r, m, err
+	if err != nil {
+		return source.Resolved{}, source.Materialized{}, fmt.Errorf("download action source: %w", err)
+	}
+	return r, m, nil
 }
 
 type actionLockBuilder struct {
@@ -76,6 +79,7 @@ type actionCompilation struct {
 	locks               []plan.ActionLock
 	capabilities        []string
 	requiredSecrets     []string
+	githubTokenActions  []string
 	requiresMise        bool
 	requiresGitHubToken bool
 }
@@ -112,12 +116,56 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Action: step.Uses, Step: i + 1,
-				Message: "action could not be resolved or validated",
+				Message: actionResolutionMessage(step.Uses, err),
 				Err:     fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
 			})
 		}
 	}
 	return evidence, errors.Join(diagnostics...)
+}
+
+func actionResolutionMessage(reference string, err error) string {
+	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", reference))
+	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {
+		return fmt.Sprintf("Action %q could not be resolved: %s", reference, reason[strings.Index(reason, ": ")+2:])
+	}
+	if start := strings.Index(reason, "parse action metadata \""); start >= 0 {
+		pathStart := start + len("parse action metadata \"")
+		if pathEnd := strings.Index(reason[pathStart:], "\""); pathEnd >= 0 {
+			reason = reason[:start] + "action metadata" + reason[pathStart+pathEnd+1:]
+		}
+	}
+	if fields := unsupportedMetadataFields(reason); fields != "" {
+		reason = "action metadata uses " + fields
+	}
+	return fmt.Sprintf("Action %q is unsupported: %s", reference, reason)
+}
+
+func unsupportedMetadataFields(reason string) string {
+	if !strings.Contains(reason, "yaml: unmarshal errors:") {
+		return ""
+	}
+	linesByField := map[string][]string{}
+	for _, line := range strings.Split(reason, "\n") {
+		if strings.Contains(line, "yaml: unmarshal errors:") || strings.TrimSpace(line) == "" {
+			continue
+		}
+		parts := strings.Fields(strings.TrimSpace(line))
+		if len(parts) < 7 || parts[0] != "line" || parts[2] != "field" || parts[4] != "not" || parts[5] != "found" {
+			return ""
+		}
+		linesByField[parts[3]] = append(linesByField[parts[3]], strings.TrimSuffix(parts[1], ":"))
+	}
+	fields := sortedKeys(linesByField)
+	formatted := make([]string, 0, len(fields))
+	for _, field := range fields {
+		lineLabel := "line "
+		if len(linesByField[field]) > 1 {
+			lineLabel = "lines "
+		}
+		formatted = append(formatted, fmt.Sprintf("unsupported field %q at %s%s", field, lineLabel, strings.Join(linesByField[field], ", ")))
+	}
+	return strings.Join(formatted, " and ")
 }
 
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
@@ -164,6 +212,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	sort.Strings(caps)
 	requiresGitHubToken := false
 	requiredSecrets := map[string]bool{}
+	var githubTokenActions []string
 	if suppliedInputs != nil {
 		for i, root := range roots {
 			requirements, err := root.inspectInvocation(suppliedInputs[i], true)
@@ -171,6 +220,9 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
 			requiresGitHubToken = requiresGitHubToken || requirements.githubToken
+			if requirements.githubToken {
+				githubTokenActions = append(githubTokenActions, refs[i])
+			}
 			for name := range requirements.requiredSecrets {
 				requiredSecrets[name] = true
 			}
@@ -182,6 +234,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 		locks:               locks,
 		capabilities:        caps,
 		requiredSecrets:     secretNames,
+		githubTokenActions:  githubTokenActions,
 		requiresMise:        b.requiresMise,
 		requiresGitHubToken: requiresGitHubToken,
 	}, nil

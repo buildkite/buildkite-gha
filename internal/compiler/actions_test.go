@@ -81,6 +81,22 @@ func writeAction(t *testing.T, root, name, body string) {
 	}
 }
 
+func TestActionResolutionMessageExplainsUnsupportedMetadata(t *testing.T) {
+	err := errors.New("compile action \"owner/action@v1\": parse action metadata \"/tmp/download/action.yml\": yaml: unmarshal errors:\n  line 11: field type not found in type metadata.Input\n  line 16: field type not found in type metadata.Input")
+	want := `Action "owner/action@v1" is unsupported: action metadata uses unsupported field "type" at lines 11, 16`
+	if got := actionResolutionMessage("owner/action@v1", err); got != want {
+		t.Fatalf("actionResolutionMessage() = %q, want %q", got, want)
+	}
+}
+
+func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
+	err := errors.New("resolve action reference: tag v1 was not found")
+	want := `Action "owner/action@v1" could not be resolved: tag v1 was not found`
+	if got := actionResolutionMessage("owner/action@v1", err); got != want {
+		t.Fatalf("actionResolutionMessage() = %q, want %q", got, want)
+	}
+}
+
 func TestCompileActionLocksRequiresMiseOnlyForJavaScriptReachableGraphs(t *testing.T) {
 	workspace := t.TempDir()
 	writeAction(t, workspace, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")

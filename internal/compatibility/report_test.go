@@ -93,3 +93,18 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 		t.Fatal("WriteProcessing() accepted unknown format")
 	}
 }
+
+func TestProcessingReportAggregatesIdenticalMatrixDiagnostics(t *testing.T) {
+	report := NewProcessingReport("ci.yml", "hosted")
+	for _, instance := range []string{"gha-test-a", "gha-test-b", "gha-test-c"} {
+		report.Diagnostics = append(report.Diagnostics, Diagnostic{
+			Level: "error", Code: "E_PROFILE", Stage: "hosted-profile-admission",
+			Message: "same actionable reason", Job: "test", Instance: instance,
+			Location: &SourceLocation{Path: "ci.yml", Line: 4, Column: 3},
+		})
+	}
+	report.Finalize()
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Instance != "" || report.Diagnostics[0].Job != "test" {
+		t.Fatalf("aggregated diagnostics = %#v", report.Diagnostics)
+	}
+}

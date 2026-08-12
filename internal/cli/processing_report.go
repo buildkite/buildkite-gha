@@ -66,6 +66,7 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 }
 
 func processingAnnotation(report compatibility.ProcessingReport) (style, body string) {
+	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
