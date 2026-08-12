@@ -49,7 +49,7 @@ The profile task uses the network to resolve selected public actions and apply t
 
 ## Verify runtime behavior
 
-Every normal Buildkite build runs repository checks and executes the basic example through a released plugin against the build's exact CLI source.
+Every normal Buildkite build runs repository checks, native macOS tests, the starter workflow compatibility report, and the shell smoke workflow against the build's exact CLI source. GitHub Actions differential oracles run only when manually dispatched.
 
 Run the complete hosted smoke suite for a pushed commit with:
 
