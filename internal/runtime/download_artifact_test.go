@@ -274,15 +274,63 @@ func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactMultiPrefixDeduplicatesAndOrdersVerifiedProducers(t *testing.T) {
+	backendArchive, backendSize, backendDigest := testDownloadZIP(t, "backend.xml")
+	productArchive, productSize, productDigest := testDownloadZIP(t, "product.xml")
+	backendPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("6", 64) + ".zip"
+	productPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("7", 64) + ".zip"
+	backend := plan.NeedArtifact{Name: "junit-results-backend-2", Path: backendPath, Digest: backendDigest, Size: backendSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	product := plan.NeedArtifact{Name: "product-junit-results-1", Path: productPath, Digest: productDigest, Size: productSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	store := &downloadStore{archives: map[string]string{backendPath: backendArchive, productPath: productArchive}}
+	workspace := t.TempDir()
+
+	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+		map[string]plan.Need{"backend": {Artifacts: []plan.NeedArtifact{product}}, "products": {Artifacts: []plan.NeedArtifact{backend}}},
+		actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "{junit-results,junit-results-backend,product-junit-results}-*", "path": "junit", "merge-multiple": "true"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(store.paths, []string{backendPath, productPath}) {
+		t.Fatalf("deduplicated download order = %#v, want artifact-name order", store.paths)
+	}
+	for _, file := range []string{"backend.xml", "product.xml"} {
+		if _, err := os.Stat(filepath.Join(workspace, "junit", file)); err != nil {
+			t.Fatalf("merged file %q: %v", file, err)
+		}
+	}
+}
+
+func TestDownloadArtifactPatternRejectsTooManyMatchesBeforeDownload(t *testing.T) {
+	artifacts := make([]plan.NeedArtifact, transport.MaxResultArtifacts+1)
+	for i := range artifacts {
+		artifacts[i].Name = fmt.Sprintf("backend-%03d", i)
+	}
+	store := &downloadStore{}
+	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
+		map[string]plan.Need{"producer": {Artifacts: artifacts}}, actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "{backend,product}-*", "merge-multiple": "true"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "maximum is 64") {
+		t.Fatalf("match limit error = %v", err)
+	}
+	if len(store.paths) != 0 {
+		t.Fatalf("over-limit selection downloaded artifacts: %#v", store.paths)
+	}
+}
+
 func TestDownloadArtifactPatternStagesCompleteMergeBeforeDestinationMutation(t *testing.T) {
 	firstArchive, firstSize, firstDigest := testDownloadZIPPayload(t, "first", "result.xml")
 	secondArchive, secondSize, secondDigest := testDownloadZIPPayload(t, "second", "result.xml")
 	firstPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("4", 64) + ".zip"
 	secondPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("5", 64) + ".zip"
-	first := plan.NeedArtifact{Name: "results-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
-	second := plan.NeedArtifact{Name: "results-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	first := plan.NeedArtifact{Name: "backend-results-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	second := plan.NeedArtifact{Name: "product-results-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
 	needs := map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{second, first}}}
-	inputs := map[string]string{"pattern": "results-*", "path": "merged", "merge-multiple": "true"}
+	inputs := map[string]string{"pattern": "{backend-results,product-results}-*", "path": "merged", "merge-multiple": "true"}
 
 	t.Run("later artifact name wins overlapping member", func(t *testing.T) {
 		workspace := t.TempDir()
