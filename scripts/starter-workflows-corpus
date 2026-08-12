@@ -182,8 +182,7 @@ for id in "${case_ids[@]}"; do
   report="$work/$id.$mode.json"
   (
     cd "$case_root"
-    # The corpus publishes one aggregate annotation after every case completes.
-    BUILDKITE_JOB_ID='' clean_env "$work/buildkite-gha" validate "${validate_args[@]}" --format json \
+    clean_env "$work/buildkite-gha" validate "${validate_args[@]}" --format json \
       --event-path "$event_path" "$workflow"
   ) > "$report" || status=$?
   record_report "$id" "$status" "$report"
