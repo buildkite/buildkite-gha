@@ -144,28 +144,33 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 }
 
 func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
-	secret := "ghs_must_not_leak"
-	for _, test := range []struct {
+	// Every response carries its own distinct secret so a leak names the branch that
+	// leaked it. Only the 400 branch may echo its own body: that body is the Agent
+	// API's rejection reason, which operators need to see.
+	const leakPrefix = "ghs_must_not_leak"
+	leaked := func(name string) string { return leakPrefix + "_" + name }
+	tests := []struct {
 		name       string
 		status     int
 		body       string
 		retryAfter string
 		want       string
 	}{
-		{"rejected", http.StatusBadRequest, secret, "", "rejected"},
-		{"unauthorized", http.StatusUnauthorized, secret, "", "denied"},
-		{"denied", http.StatusForbidden, secret, "", "denied"},
-		{"disabled", http.StatusNotFound, secret, "", "not enabled"},
-		{"rate limited", http.StatusServiceUnavailable, secret, "60", "retry after 60 seconds"},
-		{"unsafe retry header", http.StatusServiceUnavailable, secret, secret, "temporarily unavailable"},
-		{"unexpected status", http.StatusBadGateway, secret, "", "HTTP 502"},
+		{"rejected", http.StatusBadRequest, leaked("rejected"), "", "rejected"},
+		{"unauthorized", http.StatusUnauthorized, leaked("unauthorized"), "", "denied"},
+		{"denied", http.StatusForbidden, leaked("denied"), "", "denied"},
+		{"disabled", http.StatusNotFound, leaked("disabled"), "", "not enabled"},
+		{"rate limited", http.StatusServiceUnavailable, leaked("rate_limited"), "60", "retry after 60 seconds"},
+		{"unsafe retry header", http.StatusServiceUnavailable, leaked("unsafe_body"), leaked("unsafe_header"), "temporarily unavailable"},
+		{"unexpected status", http.StatusBadGateway, leaked("unexpected_status"), "", "HTTP 502"},
 		{"malformed JSON", http.StatusOK, `{"token":`, "", "decode"},
 		{"unknown field", http.StatusOK, `{"token":"ghs_valid","other":true}`, "", "unknown field"},
 		{"trailing JSON", http.StatusOK, `{"token":"ghs_valid"}{}`, "", "trailing data"},
 		{"empty token", http.StatusOK, `{"token":""}`, "", "invalid token"},
 		{"invalid token", http.StatusOK, `{"token":"secret with spaces"}`, "", "invalid token"},
 		{"oversized", http.StatusOK, `{"token":"ghs_valid"}` + strings.Repeat(" ", githubTokenResponseLimit), "", "exceeds"},
-	} {
+	}
+	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if test.retryAfter != "" {
@@ -180,8 +185,20 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
-			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("WorkflowToken() error = %v, want %q", err, test.want)
+			}
+			if test.status == http.StatusBadRequest && !strings.Contains(err.Error(), test.body) {
+				t.Fatalf("WorkflowToken() error = %v, want the rejection reason from the response body", err)
+			}
+			for _, other := range tests {
+				echoesOwnBody := other.name == test.name && test.status == http.StatusBadRequest
+				if strings.HasPrefix(other.body, leakPrefix) && !echoesOwnBody && strings.Contains(err.Error(), other.body) {
+					t.Fatalf("WorkflowToken() error = %v, leaked the %q response body", err, other.name)
+				}
+				if strings.HasPrefix(other.retryAfter, leakPrefix) && strings.Contains(err.Error(), other.retryAfter) {
+					t.Fatalf("WorkflowToken() error = %v, leaked the %q retry header", err, other.name)
+				}
 			}
 		})
 	}
@@ -202,6 +219,93 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	}
 	if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
+	}
+}
+
+func TestAgentGitHubTokensAppendsSanitizedRejectionReason(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		status     int
+		body       string
+		retryAfter string
+		want       string
+	}{
+		{
+			name:   "JSON message",
+			status: http.StatusBadRequest,
+			body:   `{"message":"Repository provider refused to issue token"}`,
+			want:   "GitHub workflow token request was rejected: Repository provider refused to issue token",
+		},
+		{
+			name:   "plain text body",
+			status: http.StatusBadRequest,
+			body:   "Repository provider refused to issue token",
+			want:   "GitHub workflow token request was rejected: Repository provider refused to issue token",
+		},
+		{
+			name:   "empty body",
+			status: http.StatusBadRequest,
+			body:   "",
+			want:   "GitHub workflow token request was rejected",
+		},
+		{
+			name:       "rate limited unaffected by body",
+			status:     http.StatusServiceUnavailable,
+			body:       `{"message":"Repository provider refused to issue token"}`,
+			retryAfter: "30",
+			want:       "GitHub workflow token service is temporarily unavailable; retry after 30 seconds",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if test.retryAfter != "" {
+					w.Header().Set("Retry-After", test.retryAfter)
+				}
+				w.WriteHeader(test.status)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("WorkflowToken() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestAgentGitHubTokensCollapsesAndTruncatesRejectionReason(t *testing.T) {
+	body := "line one\r\n\nline two\t\t" + strings.Repeat("z", 300)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, body)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+	if err == nil {
+		t.Fatal("WorkflowToken() succeeded, want error")
+	}
+	const prefix = "GitHub workflow token request was rejected: "
+	message := err.Error()
+	if !strings.HasPrefix(message, prefix) {
+		t.Fatalf("WorkflowToken() error = %q, want prefix %q", message, prefix)
+	}
+	reason := strings.TrimPrefix(message, prefix)
+	if strings.ContainsAny(reason, "\r\n\t") {
+		t.Fatalf("reason retains control characters: %q", reason)
+	}
+	if !strings.Contains(reason, "line one line two") {
+		t.Fatalf("reason lost its collapsed text: %q", reason)
+	}
+	if got := len([]rune(reason)); got != githubTokenRejectionReasonRuneLimit {
+		t.Fatalf("reason length = %d, want %d", got, githubTokenRejectionReasonRuneLimit)
 	}
 }
 
