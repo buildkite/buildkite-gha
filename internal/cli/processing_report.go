@@ -89,24 +89,30 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	out.WriteString(markdownText(report.Workflow))
 	out.WriteString("\n")
 	for _, diagnostic := range diagnostics {
-		heading, message := annotationDiagnosticPresentation(diagnostic)
+		heading, details := annotationDiagnosticPresentation(diagnostic)
 		out.WriteString("\n#### ")
 		out.WriteString(heading)
-		out.WriteString("\n\n")
-		out.WriteString(markdownCode(diagnostic.Code))
+		context := make([]string, 0, 4)
+		if diagnostic.Action != "" {
+			context = append(context, "Action "+markdownCode(diagnostic.Action))
+		}
 		if diagnostic.Location != nil {
-			out.WriteString(" · ")
-			out.WriteString(markdownCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
+			context = append(context, markdownCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
 		}
 		if diagnostic.Job != "" {
-			out.WriteString(" · Job ")
-			out.WriteString(markdownCode(diagnostic.Job))
+			context = append(context, "Job "+markdownCode(diagnostic.Job))
 		}
 		if diagnostic.Step != 0 {
-			_, _ = fmt.Fprintf(&out, " · Step %d", diagnostic.Step)
+			context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
 		}
-		out.WriteString("\n\n")
-		for i, sentence := range annotationSentences(message) {
+		if len(context) != 0 {
+			out.WriteString("\n\n")
+			out.WriteString(strings.Join(context, " · "))
+		}
+		if len(details) != 0 {
+			out.WriteString("\n\n")
+		}
+		for i, sentence := range details {
 			if i != 0 {
 				out.WriteString("  \n")
 			}
@@ -137,39 +143,24 @@ func annotationDiagnosticMessage(diagnostic compatibility.Diagnostic) string {
 	return strings.TrimPrefix(diagnostic.Message, prefix)
 }
 
-func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (heading, message string) {
-	message = annotationDiagnosticMessage(diagnostic)
+func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (heading string, details []string) {
+	message := annotationDiagnosticMessage(diagnostic)
 	if diagnostic.Action != "" {
-		for _, presentation := range []struct {
-			prefix  string
-			heading string
-		}{
-			{fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action), "Unsupported action"},
-			{fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action), "Action could not be resolved"},
+		for _, prefix := range []string{
+			fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action),
+			fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action),
 		} {
-			if strings.HasPrefix(message, presentation.prefix) {
-				return presentation.heading + ": **" + markdownText(diagnostic.Action) + "**", upperFirst(strings.TrimPrefix(message, presentation.prefix))
+			if strings.HasPrefix(message, prefix) {
+				message = upperFirst(strings.TrimPrefix(message, prefix))
+				break
 			}
 		}
-		return "Action compatibility: **" + markdownText(diagnostic.Action) + "**", message
 	}
-	switch {
-	case strings.HasPrefix(message, "Runner label"):
-		heading = "Unsupported runner"
-	case strings.Contains(message, "job or service containers"):
-		heading = "Unsupported hosted container"
-	case strings.Contains(message, "needs GITHUB_TOKEN"):
-		heading = "Unsupported GITHUB_TOKEN configuration"
-	case diagnostic.Code == "W_ACTION_RUNTIME_UNKNOWN":
-		heading = "Third-party action runtime compatibility"
-	case diagnostic.Stage == string(compiler.StageAdmission):
-		heading = "Hosted profile incompatibility"
-	case diagnostic.Level == "warning":
-		heading = "Compatibility warning"
-	default:
-		heading = "Workflow incompatibility"
+	sentences := annotationSentences(message)
+	if len(sentences) == 0 {
+		return "Compatibility diagnostic", nil
 	}
-	return heading, message
+	return markdownText(sentences[0]), sentences[1:]
 }
 
 func annotationSentences(message string) []string {

@@ -2084,12 +2084,12 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		if len(annotation.args) != 9 || annotation.args[0] != "annotate" || annotation.args[2] != "job" || annotation.args[4] != cliTestJobID || !strings.HasPrefix(annotation.args[6], processingAnnotationContext+"-") || annotation.args[8] != "error" {
 			t.Fatalf("annotation args = %#v", annotation.args)
 		}
-		for _, want := range []string{"GitHub Actions workflow diagnostics", "#### Unsupported runner", "`E_EXPRESSION_INVALID`", `Runner label "windows-latest" uses an unsupported operating system`, "Job `test`"} {
+		for _, want := range []string{"GitHub Actions workflow diagnostics", `#### Runner label "windows-latest" uses an unsupported operating system`, "Job `test`"} {
 			if !strings.Contains(string(annotation.stdin), want) {
 				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
 			}
 		}
-		for _, unwanted := range []string{"stage:", "instance:", "gha-test"} {
+		for _, unwanted := range []string{"E_EXPRESSION_INVALID", "stage:", "instance:", "gha-test"} {
 			if strings.Contains(string(annotation.stdin), unwanted) {
 				t.Fatalf("annotation = %q, does not want %q", annotation.stdin, unwanted)
 			}
@@ -2162,9 +2162,8 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 
 	_, body := processingAnnotation(report)
 	for _, want := range []string{
-		"#### Unsupported action: **actions/setup-java@v4**",
-		"`E_ACTION_UNSUPPORTED` · Job `test` · Step 2",
-		`Action metadata uses unsupported field "deprecationMessage"`,
+		`#### Action metadata uses unsupported field "deprecationMessage"`,
+		"Action `actions/setup-java@v4` · Job `test` · Step 2",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
@@ -2173,14 +2172,14 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 	if count := strings.Count(body, "actions/setup-java@v4"); count != 1 {
 		t.Fatalf("action count = %d, want 1: %q", count, body)
 	}
-	for _, unwanted := range []string{"stage:", "instance:", "gha-test-a1b2"} {
+	for _, unwanted := range []string{"E_ACTION_UNSUPPORTED", "stage:", "instance:", "gha-test-a1b2"} {
 		if strings.Contains(body, unwanted) {
 			t.Fatalf("annotation = %q, does not want %q", body, unwanted)
 		}
 	}
 }
 
-func TestProcessingAnnotationUsesUserFacingDiagnosticHeadings(t *testing.T) {
+func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 	tests := []struct {
 		name       string
 		diagnostic compatibility.Diagnostic
@@ -2190,25 +2189,25 @@ func TestProcessingAnnotationUsesUserFacingDiagnosticHeadings(t *testing.T) {
 			name: "action resolution",
 			diagnostic: compatibility.Diagnostic{Action: "owner/action@v1",
 				Message: `Action "owner/action@v1" could not be resolved: tag v1 was not found`},
-			want: "Action could not be resolved: **owner/action@v1**",
+			want: "Tag v1 was not found",
 		},
 		{
 			name: "token configuration",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
 				Message: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`},
-			want: "Unsupported GITHUB_TOKEN configuration",
+			want: `Job "test" needs GITHUB\_TOKEN, but job-level permissions are unsupported.`,
 		},
 		{
 			name: "hosted container",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
 				Message: `Job "test" uses service container "postgres". The compiler supports this construct, but hosted production does not run job or service containers.`},
-			want: "Unsupported hosted container",
+			want: `Job "test" uses service container "postgres".`,
 		},
 		{
 			name: "third-party runtime warning",
 			diagnostic: compatibility.Diagnostic{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN",
 				Message: "Third-party action runtime behavior was not validated."},
-			want: "Third-party action runtime compatibility",
+			want: "Third-party action runtime behavior was not validated.",
 		},
 	}
 	for _, test := range tests {
