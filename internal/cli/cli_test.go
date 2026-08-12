@@ -3985,6 +3985,15 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
 		t.Fatalf("runJobArgs() error = %v, want conflicting plan source error", err)
 	}
+	if _, err := runJobArgs([]string{"--plan", "", "--plan-digest", "sha256:" + strings.Repeat("0", 64), "--plan-producer", "importer"}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty plan source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("runJobArgs() error = %v, want empty plan path error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", ""}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty digest source error", err)
+	}
 	if _, err := runJobArgs([]string{"--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "both --plan-digest and --plan-producer") {
 		t.Fatalf("runJobArgs() error = %v, want incomplete artifact source error", err)
 	}

@@ -1083,9 +1083,12 @@ func runJobArgs(args []string) (runJobOptions, error) {
 			return runJobOptions{}, fmt.Errorf("unknown option %q", args[i])
 		}
 	}
-	if options.planPath != "" {
-		if options.planDigest != "" || options.planProducer != "" {
+	if seen["--plan"] {
+		if seen["--plan-digest"] || seen["--plan-producer"] {
 			return runJobOptions{}, fmt.Errorf("--plan cannot be combined with --plan-digest or --plan-producer")
+		}
+		if options.planPath == "" {
+			return runJobOptions{}, fmt.Errorf("--plan requires a path")
 		}
 		return options, nil
 	}
