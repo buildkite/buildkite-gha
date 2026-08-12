@@ -37,6 +37,8 @@ Use `--format json` for a `buildkite-gha/processing-report/v1` report.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 
+Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a skipped group during upload. Unsupported triggers and malformed data are incompatible.
+
 Validation may use the public network to resolve actions. It does not call Buildkite, install Node, or execute workflow code.
 
 ## Provide an event snapshot
@@ -105,6 +107,34 @@ Released plugin v0.8.0 does not declare or support `runners`; schema validation
 rejects that configuration. Native macOS therefore requires the companion
 plugin release. Custom importers can use the public flags below.
 
+### Select workflows
+
+Use `*` for every tracked `.yml` and `.yaml` file directly under `.github/workflows`:
+
+```sh
+buildkite-gha upload '*'
+```
+
+Quote `*` in shells and YAML. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
+
+Two or more operands switch to explicit-list mode:
+
+```sh
+buildkite-gha upload -- \
+  .github/workflows/ci.yml \
+  .github/workflows/release.yml
+```
+
+Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, missing or untracked files, files outside the repository, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs. A tracked filename containing glob metacharacters remains literal, but an unmatched glob mixed into a list—or two glob operands—is rejected rather than expanded independently.
+
+`--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
+
+All selected directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
+
+Any input, trigger translation, event validation, compilation, admission, artifact, or upload failure aborts the aggregate transaction. No partially compiled pipeline is uploaded.
+
+### Select the effective event
+
 Event source precedence is:
 
 1. `--event-path`
@@ -115,7 +145,13 @@ An explicit event path never reads Buildkite metadata. Webhook metadata must be 
 
 Raw webhook data is not retained in generated plans or pipeline YAML and cannot grant queues, secrets, or tokens.
 
-The command uploads the exact executable and content-addressed plans before running:
+The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, and event-qualified check names; group labels remain static across events. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
+
+Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as skipped groups with an ignored placeholder and no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with an ignored-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+
+Unsupported trigger events, path filters, inexact filters, malformed event data, and failures in any applicable workflow remain fatal. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+
+After all applicable workflows pass, the command uploads the exact executable and content-addressed plans before running one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets

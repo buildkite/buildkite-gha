@@ -13,7 +13,7 @@ Buildkite creates the build. The plugin reads the workload from the workflow fil
 
 | GitHub Actions | Buildkite |
 | --- | --- |
-| Triggers and filters under `on:` | Configure these in Buildkite |
+| Triggers and filters under `on:` | Select applicable workflow groups inside an existing Buildkite build |
 | Workflow run | Existing Buildkite build |
 | Job | Buildkite command job |
 | Matrix entry | Buildkite command job |
@@ -21,7 +21,7 @@ Buildkite creates the build. The plugin reads the workload from the workflow fil
 | Step | Runs inside the job compatibility runtime |
 | `runs-on` | Supported platform label; Buildkite queue mapping chooses the agent |
 
-Steps stay together because they share a workspace, environment changes, action state, and post-action cleanup. Local `workflow_call` remains useful for workflow composition, but `on:` never creates or filters a Buildkite build.
+Steps stay together because they share a workspace, environment changes, action state, and post-action cleanup. Buildkite still creates the build; `buildkite-gha` selects top-level workflows for its effective GitHub event before compiling them. Local `workflow_call` remains available for composition without creating its own group.
 
 ## Run an existing workflow
 
@@ -42,6 +42,8 @@ steps:
 ```
 
 The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship.
+
+Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`.
 
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.8.0` onward:
 
@@ -74,9 +76,9 @@ Configured Linux profiles use the matching Noble or Jammy hosted-toolchains
 image. A macOS label selects native Darwin/arm64, not a GitHub image or Xcode
 inventory.
 
-The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
+The imported workflow is a dynamic part of the Buildkite pipeline. Upload can take one tracked workflow glob or a list of explicit workflow paths and creates one aggregate group per directly runnable workflow in a single transaction. Workflows that do not declare the selected event become skipped groups. Each `:github: <workflow>` group depends on the importer; its GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
-Configure branch, tag, pull request, schedule, and manual triggers in Buildkite. The plugin uses the `pull_request` context for pull request builds and the `push` context for other builds. Filters under `on:` do not create or filter Buildkite builds.
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, manual/API, and scheduled builds to `push`, `pull_request`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, and pull request activity filters. Cross-event workflows are excluded before event-dependent compilation and retained as skipped groups.
 
 ## Check workflow compatibility
 
@@ -111,7 +113,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-An `admitted` result means the workflow satisfies upload policy. It does not execute the workflow or prove that arbitrary action code works without GitHub services. Use `--format json` for machine-readable output.
+An `admitted` result means the workflow satisfies upload policy. A `not-applicable` result means the workflow does not declare the selected event and upload would skip it without compiling it. Validation does not execute the workflow or prove that arbitrary action code works without GitHub services. Use `--format json` for machine-readable output.
 
 See the [CLI guide](docs/cli.md) for event snapshots, compilation, direct upload, and agent targeting.
 
