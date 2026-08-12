@@ -235,6 +235,9 @@ func DecodeRuntimeMatrixDescriptor(source []byte) (RuntimeMatrixDescriptor, erro
 	if len(source) > MaxRuntimeMatrixDescriptorBytes {
 		return RuntimeMatrixDescriptor{}, fmt.Errorf("runtime matrix descriptor is %d bytes, maximum is %d", len(source), MaxRuntimeMatrixDescriptorBytes)
 	}
+	if !utf8.Valid(source) {
+		return RuntimeMatrixDescriptor{}, errors.New("runtime matrix descriptor is not valid UTF-8")
+	}
 	if err := rejectRuntimeMatrixDuplicateKeys(source); err != nil {
 		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
@@ -298,12 +301,19 @@ func rejectRuntimeMatrixDescriptorKeyAliases(source []byte) error {
 
 // ExpandRuntimeMatrixOutput strictly decodes one untrusted producer output and
 // expands only matrix values. It does not construct plans or upload a pipeline.
-func ExpandRuntimeMatrixOutput(descriptor RuntimeMatrixDescriptor, source []byte, existingJobs int) ([]map[string]any, error) {
+func ExpandRuntimeMatrixOutput(descriptor RuntimeMatrixDescriptor, source []byte, existingStepKeys []string) ([]map[string]any, error) {
 	if err := descriptor.Validate(); err != nil {
 		return nil, err
 	}
-	if existingJobs < 0 || existingJobs > MaxRuntimeMatrixGraphJobs {
-		return nil, fmt.Errorf("existing graph has %d jobs, maximum is %d", existingJobs, MaxRuntimeMatrixGraphJobs)
+	if len(existingStepKeys) > MaxRuntimeMatrixGraphJobs {
+		return nil, fmt.Errorf("existing graph has %d jobs, maximum is %d", len(existingStepKeys), MaxRuntimeMatrixGraphJobs)
+	}
+	existingKeys := make(map[string]struct{}, len(existingStepKeys))
+	for _, key := range existingStepKeys {
+		if _, exists := existingKeys[key]; exists {
+			return nil, fmt.Errorf("existing graph contains duplicate step key %q", key)
+		}
+		existingKeys[key] = struct{}{}
 	}
 	if len(source) > MaxRuntimeMatrixBytes {
 		return nil, fmt.Errorf("runtime matrix output is %d bytes, maximum is %d", len(source), MaxRuntimeMatrixBytes)
@@ -349,7 +359,7 @@ func ExpandRuntimeMatrixOutput(descriptor RuntimeMatrixDescriptor, source []byte
 	if len(matrices) > MaxRuntimeMatrixInstances {
 		return nil, fmt.Errorf("runtime matrix expands beyond %d instances", MaxRuntimeMatrixInstances)
 	}
-	if existingJobs+len(matrices) > MaxRuntimeMatrixGraphJobs {
+	if len(existingStepKeys)+len(matrices) > MaxRuntimeMatrixGraphJobs {
 		return nil, fmt.Errorf("runtime continuation expands graph beyond %d jobs", MaxRuntimeMatrixGraphJobs)
 	}
 	seenValues := make(map[string]struct{}, len(matrices))
@@ -370,6 +380,9 @@ func ExpandRuntimeMatrixOutput(descriptor RuntimeMatrixDescriptor, source []byte
 		key, err := instanceKey(descriptor.Job, matrix)
 		if err != nil {
 			return nil, err
+		}
+		if _, exists := existingKeys[key]; exists {
+			return nil, fmt.Errorf("runtime matrix deterministic instance key %q collides with the existing graph", key)
 		}
 		if _, exists := seenKeys[key]; exists {
 			return nil, fmt.Errorf("runtime matrix deterministic instance key %q collides", key)

@@ -27,7 +27,7 @@ func TestExpandRuntimeMatrixOutputAcceptsPinnedPostHogIncludeShape(t *testing.T)
   "artifact_key":"core-1",
   "compat":false
 }]`)
-	matrices, err := ExpandRuntimeMatrixOutput(descriptor, source, 10)
+	matrices, err := ExpandRuntimeMatrixOutput(descriptor, source, runtimeMatrixExistingKeys(10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestExpandRuntimeMatrixOutputAcceptsPinnedPostHogIncludeShape(t *testing.T)
 		t.Fatalf("PostHog matrix = %#v", matrices)
 	}
 
-	empty, err := ExpandRuntimeMatrixOutput(descriptor, []byte(`[]`), MaxRuntimeMatrixGraphJobs)
+	empty, err := ExpandRuntimeMatrixOutput(descriptor, []byte(`[]`), runtimeMatrixExistingKeys(MaxRuntimeMatrixGraphJobs))
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty PostHog matrix = %#v, %v", empty, err)
 	}
@@ -43,7 +43,7 @@ func TestExpandRuntimeMatrixOutputAcceptsPinnedPostHogIncludeShape(t *testing.T)
 
 func TestExpandRuntimeMatrixOutputAcceptsBoundedMatrixObject(t *testing.T) {
 	descriptor := validRuntimeMatrixDescriptor(RuntimeMatrixShapeObject)
-	matrices, err := ExpandRuntimeMatrixOutput(descriptor, []byte(`{"os":["ubuntu"],"version":[1,2],"include":[{"os":"macos","version":3}],"exclude":[{"os":"ubuntu","version":2}]}`), 4)
+	matrices, err := ExpandRuntimeMatrixOutput(descriptor, []byte(`{"os":["ubuntu"],"version":[1,2],"include":[{"os":"macos","version":3}],"exclude":[{"os":"ubuntu","version":2}]}`), runtimeMatrixExistingKeys(4))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestExpandRuntimeMatrixOutputAcceptsBoundedMatrixObject(t *testing.T) {
 func TestExpandRuntimeMatrixOutputCanonicalizesEquivalentNumbers(t *testing.T) {
 	descriptor := validRuntimeMatrixDescriptor(RuntimeMatrixShapeInclude)
 	for _, source := range []string{`[{"group":1}]`, `[{"group":1.0}]`, `[{"group":1e0}]`} {
-		matrices, err := ExpandRuntimeMatrixOutput(descriptor, []byte(source), 0)
+		matrices, err := ExpandRuntimeMatrixOutput(descriptor, []byte(source), nil)
 		if err != nil {
 			t.Fatalf("ExpandRuntimeMatrixOutput(%s): %v", source, err)
 		}
@@ -106,7 +106,7 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := ExpandRuntimeMatrixOutput(test.descriptor, []byte(test.source), 0)
+			_, err := ExpandRuntimeMatrixOutput(test.descriptor, []byte(test.source), nil)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("ExpandRuntimeMatrixOutput() error = %v, want %q", err, test.want)
 			}
@@ -117,14 +117,14 @@ func TestExpandRuntimeMatrixOutputRejectsMalformedAndTypeConfusedValues(t *testi
 func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testing.T) {
 	descriptor := validRuntimeMatrixDescriptor(RuntimeMatrixShapeInclude)
 	oversized := bytes.Repeat([]byte{' '}, MaxRuntimeMatrixBytes+1)
-	if _, err := ExpandRuntimeMatrixOutput(descriptor, oversized, 0); err == nil || !strings.Contains(err.Error(), "maximum is 65536") {
+	if _, err := ExpandRuntimeMatrixOutput(descriptor, oversized, nil); err == nil || !strings.Contains(err.Error(), "maximum is 65536") {
 		t.Fatalf("oversized output error = %v", err)
 	}
 	boundary := append([]byte(`[]`), bytes.Repeat([]byte{' '}, MaxRuntimeMatrixBytes-2)...)
-	if matrices, err := ExpandRuntimeMatrixOutput(descriptor, boundary, MaxRuntimeMatrixGraphJobs); err != nil || len(matrices) != 0 {
+	if matrices, err := ExpandRuntimeMatrixOutput(descriptor, boundary, runtimeMatrixExistingKeys(MaxRuntimeMatrixGraphJobs)); err != nil || len(matrices) != 0 {
 		t.Fatalf("exact byte-boundary matrix = %#v, %v", matrices, err)
 	}
-	if _, err := ExpandRuntimeMatrixOutput(descriptor, []byte{'[', 0xff, ']'}, 0); err == nil || !strings.Contains(err.Error(), "valid UTF-8") {
+	if _, err := ExpandRuntimeMatrixOutput(descriptor, []byte{'[', 0xff, ']'}, nil); err == nil || !strings.Contains(err.Error(), "valid UTF-8") {
 		t.Fatalf("invalid UTF-8 matrix error = %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	matrices, err := ExpandRuntimeMatrixOutput(descriptor, encoded, MaxRuntimeMatrixGraphJobs-MaxRuntimeMatrixInstances)
+	matrices, err := ExpandRuntimeMatrixOutput(descriptor, encoded, runtimeMatrixExistingKeys(MaxRuntimeMatrixGraphJobs-MaxRuntimeMatrixInstances))
 	if err != nil || len(matrices) != MaxRuntimeMatrixInstances {
 		t.Fatalf("256-instance matrix = %d, %v", len(matrices), err)
 	}
@@ -146,7 +146,7 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExpandRuntimeMatrixOutput(descriptor, encoded, 0); err == nil || !strings.Contains(err.Error(), "more than 256") {
+	if _, err := ExpandRuntimeMatrixOutput(descriptor, encoded, nil); err == nil || !strings.Contains(err.Error(), "more than 256") {
 		t.Fatalf("257-instance matrix error = %v", err)
 	}
 
@@ -154,7 +154,7 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExpandRuntimeMatrixOutput(descriptor, one, MaxRuntimeMatrixGraphJobs); err == nil || !strings.Contains(err.Error(), "graph beyond 1024 jobs") {
+	if _, err := ExpandRuntimeMatrixOutput(descriptor, one, runtimeMatrixExistingKeys(MaxRuntimeMatrixGraphJobs)); err == nil || !strings.Contains(err.Error(), "graph beyond 1024 jobs") {
 		t.Fatalf("graph limit error = %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExpandRuntimeMatrixOutput(objectDescriptor, product, 0); err == nil || !strings.Contains(err.Error(), "beyond 256 instances") {
+	if _, err := ExpandRuntimeMatrixOutput(objectDescriptor, product, nil); err == nil || !strings.Contains(err.Error(), "beyond 256 instances") {
 		t.Fatalf("matrix product error = %v", err)
 	}
 
@@ -182,8 +182,22 @@ func TestExpandRuntimeMatrixOutputEnforcesByteCardinalityAndGraphBounds(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExpandRuntimeMatrixOutput(objectDescriptor, tooManyProperties, 0); err == nil || !strings.Contains(err.Error(), "more than 64 properties") {
+	if _, err := ExpandRuntimeMatrixOutput(objectDescriptor, tooManyProperties, nil); err == nil || !strings.Contains(err.Error(), "more than 64 properties") {
 		t.Fatalf("expanded property limit error = %v", err)
+	}
+}
+
+func TestExpandRuntimeMatrixOutputRejectsExistingGraphKeyCollision(t *testing.T) {
+	descriptor := validRuntimeMatrixDescriptor(RuntimeMatrixShapeInclude)
+	descriptor.Job = "call.worker"
+	matrix := map[string]any{"os": "linux"}
+	existingKey, err := instanceKey("call-worker", matrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ExpandRuntimeMatrixOutput(descriptor, []byte(`[{"os":"linux"}]`), []string{existingKey})
+	if err == nil || !strings.Contains(err.Error(), "collides with the existing graph") {
+		t.Fatalf("existing graph collision error = %v", err)
 	}
 }
 
@@ -210,6 +224,7 @@ func TestRuntimeMatrixDescriptorIsDeterministicStrictAndSchemaValid(t *testing.T
 		bytes.Replace(first, []byte(`"start":`), []byte(`"Start":`), 1),
 		bytes.Replace(first, []byte(`"line":`), []byte(`"Line":`), 1),
 		append(append([]byte(nil), first...), []byte(`true`)...),
+		append([]byte{'{', '"', 0xff, '"', ':'}, []byte(`true}`)...),
 	} {
 		if _, err := DecodeRuntimeMatrixDescriptor(source); err == nil {
 			t.Fatalf("DecodeRuntimeMatrixDescriptor(%s) unexpectedly succeeded", source)
@@ -297,4 +312,12 @@ func validRuntimeMatrixDescriptor(shape string) RuntimeMatrixDescriptor {
 		MaxInstances:    MaxRuntimeMatrixInstances,
 		MaxGraphJobs:    MaxRuntimeMatrixGraphJobs,
 	}
+}
+
+func runtimeMatrixExistingKeys(count int) []string {
+	keys := make([]string, count)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("gha-existing-%d", i)
+	}
+	return keys
 }

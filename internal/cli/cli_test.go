@@ -770,6 +770,38 @@ jobs:
 			}
 		})
 	}
+
+	invalidWorkflow := filepath.Join(t.TempDir(), "invalid-dynamic.yml")
+	if err := os.WriteFile(invalidWorkflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.missing) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("invalid boundary before event metadata", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", invalidWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("invalid runtime matrix boundary made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_MATRIX_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
 }
 
 func TestProcessingReportAggregatesIndependentErrorsAndRetainsPartialSuccess(t *testing.T) {

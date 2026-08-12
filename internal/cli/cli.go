@@ -1280,7 +1280,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		return 1
 	}
 	validation, validationErr := compiler.Validate(workflowPath, workflowSource)
-	if len(validation.RuntimeMatrices) != 0 {
+	if validation.RuntimeMatrixBoundary {
 		report := compatibility.InitialProcessingReport(workflowPath, hostedTokenlessProfile, false, validation, validationErr)
 		report.Result = "incompatible"
 		_ = out.write(report)

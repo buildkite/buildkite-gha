@@ -132,6 +132,7 @@ type Report struct {
 	Instances             int
 	Warnings              []Warning
 	Jobs                  []JobInstance
+	RuntimeMatrixBoundary bool
 	RuntimeMatrices       []RuntimeMatrixDescriptor
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
@@ -148,6 +149,7 @@ type ParsedJob struct {
 type expansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
+	runtimeMatrixBoundary bool
 	runtimeMatrices       []RuntimeMatrixDescriptor
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
@@ -191,7 +193,8 @@ func ParseWorkflow(path string, source []byte) (Report, error) {
 func expansionReport(expanded expansionResult, warnings []Warning) Report {
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
+		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
+		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
@@ -843,6 +846,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], needBindings[id], jobs, matricesByJob)
 		var matrices []map[string]any
 		if deferred {
+			result.runtimeMatrixBoundary = true
 			position := job.Matrix.Span.Start
 			if job.Matrix.Expression != nil {
 				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
