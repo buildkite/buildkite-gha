@@ -2342,6 +2342,160 @@ func TestExpandWorkflowPatternNamespacesLiteralDirectoryMatches(t *testing.T) {
 	}
 }
 
+func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
+	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"a.yml":           workflowSource,
+		"b.yaml":          workflowSource,
+		"workflow[1].yml": workflowSource,
+	})
+	workflowDirectory := filepath.Join(repository, ".github", "workflows")
+	notePath := filepath.Join(workflowDirectory, "note.txt")
+	if err := os.WriteFile(notePath, []byte("not a workflow\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkPath := filepath.Join(workflowDirectory, "linked.yml")
+	if err := os.Symlink("a.yml", symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+	leadingDashPath := filepath.Join(repository, "-leading.yml")
+	if err := os.WriteFile(leadingDashPath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repository, "add", ".github/workflows/note.txt", ".github/workflows/linked.yml").CombinedOutput(); err != nil {
+		t.Fatalf("git add fixtures: %v: %s", err, output)
+	}
+	if output, err := exec.Command("git", "-C", repository, "add", "--", "-leading.yml").CombinedOutput(); err != nil {
+		t.Fatalf("git add leading-dash fixture: %v: %s", err, output)
+	}
+	untrackedPath := filepath.Join(workflowDirectory, "untracked.yml")
+	if err := os.WriteFile(untrackedPath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsidePath := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outsidePath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+
+	aPath := filepath.Join(".github", "workflows", "a.yml")
+	bPath := filepath.Join(".github", "workflows", "b.yaml")
+	first, err := expandWorkflowOperands([]string{filepath.Join(repository, bPath), "./" + aPath, aPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := expandWorkflowOperands([]string{aPath, filepath.Join(repository, bPath)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) || len(first) != 2 || first[0].CanonicalPath != ".github/workflows/a.yml" || first[1].CanonicalPath != ".github/workflows/b.yaml" {
+		t.Fatalf("canonical explicit inputs = %#v and %#v", first, second)
+	}
+	for _, input := range first {
+		if input.Identity == "" || input.StepKeyNamespace != input.Identity || !filepath.IsAbs(input.Path) {
+			t.Fatalf("explicit workflow identity = %#v", input)
+		}
+	}
+	metacharacter, err := expandWorkflowOperands([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath})
+	if err != nil || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {
+		t.Fatalf("literal metacharacter list = %#v, %v", metacharacter, err)
+	}
+	operands, _, err := uploadArgs([]string{"--", "-leading.yml", aPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leadingDash, err := expandWorkflowOperands(operands)
+	if err != nil || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
+		t.Fatalf("leading-dash explicit path = %#v, %v", leadingDash, err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		operands []string
+		want     string
+	}{
+		{name: "mixed glob and literal", operands: []string{filepath.Join(".github", "workflows", "*.yml"), aPath}, want: "glob pattern"},
+		{name: "multiple globs", operands: []string{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "*.yaml")}, want: "glob pattern"},
+		{name: "missing", operands: []string{filepath.Join(".github", "workflows", "missing.yml"), aPath}, want: "regular tracked file"},
+		{name: "untracked", operands: []string{untrackedPath, aPath}, want: "not tracked by git"},
+		{name: "directory", operands: []string{workflowDirectory, aPath}, want: "regular tracked file"},
+		{name: "outside repository", operands: []string{outsidePath, aPath}, want: "outside the checked-out git repository"},
+		{name: "non-workflow extension", operands: []string{notePath, aPath}, want: "must end in .yml or .yaml"},
+		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "regular tracked file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := expandWorkflowOperands(test.operands); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expandWorkflowOperands(%q) error = %v, want %q", test.operands, err, test.want)
+			}
+		})
+	}
+}
+
+func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
+	workflow := func(name string) string {
+		return "name: " + name + "\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	}
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"a.yml": workflow("A"),
+		"b.yml": workflow("B"),
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "explicit-list-importer")
+	aPath := filepath.Join(".github", "workflows", "a.yml")
+	bPath := filepath.Join(".github", "workflows", "b.yml")
+
+	runUpload := func(operands []string) (string, []byte, map[string][]byte) {
+		t.Helper()
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"upload", "--event-path", eventPath}, operands...)
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("run(%q) code = %d, stderr = %q", operands, code, stderr.String())
+		}
+		if stderr.Len() != 0 || len(runner.commands) == 0 {
+			t.Fatalf("run(%q) stderr/commands = %q / %#v", operands, stderr.String(), runner.commands)
+		}
+		return stdout.String(), runner.commands[len(runner.commands)-1].stdin, runner.uploaded
+	}
+	firstOutput, firstPipeline, firstArtifacts := runUpload([]string{bPath, aPath, "./" + aPath})
+	secondOutput, secondPipeline, secondArtifacts := runUpload([]string{"./" + aPath, aPath, bPath})
+	if firstOutput != secondOutput || !bytes.Equal(firstPipeline, secondPipeline) || !reflect.DeepEqual(firstArtifacts, secondArtifacts) {
+		t.Fatalf("reversed explicit paths changed output:\nfirst: %q\nsecond: %q\nfirst pipeline:\n%s\nsecond pipeline:\n%s", firstOutput, secondOutput, firstPipeline, secondPipeline)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(firstPipeline, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 || pipeline.Steps[0].Group != ":github: A" || pipeline.Steps[1].Group != ":github: B" {
+		t.Fatalf("explicit path groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
+	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{"a.yml": workflowSource})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "invalid-list-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "a.yml")}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "glob pattern") {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("invalid explicit list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	}
+}
+
 func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -2837,7 +2991,12 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	t.Setenv("BUILDKITE_STEP_KEY", "reusable-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{
+		"upload", "--event-path", eventPath,
+		".github/workflows/reusable.yml",
+		".github/workflows/pull-request.yml",
+		".github/workflows/caller.yml",
+	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 1 workflows") || len(runner.commands) != 3 {
@@ -2895,6 +3054,25 @@ func TestRunUploadRejectsAllReusableOnlyMatches(t *testing.T) {
 	}
 	if len(runner.commands) != 0 || len(runner.uploaded) != 0 {
 		t.Fatalf("reusable-only upload reached Buildkite: commands %#v, uploads %#v", runner.commands, runner.uploaded)
+	}
+}
+
+func TestRunUploadRejectsAllReusableExplicitPaths(t *testing.T) {
+	reusable := "on: workflow_call\njobs:\n  shared:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"first.yml":  reusable,
+		"second.yml": reusable,
+	})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "reusable-list-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", ".github/workflows/second.yml", ".github/workflows/first.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "workflow paths matched only reusable workflow_call workflows") {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("reusable-only list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
 	}
 }
 
@@ -5021,9 +5199,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
-	workflow, event, err := uploadArgs([]string{"workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "" {
-		t.Fatalf("uploadArgs() default = %q, %q, %v", workflow, event, err)
+	workflows, event, err := uploadArgs([]string{"workflow.yml"})
+	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
+		t.Fatalf("uploadArgs() default = %q, %q, %v", workflows, event, err)
 	}
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "custom-runners", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("uploadArgs() error = %v, want legacy runtime queue error", err)
@@ -5031,9 +5209,34 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := uploadArgs([]string{"--private-checkout", "--private-checkout", "--runtime-queue", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate private checkout error", err)
 	}
-	workflow, event, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
-	if err != nil || workflow != "workflow.yml" || event != "event.json" {
-		t.Fatalf("uploadArgs() deprecated private checkout = %q, %q, %v", workflow, event, err)
+	workflows, event, err = uploadArgs([]string{"--private-checkout", "--runtime-queue", "hosted", "--event-path", "event.json", "workflow.yml"})
+	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "event.json" {
+		t.Fatalf("uploadArgs() deprecated private checkout = %q, %q, %v", workflows, event, err)
+	}
+}
+
+func TestUploadArgsAcceptsExplicitPathsAndEndOfOptions(t *testing.T) {
+	workflows, event, err := uploadArgs([]string{
+		"first.yml", "--event-path", "event.json", "second.yaml",
+	})
+	if err != nil || !slices.Equal(workflows, []string{"first.yml", "second.yaml"}) || event != "event.json" {
+		t.Fatalf("uploadArgs() list = %q, %q, %v", workflows, event, err)
+	}
+
+	workflows, event, err = uploadArgs([]string{
+		"--event-path", "event.json", "--", "-first.yml", "--event-path",
+	})
+	if err != nil || !slices.Equal(workflows, []string{"-first.yml", "--event-path"}) || event != "event.json" {
+		t.Fatalf("uploadArgs() after -- = %q, %q, %v", workflows, event, err)
+	}
+	if _, _, err := uploadArgs([]string{"-first.yml", "second.yml"}); err == nil || !strings.Contains(err.Error(), `unknown option "-first.yml"`) {
+		t.Fatalf("uploadArgs() leading-dash error = %v", err)
+	}
+	if _, _, err := uploadArgs(nil); err == nil || !strings.Contains(err.Error(), "workflow path is required") {
+		t.Fatalf("uploadArgs() empty error = %v", err)
+	}
+	if _, _, err := workflowArgs([]string{"first.yml", "second.yml"}); err == nil || !strings.Contains(err.Error(), "expected one workflow path") {
+		t.Fatalf("workflowArgs() accepted a list: %v", err)
 	}
 }
 
@@ -5051,7 +5254,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.workflowPath != "workflow.yml" || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" {
+	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" {
 		t.Fatalf("parseUploadArgs() = %#v", parsed)
 	}
 	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {

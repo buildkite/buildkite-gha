@@ -55,7 +55,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] <workflow-pattern>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] [--] <workflow-pattern | workflow-path> [<workflow-path>...]\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -67,7 +67,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nThe workflow pattern is expanded against tracked files and uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nOne workflow operand preserves literal, directory, and tracked glob expansion. Two or more operands are explicit tracked .yml/.yaml paths; use -- before paths that begin with a dash. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -176,7 +176,7 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		return 1
 	}
 	return uploadParsed(parsedUploadArgs{
-		workflowPath:      configuration.Workflow,
+		workflowOperands:  []string{configuration.Workflow},
 		runnerTargets:     configuration.runnerTargets,
 		pluginAcquisition: &pluginRuntimeAcquisition{version: version},
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
@@ -1331,7 +1331,7 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 }
 
 func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPattern, eventPath := uploadArguments.workflowPath, uploadArguments.eventPath
+	workflowOperands, eventPath := uploadArguments.workflowOperands, uploadArguments.eventPath
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
@@ -1342,7 +1342,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
-	workflows, err := expandWorkflowPattern(workflowPattern)
+	workflows, err := expandWorkflowOperands(workflowOperands)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1366,7 +1366,11 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	if runnableWorkflowCount == 0 {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow pattern %q matched only reusable workflow_call workflows; there is nothing to upload\n", workflowPattern)
+		if len(workflowOperands) == 1 {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow pattern %q matched only reusable workflow_call workflows; there is nothing to upload\n", workflowOperands[0])
+		} else {
+			_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
+		}
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1724,6 +1728,56 @@ type workflowInput struct {
 	ReusableOnly, Applicable                        bool
 }
 
+func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
+	if len(operands) == 0 {
+		return nil, fmt.Errorf("workflow path is required")
+	}
+	if len(operands) == 1 {
+		return expandWorkflowPattern(operands[0])
+	}
+	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
+	}
+	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
+	matches := make([]workflowInput, 0, len(operands))
+	for _, operand := range operands {
+		absolute, err := filepath.Abs(operand)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workflow path %q: %w", operand, err)
+		}
+		relative, err := filepath.Rel(root, absolute)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("workflow path %q is outside the checked-out git repository", operand)
+		}
+		canonical := filepath.ToSlash(filepath.Clean(relative))
+		info, err := os.Lstat(absolute)
+		if err != nil {
+			if strings.ContainsAny(operand, "*?[") {
+				return nil, fmt.Errorf("multiple workflow operands must be explicit paths; glob pattern %q is not allowed", operand)
+			}
+			return nil, fmt.Errorf("workflow path %q does not name a regular tracked file", operand)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("workflow path %q does not name a regular tracked file", operand)
+		}
+		extension := filepath.Ext(canonical)
+		if extension != ".yml" && extension != ".yaml" {
+			return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operand)
+		}
+		output, err := exec.Command("git", "-C", root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
+		entries := bytes.Split(output, []byte{0})
+		if err != nil || len(entries) != 2 || string(entries[0]) != canonical || len(entries[1]) != 0 {
+			if strings.ContainsAny(operand, "*?[") {
+				return nil, fmt.Errorf("multiple workflow operands must be explicit paths; glob pattern %q is not allowed", operand)
+			}
+			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
+		}
+		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
+	}
+	return workflowInputs(matches, true)
+}
+
 func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
 	patternHasMeta := strings.ContainsAny(pattern, "*?[")
 	if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
@@ -2073,27 +2127,50 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 }
 
 type parsedUploadArgs struct {
-	workflowPath             string
+	workflowOperands         []string
 	eventPath                string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
 	pluginAcquisition        *pluginRuntimeAcquisition
 }
 
-func uploadArgs(args []string) (workflowPath, eventPath string, err error) {
+func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {
 	parsed, err := parseUploadArgs(args)
-	return parsed.workflowPath, parsed.eventPath, err
+	return parsed.workflowOperands, parsed.eventPath, err
 }
 
 func parseUploadArgs(args []string) (parsedUploadArgs, error) {
-	filtered := make([]string, 0, len(args))
+	workflowOperands := make([]string, 0, len(args))
 	runtimeDistributionPaths := make(map[compiler.Platform]string)
 	runnerQueues := make(map[string]string)
 	runnerImages := make(map[string]string)
+	eventPath := ""
+	eventPathSeen := false
 	runtimeQueue := ""
 	runtimeQueueSeen := false
 	deprecatedPrivateCheckoutSeen := false
+	optionsEnded := false
 	for i := 0; i < len(args); i++ {
+		if optionsEnded {
+			workflowOperands = append(workflowOperands, args[i])
+			continue
+		}
+		if args[i] == "--" {
+			optionsEnded = true
+			continue
+		}
+		if args[i] == "--event-path" {
+			if eventPathSeen {
+				return parsedUploadArgs{}, fmt.Errorf("--event-path may only be specified once")
+			}
+			eventPathSeen = true
+			i++
+			if i == len(args) {
+				return parsedUploadArgs{}, fmt.Errorf("--event-path requires a path")
+			}
+			eventPath = args[i]
+			continue
+		}
 		if args[i] == "--private-checkout" {
 			if deprecatedPrivateCheckoutSeen {
 				return parsedUploadArgs{}, fmt.Errorf("--private-checkout may only be specified once")
@@ -2147,8 +2224,14 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 			values[canonical] = value
 			continue
 		}
+		if args[i] == "-h" || args[i] == "--help" {
+			return parsedUploadArgs{}, fmt.Errorf("help must be requested immediately after the command")
+		}
 		if args[i] != "--runtime-queue" {
-			filtered = append(filtered, args[i])
+			if strings.HasPrefix(args[i], "-") {
+				return parsedUploadArgs{}, fmt.Errorf("unknown option %q", args[i])
+			}
+			workflowOperands = append(workflowOperands, args[i])
 			continue
 		}
 		if runtimeQueueSeen {
@@ -2161,9 +2244,8 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 		}
 		runtimeQueue = args[i]
 	}
-	workflowPath, eventPath, err := workflowArgs(filtered)
-	if err != nil {
-		return parsedUploadArgs{}, err
+	if len(workflowOperands) == 0 {
+		return parsedUploadArgs{}, fmt.Errorf("workflow path is required")
 	}
 	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
 		return parsedUploadArgs{}, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
@@ -2182,7 +2264,7 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 			return parsedUploadArgs{}, fmt.Errorf("--runner-image for %q requires --runner-queue", label)
 		}
 	}
-	return parsedUploadArgs{workflowPath: workflowPath, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets}, nil
+	return parsedUploadArgs{workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets}, nil
 }
 
 func configuredRunnerTarget(label, queue, image string) (string, compiler.RunnerTarget, error) {
