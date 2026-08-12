@@ -125,19 +125,19 @@ Use repeatable mappings before the workflow path:
 ```sh
 buildkite-gha upload \
   --runner-queue ubuntu-latest=hosted \
-  --runner-image ubuntu-latest=buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24 \
   --runner-queue macos-14=macos-sonoma-arm64 \
   --runtime-distribution darwin/arm64=/opt/buildkite-gha-darwin \
   .github/workflows/ci.yml
 ```
 
-Unmapped Linux labels keep default targeting; every macOS label requires a queue.
-Images are Linux-only and must use an immutable digest. Runtime distribution
-paths must be absolute executables; Linux defaults to the importer and Darwin
-has no direct-upload default. `BUILDKITE_GHA_TARGET_QUEUE` and
-`BUILDKITE_GHA_RUNTIME_IMAGE` are no longer supported.
-
-Renovate resolves the example digest from `buildkite/agent-base:ubuntu-noble-hosted-toolchains`; Namespace must preserve its manifest digest.
+Configured `ubuntu-latest` and `ubuntu-24.04` profiles default to the Noble
+hosted-toolchains image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image`
+with an immutable digest to override the default. Unmapped Linux labels keep
+default targeting without an image. Every macOS label requires a queue and
+rejects images. Runtime distribution paths must be absolute executables; Linux
+defaults to the importer and Darwin has no direct-upload default.
+`BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
+supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 

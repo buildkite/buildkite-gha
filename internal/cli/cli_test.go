@@ -185,6 +185,36 @@ func TestParsePluginConfiguration(t *testing.T) {
 	}
 }
 
+func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) {
+	for _, test := range []struct {
+		label string
+		image string
+	}{
+		{label: "ubuntu-latest", image: defaultNobleRunnerImage},
+		{label: "ubuntu-24.04", image: defaultNobleRunnerImage},
+		{label: "ubuntu-22.04", image: defaultJammyRunnerImage},
+	} {
+		t.Run(test.label, func(t *testing.T) {
+			canonical, target, err := configuredRunnerTarget(test.label, "hosted", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if canonical != test.label || target != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: test.image}) {
+				t.Fatalf("configuredRunnerTarget() = %q, %#v", canonical, target)
+			}
+		})
+	}
+
+	override := "registry.example.com/custom@sha256:" + strings.Repeat("0", 64)
+	_, target, err := configuredRunnerTarget("ubuntu-latest", "hosted", override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Image != override {
+		t.Fatalf("explicit image = %q, want %q", target.Image, override)
+	}
+}
+
 func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "linux.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n"), 0o600); err != nil {
@@ -249,15 +279,17 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Agents map[string]string `yaml:"agents"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range pipeline.Steps {
-		if step.Agents["queue"] != "hosted" {
-			t.Fatalf("plugin profile was not applied: %#v", step.Agents)
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
 	}
 }
@@ -2098,8 +2130,10 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 
 	var pipeline struct {
 		Steps []struct {
-			Key    string            `yaml:"key"`
-			Agents map[string]string `yaml:"agents"`
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Agents  map[string]string `yaml:"agents"`
+			Command string            `yaml:"command"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
@@ -2111,6 +2145,9 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	for _, step := range pipeline.Steps {
 		if step.Agents["queue"] != "hosted" {
 			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
+		}
+		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("step %q image = %q, command = %q", step.Key, step.Image, step.Command)
 		}
 	}
 

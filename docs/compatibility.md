@@ -274,10 +274,11 @@ jobs:
 
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
 
-Runner labels do not select GitHub images. Unmapped Linux labels use default
-Buildkite targeting. macOS labels require a runner profile with a native queue;
-images are Linux-only. macOS labels select Darwin/arm64, not a GitHub image or
-Xcode inventory.
+Runner labels do not select GitHub images. Configured Linux profiles default to
+the corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
+image overrides it. Unmapped Linux labels use default Buildkite targeting
+without an image. macOS labels require a runner profile with a native queue and
+reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
 
 ### Matrix strategies
 
@@ -628,9 +629,10 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Runner tools
 
-Accepted labels do not select GitHub-hosted images. Agents must provide tools
-used by shell steps. The runtime sets `RUNNER_OS` and `RUNNER_ARCH` to
-`Linux`/`X64` or `macOS`/`ARM64`.
+Configured Linux profiles use the corresponding Noble or Jammy
+hosted-toolchains image. Unmapped Linux and macOS agents must provide tools used
+by shell steps. These images do not provide GitHub image parity. The runtime
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`.
 
 `RUNNER_TOOL_CACHE` is job-private unless a Linux runner profile selects an
 immutable image with `/opt/hostedtoolcache`. macOS images are unsupported.

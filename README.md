@@ -59,11 +59,15 @@ plugins:
       version: "<release-with-linux-and-darwin-assets>"
       workflow: .github/workflows/ci.yml
       runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
         - runs-on: macos-14
           queue: macos-sonoma-arm64
 ```
 
-A macOS label selects native Darwin/arm64, not a GitHub image or Xcode inventory.
+Configured Linux profiles use the matching Noble or Jammy hosted-toolchains
+image. A macOS label selects native Darwin/arm64, not a GitHub image or Xcode
+inventory.
 
 The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
 
