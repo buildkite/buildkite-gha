@@ -852,6 +852,43 @@ func ubuntuImageOS(osRelease []byte) string {
 	}
 }
 
+// invocationEnvironment owns the environment overlay order for one step
+// invocation: job environment first, step environment second, with runtime
+// context names protected. It also captures whether the job or step pinned
+// PATH explicitly, which decides Docker action PATH precedence.
+type invocationEnvironment struct {
+	jobEnv       map[string]string
+	stepEnv      map[string]string
+	explicitPATH bool
+}
+
+func (r Runner) invocationEnvironment(jobEnv, stepEnv map[string]string) invocationEnvironment {
+	_, stepPATH := stepEnv["PATH"]
+	jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
+	return invocationEnvironment{jobEnv: jobEnv, stepEnv: stepEnv, explicitPATH: jobPATH || stepPATH}
+}
+
+// process is the environment for shell and JavaScript step processes.
+func (e invocationEnvironment) process() map[string]string {
+	return mergeStepEnvironment(e.jobEnv, e.stepEnv)
+}
+
+// docker overlays action-declared environment beneath the invocation
+// environment: action values fill only unset names, except that the action
+// may replace PATH when neither the job nor the step pinned one. It returns
+// the container environment and whether any layer set PATH explicitly, which
+// makes the Docker image PATH yield.
+func (e invocationEnvironment) docker(actionEnv, inputs map[string]string) (map[string]string, bool) {
+	env := mergeStepEnvironment(e.jobEnv, e.stepEnv, actionInputEnv(inputs))
+	for name, value := range actionEnv {
+		if _, exists := env[name]; !exists || (name == "PATH" && !e.explicitPATH) {
+			env[name] = value
+		}
+	}
+	_, actionPATH := actionEnv["PATH"]
+	return env, e.explicitPATH || actionPATH
+}
+
 func mergeStepEnvironment(base map[string]string, overlays ...map[string]string) map[string]string {
 	out := mergeStringMaps(append([]map[string]string{base}, overlays...)...)
 	for name, value := range base {
@@ -1170,6 +1207,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 	if err != nil {
 		return newResult(), err
 	}
+	environment := r.invocationEnvironment(jobEnv, stepEnv)
 	result := newResult()
 	if step.Kind == "run" {
 		script, err := expression.Evaluate(step.Command, eval)
@@ -1207,7 +1245,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		runEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		runEnv := environment.process()
 		err = r.runProcess(ctx, processor, dir, runEnv, &result, nil, args[0], args[1:]...)
 		return result, err
 	}
@@ -1312,7 +1350,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if err != nil {
 			return result, err
 		}
-		actionEnv := mergeStepEnvironment(jobEnv, stepEnv)
+		actionEnv := environment.process()
 		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
@@ -1326,7 +1364,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// Preserve invocation state while evaluating inputs and environment
 			// again with every main-visible effect committed.
 			javascript.Inputs = inputs
-			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
+			javascript.Env = environment.process()
 			invocation.action = javascript
 		}
 		if !wasPrepared {
@@ -1371,17 +1409,8 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if actionLock != nil {
 			sourceDigest = actionLock.SourceDigest
 		}
-		_, stepPATH := stepEnv["PATH"]
-		_, actionPATH := dockerEnv["PATH"]
-		jobPATH := r.explicitJobPATH || jobEnv["PATH"] != r.implicitJobPATH
-		invocationEnv := mergeStepEnvironment(jobEnv, stepEnv, actionInputEnv(inputs))
-		for name, value := range dockerEnv {
-			_, exists := invocationEnv[name]
-			if !exists || (name == "PATH" && !jobPATH && !stepPATH) {
-				invocationEnv[name] = value
-			}
-		}
-		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: jobPATH || stepPATH || actionPATH})
+		invocationEnv, explicitPATH := environment.docker(dockerEnv, inputs)
+		result, err := r.runDocker(ctx, processor, dockerAction{Name: actionName(action, step), Path: actionPath, SourceRoot: sourceRoot, SourceDigest: sourceDigest, Workspace: workspace, Env: invocationEnv, explicitPATH: explicitPATH})
 		return result, err
 	}
 	return result, fmt.Errorf("action %q uses unsupported runtime %q", step.Uses, actionRuntime)
