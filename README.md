@@ -32,7 +32,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.9.3:
+      - github-actions#latest:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -46,7 +46,7 @@ To hold the CLI at a specific release instead, set `version` to an exact stable 
 
 ```yaml
 plugins:
-  - github-actions#v0.9.3:
+  - github-actions#latest:
       workflow: .github/workflows/ci.yml
       version: "0.10.1"
 ```
@@ -57,7 +57,7 @@ labels with a native Darwin/arm64 queue:
 
 ```yaml
 plugins:
-  - github-actions#v0.9.3:
+  - github-actions#latest:
       workflow: .github/workflows/ci.yml
       runners:
         - runs-on: ubuntu-latest
