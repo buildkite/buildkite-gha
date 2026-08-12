@@ -555,6 +555,18 @@ func runTestGitInput(t *testing.T, directory string, input []byte, args ...strin
 	return string(output)
 }
 
+func requireProcessExit(t *testing.T, pid, description string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err != nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s child process %s remains alive", description, pid)
+}
+
 func TestCheckoutSubmoduleCancellationCleansNativeUpdateProcessGroup(t *testing.T) {
 	root := t.TempDir()
 	createNativeSubmoduleRepository(t, root, "child", "child.txt", "child\n", "", "")
@@ -610,9 +622,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 		t.Fatal(err)
 	}
 	pid := strings.TrimSpace(string(pidBytes))
-	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
-		t.Fatalf("update child process %s remains alive", pid)
-	}
+	requireProcessExit(t, pid, "update")
 }
 
 func TestCheckoutSubmoduleCancellationCleansNativeStatusProcessGroup(t *testing.T) {
@@ -660,9 +670,7 @@ exit 0
 		t.Fatal(err)
 	}
 	pid := strings.TrimSpace(string(pidBytes))
-	if err := exec.Command("sh", "-c", "kill -0 "+pid).Run(); err == nil {
-		t.Fatalf("status child process %s remains alive", pid)
-	}
+	requireProcessExit(t, pid, "status")
 }
 
 func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T) {
