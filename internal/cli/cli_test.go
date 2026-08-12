@@ -4825,17 +4825,34 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	}
 	for _, test := range []struct {
 		name          string
+		workflow      plan.Workflow
+		permissions   map[string]string
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml"}},
+		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}},
+		{
+			name: "verified reusable chain", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "call.comment"},
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call"}, {Workflow: "leaf.yml", Job: "comment"}},
+			},
+		},
 		{name: "missing provenance", wantError: true},
 		{name: "missing policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}, wantError: true},
-		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml"}, wantError: true},
-		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml"}, wantError: true},
+		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
+		{name: "unsupported effective permission", permissions: map[string]string{"models": "read"}, authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
+			configuredJob := job
+			if test.workflow.Path != "" {
+				configuredJob.Workflow = test.workflow
+			}
+			if test.permissions != nil {
+				configuredJob.GitHubToken = &plan.GitHubToken{Permissions: test.permissions}
+			}
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: configuredJob, Authorization: test.authorization}}}
 			err := validateUnprivilegedBundle(bundle)
 			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow policy")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)

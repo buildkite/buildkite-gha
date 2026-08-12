@@ -491,6 +491,46 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	}
 }
 
+func TestEmitJobAuthorization(t *testing.T) {
+	planDigest := testDigest("authorized plan")
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{
+				Key: "authorized", Label: "Authorized", PlanDigest: planDigest,
+				Authorization: &JobAuthorization{
+					WorkflowJobs: []WorkflowJob{{Workflow: "caller.yml", Job: "call"}, {Workflow: "leaf.yml", Job: "run"}},
+					Permissions:  map[string]string{"pull_requests": "write", "contents": "read"},
+				},
+			},
+			{Key: "tokenless", Label: "Tokenless", PlanDigest: testDigest("tokenless plan")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Key string            `yaml:"key"`
+			Env map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	want := `{"schema":"buildkite-gha/job-authorization/v1","plan_digest":"` + planDigest + `","workflow_jobs":[{"workflow":"caller.yml","job":"call"},{"workflow":"leaf.yml","job":"run"}],"permissions":{"contents":"read","pull_requests":"write"}}`
+	if got := document.Steps[0].Env["BUILDKITE_GHA_JOB_AUTHORIZATION"]; got != want {
+		t.Fatalf("authorization = %q, want canonical %q", got, want)
+	}
+	if len(document.Steps[1].Env) != 0 {
+		t.Fatalf("tokenless environment = %#v", document.Steps[1].Env)
+	}
+}
+
 func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep: "importer",

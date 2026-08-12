@@ -28,6 +28,7 @@ type sourcedJob struct {
 	path            string
 	digest          string
 	root            string
+	workflowJobs    []WorkflowJob
 	secretAuthority bool
 	needBindings    map[string]needBinding
 }
@@ -83,12 +84,20 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		workflowJobs := make(map[string]workflow.Job, len(parsed.Jobs))
 		replacements := make(map[string]needBinding, len(parsed.Jobs))
 		for i, job := range parsed.Jobs {
-			job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
+			permissions, err := effectivePermissions(job.Permissions, parsed.Permissions, nil, false)
+			if err != nil {
+				return nil, runtimeMatrixBoundary, err
+			}
+			job.Permissions = permissions
 			bindings := make(map[string]needBinding, len(job.Needs))
 			for _, need := range job.Needs {
 				bindings[need] = needBinding{members: []string{need}}
 			}
-			jobs[i] = sourcedJob{Job: job, path: sourcePath, digest: digest, root: root, secretAuthority: true, needBindings: bindings}
+			jobs[i] = sourcedJob{
+				Job: job, path: sourcePath, digest: digest, root: root,
+				workflowJobs:    []WorkflowJob{{Workflow: filepath.Base(sourcePath), Job: job.ID}},
+				secretAuthority: true, needBindings: bindings,
+			}
 			workflowJobs[job.ID] = job
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
@@ -108,7 +117,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
 	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, nil, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -162,7 +171,7 @@ func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workfl
 	}
 }
 
-func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
+func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, workflowJobs []WorkflowJob, depth int) (reusableResolution, error) {
 	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
@@ -177,7 +186,17 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	var resolved []sourcedJob
 	for _, id := range order {
 		job := jobs[id]
-		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
+		jobPermissions := job.Permissions
+		job.Permissions, err = effectivePermissions(jobPermissions, parsed.Permissions, permissionCeiling, depth != 0)
+		if err != nil {
+			position := job.Span.Start
+			if jobPermissions != nil {
+				position = jobPermissions.Span.Start
+			} else if parsed.Permissions != nil {
+				position = parsed.Permissions.Span.Start
+			}
+			return reusableResolution{}, locatedJobError(path, job, position.Line, position.Column, err.Error())
+		}
 		job = applyStaticInputs(job, inputs)
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
@@ -203,6 +222,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		}
 		needs := bindingMembers(needBindings)
 		if job.Reusable == nil {
+			concreteWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id})
 			job.ID = namespacedJobID(namespace, job.ID)
 			job.Needs = needs
 			if labelPrefix != "" {
@@ -216,7 +236,10 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			if resolver.expanded > maxFlattenedJobs {
 				return reusableResolution{}, jobError(path, job, fmt.Sprintf("reusable-workflow graph expands beyond %d jobs", maxFlattenedJobs))
 			}
-			resolved = append(resolved, sourcedJob{Job: job, path: path, digest: digest, root: resolver.root, secretAuthority: secretAuthority, needBindings: needBindings})
+			resolved = append(resolved, sourcedJob{
+				Job: job, path: path, digest: digest, root: resolver.root, workflowJobs: concreteWorkflowJobs,
+				secretAuthority: secretAuthority, needBindings: needBindings,
+			})
 			replacements[id] = needBinding{members: []string{job.ID}}
 			continue
 		}
@@ -301,7 +324,8 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}
 			resolver.stack = append(resolver.stack, calleePath)
-			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, depth+1)
+			callerWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id})
+			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, callerWorkflowJobs, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
 				return reusableResolution{}, &ProcessingFinding{
@@ -329,35 +353,40 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	return reusableResolution{jobs: resolved, outputs: outputs}, nil
 }
 
-func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, bounded bool) *workflow.Permissions {
+func effectivePermissions(job, workflowDefault, ceiling *workflow.Permissions, bounded bool) (*workflow.Permissions, error) {
 	declared := job
 	if declared == nil {
 		declared = workflowDefault
 	}
 	if !bounded {
 		if declared == nil {
-			return defaultGitHubTokenPermissions()
+			return defaultGitHubTokenPermissions(), nil
 		}
-		return clonePermissions(declared)
+		return clonePermissions(declared), nil
 	}
 	if declared == nil {
-		return clonePermissions(ceiling)
+		return clonePermissions(ceiling), nil
 	}
-	effective := &workflow.Permissions{Scopes: map[string]string{}, Span: declared.Span}
-	if ceiling == nil {
-		return effective
-	}
-	for name, access := range declared.Scopes {
-		ceilingAccess, ok := ceiling.Scopes[name]
-		if !ok {
-			continue
+	for _, name := range sortedKeys(declared.Scopes) {
+		access := declared.Scopes[name]
+		ceilingAccess := "none"
+		if ceiling != nil {
+			if inherited, ok := ceiling.Scopes[name]; ok {
+				ceilingAccess = inherited
+			}
 		}
-		if access == "write" && ceilingAccess == "read" {
-			access = "read"
+		if ceilingAccess == "none" || (access == "write" && ceilingAccess == "read") {
+			return nil, fmt.Errorf("permission %q elevates from %s to %s above inherited caller permissions", name, ceilingAccess, access)
 		}
-		effective.Scopes[name] = access
 	}
-	return effective
+	return clonePermissions(declared), nil
+}
+
+func appendWorkflowJob(chain []WorkflowJob, job WorkflowJob) []WorkflowJob {
+	result := make([]WorkflowJob, len(chain)+1)
+	copy(result, chain)
+	result[len(chain)] = job
+	return result
 }
 
 func defaultGitHubTokenPermissions() *workflow.Permissions {
