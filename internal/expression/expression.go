@@ -225,7 +225,7 @@ func decodeJSONValue(source string) (any, error) {
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON: %w", err)
+		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")

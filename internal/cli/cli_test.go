@@ -3236,14 +3236,16 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	requireImporterHost(t)
 	directory := t.TempDir()
 	workflowPath := filepath.Join(directory, "invalid-push.yml")
-	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n"
+	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const valueSentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
 	const keySentinel = "EVENT_SECRET_KEY"
+	const jsonSentinel = "@"
 	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{
-		"runner": valueSentinel,
+		"runner":      valueSentinel,
+		"runner_json": jsonSentinel,
 		"runners": map[string]any{
 			keySentinel:                  "one",
 			strings.ToLower(keySentinel): "two",
@@ -3256,7 +3258,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), valueSentinel) || strings.Contains(stderr.String(), valueSentinel) || strings.Contains(stdout.String(), keySentinel) || strings.Contains(stderr.String(), keySentinel) {
+	if strings.Contains(stdout.String(), valueSentinel) || strings.Contains(stderr.String(), valueSentinel) || strings.Contains(stdout.String(), keySentinel) || strings.Contains(stderr.String(), keySentinel) || strings.Contains(stdout.String(), strings.ToLower(keySentinel)) || strings.Contains(stderr.String(), strings.ToLower(keySentinel)) || strings.Contains(stdout.String(), jsonSentinel) || strings.Contains(stderr.String(), jsonSentinel) {
 		t.Fatalf("event-derived runner leaked to output: stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
 	var pipeline struct {
@@ -3275,16 +3277,18 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 2 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 3 {
 		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	wantLabels := []string{
 		"Compiler error: alpha [E_EXPRESSION_INVALID]",
 		"Compiler error: beta [E_EXPRESSION_INVALID]",
+		"Compiler error: gamma [E_EXPRESSION_INVALID]",
 	}
 	wantReasons := []string{
 		"resolved runner target is not admitted by policy: runner label is not mapped by policy",
 		`job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties`,
+		`job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON`,
 	}
 	for i, step := range pipeline.Steps[0].Steps {
 		if step.Label != wantLabels[i] || step.Command != `printf '%s\n' '`+wantReasons[i]+`' && exit 1` || !step.Checkout.Skip {
@@ -3296,7 +3300,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 			t.Fatalf("compiler failure command %d output/error = %q / %v", i, printed, err)
 		}
 	}
-	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) {
+	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) || strings.Contains(string(pipelineCommand.stdin), strings.ToLower(keySentinel)) || strings.Contains(string(pipelineCommand.stdin), jsonSentinel) {
 		t.Fatalf("event-derived runner leaked to aggregate pipeline: %s", pipelineCommand.stdin)
 	}
 }
