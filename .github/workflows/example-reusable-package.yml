@@ -1,0 +1,33 @@
+name: Example - reusable package selection
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Go package to select
+        required: true
+        type: string
+    outputs:
+      selected-package:
+        description: Exact package selected by the reusable workflow
+        value: ${{ jobs.select.outputs.selected-package }}
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Reusable package selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      selected-package: ${{ steps.package.outputs.selected-package }}
+    steps:
+      - name: Select requested package
+        id: package
+        shell: bash
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          [[ "$PACKAGE" == ./* ]]
+          printf 'selected-package=%s\n' "$PACKAGE" >> "$GITHUB_OUTPUT"
