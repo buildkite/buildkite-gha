@@ -40,8 +40,8 @@ const (
 
 	jobSummaryTruncationNotice       = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
-	workflowWarningAnnotationHeading = "<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n"
-	workflowErrorAnnotationHeading   = "<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n"
+	workflowWarningAnnotationHeading = "<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n"
+	workflowErrorAnnotationHeading   = "<h2 class=\"h4 mb2\">GitHub Actions errors</h2>\n"
 	workflowCommandTableHeading      = "<table class=\"col-12 mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-8 align-middle\">Message</th></tr></thead>\n<tbody>\n"
 	workflowCommandTableEnd          = "</tbody>\n</table>\n"
 )

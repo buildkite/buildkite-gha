@@ -3085,14 +3085,14 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n<table class=\"col-12 mb2\">", `<th class="col-4 align-middle">Source</th><th class="col-8 align-middle">Message</th>`, "<td><code>cmd,main.go:12:3–12:5</code></td>", "<strong>Unsafe &lt;title&gt;</strong><br>", "*** &lt;warning&gt;",
+		"<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n<table class=\"col-12 mb2\">", `<th class="col-4 align-middle">Source</th><th class="col-8 align-middle">Message</th>`, "<td><code>cmd,main.go:12:3–12:5</code></td>", "<strong>Unsafe &lt;title&gt;</strong><br>", "*** &lt;warning&gt;",
 	} {
 		if !strings.Contains(result.WarningAnnotations, fragment) {
 			t.Errorf("warning annotation lacks %q: %q", fragment, result.WarningAnnotations)
 		}
 	}
 	for _, fragment := range []string{
-		"<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n<table class=\"col-12 mb2\">", "<td><code>main.go:9:2–9:4</code></td>", "*** &lt;error&gt;",
+		"<h2 class=\"h4 mb2\">GitHub Actions errors</h2>\n<table class=\"col-12 mb2\">", "<td><code>main.go:9:2–9:4</code></td>", "*** &lt;error&gt;",
 	} {
 		if !strings.Contains(result.ErrorAnnotations, fragment) {
 			t.Errorf("error annotation lacks %q: %q", fragment, result.ErrorAnnotations)
