@@ -36,6 +36,10 @@ run = "golangci-lint run"
 description = "Lint shell scripts"
 run = "shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
+[tasks.lint]
+description = "Lint Go code and shell scripts"
+depends = ["lint:go", "lint:shell"]
+
 [tasks.vet]
 description = "Run go vet"
 run = "go vet ./..."
@@ -75,4 +79,4 @@ run = "./scripts/starter-workflows-corpus --profile"
 
 [tasks.check]
 description = "Run formatting, build, tests, lint, vet, and fixture checks"
-run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test ::: test:race ::: lint:go ::: lint:shell ::: vet ::: smoke:local ::: release:check"
+run = "mise run --jobs 1 format ::: build ::: build:darwin ::: test ::: test:race ::: lint ::: vet ::: smoke:local ::: release:check"
