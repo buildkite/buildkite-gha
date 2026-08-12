@@ -42,7 +42,7 @@ const (
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
 	workflowWarningAnnotationHeading = "<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n"
 	workflowErrorAnnotationHeading   = "<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n"
-	workflowCommandTableHeading      = "<table class=\"mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-2 align-middle\">Title</th><th class=\"col-6 align-middle\">Message</th></tr></thead>\n<tbody>\n"
+	workflowCommandTableHeading      = "<table class=\"col-12 mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-8 align-middle\">Message</th></tr></thead>\n<tbody>\n"
 	workflowCommandTableEnd          = "</tbody>\n</table>\n"
 )
 
@@ -1666,8 +1666,11 @@ func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
 		}
 		source = "<code>" + commandHTML(location) + "</code>"
 	}
-	return "<tr><td>" + source + "</td><td>" + commandHTML(command.title) +
-		"</td><td>" + commandHTML(command.message) + "</td></tr>\n"
+	detail := commandHTML(command.message)
+	if command.title != "" {
+		detail = "<strong>" + commandHTML(command.title) + "</strong><br>\n" + detail
+	}
+	return "<tr><td>" + source + "</td><td>" + detail + "</td></tr>\n"
 }
 
 func workflowCommandLocationLabel(properties map[string]string) string {

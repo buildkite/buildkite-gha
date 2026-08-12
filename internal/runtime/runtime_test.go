@@ -3085,14 +3085,14 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n<table class=\"mb2\">", `<th class="col-4 align-middle">Source</th><th class="col-2 align-middle">Title</th><th class="col-6 align-middle">Message</th>`, "<td><code>cmd,main.go:12:3–12:5</code></td>", "Unsafe &lt;title&gt;", "*** &lt;warning&gt;",
+		"<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n<table class=\"col-12 mb2\">", `<th class="col-4 align-middle">Source</th><th class="col-8 align-middle">Message</th>`, "<td><code>cmd,main.go:12:3–12:5</code></td>", "<strong>Unsafe &lt;title&gt;</strong><br>", "*** &lt;warning&gt;",
 	} {
 		if !strings.Contains(result.WarningAnnotations, fragment) {
 			t.Errorf("warning annotation lacks %q: %q", fragment, result.WarningAnnotations)
 		}
 	}
 	for _, fragment := range []string{
-		"<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n<table class=\"mb2\">", "<td><code>main.go:9:2–9:4</code></td>", "*** &lt;error&gt;",
+		"<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n<table class=\"col-12 mb2\">", "<td><code>main.go:9:2–9:4</code></td>", "*** &lt;error&gt;",
 	} {
 		if !strings.Contains(result.ErrorAnnotations, fragment) {
 			t.Errorf("error annotation lacks %q: %q", fragment, result.ErrorAnnotations)
@@ -3125,10 +3125,10 @@ func TestWorkflowCommandAnnotationsGroupRowsByFile(t *testing.T) {
 		t.Fatalf("annotation did not retain row order within first-seen file groups: %q", warnings)
 	}
 	for _, row := range []string{
-		"<td><code>first.go:2</code></td><td>First</td><td>first message</td>",
-		"<td><code>first.go:9</code></td><td></td><td>another first message</td>",
-		"<td><code>second.go:7:3</code></td><td></td><td>second message</td>",
-		"<td>General</td><td>General</td><td>general message</td>",
+		"<td><code>first.go:2</code></td><td><strong>First</strong><br>\nfirst message</td>",
+		"<td><code>first.go:9</code></td><td>another first message</td>",
+		"<td><code>second.go:7:3</code></td><td>second message</td>",
+		"<td>General</td><td><strong>General</strong><br>\ngeneral message</td>",
 	} {
 		if !strings.Contains(warnings, row) {
 			t.Errorf("annotation lacks row %q: %q", row, warnings)
@@ -3397,7 +3397,7 @@ func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
 	if truncated || !utf8.ValidString(warnings) || strings.Count(warnings, "\uFFFD") != 3 {
 		t.Fatalf("warning annotation = %q, truncated = %v, valid UTF-8 = %v", warnings, truncated, utf8.ValidString(warnings))
 	}
-	for _, fragment := range []string{"<td><code>bad\uFFFD.go</code></td>", "<td>bad\uFFFD</td><td>bad\uFFFD</td>"} {
+	for _, fragment := range []string{"<td><code>bad\uFFFD.go</code></td>", "<td><strong>bad\uFFFD</strong><br>\nbad\uFFFD</td>"} {
 		if !strings.Contains(warnings, fragment) {
 			t.Fatalf("warning annotation lacks %q: %q", fragment, warnings)
 		}
@@ -3424,7 +3424,7 @@ func TestWorkflowCommandMasksCannotCorruptAnnotationMarkup(t *testing.T) {
 	_ = processor.process(io.Discard, "::add-mask::table")
 
 	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
-	if truncated || !strings.Contains(warnings, `<td><code>***.go</code></td>`) || !strings.Contains(warnings, "<td>***</td><td>s***uctured *** text</td>") {
+	if truncated || !strings.Contains(warnings, `<td><code>***.go</code></td>`) || !strings.Contains(warnings, "<td><strong>***</strong><br>\ns***uctured *** text</td>") {
 		t.Fatalf("masked warning annotation = %q, truncated = %v", warnings, truncated)
 	}
 	if strings.Count(warnings, "<table") != 1 || strings.Count(warnings, "</table>") != 1 || strings.Count(warnings, "<tr>") != strings.Count(warnings, "</tr>") {
