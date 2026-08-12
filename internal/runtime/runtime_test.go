@@ -2616,6 +2616,23 @@ if [ "${1##*/}" = post.js ]; then printenv INPUT_JOB_STATUS > "$POST_MARKER"; fi
 	}
 }
 
+func TestJobTimeoutDuringSetupIsCancelled(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: setup timeout\n")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.ContinueOnError = true
+	job.TimeoutMinutes = 0.001
+	runner := Runner{ResolveMise: func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+
+	result, err := runner.RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestJavaScriptPostConditionsUseFinalJobStatus(t *testing.T) {
 	tests := []struct {
 		name        string

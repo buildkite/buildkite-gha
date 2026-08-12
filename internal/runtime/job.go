@@ -341,13 +341,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if r.Mise == "" && r.ResolveMise != nil {
 		r.Mise, err = r.ResolveMise(runCtx)
 		if err != nil {
-			return jobResult, err
+			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 		}
 	}
 
 	secrets, err := r.resolveSecrets(runCtx, processor, job.RequiredSecrets)
 	if err != nil {
-		return jobResult, err
+		return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 	}
 	if job.GitHubToken != nil {
 		if secrets == nil {
@@ -355,7 +355,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.Workflow.Path, job.GitHubToken.Permissions)
 		if err != nil {
-			return jobResult, err
+			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 		}
 	}
 	eval.Secrets = secrets
@@ -416,7 +416,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	jobEnv, err := evaluateMap(job.Env, eval)
 	if err != nil {
-		return jobResult, fmt.Errorf("evaluate job environment: %w", err)
+		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
 	_, explicitJobPATH := jobEnv["PATH"]
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
