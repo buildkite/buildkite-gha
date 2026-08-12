@@ -7,8 +7,7 @@ build:
 	mise run build
 
 lint:
-	mise run lint:go
-	mise run lint:shell
+	mise run lint
 
 test:
 	mise run test

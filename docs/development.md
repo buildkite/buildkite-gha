@@ -31,6 +31,7 @@ Useful focused tasks are:
 mise run build
 mise run test
 mise run test:race
+mise run lint
 mise run lint:go
 mise run lint:shell
 mise run smoke:local
