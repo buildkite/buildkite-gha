@@ -42,8 +42,8 @@ const (
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
 	workflowWarningAnnotationHeading = "<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n"
 	workflowErrorAnnotationHeading   = "<h2 class=\"h4 mb2\">GitHub Actions errors</h2>\n"
-	workflowCommandTableHeading      = "<table class=\"col-12 mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-8 align-middle\">Message</th></tr></thead>\n<tbody>\n"
-	workflowCommandTableEnd          = "</tbody>\n</table>\n"
+	workflowCommandTableHeading      = "<div class=\"flex\"><table class=\"flex-auto mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-8 align-middle\">Message</th></tr></thead>\n<tbody>\n"
+	workflowCommandTableEnd          = "</tbody>\n</table></div>\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -1660,7 +1660,7 @@ func renderWorkflowCommandAnnotation(heading string, commands []workflowCommandA
 func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
 	source := "General"
 	if command.file != "" {
-		location := command.file
+		location := filepath.Base(strings.ReplaceAll(command.file, "\\", "/"))
 		if command.location != "" {
 			location += ":" + command.location
 		}
@@ -1668,7 +1668,7 @@ func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
 	}
 	detail := commandHTML(command.message)
 	if command.title != "" {
-		detail = "<strong>" + commandHTML(command.title) + "</strong><br>\n" + detail
+		detail = "<strong>" + commandHTML(command.title) + ":</strong> " + detail
 	}
 	return "<tr><td>" + source + "</td><td>" + detail + "</td></tr>\n"
 }

@@ -10,16 +10,16 @@ jobs:
       - name: Emit a warning from stdout
         shell: bash
         run: |
-          printf '%s\n' '::warning title=Workflow warning,file=.github/workflows/workflow-command-annotations.yml,line=13,endLine=13,col=3,endColumn=8::WORKFLOW_WARNING_OBSERVATION=stdout-with-location'
+          printf '%s\n' '::warning title=Deprecated command,file=.github/workflows/workflow-command-annotations.yml,line=13,endLine=13,col=3,endColumn=8::The save-state command is deprecated; use environment files instead.'
 
       - name: Emit an error from stderr without failing the job
         shell: bash
         run: |
-          printf '%s\n' '::error title=Workflow error,file=.github/workflows/workflow-command-annotations.yml,line=18::WORKFLOW_ERROR_OBSERVATION=stderr-outcome-neutral' >&2
+          printf '%s\n' '::error title=Invalid deployment target,file=.github/workflows/workflow-command-annotations.yml,line=18::The deployment environment must be staging or production.' >&2
 
       - name: Prove late annotation masking
         shell: bash
         run: |
           canary='workflow-command-secret'
-          printf '%s\n' "::warning title=Masked warning::masked diagnostic $canary"
+          printf '%s\n' "::warning title=Secret redaction::Sensitive value redacted: $canary"
           printf '%s\n' "::add-mask::$canary"

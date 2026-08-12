@@ -55,19 +55,19 @@ if ! jq -e \
     $warnings[0].scope == "job" and
     $warnings[0].job_id == $job_id and
     $warnings[0].style == "warning" and
-    ($warnings[0].body_html | contains("Workflow warning")) and
+    ($warnings[0].body_html | contains("Deprecated command")) and
     ($warnings[0].body_html | contains(">Source</th>")) and
-    ($warnings[0].body_html | contains("workflow-command-annotations.yml")) and
     ($warnings[0].body_html | contains("workflow-command-annotations.yml:13:3–13:8")) and
-    ($warnings[0].body_html | contains("WORKFLOW_WARNING_OBSERVATION=stdout-with-location")) and
-    ($warnings[0].body_html | contains("masked diagnostic")) and
+    ($warnings[0].body_html | contains("The save-state command is deprecated; use environment files instead.")) and
+    ($warnings[0].body_html | contains("Secret redaction")) and
+    ($warnings[0].body_html | contains("Sensitive value redacted: ***")) and
     ($warnings[0].body_html | contains($masked_canary) | not) and
     $errors[0].scope == "job" and
     $errors[0].job_id == $job_id and
     $errors[0].style == "error" and
-    ($errors[0].body_html | contains("Workflow error")) and
+    ($errors[0].body_html | contains("Invalid deployment target")) and
     ($errors[0].body_html | contains("workflow-command-annotations.yml:18")) and
-    ($errors[0].body_html | contains("WORKFLOW_ERROR_OBSERVATION=stderr-outcome-neutral"))
+    ($errors[0].body_html | contains("The deployment environment must be staging or production."))
   ' <<<"$annotations" >/dev/null
 then
   echo "job $job_id does not have the exact workflow command annotation contract" >&2
