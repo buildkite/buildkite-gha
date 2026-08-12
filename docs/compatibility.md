@@ -589,7 +589,9 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-**🟡 Supported subset.** Only `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) is admitted. Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service. v4, v5, and unknown v6 commits are unsupported.
+**🟡 Supported subset.** Public runtime support remains limited to `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9). Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service.
+
+The hosted profile also admits the exact v5.0.3 and v5.1.0 commits for runtime-proof collection. They are not part of the public compatibility contract until that hosted proof is complete. Other v5 commits, v4, and unknown v6 commits remain unsupported.
 
 JavaScript and Docker actions with compatible bundled cache clients, such as `actions/setup-go`, also receive job-bound cache-v2 credentials when the service is available. Ordinary `run` steps and native action adapters do not.
 

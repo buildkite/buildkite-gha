@@ -213,14 +213,14 @@ func (p *sequenceCacheCredentials) Credentials(context.Context) (CacheCredential
 	return CacheCredentials{ResultsURL: "https://cache.example", Token: token}, nil
 }
 
-func TestCacheV6LifecycleUsesFreshIsolatedCredentials(t *testing.T) {
+func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "package.json", `{"type":"module"}`)
-	writeFixtureFile(t, remote, "action.yml", "name: cache v6\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "action.yml", "name: cache service fixture\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
@@ -525,7 +525,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	if err := runner.runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
 		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
-	); err == nil || !strings.Contains(err.Error(), "configure actions/cache v6 service: cache unavailable") {
+	); err == nil || !strings.Contains(err.Error(), "configure actions/cache service: cache unavailable") {
 		t.Fatalf("explicit cache action error = %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -574,7 +574,7 @@ func (r failingCacheRedactor) AddRedaction(context.Context, string) error {
 	return fmt.Errorf("redactor rejected %s", r.token)
 }
 
-func TestCacheV6RedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
+func TestCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
 	token := "header.secret.signature"
 	actionRoot := t.TempDir()
 	marker := filepath.Join(actionRoot, "executed")

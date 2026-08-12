@@ -141,8 +141,17 @@
       "workflow": "testdata/smoke/.github/workflows/cache-v6.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
-      "evidence": "Compiler and runtime conformance tests admit only the audited actions/cache v6.1.0 commit and execute its ESM pre/main/post lifecycle with isolated per-phase cache-v2 credentials.",
+      "evidence": "Compiler and runtime conformance tests admit the audited actions/cache v6.1.0 commit and execute the cache lifecycle with isolated per-phase cache-v2 credentials.",
       "note": "This minimal fixture remains compile-only conformance coverage. The stable plugin-demo-cache fixture has published-plugin runtime evidence from Buildkite build 337.",
+      "action_preflight": "hosted-tokenless"
+    },
+    {
+      "id": "cache-v5",
+      "workflow": "testdata/smoke/.github/workflows/cache-v5.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit only the audited actions/cache v5 commits; shared tests cover the unchanged isolated cache-v2 credential boundary.",
+      "note": "This minimal roundtrip remains compile-only conformance coverage until an exact v5 commit passes the hosted cache-v2 runtime proof.",
       "action_preflight": "hosted-tokenless"
     },
     {
