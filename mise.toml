@@ -16,37 +16,38 @@ GOTOOLCHAIN = "local"
 [tasks.format]
 description = "Check Go formatting"
 run = '''
+echo '--- Check formatting'
 unformatted="$(gofmt -l .)"
 test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
 '''
 
 [tasks.test]
 description = "Run the Go test suite"
-run = "go test ./..."
+run = "echo '--- Run tests'; go test ./..."
 
 [tasks."test:race"]
 description = "Run the race-enabled Go test suite"
-run = "go test -race ./..."
+run = "echo '--- Run race tests'; go test -race ./..."
 
 [tasks."lint:go"]
 description = "Lint Go code"
-run = "golangci-lint run"
+run = "echo '--- Lint Go'; golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
+run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.vet]
 description = "Run go vet"
-run = "go vet ./..."
+run = "echo '--- Vet Go'; go vet ./..."
 
 [tasks.build]
 description = "Build all Go commands"
-run = "go build ./..."
+run = "echo '--- Build Linux'; go build ./..."
 
 [tasks."build:darwin"]
 description = "Cross-build all Go commands for native macOS arm64"
-run = "GOOS=darwin GOARCH=arm64 go build ./..."
+run = "echo '--- Build macOS arm64'; GOOS=darwin GOARCH=arm64 go build ./..."
 
 [tasks.release]
 description = "Tag and push the next pre-1.0 release"
@@ -55,11 +56,11 @@ run = "scripts/release"
 
 [tasks."release:check"]
 description = "Validate the release configuration"
-run = "goreleaser check"
+run = "echo '--- Check release configuration'; goreleaser check"
 
 [tasks."smoke:local"]
 description = "Validate and deterministically compile the local smoke inventory"
-run = "./scripts/smoke-local"
+run = "echo '--- Run local smoke tests'; ./scripts/smoke-local"
 
 [tasks."smoke:profile"]
 description = "Resolve actions and apply the hosted profile to smoke fixtures"
