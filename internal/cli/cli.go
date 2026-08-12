@@ -143,9 +143,9 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 			}
 			switch args[0] {
 			case "validate":
-				return validate(args[1:], stdout, stderr, version)
+				return validate(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "compile":
-				return compile(args[1:], stdout, stderr, version)
+				return compile(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "upload":
 				return upload(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "run-job":
@@ -1184,7 +1184,7 @@ func verifyBuildkiteTarget(job plan.Job) error {
 	return nil
 }
 
-func validate(args []string, stdout, stderr io.Writer, version string) int {
+func validate(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
 	workflowPath, eventPath, format, profile, err := validateArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
@@ -1192,7 +1192,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if profile != "" && eventPath == "" {
 		return usageError(stderr, "validate: --event-path is required with --profile")
 	}
-	out := processingOutput{command: "validate", format: format, reports: stdout, stderr: stderr}
+	out := newProcessingOutput("validate", format, stdout, stderr, agent)
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		loadEvent = func() ([]byte, error) { return os.ReadFile(eventPath) }
@@ -1308,7 +1308,7 @@ func validateArgs(args []string) (workflowPath, eventPath, format, profile strin
 	return workflowPath, eventPath, format, profile, err
 }
 
-func compile(args []string, stdout, stderr io.Writer, version string) int {
+func compile(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
 	workflowPath, eventPath, format, err := compileArgs(args)
 	if err != nil {
 		return usageError(stderr, "compile: %v", err)
@@ -1316,7 +1316,7 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	out := processingOutput{command: "compile", format: "text", reports: stderr, stderr: stderr}
+	out := newProcessingOutput("compile", "text", stderr, stderr, agent)
 	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return os.ReadFile(eventPath) })
 	if !ok {
 		return 1
@@ -1400,7 +1400,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			return usageError(stderr, "upload: %s is no longer supported; configure runner profiles with --runner-queue and --runner-image, or with the plugin runners array", retired)
 		}
 	}
-	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
+	out := newProcessingOutput("upload", "text", stderr, stderr, agent)
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
@@ -1605,6 +1605,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	for i, input := range workflows {
 		if input.Applicable {
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
+			out.annotate(processingReports[i])
 		}
 	}
 	artifacts := make([]transport.Artifact, 0, 1+len(runtimeDistributions)+len(planArtifacts))
