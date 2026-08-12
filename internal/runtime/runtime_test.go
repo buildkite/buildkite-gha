@@ -3085,14 +3085,14 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"## GitHub Actions warnings", "### Warning", "Unsafe &lt;title&gt;", "cmd,main.go", "<strong>Line:</strong> <code>12</code>", "*** &lt;warning&gt;",
+		"<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n<table class=\"mb2\">", `<th class="col-4 align-middle">Source</th><th class="col-2 align-middle">Title</th><th class="col-6 align-middle">Message</th>`, "<td><code>cmd,main.go:12:3–12:5</code></td>", "Unsafe &lt;title&gt;", "*** &lt;warning&gt;",
 	} {
 		if !strings.Contains(result.WarningAnnotations, fragment) {
 			t.Errorf("warning annotation lacks %q: %q", fragment, result.WarningAnnotations)
 		}
 	}
 	for _, fragment := range []string{
-		"## GitHub Actions errors", "### Error", "<strong>Line:</strong> <code>9</code>", "<strong>Column:</strong> <code>2</code>", "*** &lt;error&gt;",
+		"<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n<table class=\"mb2\">", "<td><code>main.go:9:2–9:4</code></td>", "*** &lt;error&gt;",
 	} {
 		if !strings.Contains(result.ErrorAnnotations, fragment) {
 			t.Errorf("error annotation lacks %q: %q", fragment, result.ErrorAnnotations)
@@ -3103,6 +3103,81 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "::error") || !strings.Contains(stderr.String(), "error: *** <error>") {
 		t.Fatalf("stderr = %q, want masked rendered error", stderr.String())
+	}
+}
+
+func TestWorkflowCommandAnnotationsGroupRowsByFile(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	for _, command := range []string{
+		"::warning file=first.go,line=2,title=First::first message",
+		"::warning file=second.go,line=7,col=3::second message",
+		"::warning file=first.go,line=9::another first message",
+		"::warning title=General::general message",
+	} {
+		_ = processor.process(io.Discard, command)
+	}
+
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if truncated {
+		t.Fatal("small grouped annotation was truncated")
+	}
+	if first, second := strings.LastIndex(warnings, "first.go"), strings.Index(warnings, "second.go"); first < 0 || second < first || strings.Count(warnings, "<tr><td>") != 4 {
+		t.Fatalf("annotation did not retain row order within first-seen file groups: %q", warnings)
+	}
+	for _, row := range []string{
+		"<td><code>first.go:2</code></td><td>First</td><td>first message</td>",
+		"<td><code>first.go:9</code></td><td></td><td>another first message</td>",
+		"<td><code>second.go:7:3</code></td><td></td><td>second message</td>",
+		"<td>General</td><td>General</td><td>general message</td>",
+	} {
+		if !strings.Contains(warnings, row) {
+			t.Errorf("annotation lacks row %q: %q", row, warnings)
+		}
+	}
+}
+
+func TestWorkflowCommandAnnotationRetainsOnlyOwnedRenderedFields(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	properties := map[string]string{
+		"file": "main.go", "title": "Lint", "line": "7", "unknown": strings.Repeat("unused", 100_000),
+	}
+	processor.mu.Lock()
+	processor.appendWorkflowCommandLocked(&processor.warnings, workflowWarningAnnotationHeading, parsedWorkflowCommand{properties: properties, message: "message"})
+	processor.mu.Unlock()
+	properties["file"] = "changed.go"
+	properties["title"] = "Changed"
+
+	if len(processor.warnings.commands) != 1 {
+		t.Fatalf("retained commands = %d, want 1", len(processor.warnings.commands))
+	}
+	got := processor.warnings.commands[0]
+	if got.file != "main.go" || got.title != "Lint" || got.location != "7" || got.message != "message" {
+		t.Fatalf("retained annotation = %#v", got)
+	}
+	if processor.warnings.rendered >= len(properties["unknown"]) {
+		t.Fatalf("rendered size %d retained unknown property bytes", processor.warnings.rendered)
+	}
+}
+
+func TestWorkflowCommandLocationLabels(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		properties map[string]string
+		want       string
+	}{
+		{name: "line", properties: map[string]string{"line": "5"}, want: "5"},
+		{name: "point", properties: map[string]string{"line": "5", "col": "3"}, want: "5:3"},
+		{name: "same-line range", properties: map[string]string{"line": "5", "col": "3", "endcolumn": "8"}, want: "5:3–5:8"},
+		{name: "explicit same point", properties: map[string]string{"line": "5", "endline": "5", "col": "3"}, want: "5:3"},
+		{name: "multiline range", properties: map[string]string{"line": "5", "endline": "6", "col": "3", "endcolumn": "8"}, want: "5–6"},
+		{name: "end line supplies start", properties: map[string]string{"endline": "5"}, want: "5"},
+		{name: "reversed range", properties: map[string]string{"line": "5", "endline": "4"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := workflowCommandLocationLabel(test.properties); got != test.want {
+				t.Fatalf("workflowCommandLocationLabel() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -3298,8 +3373,8 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 	}
 	group.Wait()
 	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
-	if truncated || strings.Count(warnings, "### Warning") != 100 {
-		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, "### Warning"), truncated)
+	if truncated || strings.Count(warnings, "<tr><td>") != 100 {
+		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, "<tr><td>"), truncated)
 	}
 
 	processor = newCommandProcessor(io.Discard, io.Discard)
@@ -3322,7 +3397,7 @@ func TestWorkflowCommandAnnotationsNormalizeInvalidUTF8(t *testing.T) {
 	if truncated || !utf8.ValidString(warnings) || strings.Count(warnings, "\uFFFD") != 3 {
 		t.Fatalf("warning annotation = %q, truncated = %v, valid UTF-8 = %v", warnings, truncated, utf8.ValidString(warnings))
 	}
-	for _, fragment := range []string{"<strong>Title:</strong> <code>bad\uFFFD</code>", "<strong>File:</strong> <code>bad\uFFFD.go</code>", "<p>bad\uFFFD</p>"} {
+	for _, fragment := range []string{"<td><code>bad\uFFFD.go</code></td>", "<td>bad\uFFFD</td><td>bad\uFFFD</td>"} {
 		if !strings.Contains(warnings, fragment) {
 			t.Fatalf("warning annotation lacks %q: %q", fragment, warnings)
 		}
@@ -3342,12 +3417,35 @@ func TestWorkflowCommandAnnotationScrubbingPreservesUTF8(t *testing.T) {
 	}
 }
 
-func TestWorkflowCommandAnnotationsRemainBoundedAfterSecretScrubbing(t *testing.T) {
-	secret := "x"
-	result := JobResult{WarningAnnotations: strings.Repeat(secret, maxJobAnnotationBytes)}
-	result = scrubJobResult(result, []string{secret})
-	if len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || strings.Contains(result.WarningAnnotations, secret) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
-		t.Fatalf("scrubbed warnings bytes = %d, valid UTF-8 = %v", len(result.WarningAnnotations), utf8.ValidString(result.WarningAnnotations))
+func TestWorkflowCommandMasksCannotCorruptAnnotationMarkup(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	_ = processor.process(io.Discard, "::warning file=table.go,title=tr::structured table text")
+	_ = processor.process(io.Discard, "::add-mask::tr")
+	_ = processor.process(io.Discard, "::add-mask::table")
+
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if truncated || !strings.Contains(warnings, `<td><code>***.go</code></td>`) || !strings.Contains(warnings, "<td>***</td><td>s***uctured *** text</td>") {
+		t.Fatalf("masked warning annotation = %q, truncated = %v", warnings, truncated)
+	}
+	if strings.Count(warnings, "<table") != 1 || strings.Count(warnings, "</table>") != 1 || strings.Count(warnings, "<tr>") != strings.Count(warnings, "</tr>") {
+		t.Fatalf("masks corrupted annotation markup: %q", warnings)
+	}
+}
+
+func TestWorkflowCommandAnnotationsRemainBoundedAfterMaskExpansion(t *testing.T) {
+	processor := newCommandProcessor(io.Discard, io.Discard)
+	for range 5000 {
+		_ = processor.process(io.Discard, "::warning file=main.go::"+strings.Repeat("x", 100))
+	}
+	_ = processor.process(io.Discard, "::add-mask::x")
+
+	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
+	if !truncated || strings.Contains(warnings, "x") || !strings.HasSuffix(warnings, workflowCommandTableEnd) || strings.Count(warnings, "<tr><td>") != strings.Count(warnings, "</td></tr>") {
+		t.Fatalf("expanded warning annotation bytes = %d, rows = %d/%d, truncated = %v", len(warnings), strings.Count(warnings, "<tr><td>"), strings.Count(warnings, "</td></tr>"), truncated)
+	}
+	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, processor.maskValues())
+	if len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
+		t.Fatalf("final warning annotation bytes = %d, valid UTF-8 = %v", len(result.WarningAnnotations), utf8.ValidString(result.WarningAnnotations))
 	}
 }
 

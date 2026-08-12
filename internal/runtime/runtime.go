@@ -40,8 +40,10 @@ const (
 
 	jobSummaryTruncationNotice       = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
-	workflowWarningAnnotationHeading = "## GitHub Actions warnings\n\n"
-	workflowErrorAnnotationHeading   = "## GitHub Actions errors\n\n"
+	workflowWarningAnnotationHeading = "<h2 class=\"h3 mb2\">GitHub Actions warnings</h2>\n"
+	workflowErrorAnnotationHeading   = "<h2 class=\"h3 mb2\">GitHub Actions errors</h2>\n"
+	workflowCommandTableHeading      = "<table class=\"mb2\">\n<thead><tr><th class=\"col-4 align-middle\">Source</th><th class=\"col-2 align-middle\">Title</th><th class=\"col-6 align-middle\">Message</th></tr></thead>\n<tbody>\n"
+	workflowCommandTableEnd          = "</tbody>\n</table>\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -1298,19 +1300,22 @@ type commandProcessor struct {
 }
 
 type workflowCommandAnnotationBuffer struct {
-	body      string
+	commands  []workflowCommandAnnotation
+	rendered  int
 	truncated bool
+}
+
+type workflowCommandAnnotation struct {
+	file     string
+	title    string
+	location string
+	message  string
 }
 
 type parsedWorkflowCommand struct {
 	name       string
 	properties map[string]string
 	message    string
-}
-
-type workflowCommandMetadata struct {
-	label string
-	value string
 }
 
 func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
@@ -1341,7 +1346,7 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 		case strings.EqualFold(command.name, "stop-commands"):
 			if !validWorkflowCommandStopToken(command.message) {
 				const message = "invalid ::stop-commands token: token is empty or collides with a workflow command"
-				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", parsedWorkflowCommand{message: message})
+				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, parsedWorkflowCommand{message: message})
 				p.writeWorkflowCommandMessageLocked(target, "error", message)
 				return errInvalidWorkflowCommandStopToken
 			}
@@ -1352,11 +1357,11 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 			p.writeMaskedLineLocked(target, line)
 			return nil
 		case strings.EqualFold(command.name, "warning"):
-			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, "Warning", command)
+			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, command)
 			p.writeWorkflowCommandMessageLocked(target, "warning", command.message)
 			return nil
 		case strings.EqualFold(command.name, "error"):
-			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", command)
+			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, command)
 			p.writeWorkflowCommandMessageLocked(target, "error", command.message)
 			return nil
 		case strings.EqualFold(command.name, "group"):
@@ -1443,7 +1448,7 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 func (p *commandProcessor) trustedWarning(message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, "Warning", parsedWorkflowCommand{message: message})
+	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, parsedWorkflowCommand{message: message})
 	p.writeWorkflowCommandMessageLocked(p.stderr, "warning", message)
 }
 
@@ -1458,12 +1463,30 @@ func (p *commandProcessor) maskTextLocked(text string) string {
 	return text
 }
 
-func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading, severity string, command parsedWorkflowCommand) {
-	fragment := renderWorkflowCommand(severity, command)
-	if buffer.body == "" {
-		fragment = heading + fragment
+func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading string, command parsedWorkflowCommand) {
+	annotation := workflowCommandAnnotation{
+		file:     strings.Clone(commandText(command.properties["file"])),
+		title:    strings.Clone(commandText(command.properties["title"])),
+		location: strings.Clone(workflowCommandLocationLabel(command.properties)),
+		message:  strings.Clone(commandText(command.message)),
 	}
-	appendBoundedText(&buffer.body, &buffer.truncated, fragment, false, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	p.appendWorkflowCommandAnnotationLocked(buffer, heading, annotation)
+}
+
+func (p *commandProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflowCommandAnnotationBuffer, heading string, command workflowCommandAnnotation) {
+	if buffer.truncated {
+		return
+	}
+	additional := len(renderWorkflowCommandTableRow(command))
+	if len(buffer.commands) == 0 {
+		additional += len(heading) + len(workflowCommandTableHeading) + len(workflowCommandTableEnd)
+	}
+	if buffer.rendered+additional > maxJobAnnotationBytes-len(workflowCommandTruncationNotice) {
+		buffer.truncated = true
+		return
+	}
+	buffer.rendered += additional
+	buffer.commands = append(buffer.commands, command)
 }
 
 func (p *commandProcessor) suppress() {
@@ -1528,14 +1551,23 @@ func (p *commandProcessor) scrubError(err error) error {
 func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	warnings, warningsTruncated = p.warnings.body, p.warnings.truncated
-	if p.trustedWarnings.body != "" {
-		warnings, warningsTruncated = "", false
-		appendBoundedText(&warnings, &warningsTruncated, p.trustedWarnings.body, p.trustedWarnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
-		untrusted := strings.TrimPrefix(p.warnings.body, workflowWarningAnnotationHeading)
-		appendBoundedText(&warnings, &warningsTruncated, untrusted, p.warnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	masks := normalizedMasks(p.masks)
+	var combinedWarnings workflowCommandAnnotationBuffer
+	for _, command := range p.trustedWarnings.commands {
+		p.appendWorkflowCommandAnnotationLocked(&combinedWarnings, workflowWarningAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
 	}
-	return warnings, warningsTruncated, p.errors.body, p.errors.truncated
+	for _, command := range p.warnings.commands {
+		p.appendWorkflowCommandAnnotationLocked(&combinedWarnings, workflowWarningAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
+	}
+	combinedWarnings.truncated = combinedWarnings.truncated || p.trustedWarnings.truncated || p.warnings.truncated
+	warnings, warningsTruncated = renderWorkflowCommandAnnotation(workflowWarningAnnotationHeading, combinedWarnings.commands, combinedWarnings.truncated)
+	var maskedErrors workflowCommandAnnotationBuffer
+	for _, command := range p.errors.commands {
+		p.appendWorkflowCommandAnnotationLocked(&maskedErrors, workflowErrorAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
+	}
+	maskedErrors.truncated = maskedErrors.truncated || p.errors.truncated
+	errors, errorsTruncated = renderWorkflowCommandAnnotation(workflowErrorAnnotationHeading, maskedErrors.commands, maskedErrors.truncated)
+	return warnings, warningsTruncated, errors, errorsTruncated
 }
 
 func (p *commandProcessor) addMaskLocked(value string) {
@@ -1588,52 +1620,115 @@ func decodeCommandProperty(value string) string {
 	return replacer.Replace(value)
 }
 
-func renderWorkflowCommand(severity string, command parsedWorkflowCommand) string {
-	var body strings.Builder
-	body.WriteString("### ")
-	body.WriteString(severity)
-	body.WriteString("\n\n")
-	metadata := []workflowCommandMetadata{
-		{label: "Title", value: command.properties["title"]},
-		{label: "File", value: command.properties["file"]},
+func renderWorkflowCommandAnnotation(heading string, commands []workflowCommandAnnotation, truncated bool) (string, bool) {
+	if len(commands) == 0 {
+		return "", truncated
 	}
-	line, endLine, column, endColumn := workflowCommandLocation(command.properties)
-	metadata = append(metadata,
-		workflowCommandMetadata{label: "Line", value: line},
-		workflowCommandMetadata{label: "End line", value: endLine},
-		workflowCommandMetadata{label: "Column", value: column},
-		workflowCommandMetadata{label: "End column", value: endColumn},
-	)
-	hasMetadata := false
-	for _, item := range metadata {
-		if item.value == "" {
-			continue
+	type commandGroup struct {
+		file     string
+		commands []workflowCommandAnnotation
+	}
+	groups := make([]commandGroup, 0)
+	groupIndexes := make(map[string]int)
+	for _, command := range commands {
+		file := command.file
+		index, ok := groupIndexes[file]
+		if !ok {
+			index = len(groups)
+			groupIndexes[file] = index
+			groups = append(groups, commandGroup{file: file})
 		}
-		if !hasMetadata {
-			body.WriteString("<p>")
-			hasMetadata = true
-		} else {
-			body.WriteString("<br>\n")
+		groups[index].commands = append(groups[index].commands, command)
+	}
+
+	var rendered strings.Builder
+	rendered.WriteString(heading)
+	rendered.WriteString(workflowCommandTableHeading)
+	for _, group := range groups {
+		for _, command := range group.commands {
+			rendered.WriteString(renderWorkflowCommandTableRow(command))
 		}
-		body.WriteString("<strong>")
-		body.WriteString(item.label)
-		body.WriteString(":</strong> <code>")
-		body.WriteString(commandHTML(item.value))
-		body.WriteString("</code>")
 	}
-	if hasMetadata {
-		body.WriteString("</p>\n\n")
+	rendered.WriteString(workflowCommandTableEnd)
+
+	var body string
+	var bodyTruncated bool
+	appendBoundedText(&body, &bodyTruncated, rendered.String(), truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	return body, bodyTruncated
+}
+
+func renderWorkflowCommandTableRow(command workflowCommandAnnotation) string {
+	source := "General"
+	if command.file != "" {
+		location := command.file
+		if command.location != "" {
+			location += ":" + command.location
+		}
+		source = "<code>" + commandHTML(location) + "</code>"
 	}
-	body.WriteString("<p>")
-	body.WriteString(commandHTML(command.message))
-	body.WriteString("</p>\n\n")
-	return body.String()
+	return "<tr><td>" + source + "</td><td>" + commandHTML(command.title) +
+		"</td><td>" + commandHTML(command.message) + "</td></tr>\n"
+}
+
+func workflowCommandLocationLabel(properties map[string]string) string {
+	line, endLine, column, endColumn := workflowCommandLocation(properties)
+	if line == "" {
+		return ""
+	}
+	if endLine == "" {
+		endLine = line
+	}
+	if endColumn == "" {
+		endColumn = column
+	}
+	start := line
+	if column != "" {
+		start += ":" + column
+	}
+	end := endLine
+	if endColumn != "" {
+		end += ":" + endColumn
+	}
+	if end == "" || end == start || endLine == line && endColumn == column {
+		return start
+	}
+	return start + "–" + end
+}
+
+func normalizedMasks(masks []string) []string {
+	normalized := make([]string, 0, len(masks))
+	for _, mask := range masks {
+		if mask = commandText(mask); mask != "" {
+			normalized = append(normalized, mask)
+		}
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if len(normalized[i]) != len(normalized[j]) {
+			return len(normalized[i]) > len(normalized[j])
+		}
+		return normalized[i] < normalized[j]
+	})
+	return normalized
+}
+
+func maskWorkflowCommandAnnotation(command workflowCommandAnnotation, masks []string) workflowCommandAnnotation {
+	values := []*string{&command.file, &command.title, &command.location, &command.message}
+	for _, mask := range masks {
+		for _, value := range values {
+			*value = strings.ReplaceAll(*value, mask, "***")
+		}
+	}
+	return command
+}
+
+func commandText(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.ReplaceAll(value, "\r", "\n")
 }
 
 func commandHTML(value string) string {
-	value = strings.ToValidUTF8(value, "\uFFFD")
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
+	value = commandText(value)
 	return strings.ReplaceAll(html.EscapeString(value), "\n", "<br>\n")
 }
 
