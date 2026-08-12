@@ -14,6 +14,8 @@ GitHub Actions syntax changes over time. If a feature is not listed here, treat 
 | 🚧 **Not available in production** | The compiler or runtime supports it, but production upload blocks it. |
 | ❌ **Unsupported** | Rejected or outside the compatibility contract. |
 
+Looking for something else? [Browse open compatibility issues](https://github.com/buildkite/buildkite-gha/issues?q=is%3Aissue%20state%3Aopen%20label%3Acompatibility). This page is the source of truth for what works today.
+
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
@@ -400,26 +402,35 @@ Step summaries become job-scoped Buildkite annotations and require Buildkite age
 
 Three expression modes intentionally support different syntax.
 
+| Syntax | Conditions | Runtime interpolation | Other compile-time expressions |
+| --- | --- | --- | --- |
+| `!`, `&&`, `\|\|`, `==`, `!=` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
+| `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
+| `fromJSON()`, case-insensitive `startsWith()` | 🟡 Compile time only | ❌ Unsupported | 🟡 When the result resolves fully |
+| `hashFiles()` | ❌ Unsupported | ❌ Unsupported | ❌ Unsupported |
+
 ### Conditions
 
-Job and step `if` conditions support literals; `!`, `&&`, `||`, `==`, and `!=`; and `always()`, `success()`, `failure()`, and `cancelled()` without arguments. Ordered comparisons, `hashFiles`, other functions, and function arguments are unsupported.
+Job and step `if` conditions support literals and the syntax listed above. Ordered comparisons, other functions, and function arguments are unsupported.
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
 | `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
+| `github.head_ref`, `github.ref_name` | ❌ No | ❌ No |
+| `runner.os` | ❌ No | ❌ No |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
 | `env.<name>` | ❌ No | ✅ Yes |
 | `job.services.<service>.ports[<port>]` | ❌ No | ✅ Yes |
-| `github.event.*` | 🟡 Compile time only | 🟡 Compile time only |
+| `github.event.*`, including `github.event.pull_request.*` | 🟡 Compile time only | 🟡 Compile time only |
 | `secrets` and other contexts | ❌ No | ❌ No |
 
 An event-backed condition is evaluated from the immutable event snapshot before runtime validation. Every branch is validated before evaluation, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A condition that cannot be fully resolved at compile time cannot carry `github.event` into the runtime.
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. General operators and functions are not supported inside interpolated strings.
+Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
 
 A runtime interpolation can read a verified upstream output directly:
 
@@ -431,7 +442,7 @@ At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repo
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported where the complete expression resolves during compilation. Values derived from runtime `needs` or `steps` are unsupported.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above where the complete expression resolves during compilation. Values derived from runtime `needs` or `steps` are unsupported.
 
 ## Actions
 

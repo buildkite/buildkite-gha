@@ -1,0 +1,43 @@
+name: Compatibility request
+description: Request support for a GitHub Actions feature
+title: "[Compatibility]: "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the [compatibility contract](https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md). It lists what works today.
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Minimal workflow
+      description: Show the smallest workflow that needs this feature.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: What happens when you validate or run it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected outcome
+      description: What should work, and why do you need it?
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: buildkite-gha version
+      placeholder: v0.0.0 or commit SHA
+    validations:
+      required: false
