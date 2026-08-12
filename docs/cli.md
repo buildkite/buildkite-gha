@@ -99,8 +99,8 @@ The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_K
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow` and
 `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`; it also accepts the plugin-owned
-`version` and `minimum-release-age` fields. The Linux/amd64 importer fetches the
-same release's Darwin runtime only when the workflow requires it.
+`version`, `source-ref`, and `minimum-release-age` fields. The Linux/amd64 importer
+fetches the same release's Darwin runtime only when the workflow requires it.
 
 Event source precedence is:
 
