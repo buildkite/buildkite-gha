@@ -77,16 +77,23 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 func TranslateEventTriggerCondition(triggers []workflow.Trigger, event string, context TriggerConditionContext) (condition string, applicable bool, err error) {
 	var terms []string
 	for _, trigger := range triggers {
-		triggerContext := liveTriggerContext(trigger.Event)
-		if trigger.Event == event {
-			triggerContext = context
+		if trigger.Event != event {
+			continue
 		}
-		term, contributes, err := translateTrigger(trigger, triggerContext)
+		term, contributes, err := translateTrigger(trigger, context)
 		if err != nil {
 			return "", false, err
 		}
-		if trigger.Event == event && contributes {
+		if contributes {
 			terms = append(terms, "("+term+")")
+		}
+	}
+	for _, trigger := range triggers {
+		if trigger.Event == event {
+			continue
+		}
+		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event)); err != nil {
+			return "", false, err
 		}
 	}
 	if len(terms) == 0 {

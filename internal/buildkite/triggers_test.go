@@ -151,6 +151,25 @@ func TestTranslateEventTriggerConditionRejectsIncompletePullRequestSnapshot(t *t
 	}
 }
 
+func TestTranslateEventTriggerConditionPrioritizesEffectiveEventErrors(t *testing.T) {
+	for _, triggers := range [][]workflow.Trigger{
+		{{Event: "issues"}, {Event: "pull_request"}},
+		{{Event: "pull_request"}, {Event: "issues"}},
+	} {
+		_, _, err := TranslateEventTriggerCondition(triggers, "pull_request", TriggerConditionContext{
+			EventPredicate:        "true",
+			PullRequestBaseBranch: `"main"`,
+			PullRequestAction:     "null",
+		})
+		if err == nil || !strings.Contains(err.Error(), "payload.action") {
+			t.Fatalf("effective event error for triggers %v = %v", triggers, err)
+		}
+		if IsUnsupportedTrigger(err) {
+			t.Fatalf("effective event error for triggers %v was classified as unsupported syntax: %v", triggers, err)
+		}
+	}
+}
+
 func TestTranslateEventTriggerConditionRejectsUnclassifiablePushSnapshot(t *testing.T) {
 	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
 		Event:    "push",
