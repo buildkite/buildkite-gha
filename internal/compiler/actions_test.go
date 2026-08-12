@@ -836,7 +836,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatalf("checkout with %q: %v", with, err)
 		}
-		if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
+		if len(plans) != 1 || plans[0].GitHubToken != nil || !reflect.DeepEqual(plans[0].RequiredCapabilities, []string{"network", "provider-token-read"}) {
 			t.Fatalf("checkout plans = %#v", plans)
 		}
 	}

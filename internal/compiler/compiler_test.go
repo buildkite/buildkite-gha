@@ -54,8 +54,16 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "missing top-level permissions", path: ".github/workflows/ci.yml", diagnostic: "explicit non-empty",
+			name: "omitted top-level permissions", path: ".github/workflows/ci.yml", want: "ci.yml",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "explicit empty permissions", path: ".github/workflows/ci.yml", diagnostic: "explicit non-empty",
+			source: "on: push\npermissions: {}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "only none permissions", path: ".github/workflows/ci.yml", diagnostic: "explicit non-empty",
+			source: "on: push\npermissions:\n  contents: none\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
 			name: "job permissions", path: ".github/workflows/ci.yml", diagnostic: "job-level",

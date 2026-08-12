@@ -727,14 +727,18 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 	if err != nil {
 		return "", err.Error()
 	}
-	if parsed.Permissions == nil || len(parsed.Permissions.Scopes) == 0 {
+	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
 		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
 	}
-	permissions := make(map[string]string, len(parsed.Permissions.Scopes))
-	for name, access := range parsed.Permissions.Scopes {
-		permissions[strings.ReplaceAll(name, "-", "_")] = access
+	permissions := defaultGitHubTokenPermissions().Scopes
+	if parsed.Permissions != nil {
+		permissions = parsed.Permissions.Scopes
 	}
-	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
+	normalizedPermissions := make(map[string]string, len(permissions))
+	for name, access := range permissions {
+		normalizedPermissions[strings.ReplaceAll(name, "-", "_")] = access
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(normalizedPermissions); err != nil {
 		return "", err.Error()
 	}
 	for _, job := range parsed.Jobs {
