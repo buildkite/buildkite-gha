@@ -37,6 +37,16 @@ const (
 	cliTestProducerJobID = "33333333-3333-4333-8333-333333333333"
 )
 
+// Stable stage IDs asserted throughout the report expectations below.
+const (
+	stageWorkflowParsing = string(compiler.StageWorkflowParsing)
+	stageEventValidation = string(compiler.StageEventValidation)
+	stageGraph           = string(compiler.StageGraph)
+	stageMatrix          = string(compiler.StageMatrix)
+	stageExpressions     = string(compiler.StageExpressions)
+	stageResolution      = string(compiler.StageResolution)
+)
+
 func TestRunHelpAndVersion(t *testing.T) {
 	tests := []struct {
 		name       string
