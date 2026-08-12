@@ -3137,7 +3137,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 
 func writeUploadWorkflowRepository(t *testing.T, sources map[string]string) string {
 	t.Helper()
-	repository := t.TempDir()
+	repository := canonicalTempDir(t)
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
 		t.Fatal(err)
