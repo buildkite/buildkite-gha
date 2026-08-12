@@ -92,7 +92,6 @@ steps:
 
       - label: ":github: Starter workflow compatibility"
         key: "starter-workflows-corpus"
-        if: build.branch == pipeline.default_branch
         soft_fail: true
         timeout_in_minutes: 10
         plugins:
