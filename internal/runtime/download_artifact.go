@@ -201,7 +201,7 @@ func (r Runner) downloadNeedArtifact(ctx context.Context, artifact plan.NeedArti
 	if regular != 1 {
 		return 0, fmt.Errorf("download contained %d regular files, want exactly the expected archive", regular)
 	}
-	temporaryRoot, err := os.OpenRoot(temporary)
+	temporaryRoot, err := openPinnedDownloadRoot(temporary)
 	if err != nil {
 		return 0, fmt.Errorf("open downloaded artifact root: %w", err)
 	}
