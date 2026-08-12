@@ -485,6 +485,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if strings.Contains(pluginDemo.command, "BUILDKITE_GHA_CACHE_URL") {
 		t.Fatalf("released plugin demo loader still requires a cache Results URL:\n%s", pluginDemo.command)
 	}
+	if got := steps["plugin-source-smoke-importer"]; got.condition != `build.env("DEMO_SUITE") != "plugin"` {
+		t.Fatalf("exact-source plugin smoke = %#v", got)
+	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
 	}

@@ -115,6 +115,7 @@ steps:
 
   - label: ":github: Exact-source plugin smoke"
     key: "plugin-source-smoke-importer"
+    if: build.env("DEMO_SUITE") != "plugin"
     env:
       BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     timeout_in_minutes: 20
