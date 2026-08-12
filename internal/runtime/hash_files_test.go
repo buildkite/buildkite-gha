@@ -416,6 +416,27 @@ func TestHashFilesStepEnvironmentFailureUsesStepConclusion(t *testing.T) {
 	}
 }
 
+func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles condition failure\n")
+	writeFixtureFile(t, workspace, "target", "value")
+	if err := os.Symlink("target", filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	marker := filepath.Join(workspace, "cleaned")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "invalid", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "exit 99"},
+		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "failure()", Command: "touch " + marker},
+	})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("failure cleanup did not run: %v", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string
