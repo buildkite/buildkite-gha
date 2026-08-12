@@ -185,20 +185,37 @@ func TestParsePluginConfiguration(t *testing.T) {
 	}
 }
 
-func TestValidateImporterPlatform(t *testing.T) {
-	if err := validateImporterPlatform("linux", "amd64"); err != nil {
-		t.Fatalf("linux/amd64 importer rejected: %v", err)
+func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "linux.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, platform := range []struct {
-		goos   string
-		goarch string
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "darwin-importer")
+	for _, test := range []struct {
+		name string
+		args []string
 	}{
-		{goos: "darwin", goarch: "arm64"},
-		{goos: "linux", goarch: "arm64"},
+		{name: "Linux graph", args: []string{workflowPath}},
+		{name: "explicit runtimes", args: []string{
+			"--runtime-distribution", "linux/amd64=/tmp/buildkite-gha-linux",
+			"--runtime-distribution", "darwin/arm64=/tmp/buildkite-gha-darwin",
+			workflowPath,
+		}},
 	} {
-		if err := validateImporterPlatform(platform.goos, platform.goarch); err == nil || !strings.Contains(err.Error(), "importer requires linux/amd64") {
-			t.Fatalf("validateImporterPlatform(%q, %q) error = %v", platform.goos, platform.goarch, err)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := uploadFromPlatform("darwin", "arm64", test.args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
+				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
+			}
+			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64, running on darwin/arm64\n" {
+				t.Fatalf("stderr = %q", got)
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("Darwin importer performed work: stdout = %q, commands = %d, uploads = %d", stdout.String(), len(runner.commands), len(runner.uploaded))
+			}
+		})
 	}
 }
 
