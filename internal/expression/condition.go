@@ -321,6 +321,32 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	}
 }
 
+// EvaluateActionLifecycleCondition evaluates an action pre-if or post-if
+// condition against the supplied lifecycle state. The accepted grammar is
+// deliberately narrower than general conditions: exactly one bare status
+// function with optional ${{ }} delimiters. An empty condition is
+// unconditionally true (unlike general conditions, which apply the implicit
+// success guard), failure() means unsuccessful and not cancelled, and any
+// other expression fails closed with an error.
+func EvaluateActionLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
+		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
+	}
+	switch strings.ToLower(value) {
+	case "", "always()":
+		return true, nil
+	case "success()":
+		return !unsuccessful && !cancelled, nil
+	case "failure()":
+		return unsuccessful && !cancelled, nil
+	case "cancelled()":
+		return cancelled, nil
+	default:
+		return false, fmt.Errorf("condition %q is unsupported", value)
+	}
+}
+
 // EvaluateCondition evaluates a job or step condition. Unsupported syntax and
 // unavailable values fail closed with an error.
 func EvaluateCondition(source string, context ConditionContext) (bool, error) {
