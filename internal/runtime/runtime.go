@@ -1670,8 +1670,8 @@ func renderWorkflowCommandListItem(command workflowCommandAnnotation) string {
 	if command.title != "" {
 		detail = "<strong>" + commandHTML(command.title) + ":</strong> " + detail
 	}
-	return "<div class=\"border-top silver py2\"><div class=\"black\">" + detail +
-		"</div><div class=\"mt1 black\">" + source + "</div></div>\n"
+	return "<div class=\"border-top py2\"><div>" + detail +
+		"</div><div class=\"mt1\">" + source + "</div></div>\n"
 }
 
 func workflowCommandLocationLabel(properties map[string]string) string {

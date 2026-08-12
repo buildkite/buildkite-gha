@@ -56,7 +56,7 @@ if ! jq -e \
     $warnings[0].job_id == $job_id and
     $warnings[0].style == "warning" and
     ($warnings[0].body_html | contains("Deprecated command")) and
-    ($warnings[0].body_html | contains("border-top silver py2")) and
+    ($warnings[0].body_html | contains("border-top py2")) and
     ($warnings[0].body_html | contains("workflow-command-annotations.yml:13:3–13:8")) and
     ($warnings[0].body_html | contains("The save-state command is deprecated; use environment files instead.")) and
     ($warnings[0].body_html | contains("Secret redaction")) and
