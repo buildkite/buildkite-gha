@@ -793,7 +793,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy" {
+		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy: runner label is not mapped by policy" {
 			t.Fatalf("macOS profile report = %#v", report)
 		}
 	})
@@ -1667,7 +1667,7 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy" {
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy: runner label is not mapped by policy" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }

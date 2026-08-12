@@ -228,6 +228,46 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
+	policy := RunnerPolicy{
+		Labels:          map[string]string{"ubuntu-24.04": "linux", "self-hosted": "one", "linux": "two", "default": ""},
+		Targets:         map[string]RunnerTarget{"macos": {Queue: "macos", Platform: PlatformDarwinARM64}},
+		UntrustedQueues: []string{"isolated"},
+	}
+	tests := []struct {
+		name   string
+		labels []string
+		trust  EventTrust
+		want   string
+	}{
+		{name: "no labels", trust: EventTrusted, want: reasonNoLabels},
+		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: reasonDuplicateLabel},
+		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: reasonUnsupportedOS},
+		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: reasonUnmappedLabel},
+		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: reasonConflictingQueues},
+		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: reasonConflictingTarget},
+		{name: "untrusted default targeting", labels: []string{"default"}, trust: EventUntrusted, want: reasonUntrustedDefault},
+		{name: "untrusted queue", labels: []string{"ubuntu-24.04"}, trust: EventUntrusted, want: reasonUntrustedQueue},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := policy.resolve(test.labels, test.trust)
+			if err == nil {
+				t.Fatal("resolve() error = nil, want rejection")
+			}
+			if message := runnerRejectionMessage(err); message != "resolved runner target is not admitted by policy: "+test.want {
+				t.Fatalf("runnerRejectionMessage() = %q, want reason %q", message, test.want)
+			}
+		})
+	}
+}
+
+func TestRunnerRejectionMessageFallsBackWhenUnclassified(t *testing.T) {
+	if message := runnerRejectionMessage(errors.New("boom")); message != "resolved runner target is not admitted by policy" {
+		t.Fatalf("runnerRejectionMessage() = %q, want the bare policy message", message)
+	}
+}
+
 func TestDefaultCompilePolicyIsUntrustedAndUsesBuildkiteDefault(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	compiled, err := Compile("default.yml", workflow, pushEvent(t))

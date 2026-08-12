@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -242,9 +243,38 @@ func (sources VariableSources) snapshot() map[string]string {
 	return vars
 }
 
+// Every runs-on rejection reason a processing report may render. Resolved
+// labels can interpolate event payload data, so a reason must stay a literal
+// and never interpolate a resolved value.
+const (
+	reasonNoLabels          = "runs-on must resolve to at least one label"
+	reasonDuplicateLabel    = "duplicate runner label"
+	reasonUnsupportedOS     = "unsupported operating system"
+	reasonUnmappedLabel     = "runner label is not mapped by policy"
+	reasonConflictingQueues = "labels resolve to conflicting queues"
+	reasonConflictingTarget = "labels resolve to conflicting targets"
+	reasonUntrustedDefault  = "untrusted event cannot use Buildkite default agent targeting"
+	reasonUntrustedQueue    = "untrusted event cannot target the resolved queue"
+)
+
+// runnerPolicyRejection pairs a rejected runs-on resolution with its reason.
+// Reports may render reason but never the detailed error, which quotes the
+// resolved label.
+type runnerPolicyRejection struct {
+	reason string
+	err    error
+}
+
+func (e *runnerPolicyRejection) Error() string { return e.err.Error() }
+func (e *runnerPolicyRejection) Unwrap() error { return e.err }
+
+func rejectRunner(reason, format string, args ...any) error {
+	return &runnerPolicyRejection{reason: reason, err: fmt.Errorf(format, args...)}
+}
+
 func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTarget, error) {
 	if len(labels) == 0 {
-		return RunnerTarget{}, fmt.Errorf("runs-on must resolve to at least one label")
+		return RunnerTarget{}, rejectRunner(reasonNoLabels, reasonNoLabels)
 	}
 	var target RunnerTarget
 	resolved := false
@@ -252,11 +282,11 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	for _, label := range labels {
 		normalized := strings.ToLower(strings.TrimSpace(label))
 		if _, duplicate := seen[normalized]; duplicate {
-			return RunnerTarget{}, fmt.Errorf("runs-on contains duplicate runner label %q", label)
+			return RunnerTarget{}, rejectRunner(reasonDuplicateLabel, "runs-on contains duplicate runner label %q", label)
 		}
 		seen[normalized] = struct{}{}
 		if unsupportedOS(normalized) {
-			return RunnerTarget{}, fmt.Errorf("unsupported operating system runner label %q", label)
+			return RunnerTarget{}, rejectRunner(reasonUnsupportedOS, "unsupported operating system runner label %q", label)
 		}
 		mapped, ok := policy.Targets[normalized]
 		if !ok {
@@ -280,26 +310,38 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 			}
 		}
 		if !ok {
-			return RunnerTarget{}, fmt.Errorf("runner label %q is not mapped by policy", label)
+			return RunnerTarget{}, rejectRunner(reasonUnmappedLabel, "runner label %q is not mapped by policy", label)
 		}
 		if resolved && target != mapped {
 			if target.Platform == mapped.Platform && target.Image == mapped.Image {
-				return RunnerTarget{}, fmt.Errorf("runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
+				return RunnerTarget{}, rejectRunner(reasonConflictingQueues, "runner labels resolve to conflicting queues %q and %q", target.Queue, mapped.Queue)
 			}
-			return RunnerTarget{}, fmt.Errorf("runner labels resolve to conflicting targets %q and %q", targetDescription(target), targetDescription(mapped))
+			return RunnerTarget{}, rejectRunner(reasonConflictingTarget, "runner labels resolve to conflicting targets %q and %q", targetDescription(target), targetDescription(mapped))
 		}
 		target = mapped
 		resolved = true
 	}
 	if trust == EventUntrusted && target.Queue == "" && !policy.AllowUntrustedDefaultQueue {
-		return RunnerTarget{}, fmt.Errorf("untrusted event cannot use Buildkite default agent targeting")
+		return RunnerTarget{}, rejectRunner(reasonUntrustedDefault, reasonUntrustedDefault)
 	}
 	if trust == EventUntrusted && target.Queue != "" && !contains(policy.UntrustedQueues, target.Queue) {
 		allowlist := append([]string(nil), policy.UntrustedQueues...)
 		sort.Strings(allowlist)
-		return RunnerTarget{}, fmt.Errorf("untrusted event cannot target queue %q; allowed queues: %s", target.Queue, strings.Join(allowlist, ", "))
+		return RunnerTarget{}, rejectRunner(reasonUntrustedQueue, "untrusted event cannot target queue %q; allowed queues: %s", target.Queue, strings.Join(allowlist, ", "))
 	}
 	return target, nil
+}
+
+// runnerRejectionMessage renders a rejected runs-on resolution for a processing
+// report. It appends only the fixed rejection reason, so a resolved label built
+// from event payload data never reaches the report.
+func runnerRejectionMessage(err error) string {
+	const message = "resolved runner target is not admitted by policy"
+	var rejection *runnerPolicyRejection
+	if errors.As(err, &rejection) {
+		return message + ": " + rejection.reason
+	}
+	return message
 }
 
 func unsupportedOS(label string) bool {
