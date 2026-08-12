@@ -525,7 +525,7 @@ func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 		t.Fatalf("steps = %#v", document.Steps)
 	}
 	step := document.Steps[0]
-	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/cache/bkcache/buildkite-gha/mise/darwin-arm64"}) {
+	if step.Image != "" || step.Cache.Name != "buildkite-gha-darwin-arm64" || !slices.Equal(step.Cache.Paths, []string{"/tmp/bkcache/buildkite-gha/mise/darwin-arm64"}) {
 		t.Fatalf("Darwin runtime placement = %#v", step)
 	}
 	if step.Env["BUILDKITE_GHA_MISE_DATA_DIR"] != MiseDataDir("darwin/arm64") {
@@ -568,7 +568,7 @@ func TestMiseDataDirUsesManagedRuntimeVersion(t *testing.T) {
 	if got := MiseDataDir(); got != "/cache/bkcache/buildkite-gha/mise/linux-amd64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir() = %q", got)
 	}
-	if got := MiseDataDir("darwin/arm64"); got != "/cache/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
+	if got := MiseDataDir("darwin/arm64"); got != "/tmp/bkcache/buildkite-gha/mise/darwin-arm64/"+MinimumMiseVersion {
 		t.Fatalf("MiseDataDir(darwin/arm64) = %q", got)
 	}
 }
