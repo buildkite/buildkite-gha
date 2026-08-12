@@ -11,18 +11,21 @@ It does not clone the repository or execute third-party code. This deliberately
 limits the corpus to workflows that do not need repository-local actions or
 reusable workflows during compilation.
 
+Push cases can set `event_branch`; otherwise they use `default_branch`.
+Pull-request cases set `event_action` so the synthetic event is complete.
+
 The initial ten cases deliberately mix outcomes:
 
 | Case | Ecosystem/shape | Exact GitHub run | Current boundary |
 | --- | --- | --- | --- |
 | `urfave-cli-lint` | Go setup and third-party lint action | [Success](https://github.com/urfave/cli/actions/runs/29794452917) | Admitted by profile evaluation; runtime remains unproven. |
-| `fastify-markdown-lint` | Small Node lint job with pinned actions | — | Admitted by profile evaluation; runtime remains unproven. |
+| `fastify-markdown-lint` | Small Node lint job with pinned actions | — | Push path filters are unsupported. The corpus uses a non-default push branch that passes the workflow's branch filter. |
 | `prettier-lint` | Larger Yarn, cache, condition, and concurrency workflow | [Success](https://github.com/prettier/prettier/actions/runs/31316608109) | Admitted with ignored concurrency-cancellation behavior; runtime remains unproven. |
-| `bat-changelog` | Pull-request shell and output workflow | — | Admitted; runtime needs a faithful real PR event. |
-| `p-map-main` | Two-entry Node matrix | [Success](https://github.com/sindresorhus/p-map/actions/runs/29779845179) | Admitted by profile evaluation; runtime remains unproven. |
+| `bat-changelog` | Pull-request shell and output workflow | — | Compiles with the synthetic `synchronize` event but is not admitted because implicit checkout credentials require unverified token-write access. |
+| `p-map-main` | Two-entry Node matrix | [Success](https://github.com/sindresorhus/p-map/actions/runs/29779845179) | Not admitted because implicit checkout credentials require unverified token-write access. |
 | `fzf-linux` | Go, Ruby, multiple shells, and host package setup | [Success](https://github.com/junegunn/fzf/actions/runs/31253573599) | Admitted; checkout's requested full history is supported. Runtime remains unproven. |
-| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Profile-admitted with bounded direct submodules; emits `W_ACTION_RUNTIME_UNKNOWN` because static action metadata cannot prove independence from every GitHub-only runtime service. The profile does not execute the checkout or build. |
-| `go-task-ci` | Five-job Go matrix | [Success](https://github.com/go-task/task/actions/runs/31330279154) | Compound concurrency expression is unsupported. |
+| `jq-valgrind` | C/autotools/Valgrind plus failure artifact | [Success](https://github.com/jqlang/jq/actions/runs/30182447884) | Not admitted because implicit checkout credentials require unverified token-write access. |
+| `go-task-ci` | Five-job Go matrix | [Success](https://github.com/go-task/task/actions/runs/31330279154) | The `github.head_ref` concurrency expression and non-Linux matrix rows are unsupported. |
 | `gum-build` | Remote reusable workflow | — | Remote reuse and runtime secret forwarding are unsupported. |
 | `just-ci` | Rust and a mixed-OS matrix | [Success](https://github.com/casey/just/actions/runs/31140381397) | Non-Linux runner rows are unsupported. |
 
@@ -32,13 +35,13 @@ Run the networked compile corpus with:
 mise run corpus:oss
 ```
 
-This prints every result, reports a passing/blocked summary, and exits non-zero
+This prints every result, reports a compilable/blocked summary, and exits non-zero
 while any workflow is not compilable. Seven cases also retain a successful
 upstream GitHub run at the exact source SHA as a future comparison reference.
 Compiler determinism remains covered by the repository-owned smoke fixtures.
 
-The profile scan resolves public actions and treats only admitted workflows as
-passing:
+The profile scan resolves public actions and counts only admitted workflows in
+its admitted total:
 
 ```sh
 mise run corpus:oss-profile

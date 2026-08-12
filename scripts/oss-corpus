@@ -35,7 +35,7 @@ trap 'rm -rf -- "$work"' EXIT
 
 cd "$root"
 jq -e '
-  .schema == "buildkite-gha/oss-corpus/v3" and
+  .schema == "buildkite-gha/oss-corpus/v4" and
   (.cases | type == "array" and length > 0) and
   all(.cases[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
@@ -45,6 +45,13 @@ jq -e '
     (.workflow_sha256 | test("^[0-9a-f]{64}$")) and
     (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
     (.event | IN("push", "pull_request")) and
+    (if .event == "push" then
+      ((.event_action // "") == "") and
+      ((.event_branch // .default_branch) | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not))
+    else
+      ((.event_branch // "") == "") and
+      (.event_action | type == "string" and test("^[a-z][a-z_]*$"))
+    end) and
     ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$")))) and
   ([.cases[].id] | length == (unique | length))
 ' "$manifest" >/dev/null
@@ -70,6 +77,8 @@ if $profile; then
   desired=admitted
   validate_args=(--profile hosted-tokenless)
 fi
+success_label=compilable
+$profile && success_label=admitted
 summary="$work/summary.md"
 printf '### OSS workflow compatibility — %s\n\n' "$mode" > "$summary"
 passed=0
@@ -85,11 +94,12 @@ clean_env() {
 }
 
 make_event() {
-  local repository=$1 commit=$2 branch=$3 event=$4 destination=$5
+  local repository=$1 commit=$2 branch=$3 event=$4 event_branch=$5 event_action=$6 destination=$7
   local owner=${repository%%/*} name=${repository#*/}
   jq -n \
     --arg owner "$owner" --arg name "$name" --arg sha "$commit" \
-    --arg branch "$branch" --arg event "$event" '
+    --arg branch "$branch" --arg event "$event" --arg event_branch "$event_branch" \
+    --arg event_action "$event_action" '
     def clone_url: "https://github.com/" + $owner + "/" + $name + ".git";
     def payload_repo: {
       clone_url: clone_url,
@@ -105,17 +115,18 @@ make_event() {
       provider: "github",
       event: $event,
       repository: repository,
-      ref: (if $event == "pull_request" then "refs/pull/1/head" else "refs/heads/" + $branch end),
+      ref: (if $event == "pull_request" then "refs/pull/1/head" else "refs/heads/" + $event_branch end),
       sha: $sha,
       actor: "buildkite-gha-corpus",
       payload: (if $event == "pull_request" then {
+        action: $event_action,
         number: 1,
         pull_request: {
           number: 1,
           head: {sha: $sha, ref: "corpus", repo: payload_repo},
           base: {ref: $branch, repo: payload_repo}
         }
-      } else {ref: ("refs/heads/" + $branch)} end)
+      } else {ref: ("refs/heads/" + $event_branch)} end)
     }
   ' > "$destination"
 }
@@ -156,6 +167,8 @@ for id in "${case_ids[@]}"; do
   workflow_sha256="$(jq -r '.workflow_sha256' <<<"$entry")"
   branch="$(jq -r '.default_branch' <<<"$entry")"
   event="$(jq -r '.event' <<<"$entry")"
+  event_branch="$(jq -r '.event_branch // .default_branch' <<<"$entry")"
+  event_action="$(jq -r '.event_action // ""' <<<"$entry")"
 
   case_root="$work/cases/$id"
   workflow_path="$case_root/$workflow"
@@ -169,7 +182,7 @@ for id in "${case_ids[@]}"; do
     echo "$id: workflow digest=$actual_sha256, want $workflow_sha256" >&2
     exit 1
   }
-  make_event "$repository" "$commit" "$branch" "$event" "$event_path"
+  make_event "$repository" "$commit" "$branch" "$event" "$event_branch" "$event_action" "$event_path"
 
   status=0
   report="$work/$id.$mode.json"
@@ -181,7 +194,7 @@ for id in "${case_ids[@]}"; do
   record_report "$id" "$status" "$report"
 done
 
-printf '\n**%d passing; %d blocked.**\n' "$passed" "$blocked" >> "$summary"
+printf '\n**%d %s; %d blocked.**\n' "$passed" "$success_label" "$blocked" >> "$summary"
 cat "$summary"
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   style=success

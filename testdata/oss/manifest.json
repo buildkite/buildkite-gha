@@ -1,5 +1,5 @@
 {
-  "schema": "buildkite-gha/oss-corpus/v3",
+  "schema": "buildkite-gha/oss-corpus/v4",
   "cases": [
     {
       "id": "urfave-cli-lint",
@@ -19,6 +19,7 @@
       "workflow_sha256": "1df71d89b1ce8a22025539d35760db833c4c7a182d0e0eac417d95d8420f2cee",
       "default_branch": "main",
       "event": "push",
+      "event_branch": "corpus-markdown-change",
       "github_run": null
     },
     {
@@ -39,6 +40,7 @@
       "workflow_sha256": "31f33b596fbced2e8b1291bcda024ffc2300b3c1c27cc66df19dbce37c3acbb5",
       "default_branch": "master",
       "event": "pull_request",
+      "event_action": "synchronize",
       "github_run": null
     },
     {
