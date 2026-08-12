@@ -531,20 +531,29 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		stepEnv, err := evaluateStepMap(step.Env, eval)
+		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
+		stepEval := cloneExpressionContext(eval)
+		if stepEval.HashFilesContext != nil {
+			stepEval.HashFiles = func(patterns []string) (string, error) {
+				return stepEval.HashFilesContext(stepCtx, patterns)
+			}
+		}
+		stepEnv, err := evaluateStepMap(step.Env, stepEval)
 		if err != nil {
+			cancelStep()
 			runErr = errors.Join(runErr, fmt.Errorf("step %q environment: %w", step.ID, err))
 			break
 		}
-		stepEval := cloneExpressionContext(eval)
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil, HashFiles: eval.HashFiles}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: stepCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
+			cancelStep()
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
 			break
 		}
 		if !run {
+			cancelStep()
 			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
@@ -554,18 +563,21 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		evalSnapshot := stepEval
 		if step.Background {
 			step := step
-			supervisor.start(runCtx, step.ID,
+			supervisor.start(stepCtx, step.ID,
 				func(stepCtx context.Context) stepExecution {
+					defer cancelStep()
 					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
+					cancelStep()
 					return cancelledStepExecution(ctx, stepCtx, step)
 				},
 			)
 			continue
 		}
 		processor.logSection(stepDisplayName(step, evalSnapshot))
-		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
+		execution := r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
+		cancelStep()
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
 		}

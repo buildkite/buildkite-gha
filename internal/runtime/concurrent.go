@@ -155,19 +155,15 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
+func stepContext(parent context.Context, timeoutMinutes float64) (context.Context, context.CancelFunc) {
+	if timeoutMinutes > 0 {
+		return context.WithTimeout(parent, durationMinutes(timeoutMinutes))
+	}
+	return context.WithCancel(parent)
+}
+
 func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
-	stepCtx := runCtx
-	cancelStep := func() {}
-	if step.TimeoutMinutes > 0 {
-		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
-	}
-	if eval.HashFilesContext != nil {
-		eval.HashFiles = func(patterns []string) (string, error) {
-			return eval.HashFilesContext(stepCtx, patterns)
-		}
-	}
-	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
-	cancelStep()
+	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }
 

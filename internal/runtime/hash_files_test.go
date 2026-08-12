@@ -11,8 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"golang.org/x/sys/unix"
 )
@@ -288,19 +288,47 @@ func TestHashWorkspaceFilesDetectsMutationAndCancellation(t *testing.T) {
 }
 
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
-	called := false
-	eval := expression.Context{HashFilesContext: func(ctx context.Context, _ []string) (string, error) {
-		called = true
-		<-ctx.Done()
-		return "", ctx.Err()
-	}}
-	execution := (Runner{}).executePlanStep(
-		context.Background(), context.Background(), nil, "", plan.Job{},
-		plan.Step{ID: "hash", Kind: "run", TimeoutMinutes: 0.001, Env: map[string]string{"HASH": "${{ hashFiles('value') }}"}},
-		"0", nil, nil, eval, nil, nil, nil,
-	)
-	if !called || !errors.Is(execution.err, context.DeadlineExceeded) {
-		t.Fatalf("step timeout hashFiles execution = %#v", execution)
+	for _, test := range []struct {
+		name      string
+		env       map[string]string
+		condition string
+	}{
+		{name: "environment", env: map[string]string{"HASH": "${{ hashFiles('large') }}"}},
+		{name: "condition", condition: "hashFiles('large') != ''"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles timeout\n")
+			large := filepath.Join(workspace, "large")
+			file, err := os.Create(large)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := file.Truncate(256 << 20); err != nil {
+				_ = file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+				ID:             "hash",
+				Kind:           "run",
+				Shell:          "sh",
+				TimeoutMinutes: 0.001,
+				Env:            test.env,
+				Condition:      test.condition,
+				Command:        "true",
+			}})
+			started := time.Now()
+			_, err = (Runner{}).RunJob(context.Background(), job, workspace)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("RunJob() timeout error = %v", err)
+			}
+			if elapsed := time.Since(started); elapsed > 2*time.Second {
+				t.Fatalf("RunJob() took %s after step timeout", elapsed)
+			}
+		})
 	}
 }
 
