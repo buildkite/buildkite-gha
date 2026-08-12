@@ -7,8 +7,10 @@ The [GitHub Actions Buildkite plugin](https://github.com/buildkite-plugins/githu
 Install `buildkite-gha` with `mise` 2026.5.12 or newer:
 
 ```sh
-mise use -g github:buildkite/buildkite-gha
+mise use -g --minimum-release-age 0s github:buildkite/buildkite-gha
 ```
+
+The `--minimum-release-age 0s` override prevents mise's default 24-hour delay from selecting an older release without an artifact for your platform.
 
 Append `@<version>` to install an exact release. A custom importer that runs macOS jobs must also download and verify the same release's Darwin/arm64 distribution.
 
