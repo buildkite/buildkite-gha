@@ -2066,7 +2066,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		if len(annotation.args) != 9 || annotation.args[0] != "annotate" || annotation.args[2] != "job" || annotation.args[4] != cliTestJobID || !strings.HasPrefix(annotation.args[6], processingAnnotationContext+"-") || annotation.args[8] != "error" {
 			t.Fatalf("annotation args = %#v", annotation.args)
 		}
-		for _, want := range []string{"GitHub Actions workflow diagnostics", "E\\_EXPRESSION\\_INVALID", "resolved runner target is not admitted by policy", "job: test"} {
+		for _, want := range []string{"GitHub Actions workflow diagnostics", "E\\_EXPRESSION\\_INVALID", "resolved runner target is not admitted by policy", "job: test", "instance: gha-test"} {
 			if !strings.Contains(string(annotation.stdin), want) {
 				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
 			}

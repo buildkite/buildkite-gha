@@ -107,6 +107,10 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 			out.WriteString(" · job: ")
 			out.WriteString(markdownText(diagnostic.Job))
 		}
+		if diagnostic.Instance != "" {
+			out.WriteString(" · instance: ")
+			out.WriteString(markdownText(diagnostic.Instance))
+		}
 		if diagnostic.Action != "" {
 			out.WriteString(" · action: ")
 			out.WriteString(markdownText(diagnostic.Action))
