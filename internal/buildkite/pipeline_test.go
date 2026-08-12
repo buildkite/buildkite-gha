@@ -1624,7 +1624,7 @@ func TestWorkflowCommandAnnotationProofContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixtureText := string(fixture)
-	for _, fragment := range []string{"::warning title=Workflow warning", "::error title=Workflow error", "WORKFLOW_WARNING_OBSERVATION=stdout-with-location", "WORKFLOW_ERROR_OBSERVATION=stderr-outcome-neutral", "::add-mask::$canary", "workflow-command-secret"} {
+	for _, fragment := range []string{"::warning title=Deprecated command", "::error title=Invalid deployment target", "The save-state command is deprecated", "The deployment environment must be staging or production", "::warning title=Secret redaction", "Sensitive value redacted", "::add-mask::$canary", "workflow-command-secret"} {
 		if !strings.Contains(fixtureText, fragment) {
 			t.Fatalf("Workflow annotation fixture lacks %q: %s", fragment, fixture)
 		}

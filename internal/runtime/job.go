@@ -680,40 +680,17 @@ func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {
 		result.Summary = trimSensitiveSuffix(result.Summary, sensitiveValues)
 	}
 	result.Summary = finalizeJobSummary(result.Summary, result.summaryTruncated)
-	result.WarningAnnotations, result.warningsTruncated = scrubWorkflowCommandAnnotations(result.WarningAnnotations, result.warningsTruncated, sensitiveValues)
-	result.ErrorAnnotations, result.errorsTruncated = scrubWorkflowCommandAnnotations(result.ErrorAnnotations, result.errorsTruncated, sensitiveValues)
+	result.WarningAnnotations, result.warningsTruncated = finalizeWorkflowCommandAnnotations(result.WarningAnnotations, result.warningsTruncated)
+	result.ErrorAnnotations, result.errorsTruncated = finalizeWorkflowCommandAnnotations(result.ErrorAnnotations, result.errorsTruncated)
 	return result
 }
 
-func scrubWorkflowCommandAnnotations(value string, truncated bool, sensitiveValues []string) (string, bool) {
-	annotationSensitiveValues := make([]string, 0, len(sensitiveValues))
-	for _, sensitive := range sensitiveValues {
-		if sensitive == "" {
-			continue
-		}
-		// User-controlled annotation content is rendered through commandHTML.
-		// Scrubbing that same valid UTF-8 representation prevents invalid raw
-		// mask bytes from splitting a rendered multibyte rune.
-		annotationSensitiveValues = append(annotationSensitiveValues, commandHTML(sensitive))
-	}
-	sort.Slice(annotationSensitiveValues, func(i, j int) bool {
-		if len(annotationSensitiveValues[i]) != len(annotationSensitiveValues[j]) {
-			return len(annotationSensitiveValues[i]) > len(annotationSensitiveValues[j])
-		}
-		return annotationSensitiveValues[i] < annotationSensitiveValues[j]
-	})
-	for _, sensitive := range annotationSensitiveValues {
-		value = strings.ReplaceAll(value, sensitive, "***")
-		var bounded string
-		var boundedTruncated bool
-		appendBoundedText(&bounded, &boundedTruncated, value, truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
-		value, truncated = bounded, boundedTruncated
-	}
+func finalizeWorkflowCommandAnnotations(value string, truncated bool) (string, bool) {
 	var bounded string
 	var boundedTruncated bool
 	appendBoundedText(&bounded, &boundedTruncated, value, truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
 	if boundedTruncated {
-		bounded = trimSensitiveSuffix(bounded, annotationSensitiveValues) + workflowCommandTruncationNotice
+		bounded += workflowCommandTruncationNotice
 	}
 	return bounded, boundedTruncated
 }
