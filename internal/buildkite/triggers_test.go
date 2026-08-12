@@ -123,6 +123,27 @@ func TestTranslateEventTriggerConditionUsesSnapshotExpressions(t *testing.T) {
 	}
 }
 
+func TestTranslateEventTriggerConditionRejectsIncompletePullRequestSnapshot(t *testing.T) {
+	context := TriggerConditionContext{
+		EventPredicate:        "true",
+		PullRequestBaseBranch: `"main"`,
+		PullRequestAction:     "null",
+	}
+	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request"}}, "pull_request", context); err == nil || !strings.Contains(err.Error(), "payload.action") {
+		t.Fatalf("missing action error = %v", err)
+	}
+
+	context.PullRequestAction = `"opened"`
+	context.PullRequestBaseBranch = "null"
+	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request", Branches: []string{"main"}}}, "pull_request", context); err == nil || !strings.Contains(err.Error(), "payload.pull_request.base.ref") {
+		t.Fatalf("missing filtered base branch error = %v", err)
+	}
+
+	if _, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request"}}, "pull_request", context); err != nil || !applicable {
+		t.Fatalf("unfiltered pull request with omitted base branch = applicable %t, error %v", applicable, err)
+	}
+}
+
 func TestTriggerEventSkipReason(t *testing.T) {
 	triggers := []workflow.Trigger{
 		{Event: "push", Branches: []string{"main"}},

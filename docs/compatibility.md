@@ -63,7 +63,7 @@ Steps remain inside one job because they share a workspace, environment files, a
 
 Upload accepts either one literal, directory, or tracked workflow glob, or two or more explicit workflow path operands. Explicit lists require regular, tracked `.yml` or `.yaml` files inside the repository and reject directories, missing or untracked paths, other extensions, paths outside the repository, symlinks, and independent glob expansion. Canonical repository-relative paths are deduplicated and sorted before stable workflow identities and namespaced job keys are assigned.
 
-All applicable workflows compile into one artifact and pipeline transaction. Each becomes one aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. The label is static across events. The group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Each group depends on the importer, while its child jobs omit that redundant dependency and their own check notifications.
+All directly runnable workflows are represented in one artifact and pipeline transaction. Each becomes one aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. A workflow that does not declare it becomes a skipped group with an ignored placeholder and no plan artifacts. The label is static across events. The group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Each group depends on the importer, while its child jobs omit that redundant dependency and their own check notifications.
 
 Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. A parse, trigger, event, compilation, admission, artifact, or upload failure aborts the whole transaction; no partial pipeline is uploaded.
 
@@ -111,7 +111,7 @@ Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`,
 
 `paths` and `paths-ignore` are unsupported because Buildkite `if_changed` has different semantics. Unsupported trigger events, path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are fatal rather than approximated. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
 
-A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds without uploading a pipeline.
+A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by a skipped group. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with an ignored-only pipeline.
 
 ### Reusable workflows
 
@@ -729,6 +729,7 @@ buildkite-gha validate \
 The results mean:
 
 - **Compilable**: Syntax and the static job graph can be translated.
+- **Not applicable**: The workflow does not declare the selected event, so upload would skip it without compiling it.
 - **Admitted**: Resolved actions and generated plans pass production policy.
 - **Runtime-proven**: Repository tests or hosted evidence have executed the behavior.
 

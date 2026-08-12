@@ -1163,6 +1163,26 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if !ok {
 		return 1
 	}
+	if profile != "" {
+		parsed, parseErr := workflow.Parse(workflowPath, source)
+		effectiveEvent, eventErr := newEffectiveEvent(event, effectiveEventFromPath, os.Getenv)
+		if parseErr == nil && eventErr == nil && !parsed.ReusableOnly() {
+			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
+			if triggerErr != nil {
+				report := triggerFailureProcessingReport(workflowInput{Path: workflowPath, Source: source}, triggerErr)
+				_ = out.write(report)
+				return 1
+			}
+			if !selection.Applicable {
+				report := triggerProcessingReport(workflowPath, source)
+				report.Result = "not-applicable"
+				if out.write(report) != nil {
+					return 1
+				}
+				return 0
+			}
+		}
+	}
 	processingReport, ok := validatedProcessingReport(out, workflowPath, profile, source, event, eventPath != "")
 	if !ok {
 		return 1
@@ -1411,16 +1431,16 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		condition, applicable, triggerErr := buildkitepipeline.TranslateEventTriggerCondition(workflows[i].Triggers, effectiveEvent.Event.Event, effectiveEvent.TriggerContext)
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
 			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
 			_ = out.write(triggerFailureProcessingReport(workflows[i], triggerErr))
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
 			return 1
 		}
-		workflows[i].Applicable = applicable
-		workflows[i].TriggerCondition = condition
-		workflows[i].SkipReason = buildkitepipeline.TriggerEventSkipReason(workflows[i].Triggers, effectiveEvent.Event.Event)
+		workflows[i].Applicable = selection.Applicable
+		workflows[i].TriggerCondition = selection.Condition
+		workflows[i].SkipReason = selection.SkipReason
 	}
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
@@ -1692,17 +1712,34 @@ func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.Tri
 	if tag, ok := strings.CutPrefix(event.Ref, "refs/tags/"); ok {
 		context.Tag = triggerConditionLiteral(tag)
 	}
-	if action, ok := event.Payload["action"].(string); ok {
+	if action, ok := event.Payload["action"].(string); ok && strings.TrimSpace(action) != "" {
 		context.PullRequestAction = triggerConditionLiteral(action)
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
-			if branch, ok := base["ref"].(string); ok {
+			if branch, ok := base["ref"].(string); ok && strings.TrimSpace(branch) != "" {
 				context.PullRequestBaseBranch = triggerConditionLiteral(branch)
 			}
 		}
 	}
 	return context
+}
+
+type workflowTriggerSelection struct {
+	Condition, SkipReason string
+	Applicable            bool
+}
+
+func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSelection) (workflowTriggerSelection, error) {
+	condition, applicable, err := buildkitepipeline.TranslateEventTriggerCondition(triggers, event.Event.Event, event.TriggerContext)
+	if err != nil {
+		return workflowTriggerSelection{}, err
+	}
+	return workflowTriggerSelection{
+		Condition:  condition,
+		Applicable: applicable,
+		SkipReason: buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event),
+	}, nil
 }
 
 func triggerConditionLiteral(value string) string {
@@ -1711,8 +1748,15 @@ func triggerConditionLiteral(value string) string {
 }
 
 func triggerFailureProcessingReport(input workflowInput, err error) compatibility.ProcessingReport {
-	parsed, _ := compiler.ParseWorkflow(input.Path, input.Source)
-	report := compatibility.NewProcessingReport(input.Path, hostedTokenlessProfile)
+	report := triggerProcessingReport(input.Path, input.Source)
+	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
+	report.Result = "incompatible"
+	return report
+}
+
+func triggerProcessingReport(path string, source []byte) compatibility.ProcessingReport {
+	parsed, _ := compiler.ParseWorkflow(path, source)
+	report := compatibility.NewProcessingReport(path, hostedTokenlessProfile)
 	report.LogicalJobs = parsed.LogicalJobs
 	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
 	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
@@ -1722,8 +1766,6 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 			Location: &compatibility.SourceLocation{Path: job.Path, Line: job.Source.Start.Line, Column: job.Source.Start.Column},
 		})
 	}
-	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
-	report.Result = "incompatible"
 	return report
 }
 
