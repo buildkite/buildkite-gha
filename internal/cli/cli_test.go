@@ -2330,7 +2330,7 @@ func TestValidateHostedProfileRejectsProtectedCapabilityAfterCompile(t *testing.
 	}
 }
 
-func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) {
+func TestValidateHostedProfileRejectsWorkflowTokenWithoutExplicitRootPermissions(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "token.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -2342,14 +2342,14 @@ func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) 
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
-		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 	}
 	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Result != "admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
+	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, "compiler-verified workflow policy") {
 		t.Fatalf("profile report = %#v", report)
 	}
 }

@@ -944,7 +944,7 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	if job.Job.GitHubToken == nil || !reflect.DeepEqual(job.Job.GitHubToken.Permissions, map[string]string{"contents": "read"}) {
 		t.Fatalf("default GitHub workflow token plan = %#v", job.Job)
 	}
-	if !reflect.DeepEqual(job.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || job.Authorization.WorkflowTokenPolicyFilename != "workflow.yml" {
+	if !reflect.DeepEqual(job.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || job.Authorization.WorkflowTokenPolicyFilename != "" {
 		t.Fatalf("default token authorization = %#v", job.Authorization)
 	}
 }
