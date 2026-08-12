@@ -1670,7 +1670,7 @@ func renderWorkflowCommandListItem(command workflowCommandAnnotation) string {
 	if command.title != "" {
 		detail = "<strong>" + commandHTML(command.title) + ":</strong> " + detail
 	}
-	return "<div class=\"border-top py2\"><div>" + detail +
+	return "<div class=\"border-top border-silver py2\"><div>" + detail +
 		"</div><div class=\"mt1\">" + source + "</div></div>\n"
 }
 

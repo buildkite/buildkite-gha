@@ -3085,7 +3085,7 @@ func TestWorkflowCommandsProduceBoundedMaskedJobAnnotations(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n<div class=\"mb2\">", `<div class="border-top py2"><div><strong>Unsafe &lt;title&gt;:</strong> *** *** &lt;warning&gt;</div>`, `<div class="mt1"><code>cmd,main.go:12:3–12:5</code></div>`,
+		"<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n<div class=\"mb2\">", `<div class="border-top border-silver py2"><div><strong>Unsafe &lt;title&gt;:</strong> *** *** &lt;warning&gt;</div>`, `<div class="mt1"><code>cmd,main.go:12:3–12:5</code></div>`,
 	} {
 		if !strings.Contains(result.WarningAnnotations, fragment) {
 			t.Errorf("warning annotation lacks %q: %q", fragment, result.WarningAnnotations)
@@ -3121,7 +3121,7 @@ func TestWorkflowCommandAnnotationsGroupRowsByFile(t *testing.T) {
 	if truncated {
 		t.Fatal("small grouped annotation was truncated")
 	}
-	if first, second := strings.LastIndex(warnings, "first.go"), strings.Index(warnings, "second.go"); first < 0 || second < first || strings.Count(warnings, `class="border-top py2"`) != 4 {
+	if first, second := strings.LastIndex(warnings, "first.go"), strings.Index(warnings, "second.go"); first < 0 || second < first || strings.Count(warnings, `class="border-top border-silver py2"`) != 4 {
 		t.Fatalf("annotation did not retain row order within first-seen file groups: %q", warnings)
 	}
 	for _, item := range []string{
@@ -3373,8 +3373,8 @@ func TestWorkflowCommandAnnotationsAreConcurrentAndUTF8Bounded(t *testing.T) {
 	}
 	group.Wait()
 	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
-	if truncated || strings.Count(warnings, `class="border-top py2"`) != 100 {
-		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, `class="border-top py2"`), truncated)
+	if truncated || strings.Count(warnings, `class="border-top border-silver py2"`) != 100 {
+		t.Fatalf("concurrent warning annotation count = %d, truncated = %v", strings.Count(warnings, `class="border-top border-silver py2"`), truncated)
 	}
 
 	processor = newCommandProcessor(io.Discard, io.Discard)
@@ -3427,7 +3427,7 @@ func TestWorkflowCommandMasksCannotCorruptAnnotationMarkup(t *testing.T) {
 	if truncated || !strings.Contains(warnings, `<div class="mt1"><code>***.go</code></div>`) || !strings.Contains(warnings, "<div><strong>***:</strong> s***uctured *** text</div>") {
 		t.Fatalf("masked warning annotation = %q, truncated = %v", warnings, truncated)
 	}
-	if strings.Count(warnings, `class="border-top py2"`) != 1 || strings.Count(warnings, "<div") != strings.Count(warnings, "</div>") {
+	if strings.Count(warnings, `class="border-top border-silver py2"`) != 1 || strings.Count(warnings, "<div") != strings.Count(warnings, "</div>") {
 		t.Fatalf("masks corrupted annotation markup: %q", warnings)
 	}
 }
@@ -3440,8 +3440,8 @@ func TestWorkflowCommandAnnotationsRemainBoundedAfterMaskExpansion(t *testing.T)
 	_ = processor.process(io.Discard, "::add-mask::x")
 
 	warnings, truncated, _, _ := processor.workflowCommandAnnotations()
-	if !truncated || strings.Contains(warnings, strings.Repeat("x", 100)) || !strings.HasSuffix(warnings, workflowCommandListEnd) || strings.Count(warnings, `class="border-top py2"`)*3+1 != strings.Count(warnings, "</div>") {
-		t.Fatalf("expanded warning annotation bytes = %d, items = %d, closing divs = %d, truncated = %v", len(warnings), strings.Count(warnings, `class="border-top py2"`), strings.Count(warnings, "</div>"), truncated)
+	if !truncated || strings.Contains(warnings, strings.Repeat("x", 100)) || !strings.HasSuffix(warnings, workflowCommandListEnd) || strings.Count(warnings, `class="border-top border-silver py2"`)*3+1 != strings.Count(warnings, "</div>") {
+		t.Fatalf("expanded warning annotation bytes = %d, items = %d, closing divs = %d, truncated = %v", len(warnings), strings.Count(warnings, `class="border-top border-silver py2"`), strings.Count(warnings, "</div>"), truncated)
 	}
 	result := scrubJobResult(JobResult{WarningAnnotations: warnings, warningsTruncated: truncated}, processor.maskValues())
 	if len(result.WarningAnnotations) > maxJobAnnotationBytes || !utf8.ValidString(result.WarningAnnotations) || !strings.HasSuffix(result.WarningAnnotations, workflowCommandTruncationNotice) {
