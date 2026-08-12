@@ -70,8 +70,8 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"prefix-${{ github.actor }}-${{ matrix.version }}",
 	} {
 		t.Run(template, func(t *testing.T) {
-			if err := ValidateRuntimeTemplate(template); err != nil {
-				t.Fatalf("ValidateRuntimeTemplate(%q) error = %v", template, err)
+			if err := validateRuntimeTemplate(template); err != nil {
+				t.Fatalf("validateRuntimeTemplate(%q) error = %v", template, err)
 			}
 		})
 	}
@@ -88,9 +88,9 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		{template: "${{ true || }}", want: "invalid expression"},
 	} {
 		t.Run(test.template, func(t *testing.T) {
-			err := ValidateRuntimeTemplate(test.template)
+			err := validateRuntimeTemplate(test.template)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("ValidateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
+				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
 		})
 	}

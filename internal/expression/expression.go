@@ -147,11 +147,11 @@ func ReferencePath(text string) (string, []string, error) {
 	return referencePath(node)
 }
 
-// ValidateRuntimeTemplate verifies that every expression in a runtime template
+// validateRuntimeTemplate verifies that every expression in a runtime template
 // is one direct reference supported by Evaluate. Runtime values are
 // deliberately not resolved because many contexts do not exist until a job or
 // step runs.
-func ValidateRuntimeTemplate(template string) error {
+func validateRuntimeTemplate(template string) error {
 	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
 		root, path, err := referencePath(node)
 		if err != nil {
