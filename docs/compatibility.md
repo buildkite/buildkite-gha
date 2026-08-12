@@ -34,7 +34,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and the runtime-only macOS path; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
-| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
+| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Workflows containing reusable-workflow jobs cannot receive one. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🚧 Not available in production | Production upload rejects ordinary secret requirements. |
 | [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
 | [Environments and snapshots](#job-configuration) | ➖ Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
@@ -131,6 +131,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 - Remote or dynamic workflow paths.
 - Call-level `if`.
+- Token requests from any direct or expanded job in a workflow containing a reusable-workflow call.
 - Explicit secret mappings or required called-workflow secrets.
 - Dynamic inputs or matrices.
 - Literal or compound output expressions.
@@ -642,7 +643,9 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, declare an explicit non-empty top-level permission map, and contain no job-level permission maps or reusable-workflow jobs.
 
-Pull-request builds and their triggered or rebuilt descendants may request only `contents: read`. Merge-queue builds and their descendants cannot request a token. The backend verifies this provenance and remains authoritative.
+If the selected workflow contains a reusable-workflow job, no direct or expanded job can receive a token. This includes `actions/checkout` in a called workflow when its effective `token` input defaults to `${{ github.token }}`. Tokenless local reusable workflows remain supported.
+
+Pull-request builds and their triggered or rebuilt descendants may request only `contents: read`. Merge-queue builds and their descendants cannot request a token. The endpoint does not support GitHub Enterprise Server. The backend verifies this provenance and remains authoritative.
 
 A job can request read-only repository access:
 
