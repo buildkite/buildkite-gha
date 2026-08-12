@@ -708,21 +708,24 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	type pipelineStep struct {
+		Group            string            `yaml:"group"`
+		Key              string            `yaml:"key"`
+		Command          string            `yaml:"command"`
+		If               string            `yaml:"if"`
+		Env              map[string]string `yaml:"env"`
+		TimeoutInMinutes int               `yaml:"timeout_in_minutes"`
+		Agents           struct {
+			Queue string `yaml:"queue"`
+		} `yaml:"agents"`
+		Steps []pipelineStep `yaml:"steps"`
+	}
 	var document struct {
 		Env    map[string]string `yaml:"env"`
 		Agents struct {
 			Queue string `yaml:"queue"`
 		} `yaml:"agents"`
-		Steps []struct {
-			Key              string            `yaml:"key"`
-			Command          string            `yaml:"command"`
-			If               string            `yaml:"if"`
-			Env              map[string]string `yaml:"env"`
-			TimeoutInMinutes int               `yaml:"timeout_in_minutes"`
-			Agents           struct {
-				Queue string `yaml:"queue"`
-			} `yaml:"agents"`
-		} `yaml:"steps"`
+		Steps []pipelineStep `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		t.Fatalf("parse default pipeline: %v", err)
@@ -740,19 +743,35 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		timeoutInMinutes int
 		queue            string
 	}, len(document.Steps))
-	for _, step := range document.Steps {
-		if step.Key != "" {
-			if _, exists := steps[step.Key]; exists {
-				t.Fatalf("default pipeline repeats step key %q", step.Key)
+	groups := make(map[string][]string)
+	var collectSteps func([]pipelineStep, string)
+	collectSteps = func(pipelineSteps []pipelineStep, group string) {
+		for _, step := range pipelineSteps {
+			if step.Group != "" {
+				collectSteps(step.Steps, step.Key)
+				continue
 			}
+			if step.Key != "" {
+				if _, exists := steps[step.Key]; exists {
+					t.Fatalf("default pipeline repeats step key %q", step.Key)
+				}
+				groups[group] = append(groups[group], step.Key)
+			}
+			steps[step.Key] = struct {
+				command          string
+				condition        string
+				environment      map[string]string
+				timeoutInMinutes int
+				queue            string
+			}{command: step.Command, condition: step.If, environment: step.Env, timeoutInMinutes: step.TimeoutInMinutes, queue: step.Agents.Queue}
 		}
-		steps[step.Key] = struct {
-			command          string
-			condition        string
-			environment      map[string]string
-			timeoutInMinutes int
-			queue            string
-		}{command: step.Command, condition: step.If, environment: step.Env, timeoutInMinutes: step.TimeoutInMinutes, queue: step.Agents.Queue}
+	}
+	collectSteps(document.Steps, "")
+	if got, want := fmt.Sprint(groups["on-demand-suites"]), fmt.Sprint([]string{"compatibility-proof-loader", "plugin-demo-loader", "hosted-smoke-loader"}); got != want {
+		t.Fatalf("on-demand suite steps = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprint(groups["ci"]), fmt.Sprint([]string{"checks", "macos-arm64", "starter-workflows-corpus", "plugin-source-smoke-importer"}); got != want {
+		t.Fatalf("CI steps = %s, want %s", got, want)
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
@@ -796,41 +815,28 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	if strings.Contains(pluginDemo.command, "BUILDKITE_GHA_CACHE_URL") {
 		t.Fatalf("released plugin demo loader still requires a cache Results URL:\n%s", pluginDemo.command)
 	}
-	if got := steps["plugin-source-smoke-importer"]; got.condition != `build.env("DEMO_SUITE") != "plugin"` || got.command != "mise exec -- go run ./cmd/buildkite-gha plugin" || got.environment["BUILDKITE_PLUGIN_CONFIGURATION"] != `{"workflow":".github/workflows/example-basic.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}` {
+	if got := steps["plugin-source-smoke-importer"]; got.condition != `build.env("DEMO_SUITE") != "plugin"` || got.command != "mise exec -- go run ./cmd/buildkite-gha plugin" || got.environment["BUILDKITE_PLUGIN_CONFIGURATION"] != `{"workflow":"testdata/smoke/.github/workflows/shell.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}` {
 		t.Fatalf("exact-source plugin smoke = %#v", got)
+	}
+	if got := steps["starter-workflows-corpus"]; got.condition != `build.branch == pipeline.default_branch` {
+		t.Fatalf("starter workflow corpus = %#v", got)
 	}
 	if got := steps["publish-release"]; got.command != "mise exec -- scripts/ci-buildkite-release" || got.condition != "build.tag != null" {
 		t.Fatalf("release publisher = %#v", got)
 	}
-	if got := steps["shell-upload-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Shell upload upload loader = %#v", got)
+	proofLoader := steps["compatibility-proof-loader"]
+	if proofLoader.condition != `build.env("COMPATIBILITY_PROOF") != null && build.env("SMOKE_PROBE") != "hosted"` {
+		t.Fatalf("compatibility proof loader = %#v", proofLoader)
 	}
-	if got := steps["concurrent-steps-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "concurrent-steps" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Concurrent steps upload loader = %#v", got)
+	for _, proof := range []string{"shell-upload", "concurrent-steps", "public-actions", "hosted-docker", "dockerfile-action", "container-runtime", "summary-annotation", "workflow-annotations", "upload-artifact", "artifact-roundtrip"} {
+		if !strings.Contains(proofLoader.command, proof) {
+			t.Fatalf("compatibility proof loader lacks %q:\n%s", proof, proofLoader.command)
+		}
 	}
-	if got := steps["public-actions-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "public-actions" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Public actions upload loader = %#v", got)
-	}
-	if got := steps["hosted-docker-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "hosted-docker" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Hosted Docker loader = %#v", got)
-	}
-	if got := steps["dockerfile-action-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "dockerfile-action" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Dockerfile action loader = %#v", got)
-	}
-	if got := steps["container-runtime-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "container-runtime" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Container runtime loader = %#v", got)
-	}
-	if got := steps["summary-annotation-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "summary-annotation" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Summary annotation annotation loader = %#v", got)
-	}
-	if got := steps["workflow-annotations-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "workflow-annotations" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Workflow command annotation loader = %#v", got)
-	}
-	if got := steps["upload-artifact-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Upload-artifact loader = %#v", got)
-	}
-	if got := steps["artifact-roundtrip-loader"]; got.command != "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml" || got.condition != `build.env("COMPATIBILITY_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"` {
-		t.Fatalf("Artifact roundtrip loader = %#v", got)
+	for _, required := range []string{`proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"`, `buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"`, "Unknown compatibility proof"} {
+		if !strings.Contains(proofLoader.command, required) {
+			t.Fatalf("compatibility proof loader lacks %q:\n%s", required, proofLoader.command)
+		}
 	}
 	hosted := steps["hosted-smoke-loader"]
 	if hosted.condition != `build.env("SMOKE_PROBE") == "hosted"` {
