@@ -112,7 +112,7 @@ func TestValidateDockerEntrypoints(t *testing.T) {
 func TestLoadIsStrictAndConfined(t *testing.T) {
 	t.Run("official declarative fields", func(t *testing.T) {
 		root := t.TempDir()
-		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\nauthor: GitHub\ninputs:\n  version:\n    deprecationMessage: Use version-file instead\nbranding:\n  icon: package\n  color: blue\nruns:\n  using: node24\n  main: dist/index.js\n")
+		writeAction(t, root, "action.yml", "name: Setup tool\ndescription: Installs a tool\ndeprecationMessage: Use setup-tool v2 instead\nauthor: GitHub\ninputs:\n  version:\n    deprecationMessage: Use version-file instead\n    type: string\nbranding:\n  icon: package\n  color: blue\nruns:\n  using: node24\n  main: dist/index.js\n")
 		action, err := Load(root, ".")
 		if err != nil {
 			t.Fatal(err)
@@ -120,8 +120,14 @@ func TestLoadIsStrictAndConfined(t *testing.T) {
 		if action.Author != "GitHub" {
 			t.Fatalf("Load() author = %q, want GitHub", action.Author)
 		}
+		if action.DeprecationMessage != "Use setup-tool v2 instead" {
+			t.Fatalf("Load() deprecation message = %q", action.DeprecationMessage)
+		}
 		if action.Inputs["version"].DeprecationMessage != "Use version-file instead" {
 			t.Fatalf("Load() deprecation message = %q", action.Inputs["version"].DeprecationMessage)
+		}
+		if action.Inputs["version"].Type != "string" {
+			t.Fatalf("Load() input type = %q", action.Inputs["version"].Type)
 		}
 		if action.Branding.Icon != "package" || action.Branding.Color != "blue" {
 			t.Fatalf("Load() branding = %#v", action.Branding)
