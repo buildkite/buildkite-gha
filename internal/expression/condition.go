@@ -386,14 +386,14 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
 	}
+	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
+		return false, nil
+	}
 	value, err := evaluateConditionNode(node, context)
 	if err != nil {
 		return false, err
 	}
 	result := conditionTruthy(value)
-	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
-		return false, nil
-	}
 	return result, nil
 }
 

@@ -698,6 +698,13 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
 	}
+	hashCalled := false
+	if got, err := EvaluateCondition("hashFiles('**') != ''", ConditionContext{Unsuccessful: true, HashFiles: func([]string) (string, error) {
+		hashCalled = true
+		return "digest", nil
+	}}); err != nil || got || hashCalled {
+		t.Fatalf("implicit success guard = %v, %v, hash called %v; want false, nil, false", got, err, hashCalled)
+	}
 	if _, err := EvaluateCondition("needs.missing.result", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted an unavailable need result")
 	}

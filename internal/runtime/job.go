@@ -486,6 +486,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			preEval := cloneExpressionContext(eval)
 			bindHashFilesContext(preCtx, &preEval)
+			wasUnsuccessful := preStatus.unsuccessful
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
@@ -496,6 +497,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				preFailures[stepIndex] = execution
 				if execution.conclusion != "success" {
 					preStatus.unsuccessful = true
+				} else {
+					preStatus.unsuccessful = wasUnsuccessful
 				}
 				cancelPre()
 				continue
@@ -542,6 +545,17 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 		if execution, ok := preFailures[stepIndex]; ok {
 			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
+		}
+		referencesStatus, err := expression.ReferencesStatusFunction(step.Condition)
+		if err != nil {
+			execution := classifyStepExecution(ctx, runCtx, step, newResult(), fmt.Errorf("condition: %w", err))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
+		}
+		if !referencesStatus && (runErr != nil || runCtx.Err() != nil) {
+			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
+			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
 

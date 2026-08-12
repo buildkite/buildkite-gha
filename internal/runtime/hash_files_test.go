@@ -437,6 +437,36 @@ func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
 	}
 }
 
+func TestHashFilesSkippedStepsDoNotAccessWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: skipped hashFiles\n")
+	writeFixtureFile(t, workspace, "target", "value")
+	if err := os.Symlink("target", filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	envMarker := filepath.Join(workspace, "env-ran")
+	conditionMarker := filepath.Join(workspace, "condition-ran")
+	cleanupMarker := filepath.Join(workspace, "cleaned")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "fails", Kind: "run", Shell: "sh", Command: "exit 1"},
+		{ID: "env", Kind: "run", Shell: "sh", Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "touch " + envMarker},
+		{ID: "condition", Kind: "run", Shell: "sh", Condition: "hashFiles('link') != ''", Command: "touch " + conditionMarker},
+		{ID: "cleanup", Kind: "run", Shell: "sh", Condition: "always()", Command: "touch " + cleanupMarker},
+	})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	for _, marker := range []string{envMarker, conditionMarker} {
+		if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("skipped step marker %q stat error = %v", marker, statErr)
+		}
+	}
+	if _, err := os.Stat(cleanupMarker); err != nil {
+		t.Fatalf("cleanup did not run: %v", err)
+	}
+}
+
 func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
