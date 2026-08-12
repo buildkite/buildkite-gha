@@ -28,13 +28,14 @@ const (
 )
 
 type hashFilesLimits struct {
-	patterns          int
-	patternBytes      int
-	totalPatternBytes int
-	matches           int
-	bytes             int64
-	entries           int
-	beforeOpen        func(string)
+	patterns            int
+	patternBytes        int
+	totalPatternBytes   int
+	matches             int
+	bytes               int64
+	entries             int
+	beforeOpen          func(string)
+	beforeDirectoryOpen func(string)
 }
 
 var defaultHashFilesLimits = hashFilesLimits{
@@ -74,7 +75,8 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		return "", err
 	}
 	var selected []string
-	err = walkHashFilesRoot(ctx, root, limits.entries, func(name string, entry fs.DirEntry) error {
+	directories := make(map[string]fs.FileInfo)
+	err = walkHashFilesRoot(ctx, root, limits.entries, limits.beforeDirectoryOpen, directories, func(name string, entry fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -125,6 +127,9 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		if err := verifyHashFileDirectories(root, directories, name); err != nil {
+			return "", err
+		}
 		before, err := root.Lstat(name)
 		if err != nil {
 			return "", fmt.Errorf("inspect hashFiles match %q: %w", name, err)
@@ -169,10 +174,13 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		total += read
 		_, _ = combined.Write(fileHash.Sum(nil))
 	}
+	if err := verifyHashFileDirectories(root, directories, ""); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(combined.Sum(nil)), nil
 }
 
-func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, visit func(string, fs.DirEntry) error) error {
+func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen func(string), directories map[string]fs.FileInfo, visit func(string, fs.DirEntry) error) error {
 	const readBatch = 256
 	entriesRead := 0
 	var walk func(string) error
@@ -180,9 +188,24 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, visit func
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		before, err := root.Lstat(directory)
+		if err != nil {
+			return fmt.Errorf("inspect hashFiles directory %q: %w", directory, err)
+		}
+		if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+			return fmt.Errorf("hashFiles directory %q changed before traversal", directory)
+		}
+		if beforeOpen != nil {
+			beforeOpen(directory)
+		}
 		handle, err := root.Open(directory)
 		if err != nil {
 			return fmt.Errorf("open hashFiles directory %q: %w", directory, err)
+		}
+		opened, err := handle.Stat()
+		if err != nil || !opened.IsDir() || !os.SameFile(before, opened) {
+			_ = handle.Close()
+			return fmt.Errorf("hashFiles directory %q changed before traversal", directory)
 		}
 		var entries []fs.DirEntry
 		for {
@@ -207,6 +230,11 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, visit func
 		if err := handle.Close(); err != nil {
 			return fmt.Errorf("close hashFiles directory %q: %w", directory, err)
 		}
+		after, err := root.Lstat(directory)
+		if err != nil || !sameHashFileInfo(before, after) {
+			return fmt.Errorf("hashFiles directory %q changed during traversal", directory)
+		}
+		directories[directory] = before
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 		for _, entry := range entries {
 			name := path.Join(directory, entry.Name())
@@ -222,6 +250,35 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, visit func
 		return nil
 	}
 	return walk(".")
+}
+
+func verifyHashFileDirectories(root *os.Root, directories map[string]fs.FileInfo, name string) error {
+	if name == "" {
+		for directory, before := range directories {
+			after, err := root.Lstat(directory)
+			if err != nil || !sameHashFileInfo(before, after) {
+				return fmt.Errorf("hashFiles directory %q changed after traversal", directory)
+			}
+		}
+		return nil
+	}
+	for directory := path.Dir(name); ; directory = path.Dir(directory) {
+		before, ok := directories[directory]
+		if !ok {
+			return fmt.Errorf("hashFiles directory %q was not traversed", directory)
+		}
+		after, err := root.Lstat(directory)
+		if err != nil || !sameHashFileInfo(before, after) {
+			return fmt.Errorf("hashFiles directory %q changed after traversal", directory)
+		}
+		if directory == "." {
+			return nil
+		}
+	}
+}
+
+func sameHashFileInfo(before, after fs.FileInfo) bool {
+	return after != nil && os.SameFile(before, after) && before.Mode() == after.Mode() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
 }
 
 func copyHashFile(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {

@@ -301,6 +301,29 @@ func TestHashWorkspaceFilesDetectsMutationAndCancellation(t *testing.T) {
 	}
 }
 
+func TestHashWorkspaceFilesDetectsDirectoryReplacementBeforeTraversal(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "original")
+	writeFixtureFile(t, workspace, "target/value", "replacement")
+	limits := defaultHashFilesLimits
+	replaced := false
+	limits.beforeDirectoryOpen = func(name string) {
+		if name != "nested" || replaced {
+			return
+		}
+		replaced = true
+		if err := os.Rename(filepath.Join(workspace, "nested"), filepath.Join(workspace, "moved")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target", filepath.Join(workspace, "nested")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	if _, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"nested/**"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed before traversal") {
+		t.Fatalf("directory replacement error = %v", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string
