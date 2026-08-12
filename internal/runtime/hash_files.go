@@ -314,7 +314,7 @@ func verifyHashFileDirectories(root *os.Root, directories map[string]fs.FileInfo
 }
 
 func sameHashFileInfo(before, after fs.FileInfo) bool {
-	return after != nil && os.SameFile(before, after) && before.Mode() == after.Mode() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+	return after != nil && after.IsDir() && os.SameFile(before, after) && before.Mode() == after.Mode()
 }
 
 func copyHashFile(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
