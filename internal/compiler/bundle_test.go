@@ -779,6 +779,161 @@ jobs:
 	}
 }
 
+func TestCompileBundleEmitsPerConcreteJobAuthorization(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+  tokenless:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  concrete:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := make(map[string]buildkitepipeline.Job, len(bundle.GeneratedWorkflow.Jobs))
+	for _, job := range bundle.GeneratedWorkflow.Jobs {
+		jobs[job.Key] = job
+	}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.GitHubToken != nil && artifact.Authorization.WorkflowTokenPolicyFilename != "caller.yml" {
+			t.Fatalf("token job %q policy evidence = %#v", artifact.Job.Workflow.LogicalJobID, artifact.Authorization)
+		}
+	}
+	direct := jobs["gha-direct"]
+	if direct.Authorization == nil || !reflect.DeepEqual(direct.Authorization.WorkflowJobs, []buildkitepipeline.WorkflowJob{{Workflow: "caller.yml", Job: "direct"}}) {
+		t.Fatalf("direct sibling authorization = %#v", direct.Authorization)
+	}
+	delegated := jobs["gha-delegated-concrete"]
+	if delegated.Authorization == nil || !reflect.DeepEqual(delegated.Authorization.WorkflowJobs, []buildkitepipeline.WorkflowJob{{Workflow: "caller.yml", Job: "delegated"}, {Workflow: "leaf.yml", Job: "concrete"}}) {
+		t.Fatalf("delegated authorization = %#v", delegated.Authorization)
+	}
+	if jobs["gha-tokenless"].Authorization != nil || strings.Count(string(bundle.Pipeline), "BUILDKITE_GHA_JOB_AUTHORIZATION") != 2 {
+		t.Fatalf("tokenless job received metadata or token job metadata is missing:\n%s", bundle.Pipeline)
+	}
+}
+
+func TestCompileBundleEmitsDistinctReusableCallerAuthorizations(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  read_call:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/leaf.yml
+  write_call:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  concrete:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ secrets.GITHUB_TOKEN }}'
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.GeneratedWorkflow.Jobs) != 2 {
+		t.Fatalf("generated jobs = %#v", bundle.GeneratedWorkflow.Jobs)
+	}
+	byKey := make(map[string]buildkitepipeline.Job, 2)
+	for _, job := range bundle.GeneratedWorkflow.Jobs {
+		byKey[job.Key] = job
+	}
+	readJob, writeJob := byKey["gha-read_call-concrete"], byKey["gha-write_call-concrete"]
+	if readJob.Authorization == nil || writeJob.Authorization == nil {
+		t.Fatalf("authorizations = read %#v, write %#v", readJob.Authorization, writeJob.Authorization)
+	}
+	if !reflect.DeepEqual(readJob.Authorization.Permissions, map[string]string{"contents": "read"}) || !reflect.DeepEqual(writeJob.Authorization.Permissions, map[string]string{"contents": "write"}) {
+		t.Fatalf("authorization permissions = read %#v, write %#v", readJob.Authorization.Permissions, writeJob.Authorization.Permissions)
+	}
+	if readJob.PlanDigest == writeJob.PlanDigest || reflect.DeepEqual(readJob.Authorization.WorkflowJobs, writeJob.Authorization.WorkflowJobs) {
+		t.Fatalf("sibling caller authorizations were not distinct: read %#v, write %#v", readJob, writeJob)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key string            `yaml:"key"`
+			Env map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	manifests := make(map[string]string, len(pipeline.Steps))
+	for _, step := range pipeline.Steps {
+		manifests[step.Key] = step.Env["BUILDKITE_GHA_JOB_AUTHORIZATION"]
+	}
+	if manifests[readJob.Key] == "" || manifests[writeJob.Key] == "" || manifests[readJob.Key] == manifests[writeJob.Key] {
+		t.Fatalf("sibling caller manifests = %#v", manifests)
+	}
+}
+
+func TestCompileBundleFindsNestedCompositeTokenInReusableJob(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: read
+jobs:
+  delegated:
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
+jobs:
+  concrete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/outer
+`)
+	writeAction(t, repository, ".github/actions/outer", `inputs: {}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/inner
+`)
+	writeAction(t, repository, ".github/actions/inner", `inputs:
+  github_token:
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: sh
+      run: true
+`)
+	bundle, err := CompileBundle(caller, readFile(t, caller), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken == nil || len(bundle.GeneratedWorkflow.Jobs) != 1 || bundle.GeneratedWorkflow.Jobs[0].Authorization == nil {
+		t.Fatalf("nested composite token authorization = plans %#v, jobs %#v", bundle.Plans, bundle.GeneratedWorkflow.Jobs)
+	}
+	if got := bundle.GeneratedWorkflow.Jobs[0].Authorization.WorkflowJobs; !reflect.DeepEqual(got, []buildkitepipeline.WorkflowJob{{Workflow: "caller.yml", Job: "delegated"}, {Workflow: "leaf.yml", Job: "concrete"}}) {
+		t.Fatalf("nested composite workflow chain = %#v", got)
+	}
+}
+
 func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) {
 	source := []byte("on: push\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
 	bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
@@ -789,8 +944,23 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	if job.Job.GitHubToken == nil || !reflect.DeepEqual(job.Job.GitHubToken.Permissions, map[string]string{"contents": "read"}) {
 		t.Fatalf("default GitHub workflow token plan = %#v", job.Job)
 	}
-	if !reflect.DeepEqual(job.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || job.Authorization.WorkflowTokenPolicyFilename != "workflow.yml" {
+	if !reflect.DeepEqual(job.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || job.Authorization.WorkflowTokenPolicyFilename != "" {
 		t.Fatalf("default token authorization = %#v", job.Authorization)
+	}
+}
+
+func TestCompileBundleGitHubTokenOmitsNonePermissions(t *testing.T) {
+	source := []byte("on: push\npermissions:\n  contents: read\n  issues: none\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"contents": "read"}
+	if got := bundle.Plans[0].Job.GitHubToken.Permissions; !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed GitHub workflow token permissions = %#v, want %#v", got, want)
+	}
+	if strings.Contains(string(bundle.Pipeline), `"issues":"none"`) {
+		t.Fatalf("pipeline authorization retained inactive permission:\n%s", bundle.Pipeline)
 	}
 }
 

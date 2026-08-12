@@ -21,23 +21,34 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
-func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
+func TestEffectiveReusablePermissionsRejectElevationAboveCallerAuthority(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 2, Column: 1}}
 	caller := &workflow.Permissions{Scopes: map[string]string{"contents": "read", "pull-requests": "write"}, Span: span}
-	callee := &workflow.Permissions{Scopes: map[string]string{"contents": "write", "issues": "write", "pull-requests": "read"}, Span: span}
-	if inherited := effectivePermissions(nil, nil, nil, false); !reflect.DeepEqual(inherited.Scopes, map[string]string{"contents": "read"}) {
+	callee := &workflow.Permissions{Scopes: map[string]string{"contents": "read", "pull-requests": "read"}, Span: span}
+	if inherited, err := effectivePermissions(nil, nil, nil, false); err != nil || !reflect.DeepEqual(inherited.Scopes, map[string]string{"contents": "read"}) {
 		t.Fatalf("root default permissions = %#v", inherited)
 	}
-	effective := effectivePermissions(callee, nil, caller, true)
+	effective, err := effectivePermissions(callee, nil, caller, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]string{"contents": "read", "pull-requests": "read"}
 	if !reflect.DeepEqual(effective.Scopes, want) {
 		t.Fatalf("effective permissions = %#v, want %#v", effective.Scopes, want)
 	}
-	if inherited := effectivePermissions(nil, nil, caller, true); !reflect.DeepEqual(inherited.Scopes, caller.Scopes) || inherited == caller {
+	if inherited, err := effectivePermissions(nil, nil, caller, true); err != nil || !reflect.DeepEqual(inherited.Scopes, caller.Scopes) || inherited == caller {
 		t.Fatalf("inherited permissions = %#v, want independent copy of %#v", inherited, caller)
 	}
-	if unbounded := effectivePermissions(callee, caller, nil, false); !reflect.DeepEqual(unbounded.Scopes, callee.Scopes) {
+	if unbounded, err := effectivePermissions(callee, caller, nil, false); err != nil || !reflect.DeepEqual(unbounded.Scopes, callee.Scopes) {
 		t.Fatalf("root job permissions = %#v, want job replacement %#v", unbounded, callee)
+	}
+	for _, elevated := range []*workflow.Permissions{
+		{Scopes: map[string]string{"contents": "write"}, Span: span},
+		{Scopes: map[string]string{"issues": "read"}, Span: span},
+	} {
+		if _, err := effectivePermissions(elevated, nil, caller, true); err == nil || !strings.Contains(err.Error(), "elevates") {
+			t.Fatalf("effectivePermissions(%#v) error = %v, want elevation rejection", elevated.Scopes, err)
+		}
 	}
 }
 
@@ -54,7 +65,7 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "omitted top-level permissions", path: ".github/workflows/ci.yml", want: "ci.yml",
+			name: "omitted top-level permissions", path: ".github/workflows/ci.yml", diagnostic: "explicit non-empty",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
@@ -66,11 +77,11 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 			source: "on: push\npermissions:\n  contents: none\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "job permissions", path: ".github/workflows/ci.yml", diagnostic: "job-level",
+			name: "job permissions", path: ".github/workflows/ci.yml", want: "ci.yml",
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		},
 		{
-			name: "reusable workflow", path: ".github/workflows/ci.yml", diagnostic: "reusable-workflow",
+			name: "reusable workflow", path: ".github/workflows/ci.yml", want: "ci.yml",
 			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    uses: ./.github/workflows/reusable.yml\n",
 		},
 		{
@@ -95,18 +106,18 @@ func TestWorkflowTokenPolicyEvidence(t *testing.T) {
 	}
 }
 
-func TestCompilePlansBoundsNestedReusableWorkflowDefaultPermissions(t *testing.T) {
+func TestCompilePlansRejectNestedReusableWorkflowPermissionElevation(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
   delegated:
+    permissions:
+      contents: read
     uses: ./.github/workflows/middle.yml
 `)
 	writeWorkflow(t, repository, "middle.yml", `on: workflow_call
 permissions:
   contents: write
-  issues: write
-  packages: read
 jobs:
   delegated:
     uses: ./.github/workflows/leaf.yml
@@ -119,12 +130,41 @@ jobs:
       - run: test -n '${{ secrets.GITHUB_TOKEN }}'
 `)
 
-	plans, err := compileUntrustedPlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	_, err := compileUntrustedPlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err == nil || !strings.Contains(err.Error(), `permission "contents" elevates from read to write`) {
+		t.Fatalf("nested reusable permission elevation error = %v", err)
+	}
+
+	allowedRepository := t.TempDir()
+	allowedCaller := writeWorkflow(t, allowedRepository, "caller.yml", `on: push
+jobs:
+  delegated:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/middle.yml
+`)
+	writeWorkflow(t, allowedRepository, "middle.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  delegated:
+    permissions:
+      contents: write
+    uses: ./.github/workflows/leaf.yml
+`)
+	writeWorkflow(t, allowedRepository, "leaf.yml", `on: workflow_call
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n '${{ secrets.GITHUB_TOKEN }}'
+`)
+	plans, err := compileUntrustedPlans(allowedCaller, readFile(t, allowedCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "read"}) {
-		t.Fatalf("nested reusable token plan = %#v", plans)
+	if len(plans) != 1 || plans[0].GitHubToken == nil || !reflect.DeepEqual(plans[0].GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+		t.Fatalf("nested reusable job permission replacement = %#v", plans)
 	}
 
 	emptyRepository := t.TempDir()
@@ -1321,6 +1361,40 @@ func TestCompileRejectsReusableWorkflowCyclesAndDepthOverflow(t *testing.T) {
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds maximum depth %d", maxReusableWorkflowDepth)) {
 			t.Fatalf("Compile() error = %v, want explicit depth limit", err)
+		}
+	})
+
+	t.Run("maximum authorization chain", func(t *testing.T) {
+		repository := t.TempDir()
+		for i := 0; i < maxReusableWorkflowDepth; i++ {
+			on := "workflow_call"
+			permissions := ""
+			if i == 0 {
+				on = "push"
+				permissions = "permissions:\n  contents: read\n"
+			}
+			writeWorkflow(t, repository, fmt.Sprintf("%d.yml", i), fmt.Sprintf("on: %s\n%sjobs:\n  call_%d:\n    uses: ./.github/workflows/%d.yml\n", on, permissions, i, i+1))
+		}
+		writeWorkflow(t, repository, fmt.Sprintf("%d.yml", maxReusableWorkflowDepth), "on: workflow_call\njobs:\n  concrete:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+		path := filepath.Join(repository, ".github", "workflows", "0.yml")
+		bundle, err := CompileBundle(path, readFile(t, path), pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-importer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bundle.GeneratedWorkflow.Jobs) != 1 || bundle.GeneratedWorkflow.Jobs[0].Authorization == nil {
+			t.Fatalf("maximum-depth authorization = %#v", bundle.GeneratedWorkflow.Jobs)
+		}
+		chain := bundle.GeneratedWorkflow.Jobs[0].Authorization.WorkflowJobs
+		if len(chain) != maxReusableWorkflowDepth+1 {
+			t.Fatalf("maximum-depth workflow chain = %#v", chain)
+		}
+		for i := 0; i < maxReusableWorkflowDepth; i++ {
+			if chain[i].Workflow != fmt.Sprintf("%d.yml", i) || chain[i].Job != fmt.Sprintf("call_%d", i) {
+				t.Fatalf("maximum-depth workflow chain = %#v", chain)
+			}
+		}
+		if chain[len(chain)-1].Workflow != fmt.Sprintf("%d.yml", maxReusableWorkflowDepth) || chain[len(chain)-1].Job != "concrete" {
+			t.Fatalf("maximum-depth workflow chain = %#v", chain)
 		}
 	})
 }

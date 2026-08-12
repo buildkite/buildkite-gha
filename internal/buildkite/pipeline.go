@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const planDirectory = ".buildkite-gha/plans"
@@ -19,6 +21,7 @@ const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
 const darwinRuntimeCacheRoot = "/tmp/bkcache/buildkite-gha"
+const jobAuthorizationSchema = "buildkite-gha/job-authorization/v1"
 
 // ContinueOnErrorExitStatus is reserved for a workflow failure that the job's
 // immutable plan explicitly allows Buildkite to soft-fail.
@@ -34,6 +37,8 @@ const MinimumMiseVersion = "2026.5.12"
 
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+var workflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
+var workflowJobIDPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,254}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -103,6 +108,20 @@ type Job struct {
 	SoftFail           bool
 	ConcurrencyGroup   string
 	Concurrency        int
+	Authorization      *JobAuthorization
+}
+
+// JobAuthorization is compiler-owned authorization metadata for one concrete
+// job that statically requires GITHUB_TOKEN.
+type JobAuthorization struct {
+	WorkflowJobs []WorkflowJob
+	Permissions  map[string]string
+}
+
+// WorkflowJob identifies one workflow/job edge in a concrete invocation chain.
+type WorkflowJob struct {
+	Workflow string `json:"workflow"`
+	Job      string `json:"job"`
 }
 
 // PlanPath returns the fixed local path for a content-addressed job plan.
@@ -317,8 +336,17 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if job.SoftFail {
 			_, _ = fmt.Fprintf(out, "%ssoft_fail:\n%s  - exit_status: %d\n", attributeIndent, attributeIndent, ContinueOnErrorExitStatus)
 		}
-		if job.RequiresMise {
+		if job.RequiresMise || job.Authorization != nil {
 			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
+			if job.Authorization != nil {
+				authorization, err := encodeJobAuthorization(job)
+				if err != nil {
+					return fmt.Errorf("encode job %q authorization: %w", job.Key, err)
+				}
+				_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_JOB_AUTHORIZATION: %s\n", attributeIndent, yamlScalar(string(authorization)))
+			}
+		}
+		if job.RequiresMise {
 			_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_MISE_DATA_DIR: %s\n", attributeIndent, yamlScalar(MiseDataDir(platform)))
 		}
 		if job.Concurrency != 0 {
@@ -507,6 +535,9 @@ func validateJob(compilerStep string, job Job) error {
 	if _, err := PlanPath(job.PlanDigest); err != nil {
 		return fmt.Errorf("job %q: %w", job.Key, err)
 	}
+	if err := validateJobAuthorization(job.Authorization); err != nil {
+		return fmt.Errorf("job %q: %w", job.Key, err)
+	}
 	if job.Concurrency < 0 {
 		return fmt.Errorf("job %q has invalid concurrency %d", job.Key, job.Concurrency)
 	}
@@ -522,6 +553,60 @@ func validateJob(compilerStep string, job Job) error {
 		}
 	}
 	return nil
+}
+
+func validateJobAuthorization(authorization *JobAuthorization) error {
+	if authorization == nil {
+		return nil
+	}
+	if len(authorization.WorkflowJobs) == 0 || len(authorization.WorkflowJobs) > 5 {
+		return fmt.Errorf("job authorization workflow chain must contain between 1 and 5 entries")
+	}
+	for _, workflowJob := range authorization.WorkflowJobs {
+		if len(workflowJob.Workflow) > 255 || !workflowFilenamePattern.MatchString(workflowJob.Workflow) {
+			return fmt.Errorf("job authorization has invalid workflow filename %q", workflowJob.Workflow)
+		}
+		if !workflowJobIDPattern.MatchString(workflowJob.Job) {
+			return fmt.Errorf("job authorization has invalid workflow job %q", workflowJob.Job)
+		}
+	}
+	activePermissions := activeJobAuthorizationPermissions(authorization.Permissions)
+	for name, access := range authorization.Permissions {
+		if access == "none" {
+			if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{name: "read"}); err != nil {
+				return fmt.Errorf("job authorization: %w", err)
+			}
+		}
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(activePermissions); err != nil {
+		return fmt.Errorf("job authorization: %w", err)
+	}
+	return nil
+}
+
+func activeJobAuthorizationPermissions(permissions map[string]string) map[string]string {
+	active := make(map[string]string, len(permissions))
+	for name, access := range permissions {
+		if access != "none" {
+			active[name] = access
+		}
+	}
+	return active
+}
+
+func encodeJobAuthorization(job Job) ([]byte, error) {
+	payload := struct {
+		Schema       string            `json:"schema"`
+		PlanDigest   string            `json:"plan_digest"`
+		WorkflowJobs []WorkflowJob     `json:"workflow_jobs"`
+		Permissions  map[string]string `json:"permissions"`
+	}{
+		Schema:       jobAuthorizationSchema,
+		PlanDigest:   job.PlanDigest,
+		WorkflowJobs: job.Authorization.WorkflowJobs,
+		Permissions:  activeJobAuthorizationPermissions(job.Authorization.Permissions),
+	}
+	return json.Marshal(payload)
 }
 
 func validStepKey(key string) bool {

@@ -491,6 +491,46 @@ func TestEmitActionRuntimeRequirement(t *testing.T) {
 	}
 }
 
+func TestEmitJobAuthorization(t *testing.T) {
+	planDigest := testDigest("authorized plan")
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs: []Job{
+			{
+				Key: "authorized", Label: "Authorized", PlanDigest: planDigest,
+				Authorization: &JobAuthorization{
+					WorkflowJobs: []WorkflowJob{{Workflow: "caller.yml", Job: "call"}, {Workflow: "leaf.yml", Job: "run"}},
+					Permissions:  map[string]string{"pull_requests": "write", "issues": "none", "contents": "read"},
+				},
+			},
+			{Key: "tokenless", Label: "Tokenless", PlanDigest: testDigest("tokenless plan")},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Key string            `yaml:"key"`
+			Env map[string]string `yaml:"env"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	want := `{"schema":"buildkite-gha/job-authorization/v1","plan_digest":"` + planDigest + `","workflow_jobs":[{"workflow":"caller.yml","job":"call"},{"workflow":"leaf.yml","job":"run"}],"permissions":{"contents":"read","pull_requests":"write"}}`
+	if got := document.Steps[0].Env["BUILDKITE_GHA_JOB_AUTHORIZATION"]; got != want {
+		t.Fatalf("authorization = %q, want canonical %q", got, want)
+	}
+	if len(document.Steps[1].Env) != 0 {
+		t.Fatalf("tokenless environment = %#v", document.Steps[1].Env)
+	}
+}
+
 func TestEmitDarwinActionRuntimeUsesNativePlatformCache(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep: "importer",
@@ -627,6 +667,9 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		{name: "UUID compiler", in: Pipeline{CompilerStep: "123e4567-e89b-12d3-a456-426614174000", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid compiler step key"},
 		{name: "UUID key", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "123e4567-e89b-12d3-a456-426614174000", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid generated step key"},
 		{name: "bad digest", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: "sha256:nope"}}}, want: "invalid plan digest"},
+		{name: "invalid authorization job", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, Jobs: []Job{{Key: "one", Label: "One", PlanDigest: digest, Authorization: &JobAuthorization{WorkflowJobs: []WorkflowJob{{Workflow: "ci.yml", Job: "1invalid"}}, Permissions: map[string]string{"contents": "read"}}}}}, want: "invalid workflow job"},
+		{name: "inactive authorization", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, Jobs: []Job{{Key: "one", Label: "One", PlanDigest: digest, Authorization: &JobAuthorization{WorkflowJobs: []WorkflowJob{{Workflow: "ci.yml", Job: "valid"}}, Permissions: map[string]string{"contents": "none"}}}}}, want: "non-empty bounded permission set"},
+		{name: "unsupported authorization permission", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, Jobs: []Job{{Key: "one", Label: "One", PlanDigest: digest, Authorization: &JobAuthorization{WorkflowJobs: []WorkflowJob{{Workflow: "ci.yml", Job: "valid"}}, Permissions: map[string]string{"models": "read"}}}}}, want: "unsupported permission"},
 		{name: "mutable runtime image", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, RuntimeImage: "buildkite/agent-base:ubuntu-jammy-hosted-toolchains", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "immutable registry sha256 reference"},
 		{name: "partial concurrency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Concurrency: 2}}}, want: "concurrency and concurrency group together"},
 		{name: "empty workflow concurrency group", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest, ConcurrencyGate: &ConcurrencyGate{Queue: "queue"}, Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid workflow concurrency group"},

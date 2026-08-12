@@ -29,6 +29,17 @@ type PlanAuthorization struct {
 	ProviderTokenReadCapabilitySources  []string
 	ProviderTokenWriteCapabilitySources []string
 	WorkflowTokenPolicyFilename         string
+	WorkflowJobs                        []WorkflowJob
+}
+
+// WorkflowJob identifies one exact workflow/job edge in a concrete reusable
+// workflow invocation chain. LogicalIDComponent retains the compiler's matrix-
+// qualified namespace component for exact same-process admission checks; only
+// Workflow and Job enter the pipeline manifest.
+type WorkflowJob struct {
+	Workflow           string
+	Job                string
+	LogicalIDComponent string
 }
 
 // Bundle is the complete deterministic output of static compilation.
@@ -138,6 +149,16 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 			Dependencies:       append([]string(nil), ir.Jobs[i].Needs...),
 			RequiresMise:       job.NeedsMise(),
 			SoftFail:           job.ContinueOnError,
+		}
+		if job.GitHubToken != nil {
+			workflowJobs := make([]buildkitepipeline.WorkflowJob, len(artifact.Authorization.WorkflowJobs))
+			for j, workflowJob := range artifact.Authorization.WorkflowJobs {
+				workflowJobs[j] = buildkitepipeline.WorkflowJob{Workflow: workflowJob.Workflow, Job: workflowJob.Job}
+			}
+			jobs[i].Authorization = &buildkitepipeline.JobAuthorization{
+				WorkflowJobs: workflowJobs,
+				Permissions:  cloneMap(job.GitHubToken.Permissions),
+			}
 		}
 		if ir.Jobs[i].Platform == PlatformLinuxAMD64 {
 			jobs[i].RuntimeImage = ir.Jobs[i].RuntimeImage

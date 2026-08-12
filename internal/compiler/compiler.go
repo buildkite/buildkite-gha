@@ -118,6 +118,7 @@ type JobInstance struct {
 	SourceDigest            string                  `json:"source_digest"`
 	RepositoryRoot          string                  `json:"-"`
 	Source                  workflow.Span           `json:"source"`
+	workflowJobs            []WorkflowJob
 	secretAuthority         bool
 }
 
@@ -523,6 +524,7 @@ instances:
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
 				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
+				authorization.WorkflowJobs = append([]WorkflowJob(nil), instance.workflowJobs...)
 			}
 			if len(secrets) != 0 {
 				capabilities = append(capabilities, "secrets")
@@ -727,27 +729,16 @@ func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string
 	if err != nil {
 		return "", err.Error()
 	}
-	if parsed.Permissions != nil && len(parsed.Permissions.Scopes) == 0 {
+	if parsed.Permissions == nil || len(parsed.Permissions.Scopes) == 0 {
 		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
 	}
-	permissions := defaultGitHubTokenPermissions().Scopes
-	if parsed.Permissions != nil {
-		permissions = parsed.Permissions.Scopes
-	}
+	permissions := parsed.Permissions.Scopes
 	normalizedPermissions := make(map[string]string, len(permissions))
 	for name, access := range permissions {
 		normalizedPermissions[strings.ReplaceAll(name, "-", "_")] = access
 	}
 	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(normalizedPermissions); err != nil {
 		return "", err.Error()
-	}
-	for _, job := range parsed.Jobs {
-		if job.Permissions != nil {
-			return "", "GitHub workflow access tokens do not support job-level permissions"
-		}
-		if job.Reusable != nil {
-			return "", "GitHub workflow access tokens do not support reusable-workflow jobs"
-		}
 	}
 	return filename, ""
 }
@@ -860,6 +851,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourcePaths := make(map[string]string, len(resolved))
 	sourceDigests := make(map[string]string, len(resolved))
 	sourceRoots := make(map[string]string, len(resolved))
+	workflowJobs := make(map[string][]WorkflowJob, len(resolved))
 	secretAuthorities := make(map[string]bool, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
 	var diagnostics []error
@@ -874,6 +866,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourcePaths[job.ID] = sourced.path
 		sourceDigests[job.ID] = sourced.digest
 		sourceRoots[job.ID] = sourced.root
+		workflowJobs[job.ID] = sourced.workflowJobs
 		secretAuthorities[job.ID] = sourced.secretAuthority
 		needBindings[job.ID] = sourced.needBindings
 		if err := supported(sourced.path, job); err != nil {
@@ -993,6 +986,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				SourceDigest:            sourceDigests[id],
 				RepositoryRoot:          sourceRoots[id],
 				Source:                  job.Span,
+				workflowJobs:            append([]WorkflowJob(nil), workflowJobs[id]...),
 				secretAuthority:         secretAuthorities[id],
 			}
 			result.candidates = append(result.candidates, candidate)

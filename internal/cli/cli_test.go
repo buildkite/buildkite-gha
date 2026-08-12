@@ -2330,7 +2330,7 @@ func TestValidateHostedProfileRejectsProtectedCapabilityAfterCompile(t *testing.
 	}
 }
 
-func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) {
+func TestValidateHostedProfileRejectsWorkflowTokenWithoutExplicitRootPermissions(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "token.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -2342,14 +2342,14 @@ func TestValidateHostedProfileAdmitsImplicitReadOnlyWorkflowToken(t *testing.T) 
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
-		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 	}
 	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Result != "admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
+	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, "compiler-verified workflow policy") {
 		t.Fatalf("profile report = %#v", report)
 	}
 }
@@ -4825,17 +4825,48 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	}
 	for _, test := range []struct {
 		name          string
+		workflow      plan.Workflow
+		permissions   map[string]string
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml"}},
+		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}},
+		{
+			name: "verified reusable chain", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "call.comment"},
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
+			},
+		},
+		{
+			name: "verified reusable matrix chain", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "call-deadbeef1234.comment"},
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call-deadbeef1234"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
+			},
+		},
 		{name: "missing provenance", wantError: true},
 		{name: "missing policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}, wantError: true},
-		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml"}, wantError: true},
-		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml"}, wantError: true},
+		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{name: "unsupported effective permission", permissions: map[string]string{"models": "read"}, authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{
+			name: "logical ID suffix collision", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "unrelated.call.comment"}, wantError: true,
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
+			configuredJob := job
+			if test.workflow.Path != "" {
+				configuredJob.Workflow = test.workflow
+			}
+			if test.permissions != nil {
+				configuredJob.GitHubToken = &plan.GitHubToken{Permissions: test.permissions}
+			}
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: configuredJob, Authorization: test.authorization}}}
 			err := validateUnprivilegedBundle(bundle)
 			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow policy")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)

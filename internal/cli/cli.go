@@ -100,6 +100,7 @@ const (
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var reusableMatrixNamespacePattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 var pluginReleaseBaseURL = "https://github.com/buildkite/buildkite-gha/releases/download"
 var pluginHTTPClient = securePluginHTTPClient()
@@ -2132,11 +2133,15 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "provider-token-write" {
-				filename, filenameErr := plan.GitHubWorkflowPolicyFilename(artifact.Job.Workflow.Path)
-				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || filenameErr != nil || artifact.Authorization.WorkflowTokenPolicyFilename == "" || artifact.Authorization.WorkflowTokenPolicyFilename != filename {
+				authorizationErr := validateWorkflowTokenAuthorization(artifact)
+				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || authorizationErr != nil {
 					reason := bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic
 					if reason == "" {
-						reason = "compiler-verified workflow policy evidence is missing or does not match the job plan"
+						if authorizationErr != nil {
+							reason = authorizationErr.Error()
+						} else {
+							reason = "compiler-verified workflow policy evidence is missing or does not match the job plan"
+						}
 					}
 					addFailure(artifact, "provider token write capability lacks compiler-verified workflow policy", fmt.Errorf("job %q requires provider-token-write without a compiler-verified workflow policy: %s", artifact.Job.Workflow.LogicalJobID, reason))
 				}
@@ -2160,6 +2165,63 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		}
 	}
 	return errors.Join(diagnostics...)
+}
+
+func validateWorkflowTokenAuthorization(artifact compiler.PlanArtifact) error {
+	authorization := artifact.Authorization
+	if artifact.Job.GitHubToken == nil {
+		return fmt.Errorf("compiler-verified workflow token permissions are missing")
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(artifact.Job.GitHubToken.Permissions); err != nil {
+		return err
+	}
+	if len(authorization.WorkflowJobs) == 0 || len(authorization.WorkflowJobs) > 5 {
+		return fmt.Errorf("compiler-verified workflow invocation chain is missing or exceeds 5 entries")
+	}
+	for _, workflowJob := range authorization.WorkflowJobs {
+		if err := plan.ValidateGitHubWorkflowPolicyFilename(workflowJob.Workflow); err != nil {
+			return err
+		}
+		if workflowJob.Job == "" {
+			return fmt.Errorf("compiler-verified workflow invocation chain contains an empty job")
+		}
+	}
+	first := authorization.WorkflowJobs[0]
+	if authorization.WorkflowTokenPolicyFilename == "" || authorization.WorkflowTokenPolicyFilename != first.Workflow {
+		return fmt.Errorf("compiler-verified root workflow policy does not match the invocation chain")
+	}
+	leafFilename, err := plan.GitHubWorkflowPolicyFilename(artifact.Job.Workflow.Path)
+	if err != nil {
+		return err
+	}
+	last := authorization.WorkflowJobs[len(authorization.WorkflowJobs)-1]
+	logicalJobID, err := workflowJobChainLogicalID(authorization.WorkflowJobs)
+	if err != nil {
+		return err
+	}
+	if last.Workflow != leafFilename || logicalJobID != artifact.Job.Workflow.LogicalJobID {
+		return fmt.Errorf("compiler-verified workflow invocation chain does not match the concrete job plan")
+	}
+	return nil
+}
+
+func workflowJobChainLogicalID(workflowJobs []compiler.WorkflowJob) (string, error) {
+	components := make([]string, len(workflowJobs))
+	for i, workflowJob := range workflowJobs {
+		component := workflowJob.LogicalIDComponent
+		if i == len(workflowJobs)-1 {
+			if component != workflowJob.Job {
+				return "", fmt.Errorf("compiler-verified workflow invocation chain has an invalid concrete job identity")
+			}
+		} else if component != workflowJob.Job {
+			suffix, ok := strings.CutPrefix(component, workflowJob.Job+"-")
+			if !ok || !reusableMatrixNamespacePattern.MatchString(suffix) {
+				return "", fmt.Errorf("compiler-verified workflow invocation chain has an invalid caller job identity")
+			}
+		}
+		components[i] = component
+	}
+	return strings.Join(components, "."), nil
 }
 
 func irUsesActions(ir compiler.IR) bool {
