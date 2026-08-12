@@ -239,6 +239,9 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 	}
 	token, err := provider.ActionSourceToken(ctx, "buildkite/buildkite-gha")
 	if err != nil {
+		if strings.Contains(err.Error(), "not enabled") || strings.Contains(err.Error(), "temporarily unavailable") {
+			t.Skipf("GitHub action source token rollout is unavailable: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if err := (AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")}).AddRedaction(ctx, token); err != nil {
