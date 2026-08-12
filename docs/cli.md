@@ -101,6 +101,9 @@ The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow` and
 `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`; it also accepts the plugin-owned
 `version`, `source-ref`, and `minimum-release-age` fields. The Linux/amd64 importer
 fetches the same release's Darwin runtime only when the workflow requires it.
+Released plugin v0.8.0 does not declare or support `runners`; schema validation
+rejects that configuration. Native macOS therefore requires the companion
+plugin release. Custom importers can use the public flags below.
 
 Event source precedence is:
 
