@@ -52,6 +52,43 @@ func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
 	}
 }
 
+func TestRuntimeMatrixOutputAcceptsOnlyExactDirectNeedOutput(t *testing.T) {
+	for _, source := range []string{
+		"${{ fromJSON(needs.build_django_matrix.outputs.include) }}",
+		"${{ fromJson( needs.Build-Django.outputs.Matrix_1 ) }}",
+	} {
+		expr, err := Parse(source, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RuntimeMatrixOutput(expr)
+		if err != nil {
+			t.Fatalf("RuntimeMatrixOutput(%q) error = %v", source, err)
+		}
+		if got.Job == "" || got.Output == "" {
+			t.Fatalf("RuntimeMatrixOutput(%q) = %#v", source, got)
+		}
+	}
+
+	for _, source := range []string{
+		"${{ needs.build.outputs.matrix }}",
+		"${{ fromJSON(vars.matrix) }}",
+		"${{ fromJSON(needs.build.outputs.matrix || '[]') }}",
+		"${{ fromJSON(needs.build.outputs.matrix).include }}",
+		"${{ fromJSON(needs['build'].outputs.matrix) }}",
+		"${{ toJSON(needs.build.outputs.matrix) }}",
+		"${{ fromJSON(needs.build.result) }}",
+	} {
+		expr, err := Parse(source, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RuntimeMatrixOutput(expr); err == nil {
+			t.Fatalf("RuntimeMatrixOutput(%q) unexpectedly succeeded", source)
+		}
+	}
+}
+
 func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	for _, template := range []string{
 		"literal",

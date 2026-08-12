@@ -743,9 +743,18 @@ func adaptMatrix(path, jobID string, in *actionlint.Matrix, scalars map[Position
 		}
 	}
 	var err error
-	out.Include, err = adaptMatrixCombinations(path, jobID, "include", in.Include, scalars)
-	if err != nil {
-		return nil, err
+	if in.Include != nil && in.Include.Expression != nil {
+		expr, expressionErr := adaptExpression(in.Include.Expression)
+		if expressionErr != nil {
+			return nil, locatedError(path, in.Include.Expression.Pos, jobID, expressionErr.Error())
+		}
+		out.IncludeExpression = &expr
+		out.Span.End = Position{Line: expr.Span.End.Line, Column: expr.Span.End.Column}
+	} else {
+		out.Include, err = adaptMatrixCombinations(path, jobID, "include", in.Include, scalars)
+		if err != nil {
+			return nil, err
+		}
 	}
 	out.Exclude, err = adaptMatrixCombinations(path, jobID, "exclude", in.Exclude, scalars)
 	if err != nil {

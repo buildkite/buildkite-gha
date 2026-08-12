@@ -1319,6 +1319,17 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	workflowSource, _, ok := loadProcessingInputs(out, workflowPath, hostedTokenlessProfile, "", nil)
+	if !ok {
+		return 1
+	}
+	validation, validationErr := compiler.Validate(workflowPath, workflowSource)
+	if validation.RuntimeMatrixBoundary {
+		report := compatibility.InitialProcessingReport(workflowPath, hostedTokenlessProfile, false, validation, validationErr)
+		report.Result = "incompatible"
+		_ = out.write(report)
+		return 1
+	}
 	loadEvent := func() ([]byte, error) {
 		if eventPath != "" {
 			return os.ReadFile(eventPath)
@@ -1337,8 +1348,9 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			return nil, metadataErr
 		}
 	}
-	workflowSource, eventSource, ok := loadProcessingInputs(out, workflowPath, hostedTokenlessProfile, "event input could not be acquired", loadEvent)
-	if !ok {
+	eventSource, err := loadEvent()
+	if err != nil {
+		out.fail(compatibility.EventInputProcessingReport(workflowPath, hostedTokenlessProfile, workflowSource, "event input could not be acquired"), err)
 		return 1
 	}
 	validationOptions := hostedTokenlessOptions(os.Getenv("BUILDKITE_GROUP_LABEL"), uploadArguments.runnerTargets, nil)

@@ -115,11 +115,12 @@ type ReusableWorkflowCall struct {
 
 // Matrix retains either static rows or a deferred expression.
 type Matrix struct {
-	Rows       []MatrixRow            `json:"rows,omitempty"`
-	Expression *expression.Expression `json:"expression,omitempty"`
-	Include    []MatrixCombination    `json:"include,omitempty"`
-	Exclude    []MatrixCombination    `json:"exclude,omitempty"`
-	Span       Span                   `json:"span"`
+	Rows              []MatrixRow            `json:"rows,omitempty"`
+	Expression        *expression.Expression `json:"expression,omitempty"`
+	Include           []MatrixCombination    `json:"include,omitempty"`
+	IncludeExpression *expression.Expression `json:"include_expression,omitempty"`
+	Exclude           []MatrixCombination    `json:"exclude,omitempty"`
+	Span              Span                   `json:"span"`
 }
 
 // MatrixCombination is one include or exclude entry with source-located values.

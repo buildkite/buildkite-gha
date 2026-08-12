@@ -11,6 +11,12 @@ import (
 	"github.com/rhysd/actionlint"
 )
 
+// NeedOutputReference is one statically identified direct job output.
+type NeedOutputReference struct {
+	Job    string
+	Output string
+}
+
 // ReferencePath extracts one complete static variable reference. Dot and
 // literal string index access are accepted; functions, operators, literals,
 // compound templates, and dynamic indexes fail closed.
@@ -24,6 +30,48 @@ func ReferencePath(text string) (string, []string, error) {
 		return "", nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
 	return referencePath(node)
+}
+
+// RuntimeMatrixOutput accepts only the complete runtime matrix expression
+// fromJSON(needs.<job>.outputs.<name>). Dot access is required so the source
+// cannot hide dynamic indexes or compose the producer output with other data.
+func RuntimeMatrixOutput(expr Expression) (NeedOutputReference, error) {
+	body, err := expressionBody(expr.Text)
+	if err != nil {
+		return NeedOutputReference{}, err
+	}
+	if strings.ContainsAny(body, "[]") {
+		return NeedOutputReference{}, fmt.Errorf("runtime matrix expression requires dot access")
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return NeedOutputReference{}, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
+		return NeedOutputReference{}, fmt.Errorf("runtime matrix expression must be exactly fromJSON(needs.<job>.outputs.<name>)")
+	}
+	root, path, err := referencePath(call.Args[0])
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+		return NeedOutputReference{}, fmt.Errorf("runtime matrix expression must be exactly fromJSON(needs.<job>.outputs.<name>)")
+	}
+	if !runtimeMatrixIdentifier(path[0]) || !runtimeMatrixIdentifier(path[2]) {
+		return NeedOutputReference{}, fmt.Errorf("runtime matrix expression has an invalid job or output name")
+	}
+	return NeedOutputReference{Job: path[0], Output: path[2]}, nil
+}
+
+func runtimeMatrixIdentifier(value string) bool {
+	if len(value) == 0 || len(value) > 255 {
+		return false
+	}
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // SecretReferences returns the statically named secrets referenced by a

@@ -55,26 +55,28 @@ type reusableResolution struct {
 }
 
 type reusableResolver struct {
-	root     string
-	stack    []string
-	context  expression.CompileContext
-	expanded int
+	root                  string
+	stack                 []string
+	context               expression.CompileContext
+	expanded              int
+	runtimeMatrixBoundary bool
 }
 
-func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext) ([]sourcedJob, error) {
+func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext) ([]sourcedJob, bool, error) {
 	digest := "sha256:" + sha256Sum(source)
+	runtimeMatrixBoundary := hasRuntimeMatrixBoundary(parsed)
 	if !hasReusableCall(parsed) {
 		sourcePath := path
 		root := ""
 		if isRepositoryWorkflowPath(path) {
 			repositoryRoot, canonicalPath, err := workflowRepository(path)
 			if err != nil {
-				return nil, err
+				return nil, runtimeMatrixBoundary, err
 			}
 			root = repositoryRoot
 			sourcePath, err = repositoryWorkflowPath(repositoryRoot, canonicalPath)
 			if err != nil {
-				return nil, err
+				return nil, runtimeMatrixBoundary, err
 			}
 		}
 		jobs := make([]sourcedJob, len(parsed.Jobs))
@@ -91,22 +93,23 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 			replacements[job.ID] = needBinding{members: []string{job.ID}}
 		}
 		if _, err := resolveWorkflowCallOutputs(sourcePath, parsed.CallOutputs, workflowJobs, replacements); err != nil {
-			return nil, err
+			return nil, runtimeMatrixBoundary, err
 		}
-		return jobs, nil
+		return jobs, runtimeMatrixBoundary, nil
 	}
 
 	root, canonicalPath, err := workflowRepository(path)
 	if err != nil {
-		return nil, err
+		return nil, runtimeMatrixBoundary, err
 	}
 	sourcePath, err := repositoryWorkflowPath(root, canonicalPath)
 	if err != nil {
-		return nil, err
+		return nil, runtimeMatrixBoundary, err
 	}
-	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context}
+	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
+	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
 	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
-	return resolution.jobs, err
+	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
 func hasReusableCall(parsed *workflow.Workflow) bool {
@@ -118,7 +121,49 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 	return false
 }
 
+func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
+	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
+	if depth >= maxReusableWorkflowDepth {
+		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasReusableCall(parsed)
+		return
+	}
+	for _, job := range parsed.Jobs {
+		if job.Reusable == nil {
+			continue
+		}
+		calleePath, err := resolver.localWorkflowPath(job.Reusable.Uses)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		calleeDepth := depth + 1
+		previousDepth, scanned := scannedAtDepth[calleePath]
+		if scanned && previousDepth <= calleeDepth {
+			continue
+		}
+		if !scanned && len(scannedAtDepth) >= maxFlattenedJobs {
+			// An incomplete discovery cannot prove that no unvisited callee has a
+			// runtime matrix boundary. Reject before event metadata instead.
+			resolver.runtimeMatrixBoundary = true
+			return
+		}
+		scannedAtDepth[calleePath] = calleeDepth
+		source, err := os.ReadFile(calleePath)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		callee, err := workflow.Parse(calleePath, source)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		resolver.discoverRuntimeMatrixBoundaries(callee, calleeDepth, scannedAtDepth)
+	}
+}
+
 func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
+	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
 	jobs := make(map[string]workflow.Job, len(parsed.Jobs))
 	for _, job := range parsed.Jobs {
 		jobs[job.ID] = job
@@ -198,6 +243,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		if err != nil {
 			return reusableResolution{}, err
 		}
+		resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(callee)
 		if !callee.Callable {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("local reusable workflow %q does not declare on.workflow_call", call.Uses))
 		}
