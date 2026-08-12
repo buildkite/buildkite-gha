@@ -744,21 +744,14 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		`test "$$(mise exec -- go env GOOS)" = "darwin"`,
 		`test "$$(mise exec -- go env GOARCH)" = "arm64"`,
 		`mise exec -- go build ./...`,
-		`mise exec -- go test -count=1 \`,
-		`./internal/action/integration \`,
-		`./internal/action/source \`,
-		`./internal/buildkite \`,
-		`./internal/compatibility \`,
-		`./internal/expression \`,
-		`./internal/plan \`,
-		`./internal/transport \`,
-		`./internal/workflow`,
-		`mise exec -- go test -count=1 ./internal/runtime \`,
-		`-run '^(TestCollectUploadFiles|TestUploadArtifact)'`,
+		`mise exec -- go test -count=1 ./...`,
 	} {
 		if !strings.Contains(macOS.command, required) {
 			t.Fatalf("macOS arm64 checks lack %q:\n%s", required, macOS.command)
 		}
+	}
+	if strings.Contains(macOS.command, "-run") {
+		t.Fatalf("macOS arm64 checks filter tests:\n%s", macOS.command)
 	}
 	pluginDemo := steps["plugin-demo-loader"]
 	if pluginDemo.condition != `build.env("DEMO_SUITE") == "plugin"` {

@@ -277,7 +277,7 @@ runs:
 }
 
 func TestValidateEntrypointsRejectsNestedGitMetadata(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestValidateEntrypointsRejectsNestedGitMetadata(t *testing.T) {
 }
 
 func TestValidateEntrypointsAllowsRemoteActionRepositoryBuildOutput(t *testing.T) {
-	repository := t.TempDir()
+	repository := canonicalTempDir(t)
 	action := filepath.Join(repository, "setup-gradle")
 	entrypoint := filepath.Join(repository, "dist", "setup-gradle", "main", "index.js")
 	if err := os.MkdirAll(action, 0o755); err != nil {
@@ -364,4 +364,13 @@ func writeAction(t *testing.T, root, name, contents string) {
 	if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
