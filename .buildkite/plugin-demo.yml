@@ -37,7 +37,7 @@ steps:
     plugins:
       - github-actions#v0.9.3:
           workflow: .github/workflows/macos-actions-proof.yml
-          source-ref: "$DEMO_COMMIT"
+          version: "0.11.1"
           runners:
             - runs-on: macos-14
               queue: mac-small
@@ -59,7 +59,7 @@ steps:
       - "plugin-demo-actions-importer"
       - "plugin-demo-macos-importer"
       - "plugin-demo-advanced-importer"
-    command: "echo 'The released plugin completed all service-free workflows. Linux used the released CLI; macOS used the CLI source from DEMO_COMMIT.'"
+    command: "echo 'The released plugin and CLI completed all service-free workflows.'"
 
   - label: ":package: Cache released-plugin demo"
     key: "plugin-demo-cache-importer"
