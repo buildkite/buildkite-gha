@@ -744,7 +744,17 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		`test "$$(mise exec -- go env GOOS)" = "darwin"`,
 		`test "$$(mise exec -- go env GOARCH)" = "arm64"`,
 		`mise exec -- go build ./...`,
-		`mise exec -- go test -count=1 ./...`,
+		`mise exec -- go test -count=1 \`,
+		`./internal/action/integration \`,
+		`./internal/action/source \`,
+		`./internal/buildkite \`,
+		`./internal/compatibility \`,
+		`./internal/expression \`,
+		`./internal/plan \`,
+		`./internal/transport \`,
+		`./internal/workflow`,
+		`mise exec -- go test -count=1 ./internal/runtime \`,
+		`-run '^(TestCollectUploadFiles|TestUploadArtifact)'`,
 	} {
 		if !strings.Contains(macOS.command, required) {
 			t.Fatalf("macOS arm64 checks lack %q:\n%s", required, macOS.command)

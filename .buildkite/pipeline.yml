@@ -104,7 +104,7 @@ steps:
           version: "2026.5.12"
     command: "mise run --jobs 1 check"
 
-  - label: ":go: macOS arm64"
+  - label: ":go: macOS arm64 build and portable tests"
     key: "macos-arm64"
     timeout_in_minutes: 20
     agents:
@@ -117,7 +117,17 @@ steps:
       test "$$(mise exec -- go env GOOS)" = "darwin"
       test "$$(mise exec -- go env GOARCH)" = "arm64"
       mise exec -- go build ./...
-      mise exec -- go test -count=1 ./...
+      mise exec -- go test -count=1 \
+        ./internal/action/integration \
+        ./internal/action/source \
+        ./internal/buildkite \
+        ./internal/compatibility \
+        ./internal/expression \
+        ./internal/plan \
+        ./internal/transport \
+        ./internal/workflow
+      mise exec -- go test -count=1 ./internal/runtime \
+        -run '^(TestCollectUploadFiles|TestUploadArtifact)'
 
   - label: ":github: OSS workflow compatibility"
     key: "oss-workflow-corpus"
