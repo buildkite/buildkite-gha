@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/runtime-matrix-v1.schema.json",
+  "title": "buildkite-gha deferred runtime matrix descriptor v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "job", "shape", "producer_job", "producer_step_key", "producer_output", "source_path", "source_digest", "source", "max_output_bytes", "max_instances", "max_graph_jobs"],
+  "properties": {
+    "schema": {"const": "https://buildkite.com/schemas/buildkite-gha/runtime-matrix-v1.schema.json"},
+    "job": {"$ref": "#/$defs/logicalJob"},
+    "shape": {"enum": ["matrix", "include"]},
+    "producer_job": {"$ref": "#/$defs/logicalJob"},
+    "producer_step_key": {"$ref": "#/$defs/buildkiteName"},
+    "producer_output": {"$ref": "#/$defs/buildkiteName"},
+    "source_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "source_digest": {"$ref": "#/$defs/digest"},
+    "source": {"$ref": "#/$defs/span"},
+    "max_output_bytes": {"const": 65536},
+    "max_instances": {"const": 256},
+    "max_graph_jobs": {"const": 1024}
+  },
+  "$defs": {
+    "logicalJob": {"type": "string", "pattern": "^[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*$", "minLength": 1, "maxLength": 255},
+    "buildkiteName": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$", "minLength": 1, "maxLength": 255},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "position": {"type": "object", "additionalProperties": false, "required": ["line", "column"], "properties": {"line": {"type": "integer", "minimum": 1, "maximum": 1000000}, "column": {"type": "integer", "minimum": 1, "maximum": 1000000}}},
+    "span": {"type": "object", "additionalProperties": false, "required": ["start", "end"], "properties": {"start": {"$ref": "#/$defs/position"}, "end": {"$ref": "#/$defs/position"}}}
+  }
+}

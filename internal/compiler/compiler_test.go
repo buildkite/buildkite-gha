@@ -1809,7 +1809,7 @@ func writeWorkflow(t *testing.T, repository, name, source string) string {
 	return path
 }
 
-func TestCompileRejectsRuntimeDependentGraphExpression(t *testing.T) {
+func TestCompileRejectsRuntimeMatrixSourceOutsideDirectNeeds(t *testing.T) {
 	source := []byte(`name: dynamic
 on: push
 jobs:
@@ -1821,8 +1821,8 @@ jobs:
       - run: true
 `)
 	_, err := Compile("dynamic.yml", source, readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix expressions are unsupported") {
-		t.Fatalf("Compile() error = %v, want explicit runtime-dependent matrix error", err)
+	if err == nil || !strings.Contains(err.Error(), `runtime matrix producer "prepare" must be a direct prerequisite in needs`) {
+		t.Fatalf("Compile() error = %v, want direct producer rejection", err)
 	}
 	if !strings.Contains(err.Error(), "dynamic.yml:7:15") {
 		t.Fatalf("Compile() error = %v, want source location", err)
@@ -1853,14 +1853,200 @@ jobs:
       - run: true
 `)
 	report, err := Validate("failed-prerequisite.yml", source)
-	if err == nil || !strings.Contains(err.Error(), "runtime-dependent matrix") {
+	if err == nil || !strings.Contains(err.Error(), "runtime matrix source is valid, but continuation upload is disabled") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	if strings.Contains(err.Error(), "has no expanded instances") {
 		t.Fatalf("Validate() added cascading graph failure: %v", err)
 	}
+	if len(report.RuntimeMatrices) != 1 || report.RuntimeMatrices[0].Shape != RuntimeMatrixShapeObject || report.RuntimeMatrices[0].ProducerJob != "prepare" || report.RuntimeMatrices[0].ProducerStepKey != "gha-prepare" || report.RuntimeMatrices[0].ProducerOutput != "matrix" {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
 	if !report.NotEvaluatedJobs["downstream"] || !report.NotEvaluatedInstances["gha-downstream"] {
 		t.Fatalf("not-evaluated ledger = jobs %#v, instances %#v", report.NotEvaluatedJobs, report.NotEvaluatedInstances)
+	}
+}
+
+func TestValidateRecognizesPinnedPostHogRuntimeMatrixIncludeBoundary(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  build_django_matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.build.outputs.include }}
+    steps:
+      - id: build
+        run: echo 'include=[]' >> "$GITHUB_OUTPUT"
+  django:
+    needs: build_django_matrix
+    runs-on: depot-ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.build_django_matrix.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.artifact_key }}"
+`)
+	report, err := Validate(".github/workflows/ci-backend.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	descriptor := report.RuntimeMatrices[0]
+	if descriptor.Job != "django" || descriptor.Shape != RuntimeMatrixShapeInclude || descriptor.ProducerJob != "build_django_matrix" || descriptor.ProducerStepKey != "gha-build_django_matrix" || descriptor.ProducerOutput != "include" || descriptor.Source.Start.Line != 16 {
+		t.Fatalf("PostHog runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
+func TestValidateRecognizesRuntimeMatrixInsideReusableWorkflow(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.build.outputs.include }}
+    steps:
+      - id: build
+        run: echo 'include=[]' >> "$GITHUB_OUTPUT"
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.name }}"
+`)
+
+	report, err := Validate(callerPath, readFile(t, callerPath))
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	descriptor := report.RuntimeMatrices[0]
+	if descriptor.Job != "delegated.generated" || descriptor.ProducerJob != "delegated.producer" || descriptor.ProducerStepKey != "gha-delegated-producer" || descriptor.ProducerOutput != "include" || descriptor.SourcePath != "./.github/workflows/reusable.yml" {
+		t.Fatalf("reusable runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
+func TestValidateResolvesRuntimeMatrixReusableWorkflowOutputProjection(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  producer:
+    uses: ./.github/workflows/producer.yml
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.name }}"
+`)
+	writeWorkflow(t, repository, "producer.yml", `on:
+  workflow_call:
+    outputs:
+      include:
+        value: ${{ jobs.build.outputs.matrix }}
+jobs:
+  auxiliary:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - id: build
+        run: echo 'matrix=[]' >> "$GITHUB_OUTPUT"
+`)
+
+	report, err := Validate(callerPath, readFile(t, callerPath))
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	descriptor := report.RuntimeMatrices[0]
+	if descriptor.Job != "generated" || descriptor.ProducerJob != "producer.build" || descriptor.ProducerStepKey != "gha-producer-build" || descriptor.ProducerOutput != "matrix" {
+		t.Fatalf("projected runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
+func TestValidateRuntimeMatrixDescriptorRejectsUnsupportedSourceBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		producer string
+		matrix   string
+		want     string
+	}{
+		{
+			name:     "undeclared output",
+			producer: "",
+			matrix:   "      matrix: ${{ fromJSON(needs.producer.outputs.include) }}",
+			want:     `output "include" is not declared`,
+		},
+		{
+			name: "matrix producer is ambiguous",
+			producer: `    strategy:
+      matrix:
+        shard: [1, 2]
+`,
+			matrix: "      matrix: ${{ fromJSON(needs.producer.outputs.include) }}",
+			want:   "must have exactly one statically expanded instance",
+		},
+		{
+			name:     "runtime include mixed with static dimensions",
+			producer: "",
+			matrix: `      matrix:
+        os: [ubuntu-latest]
+        include: ${{ fromJSON(needs.producer.outputs.include) }}`,
+			want: "must be the complete matrix definition",
+		},
+		{
+			name:     "runtime include mixed with empty exclude",
+			producer: "",
+			matrix: `      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+        exclude: []`,
+			want: `"exclude" section should not be empty`,
+		},
+		{
+			name:     "composed expression",
+			producer: "",
+			matrix:   "      matrix: ${{ fromJSON(needs.producer.outputs.include || '[]') }}",
+			want:     "runtime-dependent matrix expressions are unsupported",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outputs := `    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+`
+			if test.name == "undeclared output" {
+				outputs = ""
+			}
+			source := []byte("on: push\njobs:\n  producer:\n    runs-on: ubuntu-latest\n" + test.producer + outputs + "    steps:\n      - id: matrix\n        run: true\n  generated:\n    needs: producer\n    runs-on: ubuntu-latest\n    strategy:\n" + test.matrix + "\n    steps:\n      - run: true\n")
+			report, err := Validate("runtime-matrix.yml", source)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Validate() error = %v, want %q\n%s", err, test.want, source)
+			}
+			if len(report.RuntimeMatrices) != 0 {
+				t.Fatalf("invalid source produced descriptors %#v", report.RuntimeMatrices)
+			}
+		})
 	}
 }
 

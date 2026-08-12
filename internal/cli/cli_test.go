@@ -596,7 +596,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate json blocker", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "dynamic.yml")
-		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.matrix.outputs.value }}\n    steps:\n      - id: matrix\n        run: true\n  build:\n    needs: prepare\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -713,6 +713,306 @@ func TestRunValidateAndCompile(t *testing.T) {
 		var ir compiler.IR
 		if err := json.Unmarshal(stdout.Bytes(), &ir); err != nil || len(ir.Jobs) != 3 {
 			t.Fatalf("compile IR = %#v, error = %v", ir, err)
+		}
+	})
+}
+
+func TestCommandsKeepValidatedRuntimeMatrixIncompatibleWithoutUpload(t *testing.T) {
+	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
+	if err := os.WriteFile(workflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "gha-importer")
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "validate", args: []string{"validate", "--format", "json", workflow}},
+		{name: "compile pipeline", args: []string{"compile", "--event-path", eventPath, workflow}},
+		{name: "compile IR", args: []string{"compile", "--format", "ir-json", "--event-path", eventPath, workflow}},
+		{name: "upload", args: []string{"upload", "--event-path", eventPath, workflow}},
+		{name: "upload before event metadata", args: []string{"upload", workflow}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			runner := &cliCaptureRunner{}
+			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("runtime matrix command made Buildkite calls: %#v", runner.commands)
+			}
+			output := stdout.String() + stderr.String()
+			if !strings.Contains(output, "incompatible") || strings.Contains(output, "runtime_matrices") || strings.Contains(output, compiler.RuntimeMatrixSchemaV1) {
+				t.Fatalf("command output = %q", output)
+			}
+			if test.name != "validate" && stdout.Len() != 0 {
+				t.Fatalf("unsafe command wrote stdout = %q", stdout.String())
+			}
+		})
+	}
+
+	invalidWorkflow := filepath.Join(t.TempDir(), "invalid-dynamic.yml")
+	if err := os.WriteFile(invalidWorkflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.missing) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("invalid boundary before event metadata", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", invalidWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("invalid runtime matrix boundary made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_MATRIX_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	repository := t.TempDir()
+	workflowDirectory := filepath.Join(repository, ".github", "workflows")
+	if err := os.MkdirAll(workflowDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	graphFailureWorkflow := filepath.Join(workflowDirectory, "dynamic-with-graph-failure.yml")
+	if err := os.WriteFile(graphFailureWorkflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+  missing-reusable:
+    uses: ./.github/workflows/missing.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("exact boundary survives an earlier graph failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", graphFailureWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	reusableBoundaryWorkflow := filepath.Join(workflowDirectory, "reusable-boundary-with-graph-failure.yml")
+	if err := os.WriteFile(reusableBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-invalid-reusable:
+    uses: ./.github/workflows/not-callable-order.yml
+  z-runtime-matrix:
+    uses: ./.github/workflows/runtime-matrix.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "not-callable-order.yml"), []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "runtime-matrix.yml"), []byte(`on: workflow_call
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("reusable boundary discovery does not depend on fail-fast order", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", reusableBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("reusable runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	sharedBoundaryWorkflow := filepath.Join(workflowDirectory, "shared-boundary-with-depth-failure.yml")
+	if err := os.WriteFile(sharedBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-deep:
+    uses: ./.github/workflows/deep-1.yml
+  z-shared:
+    uses: ./.github/workflows/shared.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, next := range []string{"deep-2.yml", "deep-3.yml", "shared.yml"} {
+		name := fmt.Sprintf("deep-%d.yml", i+1)
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+jobs:
+  delegated:
+    uses: ./.github/workflows/%s
+`, next)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "shared.yml"), []byte(`on: workflow_call
+jobs:
+  delegated:
+    uses: ./.github/workflows/runtime-matrix.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("shared boundary is rescanned when reached at a shallower depth", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", sharedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("shared runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-deep: failed") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	depthBoundaryWorkflow := filepath.Join(workflowDirectory, "depth-boundary-with-graph-failure.yml")
+	if err := os.WriteFile(depthBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-invalid-reusable:
+    uses: ./.github/workflows/not-callable-order.yml
+  z-deep:
+    uses: ./.github/workflows/depth-1.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for i, next := range []string{"depth-2.yml", "depth-3.yml", "depth-4.yml", "runtime-matrix.yml"} {
+		name := fmt.Sprintf("depth-%d.yml", i+1)
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte(fmt.Sprintf(`on: workflow_call
+jobs:
+  delegated:
+    uses: ./.github/workflows/%s
+`, next)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("depth-limited reusable discovery fails closed before event metadata", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", depthBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("depth-limited runtime matrix discovery made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-invalid-reusable: failed") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	malformedBoundaryWorkflow := filepath.Join(workflowDirectory, "malformed-boundary-with-graph-failure.yml")
+	if err := os.WriteFile(malformedBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-not-callable:
+    uses: ./.github/workflows/not-callable.yml
+  z-malformed:
+    uses: ./.github/workflows/malformed-runtime-matrix.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "not-callable.yml"), []byte(`on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "malformed-runtime-matrix.yml"), []byte(`on: workflow_call
+jobs:
+  generated:
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    invalid: [
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("incomplete reusable discovery fails closed before event metadata", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", malformedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("incomplete runtime matrix discovery made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") || !strings.Contains(stderr.String(), "job a-not-callable: failed") {
+			t.Fatalf("upload stderr = %q", stderr.String())
 		}
 	})
 }
