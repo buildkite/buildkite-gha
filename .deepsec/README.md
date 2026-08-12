@@ -13,16 +13,19 @@ Install the pinned workspace dependency with the repository's Node 24
 toolchain:
 
 ```bash
+cd .deepsec
 mise exec node@24 -- npm ci
 ```
 
-Local AI processing can reuse an authenticated Codex CLI. Run
-`codex login status` to check authentication. DeepSec also supports model
+Local AI processing can reuse an authenticated Codex CLI. From the repository
+root, run `cd .deepsec && mise exec node@24 -- npm exec -- codex login status`
+to check authentication with the bundled CLI. DeepSec also supports model
 credentials through environment variables; never commit those values.
 
 ## Daily commands
 
 ```bash
+cd .deepsec
 mise exec node@24 -- npm exec -- deepsec scan \
   --project-id buildkite-gha
 mise exec node@24 -- npm exec -- deepsec process \
@@ -43,6 +46,7 @@ need to resume across machines.
 To scan another codebase from this same `.deepsec/`:
 
 ```bash
+cd .deepsec
 mise exec node@24 -- npm exec -- deepsec init-project ../some-other-package
 ```
 
