@@ -10,23 +10,23 @@ env:
   EXAMPLE_ADVANCED_PAYLOAD: example-advanced:${{ github.sha }}
 
 jobs:
-  quality:
-    uses: ./.github/workflows/example-reusable-quality.yml
+  selection:
+    uses: ./.github/workflows/example-reusable-package.yml
     with:
       package: ./internal/action/integration
 
   advanced-package:
     name: Exercise actions and package payload
-    needs: quality
+    needs: selection
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Require reusable workflow output and create payload
         shell: bash
         env:
-          TESTED_PACKAGE: ${{ needs.quality.outputs.tested-package }}
+          SELECTED_PACKAGE: ${{ needs.selection.outputs.selected-package }}
         run: |
-          test "$TESTED_PACKAGE" = './internal/action/integration'
+          test "$SELECTED_PACKAGE" = './internal/action/integration'
           mkdir -p example-payload
           printf '%s\n' "$EXAMPLE_ADVANCED_PAYLOAD" > example-payload/payload.txt
 

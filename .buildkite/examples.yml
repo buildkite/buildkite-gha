@@ -69,9 +69,7 @@ steps:
                 automatic: false
               cache: "/cache/bkcache/github-actions-buildkite-plugin"
               plugins:
-                - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-                    version: "2026.5.12"
-                - github-actions#v0.4.4:
+                - github-actions#v0.9.3:
                     workflow: "$$workflow"
-                    buildkite-gha-source-ref: "$$commit"
+                    source-ref: "$$commit"
       YAML

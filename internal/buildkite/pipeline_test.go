@@ -924,9 +924,8 @@ func TestExamplesPipelineSelectsOneCanonicalWorkflow(t *testing.T) {
 		`group: ":github: Run workflow"`,
 		`label: "Prepare workflow"`,
 		`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
-		`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
-		`github-actions#v0.4.4`,
-		`buildkite-gha-source-ref: "$$commit"`,
+		`github-actions#v0.9.3`,
+		`source-ref: "$$commit"`,
 	} {
 		if !strings.Contains(loader.Command, required) {
 			t.Fatalf("example loader lacks %q:\n%s", required, loader.Command)
@@ -1054,10 +1053,9 @@ func TestUploadExamplesScript(t *testing.T) {
 			`key: "example-basic-workflow"`,
 			`label: "Prepare workflow"`,
 			`key: "example-basic-importer"`,
-			`mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2`,
-			`github-actions#v0.4.4`,
+			`github-actions#v0.9.3`,
 			`workflow: ".github/workflows/example-basic.yml"`,
-			`buildkite-gha-source-ref: "` + commit + `"`,
+			`source-ref: "` + commit + `"`,
 			`cache: "/cache/bkcache/github-actions-buildkite-plugin"`,
 		} {
 			if !strings.Contains(pipeline, required) {
@@ -1069,8 +1067,8 @@ func TestUploadExamplesScript(t *testing.T) {
 				t.Fatalf("basic importer contains %q:\n%s", forbidden, pipeline)
 			}
 		}
-		if strings.Count(pipeline, "github-actions#v0.4.4") != 1 || strings.Count(pipeline, "mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2") != 1 {
-			t.Fatalf("basic importer does not contain exactly one of each plugin:\n%s", pipeline)
+		if strings.Count(pipeline, "github-actions#v0.9.3") != 1 {
+			t.Fatalf("basic importer does not contain exactly one importer plugin:\n%s", pipeline)
 		}
 	})
 
