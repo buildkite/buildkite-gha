@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
+
+const maxSkipReasonLength = 70
 
 // TriggerConditionContext supplies the trusted Buildkite expressions used to
 // select one effective event and apply its supported trigger filters.
@@ -72,6 +75,27 @@ func TranslateEventTriggerCondition(triggers []workflow.Trigger, event string, c
 		return "", false, nil
 	}
 	return strings.Join(terms, " || "), true, nil
+}
+
+// TriggerEventSkipReason describes why the effective event has no matching on
+// entry. Filter mismatches retain their generated Buildkite condition.
+func TriggerEventSkipReason(triggers []workflow.Trigger, event string) string {
+	for _, trigger := range triggers {
+		if trigger.Event == event {
+			return ""
+		}
+	}
+	return skipReason(
+		fmt.Sprintf("This workflow is not triggered by a `%s` event", event),
+		"This workflow is not triggered by the current event",
+	)
+}
+
+func skipReason(reason, fallback string) string {
+	if utf8.RuneCountInString(reason) <= maxSkipReasonLength {
+		return reason
+	}
+	return fallback
 }
 
 func liveTriggerContext(event string) TriggerConditionContext {

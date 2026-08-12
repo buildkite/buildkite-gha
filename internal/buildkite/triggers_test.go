@@ -123,6 +123,22 @@ func TestTranslateEventTriggerConditionUsesSnapshotExpressions(t *testing.T) {
 	}
 }
 
+func TestTriggerEventSkipReason(t *testing.T) {
+	triggers := []workflow.Trigger{
+		{Event: "push", Branches: []string{"main"}},
+		{Event: "pull_request"},
+	}
+	if got := TriggerEventSkipReason(triggers, "push"); got != "" {
+		t.Fatalf("push skip reason = %q, want empty for a matching on entry", got)
+	}
+	if got, want := TriggerEventSkipReason(triggers, "schedule"), "This workflow is not triggered by a `schedule` event"; got != want {
+		t.Fatalf("schedule skip reason = %q, want %q", got, want)
+	}
+	if got, want := TriggerEventSkipReason(triggers, strings.Repeat("x", maxSkipReasonLength)), "This workflow is not triggered by the current event"; got != want {
+		t.Fatalf("long event skip reason = %q, want %q", got, want)
+	}
+}
+
 func TestTranslatePushSeparatesBranchAndTagFilters(t *testing.T) {
 	condition, err := TranslateTriggerCondition([]workflow.Trigger{{
 		Event:    "push",

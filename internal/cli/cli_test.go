@@ -2596,7 +2596,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	}
 	sources := map[string]string{
 		"a.yml":        runnable("name: 'Shared \"checks\"'\n", "push"),
-		"b.yml":        runnable("name: 'Shared \"checks\"'\n", "\n  push:\n    branches: [never]"),
+		"b.yml":        runnable("name: 'Shared \"checks\"'\n", "pull_request"),
 		"unnamed.yml":  runnable("", "\n  push:\n    branches-ignore: [main]"),
 		"reusable.yml": "name: Shared\non: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
 	}
@@ -2626,6 +2626,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		Steps []struct {
 			Group     string `yaml:"group"`
 			Condition string `yaml:"if"`
+			Skip      string `yaml:"skip"`
 			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
@@ -2633,6 +2634,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 				} `yaml:"github_check"`
 			} `yaml:"notify"`
 			Steps []struct {
+				Label     string     `yaml:"label"`
 				Notify    any        `yaml:"notify"`
 				DependsOn *yaml.Node `yaml:"depends_on"`
 			} `yaml:"steps"`
@@ -2642,24 +2644,36 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []struct {
-		group, checkName, condition string
+		group, checkName, condition, skip string
 	}{
 		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`, condition: `(true)`},
-		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`, condition: `"main" =~ /^never$/`},
+		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
 		{group: ":github: .github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml (push)", condition: `!("main" =~ /^main$/)`},
 	}
 	if len(pipeline.Steps) != len(want) {
 		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
 	}
 	for i, group := range pipeline.Steps {
-		if group.Group != want[i].group || !strings.Contains(group.Condition, want[i].condition) || strings.Contains(group.Condition, "build.") || group.DependsOn != "checks-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName {
+		if group.Group != want[i].group || !strings.Contains(group.Condition, want[i].condition) || group.Skip != want[i].skip || strings.Contains(group.Condition, "build.") || group.DependsOn != "checks-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName || len(group.Steps) != 1 {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
+		}
+		if (group.Skip != "") != (group.Steps[0].Label == "Ignored workflow") {
+			t.Fatalf("aggregate group %d skipped child = %#v", i, group.Steps[0])
 		}
 		for _, step := range group.Steps {
 			if step.Notify != nil || step.DependsOn != nil {
 				t.Fatalf("aggregate group %d child emitted notification or dependency: %#v / %#v", i, step.Notify, step.DependsOn)
 			}
 		}
+	}
+	planCount := 0
+	for path := range runner.uploaded {
+		if strings.HasSuffix(path, ".json") {
+			planCount++
+		}
+	}
+	if planCount != 2 {
+		t.Fatalf("uploaded plans = %d, want plans for workflows with matching event triggers", planCount)
 	}
 }
 
@@ -2767,6 +2781,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 				Steps []struct {
 					Group     string `yaml:"group"`
 					Condition string `yaml:"if"`
+					Skip      string `yaml:"skip"`
 					Notify    []struct {
 						GitHubCheck struct {
 							Name string `yaml:"name"`
@@ -2779,10 +2794,26 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 			}
 			wantGroup := ":github: " + test.workflow
 			wantCheck := "Buildkite / " + test.workflow + " (" + test.event + ")"
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != wantGroup || !strings.Contains(pipeline.Steps[0].Condition, "true") || strings.Contains(pipeline.Steps[0].Condition, "build.") || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != wantCheck {
-				t.Fatalf("effective-event pipeline = %#v, want group %q and check %q", pipeline.Steps, wantGroup, wantCheck)
+			if len(pipeline.Steps) != 4 {
+				t.Fatalf("effective-event pipeline = %#v, want all workflow groups", pipeline.Steps)
 			}
-			if !strings.Contains(stdout.String(), "from 1 workflows") {
+			activeFound := false
+			for _, group := range pipeline.Steps {
+				if group.Group == wantGroup {
+					activeFound = true
+					if !strings.Contains(group.Condition, "true") || strings.Contains(group.Condition, "build.") || group.Skip != "" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != wantCheck {
+						t.Fatalf("active event group = %#v, want group %q and check %q", group, wantGroup, wantCheck)
+					}
+					continue
+				}
+				if group.Condition != "" || group.Skip != "This workflow is not triggered by a `"+test.event+"` event" {
+					t.Fatalf("inactive event group = %#v", group)
+				}
+			}
+			if !activeFound {
+				t.Fatalf("effective-event pipeline = %#v, want group %q", pipeline.Steps, wantGroup)
+			}
+			if !strings.Contains(stdout.String(), "from 4 workflows") {
 				t.Fatalf("stdout = %q", stdout.String())
 			}
 			for path, contents := range runner.uploaded {
@@ -2841,17 +2872,34 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 				Steps []struct {
 					Group     string `yaml:"group"`
 					Condition string `yaml:"if"`
+					Skip      string `yaml:"skip"`
 				} `yaml:"steps"`
 			}
 			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
 			wantCondition := `build.source == "` + test.source + `"`
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: "+test.workflow || !strings.Contains(pipeline.Steps[0].Condition, wantCondition) || strings.Contains(pipeline.Steps[0].Condition, "source_event") {
-				t.Fatalf("fallback pipeline = %#v, want event %q and condition %q", pipeline.Steps, test.event, wantCondition)
+			if len(pipeline.Steps) != 4 {
+				t.Fatalf("fallback pipeline = %#v, want all workflow groups", pipeline.Steps)
 			}
-			if test.pullRequest && (!strings.Contains(pipeline.Steps[0].Condition, `"main" =~ /^main$/`) || !strings.Contains(pipeline.Steps[0].Condition, `"synchronize" == "synchronize"`) || strings.Contains(pipeline.Steps[0].Condition, "build.pull_request") || strings.Contains(pipeline.Steps[0].Condition, "build.source_action")) {
-				t.Fatalf("fallback pull-request filters do not use the effective snapshot: %q", pipeline.Steps[0].Condition)
+			activeFound := false
+			for _, group := range pipeline.Steps {
+				if group.Group == ":github: "+test.workflow {
+					activeFound = true
+					if !strings.Contains(group.Condition, wantCondition) || strings.Contains(group.Condition, "source_event") || group.Skip != "" {
+						t.Fatalf("active fallback group = %#v, want event %q and condition %q", group, test.event, wantCondition)
+					}
+					if test.pullRequest && (!strings.Contains(group.Condition, `"main" =~ /^main$/`) || !strings.Contains(group.Condition, `"synchronize" == "synchronize"`) || strings.Contains(group.Condition, "build.pull_request") || strings.Contains(group.Condition, "build.source_action")) {
+						t.Fatalf("fallback pull-request filters do not use the effective snapshot: %q", group.Condition)
+					}
+					continue
+				}
+				if group.Condition != "" || group.Skip != "This workflow is not triggered by a `"+test.event+"` event" {
+					t.Fatalf("inactive fallback group = %#v", group)
+				}
+			}
+			if !activeFound {
+				t.Fatalf("fallback pipeline = %#v, want workflow %q", pipeline.Steps, test.workflow)
 			}
 		})
 	}
@@ -2880,7 +2928,7 @@ func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
 	}
 }
 
-func TestRunUploadSucceedsWithoutApplicableWorkflows(t *testing.T) {
+func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "pull-request.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2893,8 +2941,26 @@ func TestRunUploadSucceedsWithoutApplicableWorkflows(t *testing.T) {
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `No directly runnable workflows matched GitHub event "push"`) || stderr.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+	if !strings.Contains(stdout.String(), "Uploaded 0 jobs from 1 workflows") || stderr.Len() != 0 || len(runner.commands) == 0 {
 		t.Fatalf("stdout/stderr/commands/uploads = %q / %q / %#v / %#v", stdout.String(), stderr.String(), runner.commands, runner.uploaded)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+			Skip  string `yaml:"skip"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	wantGroup := ":github: " + filepath.ToSlash(filepath.Clean(workflowPath))
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != wantGroup || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" {
+		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
+	}
+	for path := range runner.uploaded {
+		if strings.HasSuffix(path, ".json") {
+			t.Fatalf("ignored workflow compiled plan %q", path)
+		}
 	}
 }
 
@@ -2999,12 +3065,13 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 1 workflows") || len(runner.commands) != 3 {
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 2 workflows") || len(runner.commands) != 3 {
 		t.Fatalf("stdout/commands = %q / %d", stdout.String(), len(runner.commands))
 	}
 	var pipeline struct {
 		Steps []struct {
 			Group     string `yaml:"group"`
+			Skip      string `yaml:"skip"`
 			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
@@ -3013,6 +3080,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 			} `yaml:"notify"`
 			Steps []struct {
 				Key    string `yaml:"key"`
+				Label  string `yaml:"label"`
 				Notify any    `yaml:"notify"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
@@ -3020,8 +3088,22 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Caller" || pipeline.Steps[0].DependsOn != "reusable-importer" || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" || len(pipeline.Steps[0].Steps) != 1 || !strings.HasPrefix(pipeline.Steps[0].Steps[0].Key, "gha-") || pipeline.Steps[0].Steps[0].Notify != nil {
+	if len(pipeline.Steps) != 2 {
 		t.Fatalf("aggregate reusable pipeline = %#v", pipeline)
+	}
+	for _, group := range pipeline.Steps {
+		switch group.Group {
+		case ":github: Caller":
+			if group.Skip != "" || group.DependsOn != "reusable-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" || len(group.Steps) != 1 || !strings.HasPrefix(group.Steps[0].Key, "gha-") || group.Steps[0].Notify != nil {
+				t.Fatalf("caller group = %#v", group)
+			}
+		case ":github: Pull request only":
+			if group.Skip != "This workflow is not triggered by a `push` event" || len(group.Steps) != 1 || group.Steps[0].Label != "Ignored workflow" {
+				t.Fatalf("inactive workflow group = %#v", group)
+			}
+		default:
+			t.Fatalf("reusable-only workflow became an aggregate group: %#v", group)
+		}
 	}
 	compiledReusable := false
 	for path, contents := range runner.uploaded {

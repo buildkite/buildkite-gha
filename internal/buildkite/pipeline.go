@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const planDirectory = ".buildkite-gha/plans"
@@ -52,6 +53,7 @@ type Workflow struct {
 	GroupKey        string
 	CheckName       string
 	Condition       string
+	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
 	Jobs            []Job
 }
@@ -128,7 +130,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
 	usedDigests := make(map[string]string)
 	for i, workflow := range workflows {
-		if len(workflow.Jobs) == 0 {
+		if len(workflow.Jobs) == 0 && (!aggregate || workflow.SkipReason == "") {
 			return nil, fmt.Errorf("workflow %d requires at least one generated job", i+1)
 		}
 		if aggregate {
@@ -141,8 +143,14 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.CheckName == "" {
 				return nil, fmt.Errorf("workflow %q requires a GitHub Check name", workflow.GroupKey)
 			}
-			if workflow.Condition == "" {
-				return nil, fmt.Errorf("workflow %q requires a trigger condition", workflow.GroupKey)
+			if workflow.Condition == "" && workflow.SkipReason == "" {
+				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
+			}
+			if workflow.Condition != "" && workflow.SkipReason != "" {
+				return nil, fmt.Errorf("workflow %q cannot have both a trigger condition and skip reason", workflow.GroupKey)
+			}
+			if utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
+				return nil, fmt.Errorf("workflow %q skip reason exceeds %d characters", workflow.GroupKey, maxSkipReasonLength)
 			}
 			if owner, exists := usedKeys[workflow.GroupKey]; exists {
 				return nil, fmt.Errorf("workflow group key %q collides with %s", workflow.GroupKey, owner)
@@ -213,6 +221,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
+		if workflow.SkipReason != "" {
+			_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
+		}
 		if workflow.CheckName != "" {
 			out.WriteString("    notify:\n")
 			out.WriteString("      - github_check:\n")
@@ -225,6 +236,12 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
+	if workflow.SkipReason != "" && len(workflow.Jobs) == 0 {
+		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar("Ignored workflow"))
+		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(":"))
+		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
+		return nil
+	}
 	if workflow.ConcurrencyGate != nil {
 		dependencies := []dependency{{Step: pipeline.CompilerStep}}
 		if workflow.Aggregate {

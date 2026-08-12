@@ -1360,6 +1360,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			return 1
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
+		workflows[i].Name = parsed.Name
 		workflows[i].Triggers = parsed.Triggers
 		if !workflows[i].ReusableOnly {
 			runnableWorkflowCount++
@@ -1406,7 +1407,6 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		return 1
 	}
-	applicableWorkflowCount := 0
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
 			continue
@@ -1420,13 +1420,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		workflows[i].Applicable = applicable
 		workflows[i].TriggerCondition = condition
-		if applicable {
-			applicableWorkflowCount++
-		}
-	}
-	if applicableWorkflowCount == 0 {
-		_, _ = fmt.Fprintf(stdout, "No directly runnable workflows matched GitHub event %q; no pipeline was uploaded.\n", effectiveEvent.Event.Event)
-		return 0
+		workflows[i].SkipReason = buildkitepipeline.TriggerEventSkipReason(workflows[i].Triggers, effectiveEvent.Event.Event)
 	}
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
@@ -1494,7 +1488,20 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	jobCount := 0
 	for i, input := range workflows {
+		if input.ReusableOnly {
+			continue
+		}
 		if !input.Applicable {
+			label := input.Name
+			if label == "" {
+				label = input.CanonicalPath
+			}
+			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
+				GroupLabel: label,
+				GroupKey:   "gha-workflow-" + input.Identity,
+				CheckName:  "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")",
+				SkipReason: input.SkipReason,
+			})
 			continue
 		}
 		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
@@ -1721,11 +1728,11 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 }
 
 type workflowInput struct {
-	Path, CanonicalPath, Identity, StepKeyNamespace string
-	Source                                          []byte
-	Triggers                                        []workflow.Trigger
-	TriggerCondition                                string
-	ReusableOnly, Applicable                        bool
+	Path, CanonicalPath, Identity, StepKeyNamespace, Name string
+	Source                                                []byte
+	Triggers                                              []workflow.Trigger
+	TriggerCondition, SkipReason                          string
+	ReusableOnly, Applicable                              bool
 }
 
 func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
