@@ -44,7 +44,7 @@ The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint
 
 Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`.
 
-To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.8.0` onward:
+To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
 ```yaml
 plugins:

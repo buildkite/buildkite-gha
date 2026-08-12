@@ -163,6 +163,9 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
+	if !configuration.explicitWorkflowPaths {
+		t.Fatal("workflows array did not retain explicit path semantics")
+	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux target = %#v", got)
 	}
@@ -170,7 +173,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
 	minimal, err := parsePluginConfiguration(`{"workflows":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || len(minimal.runnerTargets) != 0 {
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.explicitWorkflowPaths || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
 	}
 	legacy, err := parsePluginConfiguration(`{"workflow":"legacy.yml"}`)
@@ -360,6 +363,26 @@ func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	}
 	if len(pipeline.Steps) != 2 {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestPluginRejectsGlobInSingleEntryWorkflowList(t *testing.T) {
+	requireImporterHost(t)
+	configuration, err := json.Marshal(map[string]any{
+		"workflows": []string{filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*.yml")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-glob")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "explicit paths") {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("invalid workflow list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
 	}
 }
 
