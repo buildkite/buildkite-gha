@@ -941,7 +941,7 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if profile != "" {
 		_, _, distributionDigest, executableErr := executable()
 		if executableErr != nil {
-			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
 			_ = out.write(processingReport)
 			return 1
@@ -959,11 +959,11 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			_ = out.write(processingReport)
 			return 1
 		}
-		processingReport.SetStage(stageAdmission, compatibility.Passed)
+		processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
 		processingReport.Admission.Result = "admitted"
 		if preflight.HasActions {
 			processingReport.Diagnostics = append(processingReport.Diagnostics, compatibility.Diagnostic{
-				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: stageAdmission,
+				Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Category: "compatibility", Stage: string(compiler.StageAdmission),
 				Message: "resolved action metadata cannot prove that arbitrary action code is independent of GitHub-only runtime services",
 			})
 		}
@@ -1051,19 +1051,19 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	} else {
 		digest, digestErr := executableDigest()
 		if digestErr != nil {
-			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
 			_ = out.write(processingReport)
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
-		applyProcessingEvidence(&processingReport, bundle.Processing)
+		processingReport.ApplyEvidence(bundle.Processing)
 		err = compileErr
 		result = bundle.Pipeline
 		warnings = bundle.IR.Warnings
 	}
 	if err != nil {
-		addProcessingFailure(&processingReport, workflowPath, stagePlans, compiler.CodePlanConstruction, "compatibility", err)
+		processingReport.AddFailure(workflowPath, string(compiler.StagePlans), compiler.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
 		_ = out.write(processingReport)
 		return 1
@@ -1132,7 +1132,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
-		addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
+		processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 		processingReport.Result = "indeterminate"
 		_ = out.write(processingReport)
 		return 1
@@ -1145,7 +1145,7 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		return 1
 	}
 	bundle := preflight.Bundle
-	processingReport.SetStage(stageAdmission, compatibility.Passed)
+	processingReport.SetStage(string(compiler.StageAdmission), compatibility.Passed)
 	processingReport.Admission.Result = "admitted"
 	processingReport.Result = "admitted"
 	_ = compatibility.WriteProcessing(stdout, "text", processingReport)
