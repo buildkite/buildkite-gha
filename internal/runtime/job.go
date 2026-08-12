@@ -468,14 +468,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			action, _, resolveErr := actions.resolve(runCtx, plan.ActionSelector{Lock: lock.ID})
 			if resolveErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, resolveErr))
 			}
 			actionRuntime, runtimeErr := action.Runtime()
 			if runtimeErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, runtimeErr))
 			}
 			if entrypointErr := action.ValidateEntrypoints(actionRuntime); entrypointErr != nil {
-				return jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr)
+				return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action lock %q: %w", lock.ID, entrypointErr))
 			}
 		}
 		for _, step := range job.Steps {
@@ -483,10 +483,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			if source, sourceErr := actions.source(*step.Action); sourceErr != nil {
-				return jobResult, sourceErr
+				return tolerateJobSetupFailure(runCtx, job, jobResult, sourceErr)
 			} else if source == "github" {
 				if verifyErr := r.verifyRemoteActionTree(runCtx, actions, *step.Action, nil); verifyErr != nil {
-					return jobResult, fmt.Errorf("prepare action %q: %w", step.Uses, verifyErr)
+					return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("prepare action %q: %w", step.Uses, verifyErr))
 				}
 			}
 		}
@@ -494,7 +494,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			var mountErr error
 			containerMounts, mountErr = r.actionContainerMounts(runCtx, actions)
 			if mountErr != nil {
-				return jobResult, mountErr
+				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
 		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)

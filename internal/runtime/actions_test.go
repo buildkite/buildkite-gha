@@ -24,18 +24,22 @@ import (
 )
 
 type fakeActionMaterializer struct {
-	mu       sync.Mutex
-	calls    int
-	resolved source.Resolved
-	result   source.Materialized
-	err      error
+	mu          sync.Mutex
+	calls       int
+	resolved    source.Resolved
+	result      source.Materialized
+	err         error
+	materialize func(context.Context, source.Resolved) (source.Materialized, error)
 }
 
-func (f *fakeActionMaterializer) Materialize(_ context.Context, r source.Resolved) (source.Materialized, error) {
+func (f *fakeActionMaterializer) Materialize(ctx context.Context, r source.Resolved) (source.Materialized, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls++
 	f.resolved = r
+	f.mu.Unlock()
+	if f.materialize != nil {
+		return f.materialize(ctx, r)
+	}
 	return f.result, f.err
 }
 

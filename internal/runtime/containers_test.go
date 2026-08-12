@@ -1496,6 +1496,34 @@ func TestRunJobContainerRemoteActionsMountedReadOnly(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerRemoteActionPreparationTimeoutIsCancelled(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/container.yml", "name: remote container action timeout\n")
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, ".github/workflows/container.yml", []plan.Step{{
+		ID: "remote", Kind: "uses", Uses: remoteLifecycleUses("selected"), Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &plan.Container{Image: "debian:bookworm-slim"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "selected", "sha256:"+strings.Repeat("0", 64), nil)}
+	job.ContinueOnError = true
+	job.TimeoutMinutes = 0.001
+	materializer := &fakeActionMaterializer{materialize: func(ctx context.Context, _ source.Resolved) (source.Materialized, error) {
+		<-ctx.Done()
+		return source.Materialized{}, ctx.Err()
+	}}
+
+	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0], Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) || IsToleratedJobFailure(err) || result.Conclusion != "cancelled" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if len(f.calls(t)) != 0 {
+		t.Fatalf("Docker called after action preparation timeout: %#v", f.calls(t))
+	}
+}
+
 func TestRunJobContainerRemoteChildOfWorkspaceCompositeMountedBeforeCreate(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
