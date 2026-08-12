@@ -78,22 +78,25 @@ func TestEmitGolden(t *testing.T) {
 				t.Fatalf("step %q logical dependency is strict: %#v", step.Key, dependency)
 			}
 		}
-		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`) ||
+		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
+			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
+			!strings.Contains(step.Command, `artifact download '.buildkite-gha/distributions/`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `test "$actual_distribution_digest" = `+shellQuote(pipeline.DistributionDigest)) ||
-			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
-			t.Fatalf("step %q does not bootstrap and verify its exact distribution:\n%s", step.Key, step.Command)
+			!strings.Contains(step.Command, `run-job --plan-digest `) ||
+			!strings.Contains(step.Command, `--plan-producer 'gha-importer'`) {
+			t.Fatalf("step %q does not verify its distribution before delegated plan acquisition:\n%s", step.Key, step.Command)
 		}
 	}
 	if !strings.Contains(string(first), `artifact download '.buildkite-gha/distributions/`) ||
-		!strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		strings.Contains(string(first), `.buildkite-gha/bootstrap/`) ||
 		strings.Contains(string(first), "go run") ||
 		strings.Contains(string(first), "cache:") ||
 		strings.Contains(string(first), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("generated jobs are not self-contained:\n%s", first)
 	}
-	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
-		t.Fatalf("generated artifact downloads are not constrained to the exact importer:\n%s", first)
+	if strings.Count(string(first), `--step 'gha-importer'`) != 3 {
+		t.Fatalf("generated distribution downloads are not constrained to the exact importer:\n%s", first)
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
@@ -333,7 +336,7 @@ func TestEmitUsesImmutableRuntimeImageToolCache(t *testing.T) {
 	if len(document.Steps) != 1 || document.Steps[0].Image != image {
 		t.Fatalf("runtime image = %#v, want %q", document.Steps, image)
 	}
-	if !strings.Contains(document.Steps[0].Command, "run-job --plan \"$plan\" --hosted-tool-cache") {
+	if !strings.Contains(document.Steps[0].Command, "--hosted-tool-cache") {
 		t.Fatalf("run-job command does not select hosted tool cache: %q", document.Steps[0].Command)
 	}
 }
@@ -1880,32 +1883,36 @@ func TestArtifactRoundtripProofContract(t *testing.T) {
 
 func TestCacheFixtureContract(t *testing.T) {
 	root := filepath.Join("..", "..")
-	fixture, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", ".github", "workflows", "cache-v6.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixtureText := string(fixture)
-	for _, fragment := range []string{
-		"cache-producer:",
-		"cache-consumer:",
-		"needs: cache-producer",
-		"actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-		"CACHE_ROUNDTRIP_KEY: cache-roundtrip-__CACHE_ROUNDTRIP_NONCE__",
-		`CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}`,
-		`test "$CACHE_HIT" != true`,
-		`test "$CACHE_HIT" = true`,
-		"CACHE_ROUNDTRIP_PRODUCER=",
-		"CACHE_ROUNDTRIP_CONSUMER=",
+	for name, commit := range map[string]string{
+		"cache-v5.yml": "caa296126883cff596d87d8935842f9db880ef25",
+		"cache-v6.yml": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
 	} {
-		if !strings.Contains(fixtureText, fragment) {
-			t.Fatalf("Cache roundtrip fixture lacks %q: %s", fragment, fixture)
+		fixture, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", ".github", "workflows", name))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if count := strings.Count(fixtureText, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"); count != 2 {
-		t.Fatalf("Cache roundtrip fixture has %d audited cache action invocations, want two", count)
-	}
-	if strings.Contains(fixtureText, "restore-keys:") {
-		t.Fatal("Cache roundtrip fixture permits a non-exact restore")
+		fixtureText := string(fixture)
+		for _, fragment := range []string{
+			"cache-producer:",
+			"cache-consumer:",
+			"needs: cache-producer",
+			"actions/cache@" + commit,
+			`CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}`,
+			`test "$CACHE_HIT" != true`,
+			`test "$CACHE_HIT" = true`,
+			"CACHE_ROUNDTRIP_PRODUCER=",
+			"CACHE_ROUNDTRIP_CONSUMER=",
+		} {
+			if !strings.Contains(fixtureText, fragment) {
+				t.Fatalf("Cache roundtrip fixture %s lacks %q: %s", name, fragment, fixture)
+			}
+		}
+		if count := strings.Count(fixtureText, "actions/cache@"+commit); count != 2 {
+			t.Fatalf("Cache roundtrip fixture %s has %d audited cache action invocations, want two", name, count)
+		}
+		if strings.Contains(fixtureText, "restore-keys:") {
+			t.Fatalf("Cache roundtrip fixture %s permits a non-exact restore", name)
+		}
 	}
 }
 

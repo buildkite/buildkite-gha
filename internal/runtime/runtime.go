@@ -642,7 +642,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		return ctx.Err()
 	}
 	if cacheErr != nil && action.Cache {
-		return fmt.Errorf("configure actions/cache v6 service: %w", cacheErr)
+		return fmt.Errorf("configure actions/cache service: %w", cacheErr)
 	}
 	cacheToken := ""
 	if cacheErr == nil {

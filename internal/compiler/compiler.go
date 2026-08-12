@@ -796,17 +796,18 @@ func canonicalWorkflowName(path string) string {
 }
 
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, err := resolveReusableWorkflows(path, source, parsed, context)
+	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	result := expansionResult{
-		jobs:             processingJobs(path, parsed, resolved),
-		notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
+		jobs:                  processingJobs(path, parsed, resolved),
+		runtimeMatrixBoundary: runtimeMatrixBoundary,
+		notEvaluatedJobs:      make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 	}
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))

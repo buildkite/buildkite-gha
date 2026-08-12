@@ -54,6 +54,23 @@ type RuntimeMatrixDescriptor struct {
 	MaxGraphJobs    int           `json:"max_graph_jobs"`
 }
 
+func hasRuntimeMatrixBoundary(parsed *workflow.Workflow) bool {
+	for _, job := range parsed.Jobs {
+		if job.Matrix == nil {
+			continue
+		}
+		for _, candidate := range []*expression.Expression{job.Matrix.Expression, job.Matrix.IncludeExpression} {
+			if candidate == nil {
+				continue
+			}
+			if _, err := expression.RuntimeMatrixOutput(*candidate); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, needs map[string]needBinding, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeMatrixDescriptor, bool, error) {
 	if job.Matrix == nil {
 		return RuntimeMatrixDescriptor{}, false, nil

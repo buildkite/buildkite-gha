@@ -64,9 +64,12 @@ const (
 	DownloadArtifactV801Commit = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	// DownloadArtifactCommit is retained as the original v4.3.0 spelling.
 	DownloadArtifactCommit = DownloadArtifactV4Commit
-	// CacheCommit is the only actions/cache implementation admitted to the
-	// Buildkite-backed cache-v2 service.
-	CacheCommit = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+	// CacheV503Commit, CacheV5Commit, and CacheCommit are the exact audited
+	// actions/cache implementations admitted to the Buildkite-backed cache-v2
+	// service. CacheCommit retains the original v6.1.0 spelling.
+	CacheV503Commit = "cdf6c1fa76f9f475f3d7449005a359c84ca0f306"
+	CacheV5Commit   = "caa296126883cff596d87d8935842f9db880ef25"
+	CacheCommit     = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 
 	MaxUploadArtifactNameBytes = 255
 	MaxUploadArtifactRoots     = 32
@@ -124,6 +127,12 @@ var uploadArtifactCommits = map[string]string{
 	UploadArtifactV7Commit: "v7.0.1",
 }
 
+var cacheCommits = map[string]string{
+	CacheV503Commit: "v5.0.3",
+	CacheV5Commit:   "v5.1.0",
+	CacheCommit:     "v6.1.0",
+}
+
 // ValidateCheckoutCommit rejects semantic drift from the audited upstream
 // manifests and implementations. Mutable references are resolved before this
 // check, so a moved major tag must be deliberately audited and added here.
@@ -177,10 +186,16 @@ func DownloadArtifactCommits() []string {
 	}
 }
 
-// ValidateCacheCommit rejects cache client and protocol drift from v6.1.0.
+// ValidateCacheCommit rejects cache client and protocol drift from the exact
+// audited cache-v2 clients.
 func ValidateCacheCommit(commit string) error {
-	if commit != CacheCommit {
-		return fmt.Errorf("buildkite cache-v2 service supports only actions/cache v6.1.0 commit %s, resolved %q", CacheCommit, commit)
+	if _, ok := cacheCommits[commit]; !ok {
+		commits := make([]string, 0, len(cacheCommits))
+		for supported, version := range cacheCommits {
+			commits = append(commits, version+" ("+supported+")")
+		}
+		sort.Strings(commits)
+		return fmt.Errorf("buildkite cache-v2 service does not admit resolved actions/cache commit %q; supported commits are %s", commit, strings.Join(commits, ", "))
 	}
 	return nil
 }

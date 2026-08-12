@@ -527,6 +527,56 @@ func TestEvaluateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestEvaluateActionLifecycleCondition(t *testing.T) {
+	tests := []struct {
+		name         string
+		condition    string
+		unsuccessful bool
+		cancelled    bool
+		want         bool
+		wantErr      bool
+	}{
+		{name: "empty means unconditional", condition: "", want: true},
+		{name: "empty stays true after failure", condition: "", unsuccessful: true, want: true},
+		{name: "empty stays true after cancellation", condition: "", cancelled: true, want: true},
+		{name: "whitespace only is empty", condition: "   ", unsuccessful: true, want: true},
+		{name: "always", condition: "always()", unsuccessful: true, cancelled: true, want: true},
+		{name: "success on success", condition: "success()", want: true},
+		{name: "success after failure", condition: "success()", unsuccessful: true, want: false},
+		{name: "success after cancellation", condition: "success()", cancelled: true, want: false},
+		{name: "failure after failure", condition: "failure()", unsuccessful: true, want: true},
+		{name: "cancellation dominates failure", condition: "failure()", unsuccessful: true, cancelled: true, want: false},
+		{name: "failure on success", condition: "failure()", want: false},
+		{name: "cancelled when cancelled", condition: "cancelled()", cancelled: true, want: true},
+		{name: "cancelled on success", condition: "cancelled()", want: false},
+		{name: "delimiters unwrap", condition: "${{ failure() }}", unsuccessful: true, want: true},
+		{name: "delimiters without spaces", condition: "${{always()}}", cancelled: true, want: true},
+		{name: "case is insensitive", condition: "ALWAYS()", want: true},
+		{name: "surrounding whitespace trims", condition: "  success()  ", want: true},
+		{name: "literals fail closed", condition: "true", wantErr: true},
+		{name: "references fail closed", condition: "github.event_name == 'push'", wantErr: true},
+		{name: "compound expressions fail closed", condition: "success() || failure()", wantErr: true},
+		{name: "arguments fail closed", condition: "success('build')", wantErr: true},
+		{name: "unknown functions fail closed", condition: "finished()", wantErr: true},
+		{name: "unopened delimiter fails closed", condition: "failure() }}", wantErr: true},
+		{name: "unclosed delimiter fails closed", condition: "${{ failure()", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateActionLifecycleCondition(test.condition, test.unsuccessful, test.cancelled)
+			if test.wantErr {
+				if err == nil || got {
+					t.Fatalf("EvaluateActionLifecycleCondition(%q) = %v, %v, want false with error", test.condition, got, err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateActionLifecycleCondition(%q, unsuccessful=%v, cancelled=%v) = %v, %v, want %v", test.condition, test.unsuccessful, test.cancelled, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	context := ConditionContext{
 		Inputs:      map[string]string{"enabled": "true"},

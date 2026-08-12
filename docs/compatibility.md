@@ -2,6 +2,12 @@
 
 This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted-tokenless` profile used by `upload` and the Buildkite plugin.
 
+Runtime v0.9.0 supports native macOS arm64, but released plugin v0.8.0 does not
+declare or support `runners`; schema validation rejects its runner mapping.
+Linux support, including `runner.os` and `runner.arch`, is available through the
+released plugin path. Native macOS becomes production-supported only after the
+companion plugin release.
+
 GitHub Actions syntax changes over time. If a feature is not listed here, treat it as unsupported. GitHub's [workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax) describes the original syntax; this page describes the subset that runs on Buildkite.
 
 ## Support matrix
@@ -20,13 +26,13 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
 | [Triggers and filters under `on`](#names-and-triggers) | ➖ Accepted, no effect | Buildkite creates and filters builds. Local `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`; native macOS arm64 with `macos-latest`, `macos-15`, or `macos-14`. Labels do not provide GitHub image or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. Runtime v0.9.0 supports native macOS arm64, but the released plugin cannot configure it yet. Labels do not provide GitHub image or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux `bash` and `sh`; runtime-only macOS support has the same shell boundary. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and the runtime-only macOS path; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🚧 Not available in production | Production upload rejects ordinary secret requirements. |
@@ -438,6 +444,12 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 
 Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
 
+The only runner references are `runner.os` and `runner.arch`. They resolve to
+`Linux`/`X64` or `macOS`/`ARM64`. Runtime interpolation does not evaluate
+operators or functions; use the supported condition syntax in job or step
+`if`. Other runner fields and compile-time positions that require runner
+identity are unsupported.
+
 A runtime interpolation can read a verified upstream output directly:
 
 ```yaml
@@ -577,7 +589,9 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-**🟡 Supported subset.** Only `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) is admitted. Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service. v4, v5, and unknown v6 commits are unsupported.
+**🟡 Supported subset.** Public runtime support remains limited to `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9). Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service.
+
+The hosted profile also admits the exact v5.0.3 and v5.1.0 commits for runtime-proof collection. They are not part of the public compatibility contract until that hosted proof is complete. Other v5 commits, v4, and unknown v6 commits remain unsupported.
 
 JavaScript and Docker actions with compatible bundled cache clients, such as `actions/setup-go`, also receive job-bound cache-v2 credentials when the service is available. Ordinary `run` steps and native action adapters do not.
 

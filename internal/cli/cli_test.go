@@ -802,6 +802,92 @@ jobs:
 			t.Fatalf("upload stderr = %q", stderr.String())
 		}
 	})
+
+	repository := t.TempDir()
+	workflowDirectory := filepath.Join(repository, ".github", "workflows")
+	if err := os.MkdirAll(workflowDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	graphFailureWorkflow := filepath.Join(workflowDirectory, "dynamic-with-graph-failure.yml")
+	if err := os.WriteFile(graphFailureWorkflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+  missing-reusable:
+    uses: ./.github/workflows/missing.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("exact boundary survives an earlier graph failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", graphFailureWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
+
+	reusableBoundaryWorkflow := filepath.Join(workflowDirectory, "reusable-boundary-with-graph-failure.yml")
+	if err := os.WriteFile(reusableBoundaryWorkflow, []byte(`on: push
+jobs:
+  a-runtime-matrix:
+    uses: ./.github/workflows/runtime-matrix.yml
+  z-missing-reusable:
+    uses: ./.github/workflows/missing.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "runtime-matrix.yml"), []byte(`on: workflow_call
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("reusable boundary survives a later graph failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		runner := &cliCaptureRunner{}
+		if code := run([]string{"upload", reusableBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("reusable runtime matrix boundary with graph failure made Buildkite calls: %#v", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "Result: incompatible") || !strings.Contains(stderr.String(), "[E_GRAPH_INVALID]") {
+			t.Fatalf("upload stderr = %q", stderr.String())
+		}
+	})
 }
 
 func TestProcessingReportAggregatesIndependentErrorsAndRetainsPartialSuccess(t *testing.T) {
@@ -1917,10 +2003,12 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "shell-upload-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
-		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
+		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
+			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
+			!strings.Contains(step.Command, `run-job --plan-digest `) ||
+			!strings.Contains(step.Command, `--plan-producer 'shell-upload-importer'`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
 	}
@@ -3291,15 +3379,17 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 	}
 }
 
-func TestUnprivilegedUploadAllowsOnlyAuditedCacheV6Commit(t *testing.T) {
-	for _, path := range []string{"", "restore", "save"} {
-		action := plan.ActionLock{Source: "github", Repository: "actions/cache", Path: path, Commit: actionintegration.CacheCommit}
-		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-			Workflow: plan.Workflow{LogicalJobID: "cache-v6"},
-			Actions:  []plan.ActionLock{action},
-		}}}}
-		if err := validateUnprivilegedBundle(bundle); err != nil {
-			t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
+	for _, commit := range []string{actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+		for _, path := range []string{"", "restore", "save"} {
+			action := plan.ActionLock{Source: "github", Repository: "actions/cache", Path: path, Commit: commit}
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+				Workflow: plan.Workflow{LogicalJobID: "cache"},
+				Actions:  []plan.ActionLock{action},
+			}}}}
+			if err := validateUnprivilegedBundle(bundle); err != nil {
+				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+			}
 		}
 	}
 
@@ -3313,19 +3403,19 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheV6Commit(t *testing.T) {
 	}
 }
 
-func TestCacheServiceRequiredUsesOnlyAuditedCacheV6Locks(t *testing.T) {
+func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 	required, err := cacheServiceRequired([]plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}})
 	if err != nil || required {
 		t.Fatalf("ordinary action cache requirement = %v, %v", required, err)
 	}
 
-	locks := []plan.ActionLock{
-		{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)},
-		{Source: "github", Repository: "actions/cache", Path: "restore", Commit: actionintegration.CacheCommit},
-	}
-	required, err = cacheServiceRequired(locks)
-	if err != nil || !required {
-		t.Fatalf("nested cache v6 requirement = %v, %v", required, err)
+	locks := []plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}}
+	for _, commit := range []string{actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+		locks = append(locks[:1], plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore", Commit: commit})
+		required, err = cacheServiceRequired(locks)
+		if err != nil || !required {
+			t.Fatalf("cache requirement for %s = %v, %v", commit, required, err)
+		}
 	}
 
 	locks[1].Commit = strings.Repeat("b", 40)
@@ -3587,6 +3677,33 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	}
 	if !strings.Contains(string(result), `"result": "cli-ok"`) {
 		t.Fatalf("result = %s", result)
+	}
+	artifactDigest := transport.Digest(encoded)
+	artifactPath, err := buildkitepipeline.PlanPath(artifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactRunner := &cliCaptureRunner{dataByPath: map[string][]byte{artifactPath: encoded}}
+	artifactResultPath := filepath.Join(workspace, "artifact-result.json")
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer", "--result", artifactResultPath}, &stdout, &stderr, "dev", artifactRunner); code != 0 {
+		t.Fatalf("artifact Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(artifactRunner.commands) == 0 || !slices.Equal(artifactRunner.commands[0].args[:3], []string{"artifact", "download", artifactPath}) || artifactRunner.commands[0].args[4] != "--step" || artifactRunner.commands[0].args[5] != "gha-importer" {
+		t.Fatalf("plan artifact download = %#v", artifactRunner.commands)
+	}
+	if destination := artifactRunner.commands[0].args[3]; destination == workspace {
+		t.Fatalf("plan downloaded into workspace %q", destination)
+	} else if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("private plan directory still exists: %v", err)
+	}
+	tamperedRunner := &cliCaptureRunner{dataByPath: map[string][]byte{artifactPath: []byte("tampered")}}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer"}, &stdout, &stderr, "dev", tamperedRunner); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
+		t.Fatalf("tampered artifact Run() code = %d, stderr = %q", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -4032,14 +4149,29 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
-	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
 	}
-	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate hosted tool cache error", err)
 	}
-	if planPath, resultPath, hostedToolCache, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || planPath != "plan.json" || resultPath != "result.json" || !hostedToolCache {
-		t.Fatalf("runJobArgs() = %q, %q, %t, %v", planPath, resultPath, hostedToolCache, err)
+	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache {
+		t.Fatalf("runJobArgs() = %#v, %v", options, err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting plan source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "", "--plan-digest", "sha256:" + strings.Repeat("0", 64), "--plan-producer", "importer"}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty plan source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("runJobArgs() error = %v, want empty plan path error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", ""}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty digest source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "both --plan-digest and --plan-producer") {
+		t.Fatalf("runJobArgs() error = %v, want incomplete artifact source error", err)
 	}
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
