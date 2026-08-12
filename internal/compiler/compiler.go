@@ -286,52 +286,6 @@ func CompileWithOptions(path string, source, eventSource []byte, options Options
 	return out.Bytes(), nil
 }
 
-// CompilePlans connects the owned compiler IR to one versioned plan per job instance.
-func CompilePlans(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest, targetQueue string) ([]plan.Job, error) {
-	if targetQueue != "" && targetQueue != "gha-untrusted" {
-		return nil, fmt.Errorf("unsupported target queue %q for unattested event snapshot; use CompilePlansWithOptions for explicit queue policy", targetQueue)
-	}
-	options := defaultOptions()
-	if targetQueue != "" {
-		for label := range options.Runners.Labels {
-			options.Runners.Labels[label] = targetQueue
-		}
-		options.Runners.UntrustedQueues = []string{targetQueue}
-		options.Runners.AllowUntrustedDefaultQueue = false
-	}
-	return CompilePlansWithOptions(path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
-}
-
-// CompilePlansWithOptions creates one plan per job using compiler-selected
-// queues and the same snapshotted vars used for graph construction.
-func CompilePlansWithOptions(path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
-	return CompilePlansContext(context.Background(), path, source, eventSource, compilerVersion, compilerDistributionDigest, options)
-}
-
-// CompilePlansContext creates one plan per job and permits cancellation while
-// compilation resolves immutable public action source.
-func CompilePlansContext(ctx context.Context, path string, source, eventSource []byte, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
-	if compilerVersion == "" {
-		return nil, fmt.Errorf("compiler version is required")
-	}
-	if !strings.HasPrefix(compilerDistributionDigest, "sha256:") {
-		return nil, fmt.Errorf("compiler distribution digest is required")
-	}
-	ir, err := compile(path, source, eventSource, options)
-	if err != nil {
-		return nil, err
-	}
-	return compilePlans(ctx, ir, compilerVersion, compilerDistributionDigest, options)
-}
-
-func compilePlans(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, error) {
-	plans, _, _, err := compilePlansWithAuthorization(ctx, ir, compilerVersion, compilerDistributionDigest, options)
-	if err != nil {
-		return nil, err
-	}
-	return plans, err
-}
-
 func compilePlansWithAuthorization(ctx context.Context, ir IR, compilerVersion, compilerDistributionDigest string, options Options) ([]plan.Job, []PlanAuthorization, []JobEvaluation, error) {
 	payload, err := json.Marshal(ir.Event.Payload)
 	if err != nil {

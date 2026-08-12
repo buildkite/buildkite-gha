@@ -65,7 +65,7 @@ jobs:
       - run: test -n '${{ secrets.GITHUB_TOKEN }}'
 `)
 
-	plans, err := CompilePlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ jobs:
     steps:
       - run: test -n '${{ secrets.GITHUB_TOKEN }}'
 `)
-	_, err = CompilePlans(emptyCaller, readFile(t, emptyCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	_, err = compileUntrustedPlans(emptyCaller, readFile(t, emptyCaller), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), "no effective permissions") {
 		t.Fatalf("explicit empty reusable call permissions error = %v", err)
 	}
@@ -276,7 +276,7 @@ jobs:
 					return err
 				},
 				"plans": func() error {
-					_, err := CompilePlans("conditions.yml", []byte(test.source), eventSource, "0.0.0-test", testDistributionDigest, "gha-untrusted")
+					_, err := compileUntrustedPlans("conditions.yml", []byte(test.source), eventSource, "0.0.0-test", testDistributionDigest, "gha-untrusted")
 					return err
 				},
 			} {
@@ -319,7 +319,7 @@ jobs:
       - if: failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]
         run: true
 `)
-	plans, err := CompilePlans("conditions.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans("conditions.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ jobs:
 	if prepare.SourcePath != "./.github/workflows/caller.yml" || finish.SourcePath != "./.github/workflows/caller.yml" {
 		t.Fatalf("caller source provenance = %q / %q", prepare.SourcePath, finish.SourcePath)
 	}
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +729,7 @@ jobs:
           echo private=hidden >> "$GITHUB_OUTPUT"
 `)
 
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +823,7 @@ jobs:
         run: echo "release=${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 `)
 
-		plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+		plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -869,7 +869,7 @@ jobs:
         run: echo result=nested >> "$GITHUB_OUTPUT"
 `)
 
-		plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+		plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1014,7 +1014,7 @@ jobs:
 	if !reflect.DeepEqual(runners, []string{"ubuntu-22.04", "ubuntu-24.04"}) {
 		t.Fatalf("statically resolved runs-on inputs = %#v", runners)
 	}
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1063,7 +1063,7 @@ jobs:
         run: echo non-empty
 `)
 
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1109,10 +1109,10 @@ jobs:
         run: true
 `)
 
-	_, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition reference "github.event.action" is unavailable at runtime`
 	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("CompilePlans() error = %v, want callee condition diagnostic %q", err, want)
+		t.Fatalf("compileUntrustedPlans() error = %v, want callee condition diagnostic %q", err, want)
 	}
 }
 
@@ -1139,7 +1139,7 @@ jobs:
       - run: echo ${{ inputs.enabled }} ${{ github.ref }}
 `)
 
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1162,7 +1162,7 @@ func TestCompilePlansResolveReusableLocalActionsFromRepositoryRoot(t *testing.T)
 	if err := os.WriteFile(filepath.Join(actionDir, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	plans, err := CompilePlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1477,7 @@ jobs:
       - run: true
 `, strings.Join(values, ", ")))
 
-	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1527,7 +1527,7 @@ jobs:
         env:
           OPTIONAL_TOKEN: ${{ secrets.OPTIONAL_TOKEN }}
 `)
-	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1552,7 +1552,7 @@ jobs:
         env:
           OPTIONAL_TOKEN: ${{ secrets.OPTIONAL_TOKEN }}
 `)
-	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1593,7 +1593,7 @@ jobs:
       - run: echo "${{ secrets.NESTED_TOKEN }}"
 `)
 
-			plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1897,7 +1897,7 @@ jobs:
         with:
           message: ${{ steps.javascript.outputs.result }}
 `)
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1920,7 +1920,7 @@ jobs:
 	if producer.RequiredCapabilities == nil || len(producer.RequiredCapabilities) != 0 {
 		t.Fatalf("required capabilities = %#v, want concrete empty array", producer.RequiredCapabilities)
 	}
-	second, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	second, err := compileUntrustedPlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1962,7 +1962,7 @@ jobs:
           - id: named-parallel
             run: echo named
 `)
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1992,7 +1992,7 @@ jobs:
 
 func TestConcurrentSmokeTerminalKeyMatchesNativeContinuation(t *testing.T) {
 	path := smokePath(".github", "workflows", "concurrent.yml")
-	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2006,7 +2006,7 @@ func TestConcurrentSmokeTerminalKeyMatchesNativeContinuation(t *testing.T) {
 
 func TestCompilePlansRecordsStaticDependenciesWithVerifiedNeedSources(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
-	plans, err := CompilePlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2041,7 +2041,7 @@ jobs:
     steps:
       - run: echo done
 `)
-	plans, err := CompilePlans("matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	plans, err := compileUntrustedPlans("matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2076,7 +2076,7 @@ func TestCompilePlansDerivesDockerCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  docker:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/docker\n")
-	plans, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2145,12 +2145,12 @@ func TestCompilePlansAcceptsSupportedJavaScriptLocalActions(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := []byte("on: push\njobs:\n  javascript:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/" + runtime + "\n")
-			plans, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+			plans, err := compileUntrustedPlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 			if err != nil {
-				t.Fatalf("CompilePlans() error = %v, want %s support", err, runtime)
+				t.Fatalf("compileUntrustedPlans() error = %v, want %s support", err, runtime)
 			}
 			if len(plans) != 1 || !plans[0].NeedsMise() {
-				t.Fatalf("CompilePlans() plans = %#v, want one %s job requiring mise", plans, runtime)
+				t.Fatalf("compileUntrustedPlans() plans = %#v, want one %s job requiring mise", plans, runtime)
 			}
 		})
 	}
@@ -2167,9 +2167,9 @@ func TestCompilePlansRejectsRuntimeInvalidActionMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := []byte("on: push\njobs:\n  invalid:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/invalid\n")
-	_, err := CompilePlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	_, err := compileUntrustedPlans(workflowPath, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), "field unexpected not found") {
-		t.Fatalf("CompilePlans() error = %v, want strict action metadata rejection", err)
+		t.Fatalf("compileUntrustedPlans() error = %v, want strict action metadata rejection", err)
 	}
 }
 
@@ -2228,7 +2228,7 @@ func TestWorkflowRepositoryNormalizesInMemoryWorkflowPath(t *testing.T) {
 func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	source := readFile(t, path)
-	plans, err := CompilePlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "")
+	plans, err := compileUntrustedPlans(path, source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2315,7 +2315,7 @@ func readFile(t *testing.T, path string) []byte {
 
 func TestCompilePlansEmitV4ForContainers(t *testing.T) {
 	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
-	plans, err := CompilePlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}

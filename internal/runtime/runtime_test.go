@@ -868,7 +868,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compiler.CompilePlansWithOptions(
+	plans, err := compilePlansForTest(context.Background(),
 		filepath.Join(workspace, workflowPath),
 		[]byte(source),
 		event,
@@ -910,7 +910,7 @@ func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compiler.CompilePlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(filepath.Join(workspace, workflowPath), []byte(source), event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1810,7 +1810,7 @@ func TestConcurrentSmokeWorkflowEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compiler.CompilePlans(workflowPath, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans(workflowPath, source, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2285,7 +2285,7 @@ runs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compiler.CompilePlansWithOptions(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+	plans, err := compilePlansForTest(context.Background(), workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
 		EventTrust: compiler.EventUntrusted,
 		Runners: compiler.RunnerPolicy{
 			Labels:                     map[string]string{"ubuntu-latest": ""},
@@ -4622,7 +4622,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	plans, err := compiler.CompilePlansContext(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
+	plans, err := compilePlansForTest(ctx, workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), compiler.Options{
 		EventTrust: compiler.EventUntrusted,
 		Runners: compiler.RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
