@@ -46,7 +46,7 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
 
 ## Operator checklist
 
-1. Pin a released plugin version.
+1. Leave the plugin's CLI `version` unset to follow the latest stable `buildkite-gha` release, or set an exact stable release from `0.8.0` onward when a controlled rollout requires a pin.
 1. Run imported jobs on an isolated queue with no ambient credentials.
 1. Treat public actions as third-party code and prefer immutable commit pins.
 1. Restrict managed repository access and write tokens with Buildkite policy.

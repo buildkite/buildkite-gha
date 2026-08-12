@@ -32,7 +32,7 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#v0.4.4:
+      - github-actions#main:
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -40,7 +40,16 @@ steps:
     command: .buildkite/deploy.sh
 ```
 
-The plugin downloads and verifies the released CLI. Pin a plugin version rather than a floating branch.
+The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship.
+
+To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.8.0` onward:
+
+```yaml
+plugins:
+  - github-actions#main:
+      workflow: .github/workflows/ci.yml
+      version: "0.8.0"
+```
 
 The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
 
