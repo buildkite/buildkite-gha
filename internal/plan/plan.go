@@ -29,7 +29,7 @@ const (
 const MaxNeedProducers = 1024
 const maxLegacyNeedProducers = 256
 const MaxNeedOutputs = 64
-const MaxStepTargets = 256
+const maxStepTargets = 256
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var targetPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -870,8 +870,8 @@ func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
 	}
 	switch step.Kind {
 	case "wait":
-		if len(step.Targets) == 0 || len(step.Targets) > MaxStepTargets {
-			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, MaxStepTargets)
+		if len(step.Targets) == 0 || len(step.Targets) > maxStepTargets {
+			return fmt.Errorf("wait step %q must target between 1 and %d background steps", step.ID, maxStepTargets)
 		}
 	case "wait-all":
 		if len(step.Targets) != 0 {
