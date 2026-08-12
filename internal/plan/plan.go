@@ -44,6 +44,7 @@ var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
 
 var githubTokenPermissionAccess = map[string]map[string]bool{
 	"actions":             {"read": true, "write": true},
@@ -61,6 +62,22 @@ var githubTokenPermissionAccess = map[string]map[string]bool{
 	"repository_projects": {"read": true, "write": true},
 	"security_events":     {"read": true, "write": true},
 	"statuses":            {"read": true, "write": true},
+}
+
+var githubWorkflowAccessTokenPermissionAccess = map[string]map[string]bool{
+	"actions":           {"read": true, "write": true},
+	"artifact_metadata": {"read": true, "write": true},
+	"attestations":      {"read": true, "write": true},
+	"checks":            {"read": true, "write": true},
+	"contents":          {"read": true, "write": true},
+	"deployments":       {"read": true, "write": true},
+	"discussions":       {"read": true, "write": true},
+	"issues":            {"read": true, "write": true},
+	"packages":          {"read": true, "write": true},
+	"pages":             {"read": true, "write": true},
+	"pull_requests":     {"read": true, "write": true},
+	"security_events":   {"read": true, "write": true},
+	"statuses":          {"read": true, "write": true},
 }
 
 type ActionSelector struct {
@@ -655,6 +672,31 @@ func validGitHubRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
+// GitHubWorkflowPolicyFilename derives the workflow-policy endpoint filename
+// from a compiler-owned repository workflow path.
+func GitHubWorkflowPolicyFilename(path string) (string, error) {
+	const prefix = ".github/workflows/"
+
+	relative := strings.TrimPrefix(path, "./")
+	if !strings.HasPrefix(relative, prefix) {
+		return "", fmt.Errorf("GitHub workflow token requires a workflow directly under .github/workflows")
+	}
+	filename := strings.TrimPrefix(relative, prefix)
+	if err := ValidateGitHubWorkflowPolicyFilename(filename); err != nil {
+		return "", err
+	}
+	return filename, nil
+}
+
+// ValidateGitHubWorkflowPolicyFilename applies the Agent API endpoint's
+// basename contract.
+func ValidateGitHubWorkflowPolicyFilename(filename string) error {
+	if len(filename) == 0 || len(filename) > 255 || strings.ContainsAny(filename, `/\\`) || !githubWorkflowFilenamePattern.MatchString(filename) {
+		return fmt.Errorf("GitHub workflow token requires a simple .yml or .yaml filename of at most 255 bytes")
+	}
+	return nil
+}
+
 func validateGitHubTokenPermissions(permissions map[string]string) error {
 	if len(permissions) == 0 || len(permissions) > len(githubTokenPermissionAccess) {
 		return fmt.Errorf("GitHub workflow token requires a non-empty bounded permission set")
@@ -663,6 +705,21 @@ func validateGitHubTokenPermissions(permissions map[string]string) error {
 		allowed, ok := githubTokenPermissionAccess[name]
 		if !ok || !allowed[access] {
 			return fmt.Errorf("GitHub workflow token contains unsupported permission %q with access %q", name, access)
+		}
+	}
+	return nil
+}
+
+// ValidateGitHubWorkflowAccessTokenPermissions applies the workflow-policy
+// endpoint's current server-maintained allowlist.
+func ValidateGitHubWorkflowAccessTokenPermissions(permissions map[string]string) error {
+	if len(permissions) == 0 || len(permissions) > len(githubWorkflowAccessTokenPermissionAccess) {
+		return fmt.Errorf("GitHub workflow access token requires a non-empty bounded permission set")
+	}
+	for name, access := range permissions {
+		allowed, ok := githubWorkflowAccessTokenPermissionAccess[name]
+		if !ok || !allowed[access] {
+			return fmt.Errorf("GitHub workflow access token contains unsupported permission %q with access %q", name, access)
 		}
 	}
 	return nil

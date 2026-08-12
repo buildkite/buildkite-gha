@@ -3457,7 +3457,7 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedCheckoutCredentials(t *test
 
 func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T) {
 	job := plan.Job{
-		Workflow:             plan.Workflow{LogicalJobID: "comment"},
+		Workflow:             plan.Workflow{Path: ".github/workflows/comment.yml", LogicalJobID: "comment"},
 		RequiredCapabilities: []string{"provider-token-write"},
 		GitHubToken:          &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}},
 	}
@@ -3466,14 +3466,16 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "verified permissions", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}},
+		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml"}},
 		{name: "missing provenance", wantError: true},
-		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}}, wantError: true},
+		{name: "missing policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}, wantError: true},
+		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml"}, wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml"}, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
 			err := validateUnprivilegedBundle(bundle)
-			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow permission provenance")) {
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow policy")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 			if !test.wantError && err != nil {
@@ -3688,7 +3690,7 @@ type cliWorkflowTokenProvider struct {
 	calls       int
 }
 
-func (p *cliWorkflowTokenProvider) WorkflowToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+func (p *cliWorkflowTokenProvider) ScopedToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
 	p.calls++
 	p.repository = repository
 	p.permissions = permissions

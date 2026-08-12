@@ -670,7 +670,7 @@ jobs:
     steps:
       - run: true
 `)
-	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	bundle, err := CompileBundle(".github/workflows/token.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,7 +685,7 @@ jobs:
 	if !reflect.DeepEqual(token.Job.RequiredSecrets, []string{"OTHER"}) || !reflect.DeepEqual(token.Job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {
 		t.Fatalf("token secret boundary = names %#v capabilities %#v", token.Job.RequiredSecrets, token.Job.RequiredCapabilities)
 	}
-	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
+	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || token.Authorization.WorkflowTokenPolicyFilename != "token.yml" {
 		t.Fatalf("token authorization = %#v", token.Authorization)
 	}
 	if jobs["tokenless"].Job.GitHubToken != nil || jobs["tokenless"].Job.HasCapability("provider-token-write") {

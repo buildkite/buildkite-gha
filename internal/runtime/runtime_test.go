@@ -50,13 +50,15 @@ func (r *testRedactor) AddRedaction(_ context.Context, value string) error {
 type testWorkflowTokenProvider struct {
 	token       string
 	repository  string
+	workflow    string
 	permissions map[string]string
 	calls       int
 }
 
-func (p *testWorkflowTokenProvider) WorkflowToken(_ context.Context, repository string, permissions map[string]string) (string, error) {
+func (p *testWorkflowTokenProvider) WorkflowToken(_ context.Context, repository, workflow string, permissions map[string]string) (string, error) {
 	p.calls++
 	p.repository = repository
+	p.workflow = workflow
 	p.permissions = maps.Clone(permissions)
 	return p.token, nil
 }
@@ -2138,14 +2140,30 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if provider.calls != 1 || provider.repository != job.Event.Repository || !reflect.DeepEqual(provider.permissions, job.GitHubToken.Permissions) {
-		t.Fatalf("token request = calls %d, repository %q, permissions %#v", provider.calls, provider.repository, provider.permissions)
+	if provider.calls != 1 || provider.repository != job.Event.Repository || provider.workflow != "test.yml" || !reflect.DeepEqual(provider.permissions, job.GitHubToken.Permissions) {
+		t.Fatalf("token request = calls %d, repository %q, workflow %q, permissions %#v", provider.calls, provider.repository, provider.workflow, provider.permissions)
 	}
 	if !reflect.DeepEqual(redactor.values, []string{token}) {
 		t.Fatalf("redacted values = %#v", redactor.values)
 	}
 	if strings.Contains(logs.String(), token) || strings.Contains(fmt.Sprintf("%#v", result), token) || result.Env["GH_TOKEN"] != "***" || !strings.Contains(logs.String(), "***") {
 		t.Fatalf("workflow token leaked: result = %#v, logs = %q", result, logs.String())
+	}
+}
+
+func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/nested/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.Schema = plan.SchemaV6
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
+	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
+	if err == nil || !strings.Contains(err.Error(), "simple .yml or .yaml filename") || provider.calls != 0 {
+		t.Fatalf("RunJob() error/calls = %v / %d", err, provider.calls)
 	}
 }
 

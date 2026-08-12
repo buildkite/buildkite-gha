@@ -28,6 +28,7 @@ type PlanAuthorization struct {
 	DockerCapabilitySources             []string
 	ProviderTokenReadCapabilitySources  []string
 	ProviderTokenWriteCapabilitySources []string
+	WorkflowTokenPolicyFilename         string
 }
 
 // Bundle is the complete deterministic output of static compilation.
