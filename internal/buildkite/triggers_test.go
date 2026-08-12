@@ -155,6 +155,7 @@ func TestTranslateEventTriggerConditionPrioritizesEffectiveEventErrors(t *testin
 	for _, triggers := range [][]workflow.Trigger{
 		{{Event: "issues"}, {Event: "pull_request"}},
 		{{Event: "pull_request"}, {Event: "issues"}},
+		{{Event: "pull_request", Paths: []string{"src/**"}}},
 	} {
 		_, _, err := TranslateEventTriggerCondition(triggers, "pull_request", TriggerConditionContext{
 			EventPredicate:        "true",

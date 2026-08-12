@@ -137,40 +137,49 @@ func liveTriggerContext(event string) TriggerConditionContext {
 }
 
 func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (string, bool, error) {
-	if t.Paths != nil || t.PathsIgnore != nil {
-		return "", false, unsupportedTrigger("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
-	}
 	switch t.Event {
 	case "workflow_call":
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
 		return "", false, nil
 	case "workflow_dispatch":
-		if hasWebhookFilters(t) {
-			return "", false, unsupportedTrigger("workflow_dispatch has unsupported webhook filters")
-		}
 		if context.EventPredicate == "" {
 			return "", false, fmt.Errorf("workflow_dispatch requires an effective event predicate")
 		}
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
+		if hasWebhookFilters(t) {
+			return "", false, unsupportedTrigger("workflow_dispatch has unsupported webhook filters")
+		}
 		return context.EventPredicate, true, nil
 	case "schedule":
-		if hasWebhookFilters(t) {
-			return "", false, unsupportedTrigger("schedule has unsupported webhook filters")
-		}
 		// Buildkite does not expose the identity of the schedule that created a
 		// build. Cron ownership therefore stays in Buildkite, and every scheduled
 		// workflow group is eligible on any Buildkite scheduled build.
 		if context.EventPredicate == "" {
 			return "", false, fmt.Errorf("schedule requires an effective event predicate")
 		}
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
+		if hasWebhookFilters(t) {
+			return "", false, unsupportedTrigger("schedule has unsupported webhook filters")
+		}
 		return context.EventPredicate, true, nil
 	case "push":
-		if t.Types != nil || t.Workflows != nil {
-			return "", false, unsupportedTrigger("push has unsupported filters")
-		}
 		if context.EventPredicate == "" || context.Branch == "" || context.Tag == "" {
 			return "", false, fmt.Errorf("push requires effective event, branch, and tag expressions")
 		}
 		if context.Branch == "null" && context.Tag == "null" {
 			return "", false, fmt.Errorf("push event snapshot requires ref to start with refs/heads/ or refs/tags/")
+		}
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
+		if t.Types != nil || t.Workflows != nil {
+			return "", false, unsupportedTrigger("push has unsupported filters")
 		}
 		parts := []string{context.EventPredicate}
 		branch, hasBranchFilter, err := refFilters(context.Branch, t.Branches, t.BranchesIgnore)
@@ -190,14 +199,17 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
-		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedTrigger("pull_request tag filters are unsupported")
-		}
 		if context.EventPredicate == "" || context.PullRequestAction == "" {
 			return "", false, fmt.Errorf("pull_request requires effective event and action expressions")
 		}
 		if context.PullRequestAction == "null" {
 			return "", false, fmt.Errorf("pull_request event snapshot requires payload.action")
+		}
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
+		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedTrigger("pull_request tag filters are unsupported")
 		}
 		parts := []string{context.EventPredicate}
 		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
@@ -233,6 +245,13 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 	default:
 		return "", false, unsupportedTrigger("unsupported GitHub trigger event %q", t.Event)
 	}
+}
+
+func unsupportedPathFilters(t workflow.Trigger) error {
+	if t.Paths != nil || t.PathsIgnore != nil {
+		return unsupportedTrigger("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
+	}
+	return nil
 }
 
 var supportedPullRequestAction = map[string]bool{
