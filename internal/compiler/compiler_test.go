@@ -41,6 +41,52 @@ func TestEffectiveReusablePermissionsOnlyNarrowCallerAuthority(t *testing.T) {
 	}
 }
 
+func TestWorkflowTokenPolicyEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		path       string
+		source     string
+		want       string
+		diagnostic string
+	}{
+		{
+			name: "eligible", path: ".github/workflows/ci.yml", want: "ci.yml",
+			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "missing top-level permissions", path: ".github/workflows/ci.yml", diagnostic: "explicit non-empty",
+			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "job permissions", path: ".github/workflows/ci.yml", diagnostic: "job-level",
+			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "reusable workflow", path: ".github/workflows/ci.yml", diagnostic: "reusable-workflow",
+			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    uses: ./.github/workflows/reusable.yml\n",
+		},
+		{
+			name: "invalid path", path: "ci.yml", diagnostic: "directly under .github/workflows",
+			source: "on: push\npermissions:\n  contents: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+		{
+			name: "endpoint permission mismatch", path: ".github/workflows/ci.yml", diagnostic: "unsupported permission",
+			source: "on: push\npermissions:\n  models: read\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := workflow.Parse(test.path, []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			filename, diagnostic := workflowTokenPolicyEvidence(test.path, parsed)
+			if filename != test.want || !strings.Contains(diagnostic, test.diagnostic) {
+				t.Fatalf("workflowTokenPolicyEvidence() = %q, %q", filename, diagnostic)
+			}
+		})
+	}
+}
+
 func TestCompilePlansBoundsNestedReusableWorkflowDefaultPermissions(t *testing.T) {
 	repository := t.TempDir()
 	caller := writeWorkflow(t, repository, "caller.yml", `on: push

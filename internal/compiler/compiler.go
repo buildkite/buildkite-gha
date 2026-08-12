@@ -78,10 +78,12 @@ type ExecutionBoundary struct {
 
 // WorkflowSource binds the IR to its input workflow bytes.
 type WorkflowSource struct {
-	Path             string `json:"path"`
-	Name             string `json:"name,omitempty"`
-	Digest           string `json:"digest"`
-	ConcurrencyGroup string `json:"concurrency_group,omitempty"`
+	Path                          string `json:"path"`
+	Name                          string `json:"name,omitempty"`
+	Digest                        string `json:"digest"`
+	ConcurrencyGroup              string `json:"concurrency_group,omitempty"`
+	WorkflowTokenPolicyFilename   string `json:"-"`
+	WorkflowTokenPolicyDiagnostic string `json:"-"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
@@ -513,6 +515,7 @@ instances:
 				githubToken = &plan.GitHubToken{Permissions: permissions}
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
+				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
 			}
 			if len(secrets) != 0 {
 				capabilities = append(capabilities, "secrets")
@@ -679,6 +682,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
+	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
 	event, err := parseEvent(eventSource)
 	if err != nil {
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
@@ -693,8 +697,11 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
-		Schema:   schema,
-		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
+		Schema: schema,
+		Workflow: WorkflowSource{
+			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup,
+			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
+		},
 		Event:    event,
 		Vars:     vars,
 		Warnings: compilerWarnings(parsed.Concurrency, cancelInProgress),
@@ -705,6 +712,32 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Jobs: expanded.instances,
 	}
 	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
+}
+
+func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, string) {
+	filename, err := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
+	if err != nil {
+		return "", err.Error()
+	}
+	if parsed.Permissions == nil || len(parsed.Permissions.Scopes) == 0 {
+		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
+	}
+	permissions := make(map[string]string, len(parsed.Permissions.Scopes))
+	for name, access := range parsed.Permissions.Scopes {
+		permissions[strings.ReplaceAll(name, "-", "_")] = access
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
+		return "", err.Error()
+	}
+	for _, job := range parsed.Jobs {
+		if job.Permissions != nil {
+			return "", "GitHub workflow access tokens do not support job-level permissions"
+		}
+		if job.Reusable != nil {
+			return "", "GitHub workflow access tokens do not support reusable-workflow jobs"
+		}
+	}
+	return filename, ""
 }
 
 func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) []Warning {

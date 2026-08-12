@@ -1445,7 +1445,7 @@ func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
 }
 
 type actionSourceAuthentication struct {
-	provider gharuntime.WorkflowTokenProvider
+	provider gharuntime.ScopedTokenProvider
 	redactor gharuntime.Redactor
 	warnings io.Writer
 }
@@ -1484,7 +1484,7 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		a.warnAnonymousFallback("job-scoped GitHub source authentication is unavailable")
 		return "", nil
 	}
-	token, err := a.provider.WorkflowToken(ctx, repository, map[string]string{"contents": "read"})
+	token, err := a.provider.ScopedToken(ctx, repository, map[string]string{"contents": "read"})
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -1626,8 +1626,13 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 				continue
 			}
 			if capability == "provider-token-write" {
-				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
-					addFailure(artifact, "provider token write capability lacks compiler-verified permission provenance", fmt.Errorf("job %q requires provider-token-write without compiler-verified workflow permission provenance", artifact.Job.Workflow.LogicalJobID))
+				filename, filenameErr := plan.GitHubWorkflowPolicyFilename(artifact.Job.Workflow.Path)
+				if artifact.Job.GitHubToken == nil || !slices.Equal(artifact.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || filenameErr != nil || artifact.Authorization.WorkflowTokenPolicyFilename == "" || artifact.Authorization.WorkflowTokenPolicyFilename != filename {
+					reason := bundle.IR.Workflow.WorkflowTokenPolicyDiagnostic
+					if reason == "" {
+						reason = "compiler-verified workflow policy evidence is missing or does not match the job plan"
+					}
+					addFailure(artifact, "provider token write capability lacks compiler-verified workflow policy", fmt.Errorf("job %q requires provider-token-write without a compiler-verified workflow policy: %s", artifact.Job.Workflow.LogicalJobID, reason))
 				}
 				continue
 			}

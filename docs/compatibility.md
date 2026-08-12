@@ -149,9 +149,9 @@ permissions:
   pull-requests: write
 ```
 
-Supported values are `read`, `write`, and `none`. Supported names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `models`, `packages`, `pages`, `pull-requests`, `repository-projects`, `security-events`, and `statuses`. The `models` permission is read-only. The other names support `read` and `write`.
+Supported values are `read`, `write`, and `none`. Supported names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `packages`, `pages`, `pull-requests`, `security-events`, and `statuses`.
 
-An omitted map defaults to `contents: read` when a token is needed. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions.
+An omitted map defaults to `contents: read` when a token is needed. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions. These forms remain compilable when no job needs a token. Hosted token issuance requires one explicit, non-empty top-level map and rejects job-level maps and reusable-workflow jobs.
 
 The `read-all` and `write-all` values, the `id-token` permission, and noncanonical names are unsupported. An empty map, or a map containing only `none`, creates no token.
 
@@ -596,24 +596,28 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
-A job can request a token for a pull request comment:
+Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, declare an explicit non-empty top-level permission map, and contain no job-level permission maps or reusable-workflow jobs.
+
+Pull-request builds and their triggered or rebuilt descendants may request only `contents: read`. Merge-queue builds and their descendants cannot request a token. The backend verifies this provenance and remains authoritative.
+
+A job can request read-only repository access:
 
 ```yaml
 permissions:
-  pull-requests: write
+  contents: read
 
 jobs:
-  comment:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr comment "$PR_NUMBER" --body "Checks passed"
+        run: gh api repos/{owner}/{repo}
 ```
 
-Job binding does not establish fork or actor trust. If untrusted sources can edit workflows, they can request write permissions. Restrict write tokens with Buildkite pipeline and organization policy.
+The server restricts pull requests, merge queues, and their descendants. For other builds, job binding does not establish that an arbitrary commit is trusted. Restrict who can create builds and enable write tokens only when branch builds run trusted code.
 
 The token is not added to the initial job environment. The `github.token` value is available only while evaluating an effective action metadata input default. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` are unsupported.
 

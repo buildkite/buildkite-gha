@@ -766,6 +766,50 @@ func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) 
 	}
 }
 
+func TestGitHubWorkflowPolicyFilename(t *testing.T) {
+	valid255 := strings.Repeat("a", 251) + ".yml"
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: ".github/workflows/ci.yml", want: "ci.yml"},
+		{path: "./.github/workflows/release.yaml", want: "release.yaml"},
+		{path: ".github/workflows/Release_1.2-test.yml", want: "Release_1.2-test.yml"},
+		{path: ".github/workflows/" + valid255, want: valid255},
+	} {
+		got, err := GitHubWorkflowPolicyFilename(test.path)
+		if err != nil || got != test.want {
+			t.Errorf("GitHubWorkflowPolicyFilename(%q) = %q, %v; want %q", test.path, got, err, test.want)
+		}
+	}
+
+	for _, path := range []string{
+		"", "ci.yml", "/.github/workflows/ci.yml", ".github/workflows/nested/ci.yml",
+		".github/workflows/../ci.yml", ".github/workflows/.ci.yml", ".github/workflows/ci.json",
+		".github/workflows/ci yml", ".github/workflows/" + strings.Repeat("a", 252) + ".yml",
+	} {
+		if _, err := GitHubWorkflowPolicyFilename(path); err == nil {
+			t.Errorf("GitHubWorkflowPolicyFilename(%q) succeeded", path)
+		}
+	}
+}
+
+func TestValidateGitHubWorkflowAccessTokenPermissions(t *testing.T) {
+	if err := ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{"contents": "read", "pull_requests": "write"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, permissions := range []map[string]string{
+		nil,
+		{"models": "read"},
+		{"repository_projects": "read"},
+		{"contents": "admin"},
+	} {
+		if err := ValidateGitHubWorkflowAccessTokenPermissions(permissions); err == nil {
+			t.Errorf("ValidateGitHubWorkflowAccessTokenPermissions(%#v) succeeded", permissions)
+		}
+	}
+}
+
 func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	job := validJob()
 	job.Schema = SchemaV6

@@ -17,11 +17,17 @@ import (
 func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	const statelessToken = "ghs_header.payload-with-hyphen.signature"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_workflow_access_token" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Token job-secret" || r.Header.Get("Accept") != "application/json" || r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("request = %s headers %#v", r.Method, r.Header)
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Error(err)
 		}
-		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","permissions":{"contents":"read","pull_requests":"write"}}` {
+		if string(body) != `{"repo_url":"https://github.com/buildkite/buildkite-gha","workflow":"ci.yml","permissions":{"contents":"read","pull_requests":"write"}}` {
 			t.Errorf("request body = %s", body)
 		}
 		_, _ = io.WriteString(w, `{"token":"`+statelessToken+`"}`)
@@ -31,14 +37,61 @@ func TestAgentGitHubTokensMintsExactWorkflowPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"pull_requests": "write", "contents": "read"})
+	token, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"pull_requests": "write", "contents": "read"})
 	if err != nil || token != statelessToken {
 		t.Fatalf("WorkflowToken() = %q, %v", token, err)
 	}
 	for _, permissions := range []map[string]string{nil, {}, {"contents": "admin"}, {"administration": "write"}, {"models": "write"}} {
-		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", permissions); err == nil {
+		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
 			t.Fatalf("WorkflowToken(%#v) succeeded", permissions)
 		}
+	}
+	for _, permissions := range []map[string]string{{"models": "read"}, {"repository_projects": "read"}} {
+		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", permissions); err == nil {
+			t.Fatalf("WorkflowToken(%#v) succeeded", permissions)
+		}
+	}
+}
+
+func TestAgentGitHubTokensMintsScopedSourceTokenWithoutWorkflow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jobs/"+testCacheJobID+"/github_scoped_access_token" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != `{"repo_url":"https://github.com/actions/checkout","permissions":{"contents":"read"}}` {
+			t.Errorf("request body = %s", body)
+		}
+		_, _ = io.WriteString(w, `{"token":"ghs_scoped"}`)
+	}))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token, err := provider.ScopedToken(context.Background(), "actions/checkout", map[string]string{"contents": "read"}); err != nil || token != "ghs_scoped" {
+		t.Fatalf("ScopedToken() = %q, %v", token, err)
+	}
+}
+
+func TestAgentGitHubTokensRejectsInvalidWorkflowBeforeNetwork(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer server.Close()
+	provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{Endpoint: server.URL, JobID: testCacheJobID, JobToken: "job-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workflow := range []string{"", "../ci.yml", "nested/ci.yml", ".ci.yml", "ci.json"} {
+		if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", workflow, map[string]string{"contents": "read"}); err == nil {
+			t.Errorf("WorkflowToken(%q) succeeded", workflow)
+		}
+	}
+	if requests != 0 {
+		t.Fatalf("network requests = %d, want 0", requests)
 	}
 }
 
@@ -84,7 +137,7 @@ func TestAgentGitHubTokensRejectsUnsafeConfigurationAndRepository(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, repository := range []string{"", "other", "../other/repo", "owner/..", "owner/repo/extra", "owner/repo?permission=write"} {
-		if _, err := provider.WorkflowToken(context.Background(), repository, map[string]string{"contents": "read"}); err == nil {
+		if _, err := provider.WorkflowToken(context.Background(), repository, "ci.yml", map[string]string{"contents": "read"}); err == nil {
 			t.Fatalf("WorkflowToken(%q) succeeded", repository)
 		}
 	}
@@ -100,6 +153,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 		want       string
 	}{
 		{"rejected", http.StatusBadRequest, secret, "", "rejected"},
+		{"unauthorized", http.StatusUnauthorized, secret, "", "denied"},
 		{"denied", http.StatusForbidden, secret, "", "denied"},
 		{"disabled", http.StatusNotFound, secret, "", "not enabled"},
 		{"rate limited", http.StatusServiceUnavailable, secret, "60", "retry after 60 seconds"},
@@ -125,7 +179,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"contents": "read"})
+			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
 			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("WorkflowToken() error = %v, want %q without response data", err, test.want)
 			}
@@ -146,7 +200,7 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
+	if _, err := provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); err == nil || !strings.Contains(err.Error(), "HTTP 307") || redirected {
 		t.Fatalf("redirect WorkflowToken() error/redirected = %v / %v", err, redirected)
 	}
 }
@@ -158,7 +212,7 @@ func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
+	if _, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WorkflowToken() error = %v, want cancellation", err)
 	}
 }
@@ -177,7 +231,7 @@ func TestAgentGitHubTokensAuthenticateUnrelatedPublicRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := provider.WorkflowToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"})
+	token, err := provider.ScopedToken(ctx, "buildkite/buildkite-gha", map[string]string{"contents": "read"})
 	if err != nil {
 		t.Fatal(err)
 	}
