@@ -13,8 +13,19 @@ readonly step_key=gha-upload-artifact
 
 command -v bk >/dev/null
 command -v jq >/dev/null
-command -v sha256sum >/dev/null
 command -v unzip >/dev/null
+if ! command -v sha256sum >/dev/null && ! command -v shasum >/dev/null; then
+  echo 'sha256sum or shasum is required' >&2
+  exit 1
+fi
+
+sha256_digest() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$@" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$@" | cut -d ' ' -f 1
+  fi
+}
 
 build="$(bk --no-pager api "/pipelines/$pipeline/builds/$build_number")"
 commit="$(jq -r '.commit // ""' <<<"$build")"
@@ -26,7 +37,10 @@ readonly commit
 build_id="$(jq -r '.id // ""' <<<"$build")"
 readonly build_id
 
-mapfile -t job_ids < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
+job_ids=()
+while IFS= read -r candidate_job_id; do
+  job_ids+=("$candidate_job_id")
+done < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
 if (( ${#job_ids[@]} != 1 )) || [[ ! ${job_ids[0]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
   echo "build $build_number has ${#job_ids[@]} jobs with step key $step_key; expected exactly one" >&2
   exit 1
@@ -105,11 +119,14 @@ then
   exit 1
 fi
 
-if [[ $(sha256sum "$archive_file" | cut -d ' ' -f 1) != "$digest_hex" ]]; then
+if [[ $(sha256_digest "$archive_file") != "$digest_hex" ]]; then
   echo "native archive digest does not match the terminal manifest" >&2
   exit 1
 fi
-mapfile -t entries < <(unzip -Z1 "$archive_file")
+entries=()
+while IFS= read -r entry; do
+  entries+=("$entry")
+done < <(unzip -Z1 "$archive_file")
 if (( ${#entries[@]} != 2 )) || [[ ${entries[0]} != nested/metadata.json || ${entries[1]} != result.txt ]]; then
   printf 'unexpected native archive entries: %s\n' "${entries[*]}" >&2
   exit 1

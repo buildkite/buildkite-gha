@@ -720,8 +720,8 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 	if privateRuntime == "" {
 		return "", fmt.Errorf("private action runtime directory is required")
 	}
-	resolvedRoot, err := filepath.EvalSymlinks(privateRuntime)
-	if err != nil || resolvedRoot != privateRuntime {
+	resolvedRoot, err := canonicalNonSymlinkDirectory(privateRuntime)
+	if err != nil {
 		return "", fmt.Errorf("private action runtime directory contains a symlink")
 	}
 	source, err := os.Open(cached)
@@ -729,7 +729,7 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 		return "", fmt.Errorf("open cached mise executable: %w", err)
 	}
 	defer func() { _ = source.Close() }()
-	destination := filepath.Join(privateRuntime, "mise")
+	destination := filepath.Join(resolvedRoot, "mise")
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o500)
 	if err != nil {
 		return "", fmt.Errorf("create private mise executable: %w", err)
@@ -762,19 +762,20 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 
 func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
 	destinationDir := filepath.Join(root, cacheKey)
-	destination := filepath.Join(destinationDir, "mise")
-	if resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest); err == nil {
-		return resolved, nil
-	}
 	parent := filepath.Dir(destinationDir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return "", fmt.Errorf("create mise runtime cache: %w", err)
 	}
-	resolvedParent, err := filepath.EvalSymlinks(parent)
-	if err != nil || resolvedParent != parent {
+	resolvedParent, err := canonicalNonSymlinkDirectory(parent)
+	if err != nil {
 		return "", fmt.Errorf("mise runtime cache contains a symlink")
 	}
-	staging, err := os.MkdirTemp(parent, "."+cacheKey+".")
+	destinationDir = filepath.Join(resolvedParent, cacheKey)
+	destination := filepath.Join(destinationDir, "mise")
+	if resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest); err == nil {
+		return resolved, nil
+	}
+	staging, err := os.MkdirTemp(resolvedParent, "."+cacheKey+".")
 	if err != nil {
 		return "", fmt.Errorf("stage mise runtime: %w", err)
 	}
@@ -955,13 +956,35 @@ func prepareMiseDataDir(path string, stderr io.Writer) string {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is unavailable; using the ephemeral agent cache: %v\n", path, err)
 		return ""
 	}
-	resolved, resolveErr := filepath.EvalSymlinks(absolute)
-	info, statErr := os.Lstat(absolute)
-	if resolveErr != nil || resolved != absolute || statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	resolved, err := canonicalNonSymlinkDirectory(absolute)
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: mise cache %q is not a real directory; using the ephemeral agent cache\n", path)
 		return ""
 	}
-	return absolute
+	return resolved
+}
+
+func canonicalNonSymlinkDirectory(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("not a non-symlink directory")
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	canonicalInfo, err := os.Stat(resolved)
+	if err != nil || !os.SameFile(info, canonicalInfo) {
+		return "", fmt.Errorf("directory changed while canonicalizing")
+	}
+	return resolved, nil
 }
 
 func hasGitHubActionLocks(locks []plan.ActionLock) bool {

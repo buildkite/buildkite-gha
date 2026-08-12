@@ -405,8 +405,8 @@ func setAPIHeaders(r *http.Request, token string) {
 }
 
 // Store downloads exact public commits directly from codeload and atomically
-// caches them. A Store must not be shared by mutually untrusted processes
-// writing the same cache root.
+// caches them in an existing real directory. A Store must not be shared by
+// mutually untrusted processes writing the same cache root.
 type Store struct {
 	root   string
 	client *http.Client
@@ -420,6 +420,22 @@ func NewStore(root string, client *http.Client, opts ...Option) (*Store, error) 
 	}
 	if root == "" {
 		return nil, fmt.Errorf("cache root is required")
+	}
+	root, e = filepath.Abs(root)
+	if e != nil {
+		return nil, fmt.Errorf("resolve cache root: %w", e)
+	}
+	info, e := os.Lstat(root)
+	if e != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("cache root is not a non-symlink directory")
+	}
+	root, e = filepath.EvalSymlinks(root)
+	if e != nil {
+		return nil, fmt.Errorf("canonicalize cache root: %w", e)
+	}
+	canonicalInfo, e := os.Stat(root)
+	if e != nil || !os.SameFile(info, canonicalInfo) {
+		return nil, fmt.Errorf("cache root changed while canonicalizing")
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}

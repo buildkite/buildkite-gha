@@ -2877,8 +2877,14 @@ func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	stderr.Reset()
-	if got := prepareMiseDataDir(filepath.Join(link, "mise"), &stderr); got != "" || !strings.Contains(stderr.String(), "not a real directory") {
-		t.Fatalf("prepareMiseDataDir(symlink) = %q, stderr = %q", got, stderr.String())
+	want := filepath.Join(target, "mise")
+	if got := prepareMiseDataDir(filepath.Join(link, "mise"), &stderr); got != want || stderr.Len() != 0 {
+		t.Fatalf("prepareMiseDataDir(aliased ancestor) = %q, stderr = %q, want %q", got, stderr.String(), want)
+	}
+
+	stderr.Reset()
+	if got := prepareMiseDataDir(link, &stderr); got != "" || !strings.Contains(stderr.String(), "not a real directory") {
+		t.Fatalf("prepareMiseDataDir(symlink root) = %q, stderr = %q", got, stderr.String())
 	}
 }
 
@@ -3086,8 +3092,20 @@ func TestInstallRuntimeMiseDownloadsVerifiesAndReusesCache(t *testing.T) {
 		_, _ = response.Write(archive)
 	}))
 	defer server.Close()
-	root := t.TempDir()
-	want := filepath.Join(root, "linux-x64", "mise")
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realParent := filepath.Join(base, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalParent := filepath.Join(base, "logical")
+	if err := os.Symlink(realParent, logicalParent); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	root := filepath.Join(logicalParent, "cache")
+	want := filepath.Join(realParent, "cache", "linux-x64", "mise")
 	for i := 0; i < 2; i++ {
 		got, err := installRuntimeMiseFrom(context.Background(), root, server.Client(), server.URL, hex.EncodeToString(archiveHash[:]), hex.EncodeToString(binaryHash[:]))
 		if err != nil || got != want {
@@ -3192,12 +3210,27 @@ func TestPinRuntimeMiseCopiesVerifiedBytesPrivately(t *testing.T) {
 	if err := os.WriteFile(cached, binary, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	privateRuntime := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realParent := filepath.Join(base, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalParent := filepath.Join(base, "logical")
+	if err := os.Symlink(realParent, logicalParent); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	privateRuntime := filepath.Join(logicalParent, "runtime")
+	if err := os.Mkdir(privateRuntime, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	got, err := pinRuntimeMise(context.Background(), cached, privateRuntime, hex.EncodeToString(digest[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != filepath.Join(privateRuntime, "mise") {
+	if got != filepath.Join(realParent, "runtime", "mise") {
 		t.Fatalf("pinRuntimeMise() = %q, want private executable", got)
 	}
 	if err := os.Chmod(cached, 0o700); err != nil {
@@ -3211,6 +3244,13 @@ func TestPinRuntimeMiseCopiesVerifiedBytesPrivately(t *testing.T) {
 	}
 	if _, err := pinRuntimeMise(context.Background(), cached, t.TempDir(), hex.EncodeToString(digest[:])); err == nil || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("pinRuntimeMise() accepted tampered cache: %v", err)
+	}
+	linkedRuntime := filepath.Join(base, "linked-runtime")
+	if err := os.Symlink(filepath.Join(realParent, "runtime"), linkedRuntime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pinRuntimeMise(context.Background(), got, linkedRuntime, hex.EncodeToString(digest[:])); err == nil || !strings.Contains(err.Error(), "contains a symlink") {
+		t.Fatalf("pinRuntimeMise() accepted symlink root: %v", err)
 	}
 }
 
