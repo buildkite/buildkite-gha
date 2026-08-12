@@ -169,6 +169,17 @@ func TestTranslateEventTriggerConditionPrioritizesEffectiveEventErrors(t *testin
 			t.Fatalf("effective event error for triggers %v was classified as unsupported syntax: %v", triggers, err)
 		}
 	}
+
+	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{{
+		Event: "pull_request", Branches: []string{"main"}, Paths: []string{"src/**"},
+	}}, "pull_request", TriggerConditionContext{
+		EventPredicate:        "true",
+		PullRequestBaseBranch: "null",
+		PullRequestAction:     `"opened"`,
+	})
+	if err == nil || !strings.Contains(err.Error(), "payload.pull_request.base.ref") || IsUnsupportedTrigger(err) {
+		t.Fatalf("missing effective base branch was not prioritized over unsupported syntax: %v", err)
+	}
 }
 
 func TestTranslateEventTriggerConditionRejectsUnclassifiablePushSnapshot(t *testing.T) {

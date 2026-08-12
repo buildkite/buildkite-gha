@@ -205,13 +205,6 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		if context.PullRequestAction == "null" {
 			return "", false, fmt.Errorf("pull_request event snapshot requires payload.action")
 		}
-		if err := unsupportedPathFilters(t); err != nil {
-			return "", false, err
-		}
-		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, unsupportedTrigger("pull_request tag filters are unsupported")
-		}
-		parts := []string{context.EventPredicate}
 		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
 		if hasBranchFilter && context.PullRequestBaseBranch == "" {
 			return "", false, fmt.Errorf("pull_request branch filters require a base branch expression")
@@ -219,6 +212,13 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		if hasBranchFilter && context.PullRequestBaseBranch == "null" {
 			return "", false, fmt.Errorf("pull_request branch filters require payload.pull_request.base.ref")
 		}
+		if err := unsupportedPathFilters(t); err != nil {
+			return "", false, err
+		}
+		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
+			return "", false, unsupportedTrigger("pull_request tag filters are unsupported")
+		}
+		parts := []string{context.EventPredicate}
 		b, hasBranchFilter, err := refFilters(context.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, unsupportedTrigger("pull_request branches: %v", err)
