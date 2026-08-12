@@ -26,7 +26,7 @@
       "expectation": "compile-pass",
       "evidence": "Local JavaScript and composite action components have runtime tests; the complete hosted fixture does not.",
       "note": "Component runtime evidence must not be read as full workflow runtime evidence.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "smoke-artifact",
@@ -35,7 +35,7 @@
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 270 and an independent read-only artifact observation proved the producer-to-two-consumer native roundtrip.",
       "note": "The verifier bound merged commit 1b69b2fa1a9d488d0f349b3267b484db9aeea57d, one producer, both matrix consumers, their terminal manifests, the exact native archive, and the build-unique payload.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "smoke-artifact-multi-prefix",
@@ -44,7 +44,7 @@
       "expectation": "compile-pass",
       "evidence": "Parser, compiler, and runtime tests cover bounded expansion, direct-needs matching, deterministic deduplication, merge order, and atomic staging.",
       "note": "This PostHog-shaped two-prefix fixture is compile-only; hosted producer-to-consumer execution remains unproven.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "example-basic",
@@ -53,7 +53,7 @@
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 290 passed the complete example suite.",
       "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, checkout, setup-go, shell tests, conditions, outputs, and the summary-producing workflow all completed on the hosted runtime; the dedicated summary-annotation fixture owns independent persistence evidence.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "example-artifacts",
@@ -62,7 +62,7 @@
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 290 passed the complete example suite.",
       "note": "At commit 379344599c0653990687d017bd195d416c7bc29c, build, job outputs, exact-name direct-needs artifact transfer, and downloaded binary execution all passed on the hosted runtime.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "example-advanced",
@@ -71,7 +71,7 @@
       "expectation": "runtime-pass",
       "evidence": "Published-plugin Buildkite build 336 passed the revised service-free advanced fixture and all generated jobs.",
       "note": "At source commit d5102df7e81c49f27a30fb2830d9608a56ee84de, plugin v0.2.0 resolved to d009da173158270a3921b2997ae8fd3d68526d00 and proved the reusable output, public Dockerfile action, artifact, matrix, summary, and annotation path.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "plugin-demo-cache",
@@ -80,7 +80,7 @@
       "expectation": "runtime-pass",
       "evidence": "Published-plugin Buildkite build 337 passed the stable cache-v2 fixture and all generated jobs.",
       "note": "At source commit d5102df7e81c49f27a30fb2830d9608a56ee84de, plugin v0.2.0 resolved to d009da173158270a3921b2997ae8fd3d68526d00; the producer observed a miss and post-save before its direct dependent restored an exact primary-key hit and verified the payload.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "public-actions",
@@ -89,7 +89,7 @@
       "expectation": "runtime-pass",
       "evidence": "The pinned public checkout and setup action proof has runtime coverage.",
       "note": "The local harness compiles only and never fetches these actions.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "dockerfile-action",
@@ -98,7 +98,7 @@
       "expectation": "runtime-pass",
       "evidence": "The pinned public Dockerfile action proof has hosted runtime coverage.",
       "note": "The deterministic smoke event matches the production Dockerfile-action proof input.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "container-runtime",
@@ -106,7 +106,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The complete compiler-to-Runner container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted-tokenless admission still rejects its job- and service-container provenance.",
+      "note": "Hosted admission still rejects its job- and service-container provenance.",
       "action_preflight": "none"
     },
     {
@@ -134,7 +134,7 @@
       "expectation": "runtime-pass",
       "evidence": "Exact-commit Buildkite build 259 and an independent read-only artifact observation proved native archive publication and its bounded producer contract.",
       "note": "The verifier bound build 259, merged implementation commit 12e72d3298e919f33caba70d39265ef2da387f83, and generated job 019fb686-0167-4da1-9bfc-550166d6a1a4.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "cache-v6",
@@ -143,7 +143,7 @@
       "expectation": "compile-pass",
       "evidence": "Compiler and runtime conformance tests admit the audited actions/cache v6.1.0 commit and execute the cache lifecycle with isolated per-phase cache-v2 credentials.",
       "note": "This minimal fixture remains compile-only conformance coverage. The stable plugin-demo-cache fixture has published-plugin runtime evidence from Buildkite build 337.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "cache-v5",
@@ -152,7 +152,7 @@
       "expectation": "compile-pass",
       "evidence": "Compiler, upload, run-job, and runtime resolver tests admit only the audited actions/cache v5 commits; shared tests cover the unchanged isolated cache-v2 credential boundary.",
       "note": "This minimal roundtrip remains compile-only conformance coverage until an exact v5 commit passes the hosted cache-v2 runtime proof.",
-      "action_preflight": "hosted-tokenless"
+      "action_preflight": "hosted"
     },
     {
       "id": "unsupported-job-container",
@@ -160,7 +160,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 job-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted-tokenless admission still rejects job-container provenance.",
+      "note": "Hosted admission still rejects job-container provenance.",
       "action_preflight": "none"
     },
     {
@@ -169,7 +169,7 @@
       "event": "testdata/smoke/events/push.json",
       "expectation": "runtime-pass",
       "evidence": "The plan-v4 service-container fixture passed in exact-commit Buildkite build 136.",
-      "note": "Hosted-tokenless admission still rejects service-container provenance.",
+      "note": "Hosted admission still rejects service-container provenance.",
       "action_preflight": "none"
     }
   ]

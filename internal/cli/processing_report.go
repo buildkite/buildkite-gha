@@ -83,7 +83,7 @@ func validatedProcessingReportWithOptions(out processingOutput, workflowPath, pr
 
 // applyHostedPreflight folds hosted preflight evidence and any admission
 // grant into the report.
-func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedTokenlessCompilation) {
+func applyHostedPreflight(report *compatibility.ProcessingReport, preflight hostedCompilation) {
 	report.ApplyEvidence(preflight.Bundle.Processing)
 	if preflight.Admitted {
 		report.SetStage(string(compiler.StageAdmission), compatibility.Passed)
@@ -91,16 +91,16 @@ func applyHostedPreflight(report *compatibility.ProcessingReport, preflight host
 	}
 }
 
-// classifyHostedTokenlessFailure records a failed hosted preflight in the
+// classifyHostedFailure records a failed hosted preflight in the
 // report and returns the report result it implies.
-func classifyHostedTokenlessFailure(report *compatibility.ProcessingReport, workflowPath string, err error) string {
-	var failure *hostedTokenlessFailure
-	if errors.As(err, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
+func classifyHostedFailure(report *compatibility.ProcessingReport, workflowPath string, err error) string {
+	var failure *hostedFailure
+	if errors.As(err, &failure) && failure.Kind == hostedAdmissionFailure {
 		report.AddFailure(workflowPath, string(compiler.StageAdmission), "E_PROFILE", "admission", err)
 		report.Admission.Result = "not-admitted"
 		return "not-admitted"
 	}
-	if errors.As(err, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
+	if errors.As(err, &failure) && failure.Kind == hostedEnvironmentFailure {
 		report.AddEnvironmentFailure("hosted workflow-processing environment could not be initialized")
 	} else {
 		report.AddFailure(workflowPath, string(compiler.StageResolution), compiler.CodeActionResolution, "action-resolution", err)

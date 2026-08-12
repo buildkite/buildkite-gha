@@ -62,15 +62,15 @@ description = "Validate and deterministically compile the local smoke inventory"
 run = "./scripts/smoke-local"
 
 [tasks."smoke:profile"]
-description = "Resolve actions and apply the hosted-tokenless profile to smoke fixtures"
-run = "./scripts/smoke-local --profile hosted-tokenless"
+description = "Resolve actions and apply the hosted profile to smoke fixtures"
+run = "./scripts/smoke-local --profile hosted"
 
 [tasks."corpus:starter"]
 description = "Report compile compatibility for the pinned GitHub starter workflow corpus"
 run = "./scripts/starter-workflows-corpus"
 
 [tasks."corpus:starter-profile"]
-description = "Report hosted-tokenless admission for the pinned GitHub starter workflow corpus"
+description = "Report hosted admission for the pinned GitHub starter workflow corpus"
 run = "./scripts/starter-workflows-corpus --profile"
 
 [tasks.check]

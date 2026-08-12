@@ -1,6 +1,6 @@
 # GitHub Actions compatibility
 
-This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted-tokenless` profile used by `upload` and the Buildkite plugin.
+This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted` profile used by `upload` and the Buildkite plugin.
 
 The released plugin path supports Linux x86-64 and native macOS arm64, including
 the matching `runner.os` and `runner.arch` values. Platform labels do not provide
@@ -341,7 +341,7 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 ### Containers and services
 
-**🚧 Not available in production.** The compiler and runtime support a bounded Linux subset for job `container` and `services`, but the `hosted-tokenless` profile rejects it before upload.
+**🚧 Not available in production.** The compiler and runtime support a bounded Linux subset for job `container` and `services`, but the `hosted` profile rejects it before upload.
 
 The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
 
@@ -734,7 +734,7 @@ Apply the same profile as production upload:
 
 ```sh
 buildkite-gha validate \
-  --profile hosted-tokenless \
+  --profile hosted \
   --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
 ```

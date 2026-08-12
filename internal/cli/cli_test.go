@@ -710,7 +710,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 		stdout.Reset()
 		stderr.Reset()
-		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 1 {
+		if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("profile Run() code = %d, want 1; stderr = %q", code, stderr.String())
 		}
 		var profileReport compatibility.ProcessingReport
@@ -722,9 +722,9 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate hosted tokenless profile", func(t *testing.T) {
+	t.Run("validate hosted profile", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflowPath}
 		runner := &cliCaptureRunner{}
 		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
@@ -736,18 +736,18 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "admitted" || report.Profile != "hosted-tokenless" || report.Compile.Instances != 3 || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
+		if report.Result != "admitted" || report.Profile != "hosted" || report.Compile.Instances != 3 || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
 			t.Fatalf("profile report = %#v", report)
 		}
 	})
 
-	t.Run("validate hosted tokenless profile applies upload trigger policy", func(t *testing.T) {
+	t.Run("validate hosted profile applies upload trigger policy", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "issues.yml")
 		if err := os.WriteFile(workflow, []byte("on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
 		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 		}
@@ -760,13 +760,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate hosted tokenless profile does not compile a cross-event workflow", func(t *testing.T) {
+	t.Run("validate hosted profile does not compile a cross-event workflow", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "pull-request.yml")
 		if err := os.WriteFile(workflow, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
 		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
@@ -779,13 +779,13 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
-	t.Run("validate hosted tokenless macOS profile requires upload mapping", func(t *testing.T) {
+	t.Run("validate hosted macOS profile requires upload mapping", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "macos.yml")
 		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
 		if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
 			t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
 		}
@@ -800,7 +800,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate profile requires event", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--profile", "hosted-tokenless", workflowPath}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "--event-path is required with --profile") {
+		if code := Run([]string{"validate", "--profile", "hosted", workflowPath}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "--event-path is required with --profile") {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 	})
@@ -811,7 +811,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
+		if code := Run([]string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}, &stdout, &stderr, "dev"); code != 0 {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 		var report compatibility.ProcessingReport
@@ -2151,7 +2151,7 @@ runs:
 	}
 }
 
-func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *testing.T) {
+func TestValidateHostedProfileResolvesActionsWithoutClaimingRuntime(t *testing.T) {
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionPath := filepath.Join(root, ".github", "actions", "local")
@@ -2200,7 +2200,7 @@ func TestValidateHostedTokenlessProfileResolvesActionsWithoutClaimingRuntime(t *
 	}
 }
 
-func TestValidateHostedTokenlessProfileRejectsProtectedCapabilityAfterCompile(t *testing.T) {
+func TestValidateHostedProfileRejectsProtectedCapabilityAfterCompile(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "secret.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3584,7 +3584,7 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	redactor := &cliRedactor{}
 	var warnings bytes.Buffer
 	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-	if _, err := compileHostedTokenless(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
+	if _, err := compileHosted(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
 		t.Fatal(err)
 	}
 	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
@@ -3592,7 +3592,7 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	}
 }
 
-func TestCompileHostedTokenlessRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
+func TestCompileHostedRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
 	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
 	if err != nil {
@@ -3600,16 +3600,16 @@ func TestCompileHostedTokenlessRequiresExplicitMacOSQueueAndRuntime(t *testing.T
 	}
 	compilerDigest := "sha256:" + strings.Repeat("0", 64)
 	darwinDigest := "sha256:" + strings.Repeat("1", 64)
-	_, err = compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	_, err = compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), `runner label "macos-15" is not mapped by policy`) {
 		t.Fatalf("missing macOS queue error = %v", err)
 	}
 	macOSTarget := map[string]compiler.RunnerTarget{"macos-15": {Queue: "macos", Platform: compiler.PlatformDarwinARM64}}
-	_, err = compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, nil, nil)
+	_, err = compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
 		t.Fatalf("missing macOS runtime error = %v", err)
 	}
-	compiled, err := compileHostedTokenless(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}, nil)
+	compiled, err := compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", macOSTarget, map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3751,7 +3751,7 @@ jobs:
 	targets := map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image},
 	}
-	compiled, err := compileHostedTokenless(context.Background(), "profiles.yml", workflow, event, "dev", "sha256:"+strings.Repeat("1", 64), "importer", "", targets, nil, nil)
+	compiled, err := compileHosted(context.Background(), "profiles.yml", workflow, event, "dev", "sha256:"+strings.Repeat("1", 64), "importer", "", targets, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4762,7 +4762,7 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: sources}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted-tokenless upload does not admit") {
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted upload does not admit") {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", sources, err)
 		}
 	}
@@ -5606,10 +5606,13 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("validateArgs() error = %v, want duplicate format error", err)
 	}
-	if _, _, _, _, err := validateArgs([]string{"--profile", "hosted-tokenless", "--profile", "hosted-tokenless", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--profile", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("validateArgs() error = %v, want duplicate profile error", err)
 	}
-	if _, _, _, _, err := validateArgs([]string{"--profile", "unknown", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted-tokenless"`) {
+	if _, _, _, profile, err := validateArgs([]string{"--profile", "hosted-tokenless", "workflow.yml"}); err != nil || profile != "hosted" {
+		t.Fatalf("validateArgs() legacy profile = %q, %v", profile, err)
+	}
+	if _, _, _, _, err := validateArgs([]string{"--profile", "unknown", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("validateArgs() error = %v, want unknown profile error", err)
 	}
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {

@@ -40,7 +40,7 @@ mise run corpus:starter-profile -- go cmake-multi-platform swift
 
 Each command prints every result, reports a passing/blocked summary, and exits
 non-zero while any template misses its target state. The profile scan resolves
-public actions and applies the `hosted-tokenless` admission policy, but neither
+public actions and applies the `hosted` admission policy, but neither
 mode executes action or project code. Mutable action tags remain as declared by
 the official template, so profile results are observational and runtime proof
 must retain immutable resolved action locks.

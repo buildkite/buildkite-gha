@@ -104,7 +104,7 @@ To resolve public actions and apply the production upload policy, provide an eve
 
 ```sh
 buildkite-gha validate \
-  --profile hosted-tokenless \
+  --profile hosted \
   --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
 ```
