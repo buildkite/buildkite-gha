@@ -12,7 +12,6 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Verify native runner identity
-        if: runner.os == 'macOS' && runner.arch == 'ARM64'
         shell: bash
         env:
           RUNNER_CONTEXT: ${{ runner.os }}/${{ runner.arch }}
