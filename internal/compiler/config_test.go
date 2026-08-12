@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -215,16 +216,12 @@ func TestDefaultCompilePolicyIsUntrustedAndUsesBuildkiteDefault(t *testing.T) {
 	if ir.Event.Trust != EventUntrusted || ir.Jobs[0].Queue != "" {
 		t.Fatalf("default compiler trust boundary = event %q, queue %q", ir.Event.Trust, ir.Jobs[0].Queue)
 	}
-	_, err = CompilePlans("default.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "privileged")
-	if err == nil || !strings.Contains(err.Error(), "use CompilePlansWithOptions for explicit queue policy") {
-		t.Fatalf("CompilePlans() privileged default error = %v", err)
-	}
-	plans, err := CompilePlans("default.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
+	plans, err := compileUntrustedPlans("default.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.SchemaV2 {
-		t.Fatalf("CompilePlans() explicit legacy target = %#v", plans)
+		t.Fatalf("compileUntrustedPlans() explicit legacy target = %#v", plans)
 	}
 }
 
@@ -259,7 +256,7 @@ func TestCompilePlansUsePolicyQueueAndContainOnlyNonSecretVars(t *testing.T) {
 		Vars:       VariableSources{Bridge: map[string]string{"PUBLIC": "snapshotted"}},
 		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}},
 	}
-	plans, err := CompilePlansWithOptions("plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
+	plans, err := compilePlansForTest(context.Background(), "plan.yml", workflow, pushEvent(t), "0.0.0-test", "sha256:"+strings.Repeat("2", 64), options)
 	if err != nil {
 		t.Fatal(err)
 	}

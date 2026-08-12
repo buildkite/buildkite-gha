@@ -421,7 +421,7 @@ runs:
 		if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
+		return compilePlansForTest(context.Background(), workflowPath, []byte(workflow), pushEvent(t), "0.0.0-test", testDistributionDigest, defaultOptions())
 	}
 
 	effectiveWorkflow := `on: push
@@ -505,7 +505,7 @@ jobs:
       - uses: ./.github/actions/token
 `)
 	if err == nil || !strings.Contains(err.Error(), "action input default that references github.token") || !strings.Contains(err.Error(), "no effective permissions") {
-		t.Fatalf("CompilePlansWithOptions() error = %v, want empty permission rejection", err)
+		t.Fatalf("compilePlansForTest() error = %v, want empty permission rejection", err)
 	}
 }
 
@@ -695,11 +695,11 @@ jobs:
 		ResolveActions: true,
 		ActionSource:   fake,
 	}
-	first, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	first, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
+	second, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,11 +759,11 @@ jobs:
     steps:
       - uses: ./local
 `)
-	first, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	first, err := compileUntrustedPlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	second, err := compileUntrustedPlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,9 +782,9 @@ func TestCompilePlansContainersWithRemoteActionsRequireResolution(t *testing.T) 
 		t.Fatal(err)
 	}
 	workflow := []byte("on: push\njobs:\n  actions:\n    runs-on: ubuntu-latest\n    container: node:24\n    steps:\n      - uses: owner/action@v1\n")
-	_, err := CompilePlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	_, err := compileUntrustedPlans(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err == nil || !strings.Contains(err.Error(), "containers with remote actions require action resolution through upload or profile validation") {
-		t.Fatalf("CompilePlans() error = %v", err)
+		t.Fatalf("compileUntrustedPlans() error = %v", err)
 	}
 }
 
@@ -809,7 +809,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "checkout-test", testDistributionDigest, options)
+		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "checkout-test", testDistributionDigest, options)
 	}
 
 	accepted := []string{
@@ -846,7 +846,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile("        with:\n" + input)
 			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") {
-				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
 	}
@@ -942,7 +942,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1002,7 +1002,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.UploadArtifactCommit, "        with:\n"+input)
 			if err == nil || !strings.Contains(err.Error(), "artifact.yml:") || !strings.Contains(err.Error(), "bounded upload-artifact adapter") {
-				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
 	}
@@ -1015,7 +1015,7 @@ func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	if err := os.WriteFile(workflowPath, matrixWorkflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err = CompilePlansWithOptions(workflowPath, matrixWorkflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+	plans, err = compilePlansForTest(context.Background(), workflowPath, matrixWorkflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1049,7 +1049,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		return CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+		return compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 			EventTrust: EventUntrusted,
 			Runners: RunnerPolicy{
 				Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1092,7 +1092,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := compile(actionintegration.DownloadArtifactCommit, "    needs: producer\n", with)
 			if err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
-				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
 	}
@@ -1108,7 +1108,7 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	} {
 		t.Run("v8 "+name, func(t *testing.T) {
 			if _, err := compile(actionintegration.DownloadArtifactV801Commit, "    needs: producer\n", with); err == nil || !strings.Contains(err.Error(), "bounded download-artifact adapter") {
-				t.Fatalf("CompilePlansWithOptions() error = %v", err)
+				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
 	}
@@ -1149,7 +1149,7 @@ jobs:
 	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	plans, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "artifact-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1202,7 +1202,7 @@ func TestPublicActionsContinuationDependsOnCompiledTerminal(t *testing.T) {
 	writeAction(t, remote, "", "name: remote\nruns:\n  using: node24\n  main: index.js\n")
 	workflowPath := filepath.Join("..", "..", "testdata", "public-actions", ".github", "workflows", "public-actions.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "public-actions", "events", "public-checkout.json")
-	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "public-actions-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(context.Background(), workflowPath, readFile(t, workflowPath), readFile(t, eventPath), "public-actions-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1247,7 +1247,7 @@ func TestDockerfileActionContinuationDependsOnCompiledTerminal(t *testing.T) {
 	writeAction(t, remote, "", "name: remote Docker\nruns:\n  using: docker\n  image: Dockerfile\n")
 	workflowPath := filepath.Join("..", "..", "testdata", "dockerfile-action", ".github", "workflows", "docker-action.yml")
 	templatePath := workflowPath + ".tmpl"
-	plans, err := CompilePlansWithOptions(workflowPath, readFile(t, templatePath), pushEvent(t), "dockerfile-action-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(context.Background(), workflowPath, readFile(t, templatePath), pushEvent(t), "dockerfile-action-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1285,7 +1285,7 @@ func TestCompilePlansRemoteActionRequiresSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	workflow := []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/repo@v1\n")
-	_, err := CompilePlansWithOptions(workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
+	_, err := compilePlansForTest(context.Background(), workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1294,7 +1294,7 @@ func TestCompilePlansRemoteActionRequiresSource(t *testing.T) {
 		ResolveActions: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "remote action source is not configured") {
-		t.Fatalf("CompilePlansWithOptions() error = %v, want source configuration rejection", err)
+		t.Fatalf("compilePlansForTest() error = %v, want source configuration rejection", err)
 	}
 }
 
@@ -1307,7 +1307,7 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/repo@v1\n")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := CompilePlansContext(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
+	_, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
@@ -1317,7 +1317,7 @@ func TestCompilePlansContextCancelsRemoteResolution(t *testing.T) {
 		ActionSource:   contextActionSource{},
 	})
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("CompilePlansContext() error = %v, want context cancellation", err)
+		t.Fatalf("compilePlansForTest() error = %v, want context cancellation", err)
 	}
 }
 
@@ -1356,7 +1356,7 @@ jobs:
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	plans, err := CompilePlansContext(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
+	plans, err := compilePlansForTest(ctx, workflowPath, workflow, pushEvent(t), "0.0.0-test", testDistributionDigest, Options{
 		EventTrust: EventUntrusted,
 		Runners: RunnerPolicy{
 			Labels:          map[string]string{"ubuntu-latest": "hosted"},
