@@ -95,7 +95,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 			}
 			jobs[i] = sourcedJob{
 				Job: job, path: sourcePath, digest: digest, root: root,
-				workflowJobs:    []WorkflowJob{{Workflow: filepath.Base(sourcePath), Job: job.ID}},
+				workflowJobs:    []WorkflowJob{{Workflow: filepath.Base(sourcePath), Job: job.ID, LogicalIDComponent: job.ID}},
 				secretAuthority: true, needBindings: bindings,
 			}
 			workflowJobs[job.ID] = job
@@ -222,7 +222,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		}
 		needs := bindingMembers(needBindings)
 		if job.Reusable == nil {
-			concreteWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id})
+			concreteWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id, LogicalIDComponent: id})
 			job.ID = namespacedJobID(namespace, job.ID)
 			job.Needs = needs
 			if labelPrefix != "" {
@@ -324,7 +324,7 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 				calleePermissionCeiling = &workflow.Permissions{Scopes: map[string]string{}, Span: call.Span}
 			}
 			resolver.stack = append(resolver.stack, calleePath)
-			callerWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id})
+			callerWorkflowJobs := appendWorkflowJob(workflowJobs, WorkflowJob{Workflow: filepath.Base(path), Job: id, LogicalIDComponent: component})
 			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, callerWorkflowJobs, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {

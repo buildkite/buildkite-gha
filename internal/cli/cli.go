@@ -100,6 +100,7 @@ const (
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+var reusableMatrixNamespacePattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 var pluginReleaseBaseURL = "https://github.com/buildkite/buildkite-gha/releases/download"
 var pluginHTTPClient = securePluginHTTPClient()
@@ -2194,11 +2195,33 @@ func validateWorkflowTokenAuthorization(artifact compiler.PlanArtifact) error {
 		return err
 	}
 	last := authorization.WorkflowJobs[len(authorization.WorkflowJobs)-1]
-	logicalJob := artifact.Job.Workflow.LogicalJobID
-	if last.Workflow != leafFilename || (last.Job != logicalJob && !strings.HasSuffix(logicalJob, "."+last.Job)) {
+	logicalJobID, err := workflowJobChainLogicalID(authorization.WorkflowJobs)
+	if err != nil {
+		return err
+	}
+	if last.Workflow != leafFilename || logicalJobID != artifact.Job.Workflow.LogicalJobID {
 		return fmt.Errorf("compiler-verified workflow invocation chain does not match the concrete job plan")
 	}
 	return nil
+}
+
+func workflowJobChainLogicalID(workflowJobs []compiler.WorkflowJob) (string, error) {
+	components := make([]string, len(workflowJobs))
+	for i, workflowJob := range workflowJobs {
+		component := workflowJob.LogicalIDComponent
+		if i == len(workflowJobs)-1 {
+			if component != workflowJob.Job {
+				return "", fmt.Errorf("compiler-verified workflow invocation chain has an invalid concrete job identity")
+			}
+		} else if component != workflowJob.Job {
+			suffix, ok := strings.CutPrefix(component, workflowJob.Job+"-")
+			if !ok || !reusableMatrixNamespacePattern.MatchString(suffix) {
+				return "", fmt.Errorf("compiler-verified workflow invocation chain has an invalid caller job identity")
+			}
+		}
+		components[i] = component
+	}
+	return strings.Join(components, "."), nil
 }
 
 func irUsesActions(ir compiler.IR) bool {

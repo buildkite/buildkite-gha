@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const planDirectory = ".buildkite-gha/plans"
@@ -36,7 +38,7 @@ const MinimumMiseVersion = "2026.5.12"
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var workflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
-var permissionNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+var workflowJobIDPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,254}$`)
 var runtimeImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -337,7 +339,10 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if job.RequiresMise || job.Authorization != nil {
 			_, _ = fmt.Fprintf(out, "%senv:\n", attributeIndent)
 			if job.Authorization != nil {
-				authorization := encodeJobAuthorization(job)
+				authorization, err := encodeJobAuthorization(job)
+				if err != nil {
+					return fmt.Errorf("encode job %q authorization: %w", job.Key, err)
+				}
 				_, _ = fmt.Fprintf(out, "%s  BUILDKITE_GHA_JOB_AUTHORIZATION: %s\n", attributeIndent, yamlScalar(string(authorization)))
 			}
 		}
@@ -561,25 +566,35 @@ func validateJobAuthorization(authorization *JobAuthorization) error {
 		if len(workflowJob.Workflow) > 255 || !workflowFilenamePattern.MatchString(workflowJob.Workflow) {
 			return fmt.Errorf("job authorization has invalid workflow filename %q", workflowJob.Workflow)
 		}
-		if !identifierPattern.MatchString(workflowJob.Job) {
+		if !workflowJobIDPattern.MatchString(workflowJob.Job) {
 			return fmt.Errorf("job authorization has invalid workflow job %q", workflowJob.Job)
 		}
 	}
-	if len(authorization.Permissions) == 0 {
-		return fmt.Errorf("job authorization requires effective permissions")
-	}
+	activePermissions := activeJobAuthorizationPermissions(authorization.Permissions)
 	for name, access := range authorization.Permissions {
-		if !permissionNamePattern.MatchString(name) || len(name) > 255 {
-			return fmt.Errorf("job authorization has invalid permission %q", name)
+		if access == "none" {
+			if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{name: "read"}); err != nil {
+				return fmt.Errorf("job authorization: %w", err)
+			}
 		}
-		if access != "read" && access != "write" && access != "none" {
-			return fmt.Errorf("job authorization permission %q has invalid access %q", name, access)
-		}
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(activePermissions); err != nil {
+		return fmt.Errorf("job authorization: %w", err)
 	}
 	return nil
 }
 
-func encodeJobAuthorization(job Job) []byte {
+func activeJobAuthorizationPermissions(permissions map[string]string) map[string]string {
+	active := make(map[string]string, len(permissions))
+	for name, access := range permissions {
+		if access != "none" {
+			active[name] = access
+		}
+	}
+	return active
+}
+
+func encodeJobAuthorization(job Job) ([]byte, error) {
 	payload := struct {
 		Schema       string            `json:"schema"`
 		PlanDigest   string            `json:"plan_digest"`
@@ -589,10 +604,9 @@ func encodeJobAuthorization(job Job) []byte {
 		Schema:       jobAuthorizationSchema,
 		PlanDigest:   job.PlanDigest,
 		WorkflowJobs: job.Authorization.WorkflowJobs,
-		Permissions:  job.Authorization.Permissions,
+		Permissions:  activeJobAuthorizationPermissions(job.Authorization.Permissions),
 	}
-	encoded, _ := json.Marshal(payload)
-	return encoded
+	return json.Marshal(payload)
 }
 
 func validStepKey(key string) bool {

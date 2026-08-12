@@ -33,10 +33,13 @@ type PlanAuthorization struct {
 }
 
 // WorkflowJob identifies one exact workflow/job edge in a concrete reusable
-// workflow invocation chain.
+// workflow invocation chain. LogicalIDComponent retains the compiler's matrix-
+// qualified namespace component for exact same-process admission checks; only
+// Workflow and Job enter the pipeline manifest.
 type WorkflowJob struct {
-	Workflow string
-	Job      string
+	Workflow           string
+	Job                string
+	LogicalIDComponent string
 }
 
 // Bundle is the complete deterministic output of static compilation.

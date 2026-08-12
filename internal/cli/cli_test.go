@@ -4830,19 +4830,33 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 		authorization compiler.PlanAuthorization
 		wantError     bool
 	}{
-		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}},
+		{name: "verified policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}},
 		{
 			name: "verified reusable chain", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "call.comment"},
 			authorization: compiler.PlanAuthorization{
 				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
-				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call"}, {Workflow: "leaf.yml", Job: "comment"}},
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
+			},
+		},
+		{
+			name: "verified reusable matrix chain", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "call-deadbeef1234.comment"},
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call-deadbeef1234"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
 			},
 		},
 		{name: "missing provenance", wantError: true},
 		{name: "missing policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}}, wantError: true},
-		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
-		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
-		{name: "unsupported effective permission", permissions: map[string]string{"models": "read"}, authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment"}}}, wantError: true},
+		{name: "mismatched policy", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "other.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{name: "broadened provenance", authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions", "step-input"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{name: "unsupported effective permission", permissions: map[string]string{"models": "read"}, authorization: compiler.PlanAuthorization{ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml", WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "comment", LogicalIDComponent: "comment"}}}, wantError: true},
+		{
+			name: "logical ID suffix collision", workflow: plan.Workflow{Path: "./.github/workflows/leaf.yml", LogicalJobID: "unrelated.call.comment"}, wantError: true,
+			authorization: compiler.PlanAuthorization{
+				ProviderTokenWriteCapabilitySources: []string{"effective-permissions"}, WorkflowTokenPolicyFilename: "comment.yml",
+				WorkflowJobs: []compiler.WorkflowJob{{Workflow: "comment.yml", Job: "call", LogicalIDComponent: "call"}, {Workflow: "leaf.yml", Job: "comment", LogicalIDComponent: "comment"}},
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuredJob := job

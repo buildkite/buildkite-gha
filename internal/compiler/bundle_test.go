@@ -949,6 +949,21 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
+func TestCompileBundleGitHubTokenOmitsNonePermissions(t *testing.T) {
+	source := []byte("on: push\npermissions:\n  contents: read\n  issues: none\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"contents": "read"}
+	if got := bundle.Plans[0].Job.GitHubToken.Permissions; !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed GitHub workflow token permissions = %#v, want %#v", got, want)
+	}
+	if strings.Contains(string(bundle.Pipeline), `"issues":"none"`) {
+		t.Fatalf("pipeline authorization retained inactive permission:\n%s", bundle.Pipeline)
+	}
+}
+
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, permissions := range []string{"permissions: {}\n", "permissions:\n  contents: none\n"} {
 		source := []byte("on: push\n" + permissions + "jobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
