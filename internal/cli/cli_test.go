@@ -3025,6 +3025,7 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 			t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
 			t.Setenv("BUILDKITE_COMMIT", strings.Repeat("a", 40))
 			t.Setenv("BUILDKITE_BRANCH", "main")
+			t.Setenv("BUILDKITE_TAG", "")
 			if test.pullRequest {
 				t.Setenv("BUILDKITE_PULL_REQUEST", "42")
 				t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
