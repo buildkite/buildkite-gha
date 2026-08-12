@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -533,7 +532,7 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		}
 		// Root confines a concurrent path swap; O_NONBLOCK lets the regular-file
 		// check below reject a special-file replacement without hanging.
-		in, e := workspaceRoot.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		in, e := workspaceRoot.OpenFile(relative, os.O_RDONLY|nonBlockingOpenFlag, 0)
 		if e != nil {
 			return "", 0, e
 		}

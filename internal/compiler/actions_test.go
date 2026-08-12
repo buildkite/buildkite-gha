@@ -1364,6 +1364,9 @@ jobs:
 		t.Fatal(err)
 	}
 	actionCache := filepath.Join(t.TempDir(), "actions")
+	if err := os.Mkdir(actionCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	store, err := source.NewStore(actionCache, nil)
 	if err != nil {
 		t.Fatal(err)

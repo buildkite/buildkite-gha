@@ -16,8 +16,19 @@ readonly expected_payload="smoke-artifact:$build_number"
 
 command -v bk >/dev/null
 command -v jq >/dev/null
-command -v sha256sum >/dev/null
 command -v unzip >/dev/null
+if ! command -v sha256sum >/dev/null && ! command -v shasum >/dev/null; then
+  echo 'sha256sum or shasum is required' >&2
+  exit 1
+fi
+
+sha256_digest() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$@" | cut -d ' ' -f 1
+  else
+    shasum -a 256 "$@" | cut -d ' ' -f 1
+  fi
+}
 
 build="$(bk --no-pager api "/pipelines/$pipeline/builds/$build_number")"
 commit="$(jq -r '.commit // ""' <<<"$build")"
@@ -32,7 +43,11 @@ readonly build_id
 job_id() {
   local step_key=$1
   local -a matches
-  mapfile -t matches < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
+  local candidate_job_id
+  matches=()
+  while IFS= read -r candidate_job_id; do
+    matches+=("$candidate_job_id")
+  done < <(jq -r --arg step_key "$step_key" '.jobs[] | select(.step_key == $step_key) | .id' <<<"$build")
   if (( ${#matches[@]} != 1 )) || [[ ! ${matches[0]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]; then
     echo "build $build_number has ${#matches[@]} jobs with step key $step_key; expected exactly one" >&2
     return 1
@@ -83,7 +98,7 @@ readonly archive_file="$work/$archive_path"
 readonly producer_manifest="$work/$producer_manifest_path"
 
 archive_size="$(wc -c < "$archive_file" | tr -d ' ')"
-archive_digest="sha256:$(sha256sum "$archive_file" | cut -d ' ' -f 1)"
+archive_digest="sha256:$(sha256_digest "$archive_file")"
 readonly archive_size archive_digest
 producer_plan_digest="sha256:${producer_manifest_path##*/}"
 producer_plan_digest=${producer_plan_digest%.json}
@@ -112,9 +127,12 @@ then
   echo "producer manifest does not bind the exact native artifact" >&2
   exit 1
 fi
-mapfile -t entries < <(unzip -Z1 "$archive_file")
+entries=()
+while IFS= read -r entry; do
+  entries+=("$entry")
+done < <(unzip -Z1 "$archive_file")
 archive_payload="$(unzip -p "$archive_file" result.txt)"
-archive_payload_digest="sha256:$(unzip -p "$archive_file" result.txt | sha256sum | cut -d ' ' -f 1)"
+archive_payload_digest="sha256:$(unzip -p "$archive_file" result.txt | sha256_digest)"
 readonly archive_payload archive_payload_digest
 if (( ${#entries[@]} != 1 )) || [[ ${entries[0]} != result.txt ]] || [[ $archive_payload != "$expected_payload" ]]; then
   printf 'unexpected producer archive: entries=%s\n' "${entries[*]}" >&2

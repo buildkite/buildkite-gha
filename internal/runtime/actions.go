@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -229,25 +231,41 @@ func (r *actionLockResolver) verifyGitHub(ctx context.Context, entry *actionLock
 	if materialized.SourceDigest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("materialized source digest mismatch: lock binds %s, materializer returned %s", lock.SourceDigest, materialized.SourceDigest)
 	}
-	digest, err := source.DigestTree(materialized.RepositoryRoot)
+	repositoryRoot, err := filepath.Abs(materialized.RepositoryRoot)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("resolve materialized repository root: %w", err)
+	}
+	logicalInfo, err := os.Lstat(repositoryRoot)
+	if err != nil || !logicalInfo.IsDir() || logicalInfo.Mode()&os.ModeSymlink != 0 {
+		return metadata.Metadata{}, fmt.Errorf("materialized repository root is not a non-symlink directory")
+	}
+	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("canonicalize materialized repository root: %w", err)
+	}
+	canonicalInfo, err := os.Stat(repositoryRoot)
+	if err != nil || !os.SameFile(logicalInfo, canonicalInfo) {
+		return metadata.Metadata{}, fmt.Errorf("materialized repository root changed while canonicalizing")
+	}
+	digest, err := source.DigestTree(repositoryRoot)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("digest materialized repository tree: %w", err)
 	}
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("materialized repository tree digest mismatch: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
-	m, err := metadata.Load(materialized.RepositoryRoot, lock.Path)
+	m, err := metadata.Load(repositoryRoot, lock.Path)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("load materialized action: %w", err)
 	}
-	digest, err = source.DigestTree(materialized.RepositoryRoot)
+	digest, err = source.DigestTree(repositoryRoot)
 	if err != nil {
 		return metadata.Metadata{}, fmt.Errorf("digest materialized repository tree after metadata load: %w", err)
 	}
 	if digest != lock.SourceDigest {
 		return metadata.Metadata{}, fmt.Errorf("materialized repository tree mutated during metadata load: lock binds %s, tree has %s", lock.SourceDigest, digest)
 	}
-	m.SourceRoot = materialized.RepositoryRoot
+	m.SourceRoot = repositoryRoot
 	return m, nil
 }
 

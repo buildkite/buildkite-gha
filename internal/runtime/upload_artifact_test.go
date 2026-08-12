@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -493,7 +492,9 @@ func TestUploadArtifactRejectsFIFOReplacementWithoutBlockingPastCancellation(t *
 	if err := os.Remove(payload); err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Mkfifo(payload, 0o600); err != nil {
+	if err := testMkfifo(payload, 0o600); errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("FIFOs unsupported")
+	} else if err != nil {
 		t.Fatal(err)
 	}
 

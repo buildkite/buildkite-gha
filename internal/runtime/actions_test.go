@@ -147,6 +147,56 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 	}
 }
 
+func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
+	base := canonicalTempDir(t)
+	realRoot := filepath.Join(base, "real")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalRoot := filepath.Join(base, "logical")
+	if err := os.Symlink(realRoot, logicalRoot); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	repository := filepath.Join(logicalRoot, "repository")
+	writeAction(t, repository, "nested")
+	digest := digestTree(t, repository)
+	commit := strings.Repeat("a", 40)
+	job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{{
+		ID: "lock", Source: "github", Repository: "owner/repo", Commit: commit, Path: "nested", SourceDigest: digest,
+	}}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{
+		RepositoryRoot: repository,
+		ActionRoot:     filepath.Join(repository, "nested"),
+		SourceDigest:   digest,
+	}}
+	resolved, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRepository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.SourceRoot != canonicalRepository {
+		t.Fatalf("resolved source root = %q, want %q", resolved.SourceRoot, canonicalRepository)
+	}
+	actionRuntime, err := resolved.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resolved.ValidateEntrypoints(actionRuntime); err != nil {
+		t.Fatalf("validate entry points through aliased ancestor: %v", err)
+	}
+	linkedRepository := filepath.Join(base, "linked-repository")
+	if err := os.Symlink(repository, linkedRepository); err != nil {
+		t.Fatal(err)
+	}
+	materializer.result.RepositoryRoot = linkedRepository
+	if _, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("resolver accepted symlink repository root: %v", err)
+	}
+}
+
 func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T) {
 	const token = "must-not-be-sent"
 	commit := strings.Repeat("a", 40)

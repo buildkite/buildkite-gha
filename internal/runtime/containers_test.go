@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -117,9 +116,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(92)
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	_ = testFileLock(f, true)
 	_, _ = f.Write(b)
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = testFileLock(f, false)
 	_ = f.Close()
 	if len(args) == 0 {
 		os.Exit(2)
@@ -409,7 +408,7 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		if scenario == "fail-mount-probe" {
 			os.Exit(42)
 		}
-		if err := syscall.Exec("/bin/sh", args[i:], os.Environ()); err != nil {
+		if err := testExec("/bin/sh", args[i:], os.Environ()); err != nil {
 			os.Exit(126)
 		}
 	}
@@ -423,7 +422,7 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		}
 		nodeArgs := append([]string(nil), args[i:]...)
 		nodeArgs[0] = translate(nodeArgs[0])
-		if err := syscall.Exec(nodeArgs[0], nodeArgs, os.Environ()); err != nil {
+		if err := testExec(nodeArgs[0], nodeArgs, os.Environ()); err != nil {
 			os.Exit(126)
 		}
 	}
@@ -907,7 +906,7 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 		t.Fatal("cancellation hung")
 	}
 	pidb, _ := os.ReadFile(marker)
-	if p, _ := strconv.Atoi(strings.TrimSpace(string(pidb))); p > 0 && syscall.Kill(p, 0) == nil {
+	if p, _ := strconv.Atoi(strings.TrimSpace(string(pidb))); p > 0 && testProcessExists(p) {
 		t.Fatalf("child %d alive", p)
 	}
 	_ = b.cleanup()

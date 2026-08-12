@@ -5,6 +5,17 @@ usage() {
   echo 'usage: scripts/oss-corpus [--profile] [case ...]' >&2
 }
 
+sha256_digest() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$@" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null; then
+    shasum -a 256 "$@" | cut -d ' ' -f 1
+  else
+    echo 'sha256sum or shasum is required' >&2
+    return 127
+  fi
+}
+
 profile=false
 case_ids=()
 while (( $# > 0 )); do
@@ -39,7 +50,9 @@ jq -e '
 ' "$manifest" >/dev/null
 
 if (( ${#case_ids[@]} == 0 )); then
-  mapfile -t case_ids < <(jq -r '.cases[].id' "$manifest")
+  while IFS= read -r case_id; do
+    case_ids+=("$case_id")
+  done < <(jq -r '.cases[].id' "$manifest")
 fi
 for id in "${case_ids[@]}"; do
   jq -e --arg id "$id" 'any(.cases[]; .id == $id)' "$manifest" >/dev/null || {
@@ -151,7 +164,7 @@ for id in "${case_ids[@]}"; do
   clean_env curl -q --fail --silent --show-error --proto '=https' --tlsv1.2 \
     --max-time 30 --max-filesize 1048576 --output "$workflow_path" \
     "https://raw.githubusercontent.com/$repository/$commit/$workflow"
-  actual_sha256="$(sha256sum "$workflow_path" | cut -d' ' -f1)"
+  actual_sha256="$(sha256_digest "$workflow_path")"
   [[ "$actual_sha256" == "$workflow_sha256" ]] || {
     echo "$id: workflow digest=$actual_sha256, want $workflow_sha256" >&2
     exit 1

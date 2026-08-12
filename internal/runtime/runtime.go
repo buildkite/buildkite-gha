@@ -1089,67 +1089,97 @@ func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string
 		return "", "", fmt.Errorf("resolve %s installation path: %w", tool, err)
 	}
 	if r.MiseDataDir != "" {
-		dataDir, err := filepath.Abs(r.MiseDataDir)
+		_, installation, err = canonicalPathWithinRealRoot(r.MiseDataDir, installation)
 		if err != nil {
-			return "", "", fmt.Errorf("resolve mise data directory: %w", err)
-		}
-		resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
-		if err != nil || resolvedDataDir != dataDir {
-			return "", "", errors.New("mise data directory contains a symlink")
-		}
-		resolvedInstallation, err := filepath.EvalSymlinks(installation)
-		if err != nil || resolvedInstallation != installation {
-			return "", "", fmt.Errorf("mise-resolved %s installation contains a symlink", tool)
-		}
-		relative, err := filepath.Rel(dataDir, installation)
-		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return "", "", fmt.Errorf("mise resolved %s outside its runtime-owned data directory", tool)
+			return "", "", fmt.Errorf("validate mise-resolved %s installation: %w", tool, err)
 		}
 	}
 	node := filepath.Join(installation, "bin", "node")
+	if r.MiseDataDir != "" {
+		_, node, err = canonicalPathWithinRealRoot(r.MiseDataDir, node)
+		if err != nil {
+			return installation, node, fmt.Errorf("validate mise-resolved %s executable: %w", tool, err)
+		}
+	}
 	info, err := os.Lstat(node)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return installation, node, fmt.Errorf("mise-resolved %s executable is not a regular file", tool)
 	}
 	resolvedNode, err := filepath.EvalSymlinks(node)
-	if err != nil || resolvedNode != node {
+	if err != nil {
 		return installation, node, fmt.Errorf("mise-resolved %s executable contains a symlink", tool)
 	}
-	return installation, node, nil
+	return installation, resolvedNode, nil
 }
 
 func removeManagedNodeInstallation(dataDir, installation string) error {
-	dataDir, err := filepath.Abs(dataDir)
+	_, installation, err := canonicalPathWithinRealRoot(dataDir, installation)
 	if err != nil {
-		return fmt.Errorf("resolve mise data directory: %w", err)
-	}
-	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
-	if err != nil || resolvedDataDir != dataDir {
-		return errors.New("refusing to remove Node installation through a symlinked mise data directory")
-	}
-	installation, err = filepath.Abs(installation)
-	if err != nil {
-		return fmt.Errorf("resolve cached Node installation: %w", err)
-	}
-	relative, err := filepath.Rel(dataDir, installation)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return errors.New("refusing to remove Node installation outside the mise data directory")
-	}
-	current := dataDir
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("inspect cached Node installation: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to remove cached Node installation through symlink %q", current)
-		}
+		return fmt.Errorf("refusing to remove Node installation: %w", err)
 	}
 	if err := os.RemoveAll(installation); err != nil {
 		return fmt.Errorf("remove invalid cached Node installation: %w", err)
 	}
 	return nil
+}
+
+func canonicalPathWithinRealRoot(root, target string) (string, string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve root: %w", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect root: %w", err)
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", "", fmt.Errorf("root is not a non-symlink directory")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", fmt.Errorf("canonicalize root: %w", err)
+	}
+	canonicalRootInfo, err := os.Stat(resolvedRoot)
+	if err != nil || !os.SameFile(rootInfo, canonicalRootInfo) {
+		return "", "", fmt.Errorf("root changed while canonicalizing")
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve path: %w", err)
+	}
+	lexicalRoot := root
+	relative, relativeErr := filepath.Rel(root, target)
+	if relativeErr != nil || !pathWithinDirectory(relative) {
+		lexicalRoot = resolvedRoot
+		relative, relativeErr = filepath.Rel(resolvedRoot, target)
+	}
+	if relativeErr != nil || !pathWithinDirectory(relative) {
+		return "", "", fmt.Errorf("path is outside root")
+	}
+	current := lexicalRoot
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return "", "", fmt.Errorf("inspect path: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf("path component %q is a symlink", current)
+		}
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", "", fmt.Errorf("canonicalize path: %w", err)
+	}
+	relative, err = filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil || !pathWithinDirectory(relative) {
+		return "", "", fmt.Errorf("path is outside root")
+	}
+	return resolvedRoot, resolvedTarget, nil
+}
+
+func pathWithinDirectory(relative string) bool {
+	return relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func verifyManagedNodeExecutable(ctx context.Context, major int, path, want string) error {

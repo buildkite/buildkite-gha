@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1860,7 +1859,7 @@ func TestCancellationTerminatesChildProcessGroup(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if !testProcessExists(pid) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1999,7 +1998,7 @@ while :; do sleep 1; done`)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if !testProcessExists(pid) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2039,7 +2038,7 @@ func TestExplicitCancelTerminatesBackgroundProcessGroup(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if !testProcessExists(pid) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -3526,6 +3525,52 @@ func TestMiseNode16SelectionIsExactAndConfigFree(t *testing.T) {
 	}
 }
 
+func TestMiseNodeInstallationAllowsSymlinkedDataDirAncestor(t *testing.T) {
+	base := canonicalTempDir(t)
+	realParent := filepath.Join(base, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalParent := filepath.Join(base, "logical")
+	if err := os.Symlink(realParent, logicalParent); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	dataDir := filepath.Join(logicalParent, "data")
+	installation := filepath.Join(dataDir, "installs", "node", Node24Version)
+	node := filepath.Join(installation, "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNodeExecutable(t, node, 24)
+	mise := filepath.Join(base, "mise")
+	writeFixtureFile(t, base, "mise", fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' %q\n", installation))
+	if err := os.Chmod(mise, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gotInstallation, gotNode, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(context.Background(), 24, mise)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInstallation := filepath.Join(realParent, "data", "installs", "node", Node24Version)
+	if gotInstallation != wantInstallation || gotNode != filepath.Join(wantInstallation, "bin", "node") {
+		t.Fatalf("miseNodeInstallation() = %q, %q; want canonical paths under %q", gotInstallation, gotNode, wantInstallation)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNodeExecutable(t, filepath.Join(outside, "node"), 24)
+	if err := os.RemoveAll(filepath.Join(wantInstallation, "bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(wantInstallation, "bin")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (Runner{MiseDataDir: dataDir}).miseNodeInstallation(context.Background(), 24, mise); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("miseNodeInstallation() accepted symlinked bin directory: %v", err)
+	}
+}
+
 func TestMiseNodePathIgnoresProgressOnStderr(t *testing.T) {
 	root := canonicalTempDir(t)
 	nodeRoot := filepath.Join(root, "node")
@@ -4665,7 +4710,11 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := source.NewStore(filepath.Join(t.TempDir(), "actions"), nil)
+	actionCache := filepath.Join(t.TempDir(), "actions")
+	if err := os.Mkdir(actionCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := source.NewStore(actionCache, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
