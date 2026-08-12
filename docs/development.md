@@ -101,12 +101,15 @@ Native macOS support requires a paired stable release before a live Hosted smoke
    `buildkite-gha_Linux_x86_64.tar.gz`,
    `buildkite-gha_Darwin_arm64.tar.gz`, and `checksums.txt`, with exactly one
    matching checksum entry for each archive.
-1. Configure the released thin plugin with that exact CLI version and explicit
-   runner mappings:
+1. Merge and release the companion plugin change that passes `runners` through
+   to `buildkite-gha plugin`. Plugin v0.8.0 rejects `runners`; use the first
+   later release that documents this field.
+1. Configure that compatible plugin release with the exact CLI version and
+   explicit runner mappings:
 
    ```yaml
    plugins:
-     - github-actions#v0.8.0:
+     - github-actions#<release-with-runners-pass-through>:
          version: "<new-exact-buildkite-gha-version>"
          workflow: .github/workflows/mixed.yml
          runners:

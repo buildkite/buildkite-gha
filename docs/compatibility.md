@@ -438,7 +438,7 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 | --- | --- | --- |
 | `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
 | `github.head_ref`, `github.ref_name` | ❌ No | ❌ No |
-| `runner.os` | ❌ No | ❌ No |
+| `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
@@ -451,7 +451,7 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
+Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
 
 A runtime interpolation can read a verified upstream output directly:
 
