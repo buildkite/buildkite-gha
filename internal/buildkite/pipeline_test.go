@@ -713,7 +713,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		Key              string            `yaml:"key"`
 		Command          string            `yaml:"command"`
 		If               string            `yaml:"if"`
+		Cache            string            `yaml:"cache"`
 		Env              map[string]string `yaml:"env"`
+		Plugins          []map[string]any  `yaml:"plugins"`
 		TimeoutInMinutes int               `yaml:"timeout_in_minutes"`
 		Agents           struct {
 			Queue string `yaml:"queue"`
@@ -739,7 +741,9 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	steps := make(map[string]struct {
 		command          string
 		condition        string
+		cache            string
 		environment      map[string]string
+		plugins          []map[string]any
 		timeoutInMinutes int
 		queue            string
 	}, len(document.Steps))
@@ -760,10 +764,12 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			steps[step.Key] = struct {
 				command          string
 				condition        string
+				cache            string
 				environment      map[string]string
+				plugins          []map[string]any
 				timeoutInMinutes int
 				queue            string
-			}{command: step.Command, condition: step.If, environment: step.Env, timeoutInMinutes: step.TimeoutInMinutes, queue: step.Agents.Queue}
+			}{command: step.Command, condition: step.If, cache: step.Cache, environment: step.Env, plugins: step.Plugins, timeoutInMinutes: step.TimeoutInMinutes, queue: step.Agents.Queue}
 		}
 	}
 	collectSteps(document.Steps, "")
@@ -778,6 +784,20 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 	}
 	if got := steps["checks"].environment["BUILDKITE_GHA_LIVE_REQUIRED"]; got != "1" {
 		t.Fatalf("repository checks BUILDKITE_GHA_LIVE_REQUIRED = %q, want required live prerequisites", got)
+	}
+	checks := steps["checks"]
+	if checks.cache != ".buildkite/cache-volume" {
+		t.Fatalf("repository checks cache = %q, want hosted cache volume", checks.cache)
+	}
+	if len(checks.plugins) != 2 {
+		t.Fatalf("repository checks plugins = %#v, want setup-go and mise", checks.plugins)
+	}
+	setupGo, ok := checks.plugins[0]["setup-go#v0.1.0"].(map[string]any)
+	if !ok || setupGo["mise-version"] != "2026.5.12" {
+		t.Fatalf("repository checks setup-go plugin = %#v", checks.plugins[0])
+	}
+	if _, ok := checks.plugins[1]["mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2"]; !ok {
+		t.Fatalf("repository checks mise plugin = %#v", checks.plugins[1])
 	}
 	macOS := steps["macos-arm64"]
 	if macOS.condition != "" || macOS.queue != "mac-small" || macOS.timeoutInMinutes != 20 {
