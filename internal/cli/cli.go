@@ -1708,7 +1708,21 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	messages := make([]string, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
 		if diagnostic.Level == "error" {
-			messages = append(messages, diagnostic.Message)
+			message := diagnostic.Message
+			if diagnostic.Code != "" {
+				message = "[" + diagnostic.Code + "] " + message
+			}
+			var attribution []string
+			if diagnostic.Job != "" {
+				attribution = append(attribution, "job="+diagnostic.Job)
+			}
+			if diagnostic.Step != 0 {
+				attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
+			}
+			if len(attribution) != 0 {
+				message += " {" + strings.Join(attribution, ", ") + "}"
+			}
+			messages = append(messages, message)
 		}
 	}
 	return buildkitepipeline.Workflow{

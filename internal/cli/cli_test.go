@@ -3510,9 +3510,9 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	wantReasons := []string{
-		"resolved runner target is not admitted by policy: runner label is not mapped by policy",
-		`job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties`,
-		`job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON`,
+		"[E_EXPRESSION_INVALID] resolved runner target is not admitted by policy: runner label is not mapped by policy {job=alpha}",
+		`[E_EXPRESSION_INVALID] job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties {job=beta}`,
+		`[E_EXPRESSION_INVALID] job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON {job=gamma}`,
 	}
 	step := pipeline.Steps[0].Steps[0]
 	wantMessage := strings.Join(wantReasons, "\n")
@@ -3580,8 +3580,13 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 			t.Fatalf("failed workflow group %d = %#v", i, group)
 		}
 	}
-	if strings.Count(pipeline.Steps[0].Steps[0].Command, "resolved runner target is not admitted by policy") != 2 {
+	firstFailureCommand := pipeline.Steps[0].Steps[0].Command
+	if !strings.Contains(firstFailureCommand, "[E_EXPRESSION_INVALID] resolved runner target is not admitted by policy: unsupported operating system {job=first}") ||
+		!strings.Contains(firstFailureCommand, "[E_EXPRESSION_INVALID] resolved runner target is not admitted by policy: runner label is not mapped by policy {job=second}") {
 		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Steps[0].Command)
+	}
+	if actionFailureCommand := pipeline.Steps[1].Steps[0].Command; !strings.Contains(actionFailureCommand, "[E_ACTION_RESOLUTION] action could not be resolved or validated {job=action, step=1}") {
+		t.Fatalf("action failure command = %q", actionFailureCommand)
 	}
 	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
 		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
