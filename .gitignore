@@ -1,2 +1,5 @@
 dist/
 .release/
+
+# This repository intentionally tracks its reviewed DeepSec configuration.
+!/.deepsec/
