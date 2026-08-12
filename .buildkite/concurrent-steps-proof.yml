@@ -4,8 +4,6 @@ agents:
 steps:
   - label: ":pipeline: Concurrent steps proof importer"
     key: "concurrent-steps-importer"
-    env:
-      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
@@ -18,7 +16,7 @@ steps:
       CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
-        --runtime-queue hosted \
+        --runner-queue ubuntu-latest=hosted \
         testdata/smoke/.github/workflows/concurrent.yml
 
   - label: ":pipeline: Concurrent steps proof continuation loader"

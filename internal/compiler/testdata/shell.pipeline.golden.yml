@@ -1,24 +1,24 @@
 steps:
   - label: "producer"
     key: "gha-producer"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a.json\"\nif command -v sha256sum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"; elif command -v shasum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(shasum -a 256 \"$distribution\" | awk '{print \"sha256:\" $1}')\"; else echo 'buildkite-gha: no SHA-256 tool available' \u003e\u00262; exit 1; fi\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/2c7d5674939b9471aa5e2c9e7a33e3280ae2493577346d6f56eecdaedcc79814.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"
         allow_failure: false
   - label: "consumer (variant=one)"
     key: "gha-consumer-5ebbc197d87b"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/274d331de1d4f039da1bc7e173e9081f98892e08130a51353a5fa5c64288e500.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/274d331de1d4f039da1bc7e173e9081f98892e08130a51353a5fa5c64288e500.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/2cfa76df9b0c05d2e67bb73173fe047e78a3b7f406c183679d338e9fe0402a06.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/2cfa76df9b0c05d2e67bb73173fe047e78a3b7f406c183679d338e9fe0402a06.json\"\nif command -v sha256sum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"; elif command -v shasum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(shasum -a 256 \"$distribution\" | awk '{print \"sha256:\" $1}')\"; else echo 'buildkite-gha: no SHA-256 tool available' \u003e\u00262; exit 1; fi\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:274d331de1d4f039da1bc7e173e9081f98892e08130a51353a5fa5c64288e500"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/274d331de1d4f039da1bc7e173e9081f98892e08130a51353a5fa5c64288e500.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:2cfa76df9b0c05d2e67bb73173fe047e78a3b7f406c183679d338e9fe0402a06"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/2cfa76df9b0c05d2e67bb73173fe047e78a3b7f406c183679d338e9fe0402a06.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"
@@ -27,12 +27,12 @@ steps:
         allow_failure: true
   - label: "consumer (variant=two)"
     key: "gha-consumer-91934b28b00f"
-    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/cfdd37f147533104f09fc8ccd58e16dfa9038e7c6b121930c13662c39c9f23c9.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/cfdd37f147533104f09fc8ccd58e16dfa9038e7c6b121930c13662c39c9f23c9.json\"\nactual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
+    command: "set -euo pipefail\nbootstrap_dir=\"$(mktemp -d \"${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX\")\"\ntrap 'rm -rf -- \"$bootstrap_dir\"' EXIT\nbuildkite-agent artifact download '.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha' \"$bootstrap_dir\" --step 'gha-importer'\nbuildkite-agent artifact download '.buildkite-gha/plans/b06cbbeff02cd143010eefeeab5a42aa3ec6387d1d0f4e3b15949bccdceeb631.json' \"$bootstrap_dir\" --step 'gha-importer'\ndistribution=\"$bootstrap_dir/.buildkite-gha/distributions/2222222222222222222222222222222222222222222222222222222222222222/buildkite-gha\"\nplan=\"$bootstrap_dir/.buildkite-gha/plans/b06cbbeff02cd143010eefeeab5a42aa3ec6387d1d0f4e3b15949bccdceeb631.json\"\nif command -v sha256sum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(sha256sum \"$distribution\" | awk '{print \"sha256:\" $1}')\"; elif command -v shasum \u003e/dev/null 2\u003e\u00261; then actual_distribution_digest=\"$(shasum -a 256 \"$distribution\" | awk '{print \"sha256:\" $1}')\"; else echo 'buildkite-gha: no SHA-256 tool available' \u003e\u00262; exit 1; fi\ntest \"$actual_distribution_digest\" = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'\nchmod 0500 \"$distribution\"\n\"$distribution\" run-job --plan \"$plan\""
     checkout:
       skip: true
     env:
-      BUILDKITE_GHA_PLAN_DIGEST: "sha256:cfdd37f147533104f09fc8ccd58e16dfa9038e7c6b121930c13662c39c9f23c9"
-      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/cfdd37f147533104f09fc8ccd58e16dfa9038e7c6b121930c13662c39c9f23c9.json"
+      BUILDKITE_GHA_PLAN_DIGEST: "sha256:b06cbbeff02cd143010eefeeab5a42aa3ec6387d1d0f4e3b15949bccdceeb631"
+      BUILDKITE_GHA_PLAN_PATH: ".buildkite-gha/plans/b06cbbeff02cd143010eefeeab5a42aa3ec6387d1d0f4e3b15949bccdceeb631.json"
       BUILDKITE_GHA_PLAN_PRODUCER: "gha-importer"
     depends_on:
       - step: "gha-importer"

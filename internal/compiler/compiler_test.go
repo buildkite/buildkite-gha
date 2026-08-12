@@ -680,10 +680,10 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plans[3].Schema != plan.SchemaV5 {
-		t.Fatalf("downstream reusable-workflow plan schema = %q, want v5", plans[3].Schema)
+	if plans[3].Schema != plan.SchemaV8 {
+		t.Fatalf("downstream reusable-workflow plan schema = %q, want v8", plans[3].Schema)
 	}
-	if plans[1].Schema != plan.SchemaV5 || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
+	if plans[1].Schema != plan.SchemaV8 || !reflect.DeepEqual(plans[1].NeedOutputs, map[string][]plan.NeedOutput{"prepare": {}}) {
 		t.Fatalf("callee root caller prerequisite projection = %q / %#v", plans[1].Schema, plans[1].NeedOutputs)
 	}
 	if plans[3].Condition != "always() && needs.delegated.result == 'success'" || plans[3].Steps[0].Command != `test "${{ needs.delegated.result }}" = success` {
@@ -2152,8 +2152,8 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV2 {
-		t.Fatalf("plans = %#v, want one v2 plan", plans)
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 {
+		t.Fatalf("plans = %#v, want one v8 plan", plans)
 	}
 	steps := plans[0].Steps
 	if len(steps) != 8 || !steps[0].Background || !steps[1].Background {
@@ -2419,16 +2419,16 @@ func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
+	schemaSource := readFile(t, filepath.Join("..", "..", "schemas", "job-plan-v8.schema.json"))
 	var schemaDocument any
 	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
 		t.Fatal(err)
 	}
 	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(plan.SchemaV7, schemaDocument); err != nil {
+	if err := compiler.AddResource(plan.SchemaV8, schemaDocument); err != nil {
 		t.Fatal(err)
 	}
-	jobSchema, err := compiler.Compile(plan.SchemaV7)
+	jobSchema, err := compiler.Compile(plan.SchemaV8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2442,7 +2442,7 @@ func TestCompiledPlansValidateAgainstVersionedSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := jobSchema.Validate(document); err != nil {
-			t.Fatalf("compiled plan does not validate against %s: %v\n%s", plan.SchemaV7, err, encoded)
+			t.Fatalf("compiled plan does not validate against %s: %v\n%s", plan.SchemaV8, err, encoded)
 		}
 	}
 }
@@ -2499,13 +2499,13 @@ func readFile(t *testing.T, path string) []byte {
 	return source
 }
 
-func TestCompilePlansEmitV4ForContainers(t *testing.T) {
+func TestCompilePlansEmitV8ForContainers(t *testing.T) {
 	workflowSource := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container: node:24\n    services:\n      redis: {image: redis:7}\n    steps:\n      - run: true\n")
 	plans, err := compileUntrustedPlans("containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV4 || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
 		t.Fatalf("container plan = %#v", plans)
 	}
 }

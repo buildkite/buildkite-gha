@@ -98,6 +98,8 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"${{ secrets.TOKEN }}",
 		"${{ vars.RELEASE }}",
 		"${{ env.PATH }}",
+		"${{ runner.os }}",
+		"${{ runner['arch'] }}",
 		"${{ steps.build.outputs.release }}",
 		"${{ steps.build.outcome }}",
 		"${{ steps.build.conclusion }}",
@@ -130,6 +132,24 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
+	runner := map[string]string{"os": "macOS", "arch": "ARM64"}
+	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateCondition("runner.os == 'macOS' && runner.arch == 'ARM64'", ConditionContext{Runner: runner}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.os == 'macOS' && runner.arch || 'X64' }}", Context{Runner: runner}); err != nil || got != "ARM64" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	for _, reference := range []string{"runner.name", "runner.os.extra", "runner"} {
+		if err := validateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
+			t.Errorf("validateRuntimeTemplate(%q) unexpectedly succeeded", reference)
+		}
 	}
 }
 
@@ -399,6 +419,7 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
 		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
+		{name: "runner identity", source: "runner.os == 'Linux' && runner.arch == 'X64'", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {
@@ -661,6 +682,42 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	}
 	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
 		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestCompileInputLiteralRepresentations(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    string
+		wantErr string
+	}{
+		{name: "nil is the null literal", value: nil, want: "null"},
+		{name: "true", value: true, want: "true"},
+		{name: "false", value: false, want: "false"},
+		{name: "plain string is quoted", value: "ready", want: "'ready'"},
+		{name: "apostrophes escape by doubling", value: "it's ready", want: "'it''s ready'"},
+		{name: "empty string stays a literal", value: "", want: "''"},
+		{name: "json number preserves source text", value: json.Number("0.30"), want: "0.30"},
+		{name: "int", value: 42, want: "42"},
+		{name: "float64 uses shortest form", value: 2.5, want: "2.5"},
+		{name: "aggregate values cannot be literals", value: []any{"x"}, wantErr: "cannot be represented"},
+		{name: "maps cannot be literals", value: map[string]any{"x": "y"}, wantErr: "cannot be represented"},
+		{name: "typed numerics outside the YAML model fail closed", value: int32(7), wantErr: "cannot be represented"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := compileInputLiteral(test.value)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("compileInputLiteral(%#v) error = %v, want %q", test.value, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("compileInputLiteral(%#v) = %q, %v, want %q", test.value, got, err, test.want)
+			}
+		})
 	}
 }
 

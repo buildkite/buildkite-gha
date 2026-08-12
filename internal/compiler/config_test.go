@@ -114,6 +114,31 @@ func TestOptionsRejectActionConfigurationWithoutResolution(t *testing.T) {
 	}
 }
 
+func TestOptionsValidateRunnerTargetImages(t *testing.T) {
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
+	tests := []struct {
+		name   string
+		target RunnerTarget
+		want   string
+	}{
+		{name: "Linux immutable image", target: RunnerTarget{Queue: "hosted", Platform: PlatformLinuxAMD64, Image: image}},
+		{name: "mutable image", target: RunnerTarget{Queue: "hosted", Platform: PlatformLinuxAMD64, Image: "ubuntu:latest"}, want: "invalid immutable runtime image"},
+		{name: "Darwin image", target: RunnerTarget{Queue: "macos", Platform: PlatformDarwinARM64, Image: image}, want: "cannot select a runtime image on darwin/arm64"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := Options{EventTrust: EventTrusted, Runners: RunnerPolicy{Targets: map[string]RunnerTarget{"runner": test.target}}}
+			err := options.validate()
+			if test.want == "" && err != nil {
+				t.Fatalf("Options.validate() error = %v", err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("Options.validate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateEventReportsInvalidCompilerEnvironmentWithoutFailingWorkflowStage(t *testing.T) {
 	workflow := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n")
 	options := defaultOptions()
@@ -220,7 +245,7 @@ func TestDefaultCompilePolicyIsUntrustedAndUsesBuildkiteDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.SchemaV2 {
+	if len(plans) != 1 || plans[0].Target.Queue != "gha-untrusted" || plans[0].Schema != plan.SchemaV8 {
 		t.Fatalf("compileUntrustedPlans() explicit legacy target = %#v", plans)
 	}
 }
