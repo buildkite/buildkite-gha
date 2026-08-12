@@ -130,9 +130,9 @@ Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file ins
 
 `--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
 
-All selected directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
+Supported, directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. When multiple workflows are selected, workflows with unsupported trigger syntax are omitted with a warning. Selecting one such workflow remains an error. An input set containing no supported, directly runnable workflows is an error.
 
-Any input, trigger translation, event validation, compilation, admission, artifact, or upload failure aborts the aggregate transaction. No partially compiled pipeline is uploaded.
+Any input, event validation, compilation, admission, artifact, or upload failure aborts the aggregate transaction. Trigger errors caused by the effective event data also remain fatal. No partially compiled pipeline is uploaded.
 
 ### Select the effective event
 

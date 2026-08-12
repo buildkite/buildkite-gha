@@ -1473,6 +1473,11 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
+			if len(workflows) > 1 && buildkitepipeline.IsUnsupportedTrigger(triggerErr) {
+				workflows[i].UnsupportedTrigger = true
+				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: warning: skipping %s: translate workflow triggers: %v\n", workflows[i].CanonicalPath, triggerErr)
+				continue
+			}
 			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
 			_ = out.write(triggerFailureProcessingReport(workflows[i], triggerErr))
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
@@ -1482,9 +1487,19 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		workflows[i].TriggerCondition = selection.Condition
 		workflows[i].SkipReason = selection.SkipReason
 	}
+	supportedWorkflowCount := 0
+	for _, input := range workflows {
+		if !input.ReusableOnly && !input.UnsupportedTrigger {
+			supportedWorkflowCount++
+		}
+	}
+	if supportedWorkflowCount == 0 {
+		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: selected workflows contain no supported triggers")
+		return 1
+	}
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
-		if !input.Applicable {
+		if input.UnsupportedTrigger || !input.Applicable {
 			continue
 		}
 		validationOptions := hostedTokenlessOptions("", uploadArguments.runnerTargets, nil)
@@ -1548,7 +1563,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	jobCount := 0
 	for i, input := range workflows {
-		if input.ReusableOnly {
+		if input.ReusableOnly || input.UnsupportedTrigger {
 			continue
 		}
 		if !input.Applicable {
@@ -1814,7 +1829,7 @@ type workflowInput struct {
 	Source                                                []byte
 	Triggers                                              []workflow.Trigger
 	TriggerCondition, SkipReason                          string
-	ReusableOnly, Applicable                              bool
+	ReusableOnly, Applicable, UnsupportedTrigger          bool
 }
 
 func expandWorkflowOperands(operands []string) ([]workflowInput, error) {

@@ -40,6 +40,9 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Errorf("TranslateTriggerCondition(%v) error = %v, want %q", test.triggers, err, test.want)
 			}
+			if !IsUnsupportedTrigger(err) {
+				t.Errorf("TranslateTriggerCondition(%v) error was not classified as an unsupported trigger: %v", test.triggers, err)
+			}
 		})
 	}
 }
@@ -131,12 +134,16 @@ func TestTranslateEventTriggerConditionRejectsIncompletePullRequestSnapshot(t *t
 	}
 	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request"}}, "pull_request", context); err == nil || !strings.Contains(err.Error(), "payload.action") {
 		t.Fatalf("missing action error = %v", err)
+	} else if IsUnsupportedTrigger(err) {
+		t.Fatalf("missing action was classified as unsupported trigger syntax: %v", err)
 	}
 
 	context.PullRequestAction = `"opened"`
 	context.PullRequestBaseBranch = "null"
 	if _, _, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request", Branches: []string{"main"}}}, "pull_request", context); err == nil || !strings.Contains(err.Error(), "payload.pull_request.base.ref") {
 		t.Fatalf("missing filtered base branch error = %v", err)
+	} else if IsUnsupportedTrigger(err) {
+		t.Fatalf("missing base branch was classified as unsupported trigger syntax: %v", err)
 	}
 
 	if _, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request"}}, "pull_request", context); err != nil || !applicable {

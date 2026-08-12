@@ -1,6 +1,7 @@
 package buildkite
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -19,6 +20,23 @@ type TriggerConditionContext struct {
 	Tag                   string
 	PullRequestBaseBranch string
 	PullRequestAction     string
+}
+
+type unsupportedTriggerError struct {
+	err error
+}
+
+func (e *unsupportedTriggerError) Error() string { return e.err.Error() }
+
+// IsUnsupportedTrigger reports whether trigger translation failed because the
+// workflow uses trigger syntax that buildkite-gha cannot map exactly.
+func IsUnsupportedTrigger(err error) bool {
+	var target *unsupportedTriggerError
+	return errors.As(err, &target)
+}
+
+func unsupportedTrigger(format string, args ...any) error {
+	return &unsupportedTriggerError{err: fmt.Errorf(format, args...)}
 }
 
 // LiveTriggerConditionContext uses fields from the Buildkite build that
@@ -113,14 +131,14 @@ func liveTriggerContext(event string) TriggerConditionContext {
 
 func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (string, bool, error) {
 	if t.Paths != nil || t.PathsIgnore != nil {
-		return "", false, fmt.Errorf("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
+		return "", false, unsupportedTrigger("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
 	}
 	switch t.Event {
 	case "workflow_call":
 		return "", false, nil
 	case "workflow_dispatch":
 		if hasWebhookFilters(t) {
-			return "", false, fmt.Errorf("workflow_dispatch has unsupported webhook filters")
+			return "", false, unsupportedTrigger("workflow_dispatch has unsupported webhook filters")
 		}
 		if context.EventPredicate == "" {
 			return "", false, fmt.Errorf("workflow_dispatch requires an effective event predicate")
@@ -128,7 +146,7 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		return context.EventPredicate, true, nil
 	case "schedule":
 		if hasWebhookFilters(t) {
-			return "", false, fmt.Errorf("schedule has unsupported webhook filters")
+			return "", false, unsupportedTrigger("schedule has unsupported webhook filters")
 		}
 		// Buildkite does not expose the identity of the schedule that created a
 		// build. Cron ownership therefore stays in Buildkite, and every scheduled
@@ -139,7 +157,7 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		return context.EventPredicate, true, nil
 	case "push":
 		if t.Types != nil || t.Workflows != nil {
-			return "", false, fmt.Errorf("push has unsupported filters")
+			return "", false, unsupportedTrigger("push has unsupported filters")
 		}
 		if context.EventPredicate == "" || context.Branch == "" || context.Tag == "" {
 			return "", false, fmt.Errorf("push requires effective event, branch, and tag expressions")
@@ -150,11 +168,11 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		parts := []string{context.EventPredicate}
 		branch, hasBranchFilter, err := refFilters(context.Branch, t.Branches, t.BranchesIgnore)
 		if err != nil {
-			return "", false, fmt.Errorf("push branches: %w", err)
+			return "", false, unsupportedTrigger("push branches: %v", err)
 		}
 		tag, hasTagFilter, err := refFilters(context.Tag, t.Tags, t.TagsIgnore)
 		if err != nil {
-			return "", false, fmt.Errorf("push tags: %w", err)
+			return "", false, unsupportedTrigger("push tags: %v", err)
 		}
 		if hasBranchFilter && hasTagFilter {
 			parts = append(parts, "(("+context.Tag+" == null && ("+branch+")) || ("+context.Tag+" != null && ("+tag+")))")
@@ -166,7 +184,7 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
 		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
-			return "", false, fmt.Errorf("pull_request tag filters are unsupported")
+			return "", false, unsupportedTrigger("pull_request tag filters are unsupported")
 		}
 		if context.EventPredicate == "" || context.PullRequestAction == "" {
 			return "", false, fmt.Errorf("pull_request requires effective event and action expressions")
@@ -184,7 +202,7 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		}
 		b, hasBranchFilter, err := refFilters(context.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
 		if err != nil {
-			return "", false, fmt.Errorf("pull_request branches: %w", err)
+			return "", false, unsupportedTrigger("pull_request branches: %v", err)
 		}
 		if hasBranchFilter {
 			parts = append(parts, b)
@@ -194,19 +212,19 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 			types = []string{"opened", "synchronize", "reopened"}
 		}
 		if len(types) == 0 {
-			return "", false, fmt.Errorf("pull_request types is explicitly empty")
+			return "", false, unsupportedTrigger("pull_request types is explicitly empty")
 		}
 		var actions []string
 		for _, a := range types {
 			if !supportedPullRequestAction[a] {
-				return "", false, fmt.Errorf("pull_request activity type %q cannot be mapped exactly", a)
+				return "", false, unsupportedTrigger("pull_request activity type %q cannot be mapped exactly", a)
 			}
 			actions = append(actions, context.PullRequestAction+` == `+yamlScalar(a))
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
 		return strings.Join(parts, " && "), true, nil
 	default:
-		return "", false, fmt.Errorf("unsupported GitHub trigger event %q", t.Event)
+		return "", false, unsupportedTrigger("unsupported GitHub trigger event %q", t.Event)
 	}
 }
 

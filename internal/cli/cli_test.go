@@ -3269,6 +3269,61 @@ func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
 	}
 }
 
+func TestRunUploadSkipsUnsupportedTriggersInMultiWorkflowSelection(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml":      "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"summary.yml": "name: Issue summary\non: issues\njobs:\n  summary:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath := writeUploadEvent(t, repository, "push", "refs/heads/main", map[string]any{})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "wildcard-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "*"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	warning := `buildkite-gha: upload: warning: skipping .github/workflows/summary.yml: translate workflow triggers: unsupported GitHub trigger event "issues"`
+	if !strings.Contains(stderr.String(), warning) || strings.Contains(stderr.String(), "Pipeline generation: failed") {
+		t.Fatalf("unsupported workflow warning = %q, want %q", stderr.String(), warning)
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 1 workflows") || len(runner.commands) == 0 {
+		t.Fatalf("stdout/commands = %q / %#v", stdout.String(), runner.commands)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: CI" {
+		t.Fatalf("generated workflow groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestRunUploadRejectsMultiWorkflowSelectionWithoutSupportedTriggers(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"issues.yml":     "on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"discussion.yml": "on: discussion\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath := writeUploadEvent(t, repository, "push", "refs/heads/main", map[string]any{})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "wildcard-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, "*"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "selected workflows contain no supported triggers") {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("unsupported workflows reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	}
+}
+
 func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 	requireImporterHost(t)
 	for _, test := range []struct {
