@@ -324,6 +324,43 @@ func TestHashWorkspaceFilesDetectsDirectoryReplacementBeforeTraversal(t *testing
 	}
 }
 
+func TestHashWorkspaceFilesOpensMatchesThroughPinnedDirectories(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "original")
+	writeFixtureFile(t, workspace, "replacement/value", "replacement")
+	limits := defaultHashFilesLimits
+	limits.beforeOpen = func(name string) {
+		if name != "nested/value" {
+			return
+		}
+		if err := os.Rename(filepath.Join(workspace, "nested"), filepath.Join(workspace, "original")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(workspace, "replacement"), filepath.Join(workspace, "nested")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limits.afterFileHash = func(name string) {
+		if name != "nested/value" {
+			return
+		}
+		if err := os.Rename(filepath.Join(workspace, "nested"), filepath.Join(workspace, "replacement")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(workspace, "original"), filepath.Join(workspace, "nested")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	digest, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"nested/value"}, limits, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := githubHash("original")
+	if digest != want {
+		t.Fatalf("digest = %q, want original file digest %q", digest, want)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string

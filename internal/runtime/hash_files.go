@@ -36,6 +36,7 @@ type hashFilesLimits struct {
 	entries             int
 	beforeOpen          func(string)
 	beforeDirectoryOpen func(string)
+	afterFileHash       func(string)
 }
 
 var defaultHashFilesLimits = hashFilesLimits{
@@ -130,49 +131,15 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		if err := verifyHashFileDirectories(root, directories, name); err != nil {
 			return "", err
 		}
-		before, err := root.Lstat(name)
+		fileDigest, read, err := hashWorkspaceFile(ctx, root, directories[path.Dir(name)], name, limits, total)
 		if err != nil {
-			return "", fmt.Errorf("inspect hashFiles match %q: %w", name, err)
-		}
-		if before.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("hashFiles matched symlink %q; symlinks are unsupported", name)
-		}
-		if !before.Mode().IsRegular() {
-			return "", fmt.Errorf("hashFiles matched non-regular file %q", name)
-		}
-		if before.Size() < 0 || before.Size() > limits.bytes-total {
-			return "", fmt.Errorf("hashFiles selected bytes exceed %d", limits.bytes)
-		}
-		if limits.beforeOpen != nil {
-			limits.beforeOpen(name)
-		}
-		file, err := root.Open(name)
-		if err != nil {
-			return "", fmt.Errorf("open hashFiles match %q: %w", name, err)
-		}
-		opened, err := file.Stat()
-		if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-			_ = file.Close()
-			return "", fmt.Errorf("hashFiles match %q changed before hashing", name)
-		}
-		fileHash := sha256.New()
-		read, copyErr := copyHashFile(ctx, fileHash, io.LimitReader(file, limits.bytes-total+1))
-		closeErr := file.Close()
-		if copyErr != nil {
-			return "", fmt.Errorf("hash hashFiles match %q: %w", name, copyErr)
-		}
-		if closeErr != nil {
-			return "", fmt.Errorf("close hashFiles match %q: %w", name, closeErr)
-		}
-		if read > limits.bytes-total {
-			return "", fmt.Errorf("hashFiles selected bytes exceed %d", limits.bytes)
-		}
-		after, err := root.Lstat(name)
-		if err != nil || !os.SameFile(before, after) || read != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
-			return "", fmt.Errorf("hashFiles match %q changed while hashing", name)
+			return "", err
 		}
 		total += read
-		_, _ = combined.Write(fileHash.Sum(nil))
+		_, _ = combined.Write(fileDigest)
+		if limits.afterFileHash != nil {
+			limits.afterFileHash(name)
+		}
 	}
 	if err := verifyHashFileDirectories(root, directories, ""); err != nil {
 		return "", err
@@ -180,30 +147,82 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 	return hex.EncodeToString(combined.Sum(nil)), nil
 }
 
+func hashWorkspaceFile(ctx context.Context, root *os.Root, directoryInfo fs.FileInfo, name string, limits hashFilesLimits, total int64) (digest []byte, read int64, retErr error) {
+	directoryName := path.Dir(name)
+	directory, err := root.OpenRoot(directoryName)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open hashFiles directory %q: %w", directoryName, err)
+	}
+	defer func() { retErr = errors.Join(retErr, directory.Close()) }()
+	openedDirectory, err := directory.Lstat(".")
+	if err != nil || !sameHashFileInfo(directoryInfo, openedDirectory) {
+		return nil, 0, fmt.Errorf("hashFiles directory %q changed before hashing", directoryName)
+	}
+
+	base := path.Base(name)
+	before, err := directory.Lstat(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("inspect hashFiles match %q: %w", name, err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, fmt.Errorf("hashFiles matched symlink %q; symlinks are unsupported", name)
+	}
+	if !before.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("hashFiles matched non-regular file %q", name)
+	}
+	if before.Size() < 0 || before.Size() > limits.bytes-total {
+		return nil, 0, fmt.Errorf("hashFiles selected bytes exceed %d", limits.bytes)
+	}
+	if limits.beforeOpen != nil {
+		limits.beforeOpen(name)
+	}
+	file, err := directory.Open(base)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open hashFiles match %q: %w", name, err)
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, 0, fmt.Errorf("hashFiles match %q changed before hashing", name)
+	}
+	fileHash := sha256.New()
+	read, copyErr := copyHashFile(ctx, fileHash, io.LimitReader(file, limits.bytes-total+1))
+	closeErr := file.Close()
+	if copyErr != nil {
+		return nil, 0, fmt.Errorf("hash hashFiles match %q: %w", name, copyErr)
+	}
+	if closeErr != nil {
+		return nil, 0, fmt.Errorf("close hashFiles match %q: %w", name, closeErr)
+	}
+	if read > limits.bytes-total {
+		return nil, 0, fmt.Errorf("hashFiles selected bytes exceed %d", limits.bytes)
+	}
+	after, err := directory.Lstat(base)
+	if err != nil || !os.SameFile(before, after) || read != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return nil, 0, fmt.Errorf("hashFiles match %q changed while hashing", name)
+	}
+	return fileHash.Sum(nil), read, nil
+}
+
 func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen func(string), directories map[string]fs.FileInfo, visit func(string, fs.DirEntry) error) error {
 	const readBatch = 256
 	entriesRead := 0
-	var walk func(string) error
-	walk = func(directory string) error {
+	rootInfo, err := root.Lstat(".")
+	if err != nil {
+		return fmt.Errorf("inspect hashFiles workspace: %w", err)
+	}
+	directories["."] = rootInfo
+	var walk func(string, *os.Root, fs.FileInfo) error
+	walk = func(directory string, current *os.Root, currentInfo fs.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		before, err := root.Lstat(directory)
-		if err != nil {
-			return fmt.Errorf("inspect hashFiles directory %q: %w", directory, err)
-		}
-		if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
-			return fmt.Errorf("hashFiles directory %q changed before traversal", directory)
-		}
-		if beforeOpen != nil {
-			beforeOpen(directory)
-		}
-		handle, err := root.Open(directory)
+		handle, err := current.Open(".")
 		if err != nil {
 			return fmt.Errorf("open hashFiles directory %q: %w", directory, err)
 		}
 		opened, err := handle.Stat()
-		if err != nil || !opened.IsDir() || !os.SameFile(before, opened) {
+		if err != nil || !opened.IsDir() || !os.SameFile(currentInfo, opened) {
 			_ = handle.Close()
 			return fmt.Errorf("hashFiles directory %q changed before traversal", directory)
 		}
@@ -230,11 +249,10 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 		if err := handle.Close(); err != nil {
 			return fmt.Errorf("close hashFiles directory %q: %w", directory, err)
 		}
-		after, err := root.Lstat(directory)
-		if err != nil || !sameHashFileInfo(before, after) {
+		after, err := current.Lstat(".")
+		if err != nil || !sameHashFileInfo(currentInfo, after) {
 			return fmt.Errorf("hashFiles directory %q changed during traversal", directory)
 		}
-		directories[directory] = before
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 		for _, entry := range entries {
 			name := path.Join(directory, entry.Name())
@@ -242,14 +260,32 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 				return err
 			}
 			if entry.IsDir() {
-				if err := walk(name); err != nil {
-					return err
+				before, err := current.Lstat(entry.Name())
+				if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+					return fmt.Errorf("hashFiles directory %q changed before traversal", name)
+				}
+				if beforeOpen != nil {
+					beforeOpen(name)
+				}
+				childRoot, err := current.OpenRoot(entry.Name())
+				if err != nil {
+					return fmt.Errorf("open hashFiles directory %q: %w", name, err)
+				}
+				opened, err := childRoot.Lstat(".")
+				if err != nil || !opened.IsDir() || !os.SameFile(before, opened) {
+					_ = childRoot.Close()
+					return fmt.Errorf("hashFiles directory %q changed before traversal", name)
+				}
+				directories[name] = before
+				walkErr := walk(name, childRoot, before)
+				if closeErr := childRoot.Close(); walkErr != nil || closeErr != nil {
+					return errors.Join(walkErr, closeErr)
 				}
 			}
 		}
 		return nil
 	}
-	return walk(".")
+	return walk(".", root, rootInfo)
 }
 
 func verifyHashFileDirectories(root *os.Root, directories map[string]fs.FileInfo, name string) error {
