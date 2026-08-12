@@ -176,7 +176,7 @@ func hashWorkspaceFile(ctx context.Context, root *os.Root, directoryInfo fs.File
 	if limits.beforeOpen != nil {
 		limits.beforeOpen(name)
 	}
-	file, err := directory.Open(base)
+	file, err := openHashFile(directory, base)
 	if err != nil {
 		return nil, 0, fmt.Errorf("open hashFiles match %q: %w", name, err)
 	}

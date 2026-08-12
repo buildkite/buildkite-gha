@@ -372,6 +372,29 @@ func TestHashWorkspaceFilesFinalVerificationObservesCancellation(t *testing.T) {
 	}
 }
 
+func TestHashWorkspaceFilesRejectsFIFORacedIntoMatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFOs are unavailable on Windows")
+	}
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "value", "value")
+	limits := defaultHashFilesLimits
+	limits.beforeOpen = func(name string) {
+		file := filepath.Join(workspace, name)
+		if err := os.Remove(file); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mkfifo(file, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := hashWorkspaceFilesWithLimits(ctx, workspace, []string{"value"}, limits, false); err == nil || !strings.Contains(err.Error(), "changed before hashing") {
+		t.Fatalf("FIFO race error = %v", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string
