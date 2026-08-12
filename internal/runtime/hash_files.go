@@ -74,20 +74,9 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		return "", err
 	}
 	var selected []string
-	entries := 0
-	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+	err = walkHashFilesRoot(ctx, root, limits.entries, func(name string, entry fs.DirEntry) error {
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if walkErr != nil {
-			return fmt.Errorf("walk hashFiles workspace at %q: %w", name, walkErr)
-		}
-		if name == "." {
-			return nil
-		}
-		entries++
-		if entries > limits.entries {
-			return fmt.Errorf("hashFiles workspace has more than %d entries", limits.entries)
 		}
 		matched, err := hashFilePatternMatch(patterns, name, caseInsensitive)
 		if err != nil {
@@ -181,6 +170,58 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		_, _ = combined.Write(fileHash.Sum(nil))
 	}
 	return hex.EncodeToString(combined.Sum(nil)), nil
+}
+
+func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, visit func(string, fs.DirEntry) error) error {
+	const readBatch = 256
+	entriesRead := 0
+	var walk func(string) error
+	walk = func(directory string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		handle, err := root.Open(directory)
+		if err != nil {
+			return fmt.Errorf("open hashFiles directory %q: %w", directory, err)
+		}
+		var entries []fs.DirEntry
+		for {
+			batch, readErr := handle.ReadDir(readBatch)
+			for _, entry := range batch {
+				entriesRead++
+				if entriesRead > limit {
+					return errors.Join(fmt.Errorf("hashFiles workspace has more than %d entries", limit), handle.Close())
+				}
+				entries = append(entries, entry)
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return errors.Join(fmt.Errorf("read hashFiles directory %q: %w", directory, readErr), handle.Close())
+			}
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, handle.Close())
+			}
+		}
+		if err := handle.Close(); err != nil {
+			return fmt.Errorf("close hashFiles directory %q: %w", directory, err)
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, entry := range entries {
+			name := path.Join(directory, entry.Name())
+			if err := visit(name, entry); err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if err := walk(name); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(".")
 }
 
 func copyHashFile(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {

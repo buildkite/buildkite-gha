@@ -162,6 +162,14 @@ func stepContext(parent context.Context, timeoutMinutes float64) (context.Contex
 	return context.WithCancel(parent)
 }
 
+func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
+	if eval.HashFilesContext != nil {
+		eval.HashFiles = func(patterns []string) (string, error) {
+			return eval.HashFilesContext(ctx, patterns)
+		}
+	}
+}
+
 func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)

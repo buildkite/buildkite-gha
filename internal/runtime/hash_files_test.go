@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"golang.org/x/sys/unix"
 )
@@ -267,6 +269,18 @@ func TestHashWorkspaceFilesEnforcesEveryBound(t *testing.T) {
 	}
 }
 
+func TestHashWorkspaceFilesBoundsSingleDirectoryEnumeration(t *testing.T) {
+	workspace := t.TempDir()
+	for i := range 300 {
+		writeFixtureFile(t, workspace, fmt.Sprintf("entry-%03d", i), "")
+	}
+	limits := defaultHashFilesLimits
+	limits.entries = 10
+	if _, err := hashWorkspaceFilesWithLimits(context.Background(), workspace, []string{"missing"}, limits, false); err == nil || !strings.Contains(err.Error(), "more than 10 entries") {
+		t.Fatalf("single-directory entry bound error = %v", err)
+	}
+}
+
 func TestHashWorkspaceFilesDetectsMutationAndCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "mutable", "before")
@@ -329,6 +343,49 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 				t.Fatalf("RunJob() took %s after step timeout", elapsed)
 			}
 		})
+	}
+}
+
+func TestHashFilesPrePhaseUsesStepTimeoutContext(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: hashFiles pre timeout\n")
+	file, err := os.Create(filepath.Join(workspace, "large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(256 << 20); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action/action.yml", "name: timeout\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "action/pre.js", "")
+	writeFixtureFile(t, remote, "action/main.js", "")
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:             "hash",
+		Kind:           "uses",
+		Uses:           remoteLifecycleUses("action"),
+		Action:         &plan.ActionSelector{Lock: lockID},
+		TimeoutMinutes: 0.001,
+		Env:            map[string]string{"HASH": "${{ hashFiles('large') }}"},
+	}})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	started := time.Now()
+	_, err = (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunJob() pre timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("RunJob() pre took %s after step timeout", elapsed)
 	}
 }
 

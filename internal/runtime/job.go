@@ -482,7 +482,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
-			preResult, preErr := r.prepareRemoteAction(runCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, eval, &posts, actions, prepared, &preStatus, true, nil)
+			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
+			preEval := cloneExpressionContext(eval)
+			bindHashFilesContext(preCtx, &preEval)
+			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
+			cancelPre()
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -533,11 +537,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 
 		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
 		stepEval := cloneExpressionContext(eval)
-		if stepEval.HashFilesContext != nil {
-			stepEval.HashFiles = func(patterns []string) (string, error) {
-				return stepEval.HashFilesContext(stepCtx, patterns)
-			}
-		}
+		bindHashFilesContext(stepCtx, &stepEval)
 		stepEnv, err := evaluateStepMap(step.Env, stepEval)
 		if err != nil {
 			cancelStep()
