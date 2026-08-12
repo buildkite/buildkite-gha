@@ -540,9 +540,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		bindHashFilesContext(stepCtx, &stepEval)
 		stepEnv, err := evaluateStepMap(step.Env, stepEval)
 		if err != nil {
+			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("environment: %w", err))
 			cancelStep()
-			runErr = errors.Join(runErr, fmt.Errorf("step %q environment: %w", step.ID, err))
-			break
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
 		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: stepCtx.Err() != nil, HashFiles: stepEval.HashFiles}

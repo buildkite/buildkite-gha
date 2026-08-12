@@ -395,6 +395,27 @@ func TestHashWorkspaceFilesRejectsFIFORacedIntoMatch(t *testing.T) {
 	}
 }
 
+func TestHashFilesStepEnvironmentFailureUsesStepConclusion(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles environment failure\n")
+	writeFixtureFile(t, workspace, "target", "value")
+	if err := os.Symlink("target", filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	marker := filepath.Join(workspace, "continued")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{
+		{ID: "invalid", Kind: "run", Shell: "sh", ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}, Command: "exit 99"},
+		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
+	})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later step did not run: %v", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string
