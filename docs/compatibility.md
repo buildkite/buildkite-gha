@@ -557,15 +557,15 @@ The adapter sets `artifact-id` and `artifact-digest`. The `artifact-url` output 
 | Input | Supported values |
 | --- | --- |
 | `name` | Exact name, mutually exclusive with `pattern`; runtime expressions are allowed. |
-| `pattern` | Bounded artifact-name glob or leading literal-prefix alternation; requires `merge-multiple: true`; runtime expressions are allowed. |
+| `pattern` | Bounded artifact-name glob; requires `merge-multiple: true`; runtime expressions are allowed. |
 | `path` | Optional literal workspace-relative path. |
 | `merge-multiple` | Omitted or `false` with `name`; required `true` with `pattern`. |
 | v8 `skip-decompress` | Omitted or `false`. |
 | v8 `digest-mismatch` | Omitted or `error`. |
 
-Artifacts must come from verified direct `needs` producers. Exact-name lookup must find one unique artifact. A bounded pattern may select and deterministically merge up to 64 distinct names. Patterns may use one leading group of 2 through 8 comma-separated literal prefixes, such as `{junit-results-backend,product-junit-results}-*`. Each expanded glob may be at most 255 bytes and must pass the same artifact-name glob validation as a single pattern. Empty alternatives, nesting, other brace positions, and glob characters inside alternatives are unsupported.
+Artifacts must come from verified direct `needs` producers. Exact-name lookup must find one unique artifact. A bounded pattern may select and deterministically merge up to 64 distinct names. The shipped pattern contract accepts `*`, `?`, character classes, and `**`. Brace alternation remains unsupported pending hosted proof.
 
-An artifact that matches multiple alternatives is selected once. When artifacts contain the same exact member path, the later artifact by name wins. All matched archives are validated and staged before the destination changes. Artifact ID, all-artifact, cross-run, cross-repository, raw, REST, and non-merged pattern modes are unsupported.
+When artifacts contain the same exact member path, the later artifact by name wins. All matched archives are validated and staged before the destination changes. Artifact ID, all-artifact, cross-run, cross-repository, raw, REST, and non-merged pattern modes are unsupported.
 
 Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP validation failure is fatal. The `download-path` output is supported.
 
