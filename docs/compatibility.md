@@ -20,20 +20,20 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
 | [Triggers and filters under `on`](#names-and-triggers) | ➖ Accepted, no effect | Buildkite creates and filters builds. Local `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. These labels do not provide GitHub image parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`; native macOS arm64 with `macos-latest`, `macos-15`, or `macos-14`. Labels do not provide GitHub image or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
-| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux `bash` and `sh`. |
+| [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions and direct references to selected contexts. |
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
-| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript, composite, and verified Dockerfile actions. |
+| [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository, subject to effective permissions and Buildkite policy. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🚧 Not available in production | Production upload rejects ordinary secret requirements. |
 | [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
 | [Environments and snapshots](#job-configuration) | ➖ Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
 | [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, macOS, Linux arm64, GitHub Enterprise Server, and other providers are outside the initial release. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and other providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
 ## How workflows run on Buildkite
@@ -214,7 +214,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | --- | --- | --- |
 | `name` | ✅ Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | 🟡 Supported subset | Accepts `ubuntu-latest`, `ubuntu-24.04`, and `ubuntu-22.04`. Static expressions may resolve to an accepted label or list whose labels map to the same Buildkite queue. |
+| `runs-on` | 🟡 Supported subset | Accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, `macos-latest`, `macos-15`, and `macos-14`. Static expressions may resolve to an accepted label or list whose labels map to the same complete queue, platform, and image target. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
@@ -274,7 +274,11 @@ jobs:
 
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
 
-Runner labels are compatibility labels, not image selection. The selected Buildkite agent must provide the tools the workflow uses. Windows, macOS, and arm64 labels are unsupported.
+Runner labels do not select GitHub images. Configured Linux profiles default to
+the corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
+image overrides it. Unmapped Linux labels use default Buildkite targeting
+without an image. macOS labels require a runner profile with a native queue and
+reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
 
 ### Matrix strategies
 
@@ -306,6 +310,8 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
 
+macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
+
 ## Step syntax
 
 ### Step configuration
@@ -331,7 +337,7 @@ A step can continue after failure and expose its outcome to a later condition:
 
 ### Commands and actions
 
-**🟡 Supported subset.** Commands run in Linux `bash` or `sh` within the workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
+**🟡 Supported subset.** Commands run in `bash` or `sh` within the Linux or macOS workspace. PowerShell, Python as a shell, Windows shells, and custom shell templates are unsupported. Working directories cannot escape the workspace.
 
 A shell step can specify its shell and workspace-relative working directory:
 
@@ -417,7 +423,7 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 | --- | --- | --- |
 | `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
 | `github.head_ref`, `github.ref_name` | ❌ No | ❌ No |
-| `runner.os` | ❌ No | ❌ No |
+| `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
 | `steps.<id>.outcome`, `steps.<id>.conclusion`, `steps.<id>.outputs.<name>` | ❌ No | ✅ Yes |
@@ -430,7 +436,7 @@ An event-backed condition is evaluated from the immutable event snapshot before 
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
+Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists.
 
 A runtime interpolation can read a verified upstream output directly:
 
@@ -455,7 +461,7 @@ Matrices, runner labels, names, concurrency groups, and event-backed conditions 
 | Private action | ❌ Unsupported | No private action source access. |
 | JavaScript action | ✅ Supported | Declares `node16`, `node20`, or `node24`. |
 | Composite action | 🟡 Supported subset | Nested shell steps and locked local or public actions; `bash` or `sh` for `run`. |
-| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action. |
+| Dockerfile action | 🟡 Supported subset | Verified local or public Dockerfile action on Linux. Rejected on macOS, including through a composite action. |
 | `docker://` action | ❌ Unsupported | Rejected during validation. |
 
 Mutable public refs are resolved during upload, then locked to a commit. Exact lowercase commit SHAs need no GitHub API lookup. Complete source trees are verified again at runtime.
@@ -563,7 +569,9 @@ The adapter sets `artifact-id` and `artifact-digest`. The `artifact-url` output 
 | v8 `skip-decompress` | Omitted or `false`. |
 | v8 `digest-mismatch` | Omitted or `error`. |
 
-Artifacts must come from verified direct `needs` producers. Exact-name lookup must find one unique artifact. A bounded pattern may select and deterministically merge multiple distinct names. When artifacts contain the same exact member path, the later artifact by name wins. All matched archives are validated and staged before the destination changes. Artifact ID, all-artifact, cross-run, cross-repository, raw, REST, and non-merged pattern modes are unsupported.
+Artifacts must come from verified direct `needs` producers. Exact-name lookup must find one unique artifact. A bounded pattern may select and deterministically merge up to 64 distinct names. The shipped pattern contract accepts `*`, `?`, character classes, and `**`. Brace alternation remains unsupported pending hosted proof.
+
+When artifacts contain the same exact member path, the later artifact by name wins. All matched archives are validated and staged before the destination changes. Artifact ID, all-artifact, cross-run, cross-repository, raw, REST, and non-merged pattern modes are unsupported.
 
 Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP validation failure is fatal. The `download-path` output is supported.
 
@@ -623,9 +631,13 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Runner tools
 
-Accepted Ubuntu labels do not select a GitHub-hosted image. The Buildkite agent must provide external tools used by shell steps.
+Configured Linux profiles use the corresponding Noble or Jammy
+hosted-toolchains image. Unmapped Linux and macOS agents must provide tools used
+by shell steps. These images do not provide GitHub image parity. The runtime
+sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`.
 
-By default, `RUNNER_TOOL_CACHE` points to a fresh job-private directory. An operator may select an immutable runtime image with `BUILDKITE_GHA_RUNTIME_IMAGE`; generated jobs then use that image's baked `/opt/hostedtoolcache` inventory. Mutable image tags are rejected. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`.
+`RUNNER_TOOL_CACHE` is job-private unless a Linux runner profile selects an
+immutable image with `/opt/hostedtoolcache`. macOS images are unsupported.
 
 ### Results, retries, and cancellation
 

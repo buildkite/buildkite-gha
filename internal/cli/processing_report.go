@@ -59,9 +59,15 @@ func loadProcessingInputs(out processingOutput, workflowPath, profile, eventFail
 // one was evaluated, and starts the processing report. It emits the report
 // when validation rejects the workflow.
 func validatedProcessingReport(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool) (compatibility.ProcessingReport, bool) {
+	return validatedProcessingReportWithOptions(out, workflowPath, profile, source, event, eventEvaluated, nil)
+}
+
+func validatedProcessingReportWithOptions(out processingOutput, workflowPath, profile string, source, event []byte, eventEvaluated bool, options *compiler.Options) (compatibility.ProcessingReport, bool) {
 	var validation compiler.Report
 	var err error
-	if eventEvaluated {
+	if eventEvaluated && options != nil {
+		validation, err = compiler.ValidateEventWithOptions(workflowPath, source, event, *options)
+	} else if eventEvaluated {
 		validation, err = compiler.ValidateEvent(workflowPath, source, event)
 	} else {
 		validation, err = compiler.Validate(workflowPath, source)

@@ -2589,6 +2589,59 @@ func TestImageOSUsesNormalEnvironmentPrecedence(t *testing.T) {
 	}
 }
 
+func TestCanonicalRunnerContext(t *testing.T) {
+	for _, test := range []struct {
+		goos, goarch, os, arch string
+	}{
+		{goos: "linux", goarch: "amd64", os: "Linux", arch: "X64"},
+		{goos: "darwin", goarch: "arm64", os: "macOS", arch: "ARM64"},
+	} {
+		got, err := canonicalRunnerContext(test.goos, test.goarch)
+		if err != nil || got["os"] != test.os || got["arch"] != test.arch {
+			t.Errorf("canonicalRunnerContext(%s, %s) = %#v, %v", test.goos, test.goarch, got, err)
+		}
+	}
+	if _, err := canonicalRunnerContext("linux", "arm64"); err == nil {
+		t.Fatal("canonicalRunnerContext() accepted unsupported pair")
+	}
+}
+
+func TestManagedNodeDigestsCoverSupportedPlatforms(t *testing.T) {
+	for _, platform := range [][2]string{{"linux", "amd64"}, {"darwin", "arm64"}} {
+		for _, major := range []int{16, 20, 24} {
+			got := nodeDigest(platform[0], platform[1], major)
+			decoded, err := hex.DecodeString(got)
+			if err != nil || len(decoded) != sha256.Size {
+				t.Errorf("nodeDigest(%q, %q, %d) = %q", platform[0], platform[1], major, got)
+			}
+		}
+	}
+	if got := nodeDigest("darwin", "amd64", 24); got != "" {
+		t.Fatalf("nodeDigest() unsupported platform = %q", got)
+	}
+}
+
+func TestValidateHostRejectsDockerOnDarwin(t *testing.T) {
+	job := plan.Job{RequiredCapabilities: []string{"docker", "network"}}
+	if err := ValidateHost(job, "darwin", "arm64"); err == nil || !strings.Contains(err.Error(), "unsupported on macOS") {
+		t.Fatalf("ValidateHost() Darwin Docker error = %v", err)
+	}
+	if err := ValidateHost(job, "linux", "amd64"); err != nil {
+		t.Fatalf("ValidateHost() Linux Docker error = %v", err)
+	}
+	if err := ValidateHost(job, "darwin", "amd64"); err == nil || !strings.Contains(err.Error(), "unsupported runner platform") {
+		t.Fatalf("ValidateHost() unsupported platform error = %v", err)
+	}
+}
+
+func TestRunnerEnvironmentIsProtected(t *testing.T) {
+	base := map[string]string{"RUNNER_OS": "Linux", "RUNNER_ARCH": "X64"}
+	got := mergeStepEnvironment(base, map[string]string{"RUNNER_OS": "overridden", "RUNNER_ARCH": "overridden"})
+	if got["RUNNER_OS"] != "Linux" || got["RUNNER_ARCH"] != "X64" {
+		t.Fatalf("runner environment was overridden: %#v", got)
+	}
+}
+
 func TestJavaScriptInputEnvironmentMatchesToolkitNames(t *testing.T) {
 	env := actionInputEnv(map[string]string{"node-version": "24", "two words": "value"})
 	if env["INPUT_NODE-VERSION"] != "24" || env["INPUT_TWO_WORDS"] != "value" {
@@ -4637,7 +4690,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV7 || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 || len(plans[0].Actions) != 2 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("portable setup plans = %#v", plans)
 	}
 	if got := plans[0].Steps[0].With["node-version"]; got != "24" {

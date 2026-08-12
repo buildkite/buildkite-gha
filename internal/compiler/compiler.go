@@ -94,6 +94,8 @@ type JobInstance struct {
 	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
 	RunsOn                  []string                `json:"runs_on"`
 	Queue                   string                  `json:"queue"`
+	Platform                Platform                `json:"-"`
+	RuntimeImage            string                  `json:"runtime_image,omitempty"`
 	Matrix                  map[string]any          `json:"matrix,omitempty"`
 	FailFast                *bool                   `json:"fail_fast,omitempty"`
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
@@ -308,10 +310,17 @@ instances:
 				continue instances
 			}
 		}
+		runtimeDistributionDigest := options.RuntimeDistributions[instance.Platform]
+		if runtimeDistributionDigest == "" && instance.Platform == PlatformLinuxAMD64 {
+			runtimeDistributionDigest = compilerDistributionDigest
+		}
 		var builtJob plan.Job
 		var builtAuthorization PlanAuthorization
 		var encoded []byte
 		planErr := func() error {
+			if runtimeDistributionDigest == "" {
+				return fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
+			}
 			steps := make([]plan.Step, len(instance.Steps))
 			var actionIndexes []int
 			var actionRefs []string
@@ -347,7 +356,6 @@ instances:
 					actionInputs = append(actionInputs, step.With)
 				}
 			}
-			jobSchema := plan.Schema
 			var actions []plan.ActionLock
 			requiresMise := len(actionRefs) != 0
 			var capabilities []string
@@ -425,7 +433,6 @@ instances:
 						}
 					}
 				}
-				jobSchema = plan.SchemaV7
 				actions = locks
 				capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
 				sort.Strings(capabilities)
@@ -445,9 +452,6 @@ instances:
 			if instance.Container != nil || len(instance.Services) != 0 {
 				if len(actionRefs) != 0 && !lockActions {
 					return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
-				}
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV4
 				}
 				capabilities = append(capabilities, "docker", "network")
 				sort.Strings(capabilities)
@@ -485,11 +489,6 @@ instances:
 					}
 				}
 			}
-			if len(needOutputs) != 0 {
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV5
-				}
-			}
 			secrets, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
 			if err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -512,25 +511,23 @@ instances:
 					permissions[strings.ReplaceAll(name, "-", "_")] = access
 				}
 				githubToken = &plan.GitHubToken{Permissions: permissions}
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV6
-				}
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
-			}
-			if instance.Queue == "" {
-				jobSchema = plan.SchemaV7
 			}
 			if len(secrets) != 0 {
 				capabilities = append(capabilities, "secrets")
 			}
 			sort.Strings(capabilities)
 			capabilities = slices.Compact(capabilities)
+			if instance.Platform == PlatformDarwinARM64 && slices.Contains(capabilities, "docker") {
+				return fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+			}
 			job := plan.Job{
-				Schema: jobSchema,
+				Schema: plan.SchemaV8,
 				Compiler: plan.Compiler{
 					Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 				},
+				Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 				Workflow: plan.Workflow{
 					Path:         instance.SourcePath,
 					Digest:       instance.SourceDigest,
@@ -559,9 +556,7 @@ instances:
 				Steps:                   steps,
 				Actions:                 actions,
 			}
-			if jobSchema == plan.SchemaV7 {
-				job.RequiresMise = &requiresMise
-			}
+			job.RequiresMise = &requiresMise
 			if instance.Container != nil {
 				job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
 			}
@@ -939,9 +934,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 				valid = false
 			}
-			queue := ""
+			var target RunnerTarget
 			if runsOnErr == nil {
-				queue, err = options.Runners.resolve(labels, options.EventTrust)
+				target, err = options.Runners.resolve(labels, options.EventTrust)
 				if err != nil {
 					finding := &ProcessingFinding{
 						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
@@ -973,7 +968,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance := candidate
 			instance.Label = instanceLabel(job, matrix, context)
 			instance.RunsOn = labels
-			instance.Queue = queue
+			instance.Queue = target.Queue
+			instance.Platform = target.Platform
+			instance.RuntimeImage = target.Image
 			instance.ConcurrencyGroup = concurrencyGroup
 			dependencyFailed := false
 			for _, need := range sortedKeys(needBindings[id]) {

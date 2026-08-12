@@ -939,10 +939,13 @@ const (
 	Node16Version = "16.20.2"
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
-	// Digests are for bin/node in the official Linux x86-64 release archives.
-	node16Digest = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
-	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
-	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	// Digests are for bin/node in the official platform release archives.
+	node16LinuxAMD64Digest  = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
+	node20LinuxAMD64Digest  = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
+	node24LinuxAMD64Digest  = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	node16DarwinARM64Digest = "83325958463d59cb0b16433eefab0a03fd1ce7d565a27e0274f507b1f3839a6e"
+	node20DarwinARM64Digest = "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6"
+	node24DarwinARM64Digest = "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a"
 )
 
 func nodeTool(major int) string {
@@ -1042,16 +1045,33 @@ func (r Runner) nodeDigest(major int) string {
 	if digest := r.nodeDigests[major]; digest != "" {
 		return digest
 	}
-	switch major {
-	case 16:
-		return node16Digest
-	case 20:
-		return node20Digest
-	case 24:
-		return node24Digest
+	return nodeDigest(runtime.GOOS, runtime.GOARCH, major)
+}
+
+func nodeDigest(goos, goarch string, major int) string {
+	switch goos + "/" + goarch {
+	case "linux/amd64":
+		switch major {
+		case 16:
+			return node16LinuxAMD64Digest
+		case 20:
+			return node20LinuxAMD64Digest
+		case 24:
+			return node24LinuxAMD64Digest
+		}
+	case "darwin/arm64":
+		switch major {
+		case 16:
+			return node16DarwinARM64Digest
+		case 20:
+			return node20DarwinARM64Digest
+		case 24:
+			return node24DarwinARM64Digest
+		}
 	default:
 		return ""
 	}
+	return ""
 }
 
 func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string) (string, string, error) {

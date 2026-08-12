@@ -1,0 +1,37 @@
+name: bounded multi-prefix artifact selection
+
+on: push
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p junit
+          printf 'backend\n' > junit/backend.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: junit-results-backend-1
+          path: junit/backend.xml
+
+  product:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p junit
+          printf 'product\n' > junit/product.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: product-junit-results-1
+          path: junit/product.xml
+
+  report:
+    needs: [backend, product]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: '{junit-results-backend,product-junit-results}-*'
+          path: junit-artifacts
+          merge-multiple: true
+      - run: test -f junit-artifacts/backend.xml && test -f junit-artifacts/product.xml

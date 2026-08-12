@@ -7,6 +7,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"debug/elf"
+	"debug/macho"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -50,7 +53,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runtime-queue hosted] <workflow>\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] <workflow>\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -62,25 +65,40 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprintf(stdout, "\nGenerated jobs use Buildkite's default agent targeting. An importer can explicitly target one queue with %s; that queue must be suitable for untrusted workflow code. It can select an immutable image for generated jobs with %s. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n", targetQueueEnvironment, runtimeImageEnvironment)
+		_, _ = fmt.Fprintf(stdout, "\nEach repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
 const (
 	resultPublicationTimeout                    = 10 * time.Second
 	legacyRuntimeQueue                          = "hosted"
-	pluginWorkflowEnvironment                   = "BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW"
-	targetQueueEnvironment                      = "BUILDKITE_GHA_TARGET_QUEUE"
-	runtimeImageEnvironment                     = "BUILDKITE_GHA_RUNTIME_IMAGE"
+	pluginConfigurationEnvironment              = "BUILDKITE_PLUGIN_CONFIGURATION"
+	pluginDevDarwinRuntimeEnvironment           = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	legacyTargetQueueEnvironment                = "BUILDKITE_GHA_TARGET_QUEUE"
+	legacyRuntimeImageEnvironment               = "BUILDKITE_GHA_RUNTIME_IMAGE"
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
 	legacyGitHubAppGitCredentialsEnvironment    = "BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS"
 	hostedTokenlessProfile                      = "hosted-tokenless"
 	runtimeMiseArchiveDigest                    = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest                     = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
+	runtimeMiseDarwinARM64ArchiveDigest         = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
+	runtimeMiseDarwinARM64BinaryDigest          = "e777070540ffe22cf8b2b9f88aed88b461d0887d940c4f1c1a97359463cde6e1"
 	runtimeMiseArchiveLimit                     = 64 << 20
 	runtimeMiseBinaryLimit                      = 128 << 20
+	runtimeDistributionLimit                    = 256 << 20
+	pluginChecksumLimit                         = 4 << 20
+	pluginArchiveLimit                          = 256 << 20
 	maxWebhookMetadataBytes                     = 25 << 20
+	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
+	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
 )
+
+var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+var runnerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}$`)
+var stableVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+var pluginReleaseBaseURL = "https://github.com/buildkite/buildkite-gha/releases/download"
+var pluginHTTPClient = securePluginHTTPClient()
 
 func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
 	return getenv(repositoryProviderGitCredentialsEnvironment) == "true" || getenv(legacyGitHubAppGitCredentialsEnvironment) == "true"
@@ -143,15 +161,112 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
 	}
-	workflowPath := os.Getenv(pluginWorkflowEnvironment)
-	if strings.TrimSpace(workflowPath) == "" {
-		return usageError(stderr, "plugin: %s is required", pluginWorkflowEnvironment)
+	if err := validateImporterPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
+		return 1
+	}
+	configuration, err := parsePluginConfiguration(os.Getenv(pluginConfigurationEnvironment))
+	if err != nil {
+		return usageError(stderr, "plugin: %v", err)
 	}
 	if err := normalizePluginCommit(context.Background(), os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
-	return upload([]string{workflowPath}, stdout, stderr, version, transport.Agent{Runner: runner})
+	return uploadParsed(parsedUploadArgs{
+		workflowPath:      configuration.Workflow,
+		runnerTargets:     configuration.runnerTargets,
+		pluginAcquisition: &pluginRuntimeAcquisition{version: version},
+	}, stdout, stderr, version, transport.Agent{Runner: runner})
+}
+
+func validateImporterPlatform(goos, goarch string) error {
+	if goos != "linux" || goarch != "amd64" {
+		return fmt.Errorf("importer requires linux/amd64, running on %s/%s", goos, goarch)
+	}
+	return nil
+}
+
+type pluginConfiguration struct {
+	Workflow      string
+	runnerTargets map[string]compiler.RunnerTarget
+}
+
+func parsePluginConfiguration(source string) (pluginConfiguration, error) {
+	if strings.TrimSpace(source) == "" {
+		return pluginConfiguration{}, fmt.Errorf("%s is required", pluginConfigurationEnvironment)
+	}
+	decoder := json.NewDecoder(strings.NewReader(source))
+	value, err := decodeJSONValue(decoder)
+	if err != nil {
+		return pluginConfiguration{}, fmt.Errorf("decode %s: %w", pluginConfigurationEnvironment, err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return pluginConfiguration{}, fmt.Errorf("decode %s: multiple JSON values", pluginConfigurationEnvironment)
+		}
+		return pluginConfiguration{}, fmt.Errorf("decode %s: %w", pluginConfigurationEnvironment, err)
+	}
+	encoded, ok := value.(map[string]any)
+	if !ok {
+		return pluginConfiguration{}, fmt.Errorf("%s must be a JSON object", pluginConfigurationEnvironment)
+	}
+	for key := range encoded {
+		switch key {
+		case "workflow", "runners", "version", "minimum-release-age":
+		default:
+			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	workflow, ok := encoded["workflow"].(string)
+	if !ok || strings.TrimSpace(workflow) == "" {
+		return pluginConfiguration{}, fmt.Errorf("%s workflow is required", pluginConfigurationEnvironment)
+	}
+	targets := make(map[string]compiler.RunnerTarget)
+	if runnersValue, configured := encoded["runners"]; configured {
+		runners, ok := runnersValue.([]any)
+		if !ok || len(runners) == 0 {
+			return pluginConfiguration{}, fmt.Errorf("%s runners must be a non-empty array when configured", pluginConfigurationEnvironment)
+		}
+		for index, runnerValue := range runners {
+			runner, ok := runnerValue.(map[string]any)
+			if !ok {
+				return pluginConfiguration{}, fmt.Errorf("runner %d must be a JSON object", index)
+			}
+			for key := range runner {
+				switch key {
+				case "runs-on", "queue", "image":
+				default:
+					return pluginConfiguration{}, fmt.Errorf("runner %d contains unknown field %q", index, key)
+				}
+			}
+			runsOn, runsOnOK := runner["runs-on"].(string)
+			queue, queueOK := runner["queue"].(string)
+			if !runsOnOK {
+				return pluginConfiguration{}, fmt.Errorf("runner %d runs-on must be a string", index)
+			}
+			if !queueOK {
+				return pluginConfiguration{}, fmt.Errorf("runner %d queue must be a string", index)
+			}
+			image := ""
+			if imageValue, configured := runner["image"]; configured {
+				var imageOK bool
+				image, imageOK = imageValue.(string)
+				if !imageOK || image == "" {
+					return pluginConfiguration{}, fmt.Errorf("runner %d image must be an immutable registry sha256 reference", index)
+				}
+			}
+			label, target, err := configuredRunnerTarget(runsOn, queue, image)
+			if err != nil {
+				return pluginConfiguration{}, fmt.Errorf("runner %d: %w", index, err)
+			}
+			if _, duplicate := targets[label]; duplicate {
+				return pluginConfiguration{}, fmt.Errorf("runner label %q may only be configured once", label)
+			}
+			targets[label] = target
+		}
+	}
+	return pluginConfiguration{Workflow: workflow, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
@@ -238,7 +353,20 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: plan compiler version %q does not match runtime version %q\n", job.Compiler.Version, version)
 		return 1
 	}
+	runtimeDigest, err := executableDigest()
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: verify runtime executable: %v\n", err)
+		return 1
+	}
+	if expected := job.RuntimeDistributionDigest(); runtimeDigest != expected {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: runtime distribution digest %q does not match plan digest %q\n", runtimeDigest, expected)
+		return 1
+	}
 	if err := verifyBuildkiteTarget(job); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
+		return 1
+	}
+	if err := gharuntime.ValidateHost(job, runtime.GOOS, runtime.GOARCH); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
@@ -257,7 +385,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		defer func() { _ = os.RemoveAll(artifactRoot) }()
 	}
 	var actionMaterializer gharuntime.ActionMaterializer
-	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7) && hasGitHubActionLocks(job.Actions) {
+	if (job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && hasGitHubActionLocks(job.Actions) {
 		actionCache, err := os.MkdirTemp("", "buildkite-gha-actions-")
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: create action cache: %v\n", err)
@@ -520,13 +648,41 @@ func miseVersionAtLeast(actual, minimum string) bool {
 	return true
 }
 
+type runtimeMiseRelease struct {
+	asset         string
+	cacheKey      string
+	archiveDigest string
+	binaryDigest  string
+}
+
+func selectRuntimeMiseRelease(goos, goarch string) (runtimeMiseRelease, error) {
+	switch goos + "/" + goarch {
+	case "linux/amd64":
+		return runtimeMiseRelease{
+			asset:         "linux-x64",
+			cacheKey:      "linux-amd64",
+			archiveDigest: runtimeMiseArchiveDigest,
+			binaryDigest:  runtimeMiseBinaryDigest,
+		}, nil
+	case "darwin/arm64":
+		return runtimeMiseRelease{
+			asset:         "macos-arm64",
+			cacheKey:      "darwin-arm64",
+			archiveDigest: runtimeMiseDarwinARM64ArchiveDigest,
+			binaryDigest:  runtimeMiseDarwinARM64BinaryDigest,
+		}, nil
+	default:
+		return runtimeMiseRelease{}, fmt.Errorf("managed mise is unavailable on %s/%s; set BUILDKITE_GHA_MISE to a compatible absolute path", goos, goarch)
+	}
+}
+
 func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		return "", fmt.Errorf("managed mise is unavailable on %s/%s; set BUILDKITE_GHA_MISE to a compatible absolute path", runtime.GOOS, runtime.GOARCH)
+	selected, err := selectRuntimeMiseRelease(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return "", err
 	}
 	root := dataDir
 	if root == "" {
-		var err error
 		root, err = os.UserCacheDir()
 		if err != nil {
 			return "", fmt.Errorf("resolve mise runtime cache: %w", err)
@@ -535,12 +691,12 @@ func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, std
 	} else {
 		root = filepath.Join(filepath.Dir(root), "runtime", buildkitepipeline.MinimumMiseVersion)
 	}
-	destination := filepath.Join(root, "linux-x64", "mise")
-	if resolved, err := validateRuntimeMiseFile(ctx, destination, runtimeMiseBinaryDigest); err == nil {
-		return pinRuntimeMise(ctx, resolved, privateRuntime, runtimeMiseBinaryDigest)
+	destination := filepath.Join(root, selected.cacheKey, "mise")
+	if resolved, err := validateRuntimeMiseFile(ctx, destination, selected.binaryDigest); err == nil {
+		return pinRuntimeMise(ctx, resolved, privateRuntime, selected.binaryDigest)
 	}
 	_, _ = fmt.Fprintf(stderr, "~~~ :mise: Install mise %s\n", buildkitepipeline.MinimumMiseVersion)
-	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-linux-x64.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion)
+	url := fmt.Sprintf("https://github.com/jdx/mise/releases/download/v%s/mise-v%s-%s.tar.gz", buildkitepipeline.MinimumMiseVersion, buildkitepipeline.MinimumMiseVersion, selected.asset)
 	client := &http.Client{
 		Timeout: 2 * time.Minute,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
@@ -553,11 +709,11 @@ func installRuntimeMise(ctx context.Context, dataDir, privateRuntime string, std
 			return nil
 		},
 	}
-	cached, err := installRuntimeMiseFrom(ctx, root, client, url, runtimeMiseArchiveDigest, runtimeMiseBinaryDigest)
+	cached, err := installRuntimeMiseFromPlatform(ctx, root, selected.cacheKey, client, url, selected.archiveDigest, selected.binaryDigest)
 	if err != nil {
 		return "", err
 	}
-	return pinRuntimeMise(ctx, cached, privateRuntime, runtimeMiseBinaryDigest)
+	return pinRuntimeMise(ctx, cached, privateRuntime, selected.binaryDigest)
 }
 
 func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest string) (string, error) {
@@ -601,7 +757,11 @@ func pinRuntimeMise(ctx context.Context, cached, privateRuntime, expectedDigest 
 }
 
 func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
-	destinationDir := filepath.Join(root, "linux-x64")
+	return installRuntimeMiseFromPlatform(ctx, root, "linux-x64", client, sourceURL, archiveDigest, binaryDigest)
+}
+
+func installRuntimeMiseFromPlatform(ctx context.Context, root, cacheKey string, client *http.Client, sourceURL, archiveDigest, binaryDigest string) (string, error) {
+	destinationDir := filepath.Join(root, cacheKey)
 	destination := filepath.Join(destinationDir, "mise")
 	if resolved, err := validateRuntimeMiseFile(ctx, destination, binaryDigest); err == nil {
 		return resolved, nil
@@ -614,7 +774,7 @@ func installRuntimeMiseFrom(ctx context.Context, root string, client *http.Clien
 	if err != nil || resolvedParent != parent {
 		return "", fmt.Errorf("mise runtime cache contains a symlink")
 	}
-	staging, err := os.MkdirTemp(parent, ".linux-x64.")
+	staging, err := os.MkdirTemp(parent, "."+cacheKey+".")
 	if err != nil {
 		return "", fmt.Errorf("stage mise runtime: %w", err)
 	}
@@ -989,7 +1149,8 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", "", nil)
+		runtimeDistributions := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
+		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
@@ -1126,21 +1287,31 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, err := uploadArgs(args)
+	return uploadFromPlatform(runtime.GOOS, runtime.GOARCH, args, stdout, stderr, version, agent)
+}
+
+func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	if err := validateImporterPlatform(goos, goarch); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
+	uploadArguments, err := parseUploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
-	targetQueue, targetQueueConfigured := os.LookupEnv(targetQueueEnvironment)
-	if targetQueueConfigured && targetQueue == "" {
-		return usageError(stderr, "upload: %s must name a non-empty queue when set", targetQueueEnvironment)
-	}
-	runtimeImage, runtimeImageConfigured := os.LookupEnv(runtimeImageEnvironment)
-	if runtimeImageConfigured && runtimeImage == "" {
-		return usageError(stderr, "upload: %s must name a non-empty image when set", runtimeImageEnvironment)
-	}
+	return uploadParsed(uploadArguments, stdout, stderr, version, agent)
+}
+
+func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	workflowPath, eventPath := uploadArguments.workflowPath, uploadArguments.eventPath
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
+	}
+	for _, retired := range []string{legacyTargetQueueEnvironment, legacyRuntimeImageEnvironment} {
+		if os.Getenv(retired) != "" {
+			return usageError(stderr, "upload: %s is no longer supported; configure runner profiles with --runner-queue and --runner-image, or with the plugin runners array", retired)
+		}
 	}
 	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1167,7 +1338,8 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	if !ok {
 		return 1
 	}
-	processingReport, ok := validatedProcessingReport(out, workflowPath, hostedTokenlessProfile, workflowSource, eventSource, true)
+	validationOptions := hostedTokenlessOptions(os.Getenv("BUILDKITE_GROUP_LABEL"), uploadArguments.runnerTargets, nil)
+	processingReport, ok := validatedProcessingReportWithOptions(out, workflowPath, hostedTokenlessProfile, workflowSource, eventSource, true, &validationOptions)
 	if !ok {
 		return 1
 	}
@@ -1178,7 +1350,34 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 		_ = out.write(processingReport)
 		return 1
 	}
-	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, runtimeImage, jobScopedActionSourceAuthentication(stderr))
+	runtimePaths := uploadArguments.runtimeDistributionPaths
+	if uploadArguments.pluginAcquisition != nil {
+		requiredPlatforms, err := requiredRuntimePlatforms(workflowPath, workflowSource, eventSource, os.Getenv("BUILDKITE_GROUP_LABEL"), uploadArguments.runnerTargets)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+			return 1
+		}
+		runtimeDistributions, acquireErr := uploadArguments.pluginAcquisition.acquire(ctx, requiredPlatforms, runtimeDistribution{contents: executableContents, digest: distributionDigest})
+		if acquireErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
+			return 1
+		}
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflowPath, workflowSource, eventSource, executablePath, executableContents, distributionDigest, importerStep, processingReport, out, runtimeDistributions)
+	}
+	runtimeDistributions, err := loadRuntimeDistributions(runtimePaths)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflowPath, workflowSource, eventSource, executablePath, executableContents, distributionDigest, importerStep, processingReport, out, runtimeDistributions)
+}
+
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflowPath string, workflowSource, eventSource []byte, executablePath string, executableContents []byte, distributionDigest, importerStep string, processingReport compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
+	runtimeDigests := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
+	for platform, runtimeDistribution := range runtimeDistributions {
+		runtimeDigests[platform] = runtimeDistribution.digest
+	}
+	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), uploadArguments.runnerTargets, runtimeDigests, jobScopedActionSourceAuthentication(stderr))
 	applyHostedPreflight(&processingReport, preflight)
 	if err != nil {
 		processingReport.Result = classifyHostedTokenlessFailure(&processingReport, workflowPath, err)
@@ -1191,13 +1390,25 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	processingReport.Result = "admitted"
 	_ = compatibility.WriteProcessing(stdout, "text", processingReport)
 	writeCompilerWarnings(stderr, "upload", workflowPath, bundle.IR.Warnings)
-	artifacts := make([]transport.Artifact, 0, 1+len(bundle.Plans))
+	artifacts := make([]transport.Artifact, 0, 1+len(runtimeDistributions)+len(bundle.Plans))
 	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
 	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+		runtimeDistribution, ok := runtimeDistributions[platform]
+		if !ok || runtimeDistribution.digest == distributionDigest {
+			continue
+		}
+		path, pathErr := buildkitepipeline.DistributionPath(runtimeDistribution.digest)
+		if pathErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", pathErr)
+			return 1
+		}
+		artifacts = append(artifacts, transport.Artifact{Path: path, Digest: runtimeDistribution.digest, Contents: runtimeDistribution.contents})
+	}
 	for _, jobPlan := range bundle.Plans {
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
 	}
@@ -1214,6 +1425,38 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	}
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %s with importer %s.\n", len(bundle.Plans), executablePath, importerStep)
 	return 0
+}
+
+func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {
+	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, hostedTokenlessOptions(groupLabel, configuredTargets, nil))
+	if err != nil {
+		return nil, err
+	}
+	var ir compiler.IR
+	if err := json.Unmarshal(preflight, &ir); err != nil {
+		return nil, fmt.Errorf("decode compiler preflight: %w", err)
+	}
+	platforms := make(map[compiler.Platform]bool, 2)
+	for _, job := range ir.Jobs {
+		platform, err := configuredRunnerPlatform(job.RunsOn, configuredTargets)
+		if err != nil {
+			return nil, fmt.Errorf("resolve runtime platform for job %q: %w", job.LogicalJobID, err)
+		}
+		platforms[platform] = true
+	}
+	return platforms, nil
+}
+
+func configuredRunnerPlatform(labels []string, configuredTargets map[string]compiler.RunnerTarget) (compiler.Platform, error) {
+	if len(labels) == 0 {
+		return compiler.Platform{}, fmt.Errorf("runs-on resolved to no labels")
+	}
+	canonical := strings.ToLower(strings.TrimSpace(labels[0]))
+	if target, ok := configuredTargets[canonical]; ok {
+		return target.Platform, nil
+	}
+	_, platform, err := supportedRunnerTarget(canonical)
+	return platform, err
 }
 
 type hostedTokenlessCompilation struct {
@@ -1312,8 +1555,35 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 	}
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel, targetQueue, runtimeImage string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
-	preflight, err := compiler.Compile(workflowPath, workflowSource, eventSource)
+func hostedTokenlessOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
+	targets := map[string]compiler.RunnerTarget{
+		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64},
+		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64},
+		"ubuntu-22.04":  {Platform: compiler.PlatformLinuxAMD64},
+	}
+	for label, target := range configuredTargets {
+		targets[label] = target
+	}
+	options := compiler.Options{
+		EventTrust:           compiler.EventUntrusted,
+		GroupLabel:           groupLabel,
+		RuntimeDistributions: runtimeDistributions,
+		Runners: compiler.RunnerPolicy{
+			Targets:                    targets,
+			AllowUntrustedDefaultQueue: true,
+		},
+	}
+	for _, target := range configuredTargets {
+		if !slices.Contains(options.Runners.UntrustedQueues, target.Queue) {
+			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, target.Queue)
+		}
+	}
+	return options
+}
+
+func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
+	options := hostedTokenlessOptions(groupLabel, configuredTargets, runtimeDistributions)
+	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
 	}
@@ -1322,22 +1592,6 @@ func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSo
 		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("decode compiler preflight: %w", err))
 	}
 	hasActions := irUsesActions(ir)
-	options := compiler.Options{
-		EventTrust:   compiler.EventUntrusted,
-		GroupLabel:   groupLabel,
-		RuntimeImage: runtimeImage,
-		Runners: compiler.RunnerPolicy{
-			Labels: map[string]string{
-				"ubuntu-latest": targetQueue,
-				"ubuntu-24.04":  targetQueue,
-				"ubuntu-22.04":  targetQueue,
-			},
-			AllowUntrustedDefaultQueue: targetQueue == "",
-		},
-	}
-	if targetQueue != "" {
-		options.Runners.UntrustedQueues = []string{targetQueue}
-	}
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
@@ -1463,17 +1717,79 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 	return false
 }
 
+type parsedUploadArgs struct {
+	workflowPath             string
+	eventPath                string
+	runtimeDistributionPaths map[compiler.Platform]string
+	runnerTargets            map[string]compiler.RunnerTarget
+	pluginAcquisition        *pluginRuntimeAcquisition
+}
+
 func uploadArgs(args []string) (workflowPath, eventPath string, err error) {
+	parsed, err := parseUploadArgs(args)
+	return parsed.workflowPath, parsed.eventPath, err
+}
+
+func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	filtered := make([]string, 0, len(args))
+	runtimeDistributionPaths := make(map[compiler.Platform]string)
+	runnerQueues := make(map[string]string)
+	runnerImages := make(map[string]string)
 	runtimeQueue := ""
 	runtimeQueueSeen := false
 	deprecatedPrivateCheckoutSeen := false
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--private-checkout" {
 			if deprecatedPrivateCheckoutSeen {
-				return "", "", fmt.Errorf("--private-checkout may only be specified once")
+				return parsedUploadArgs{}, fmt.Errorf("--private-checkout may only be specified once")
 			}
 			deprecatedPrivateCheckoutSeen = true
+			continue
+		}
+		if args[i] == "--runtime-distribution" {
+			i++
+			if i == len(args) {
+				return parsedUploadArgs{}, fmt.Errorf("--runtime-distribution requires platform=absolute-path")
+			}
+			platformValue, path, ok := strings.Cut(args[i], "=")
+			if !ok || path == "" {
+				return parsedUploadArgs{}, fmt.Errorf("--runtime-distribution requires platform=absolute-path")
+			}
+			platform, err := compiler.ParsePlatform(platformValue)
+			if err != nil {
+				return parsedUploadArgs{}, err
+			}
+			if !filepath.IsAbs(path) {
+				return parsedUploadArgs{}, fmt.Errorf("runtime distribution for %s must use an absolute path", platform)
+			}
+			if _, exists := runtimeDistributionPaths[platform]; exists {
+				return parsedUploadArgs{}, fmt.Errorf("runtime distribution for %s may only be specified once", platform)
+			}
+			runtimeDistributionPaths[platform] = path
+			continue
+		}
+		if args[i] == "--runner-queue" || args[i] == "--runner-image" {
+			option := args[i]
+			i++
+			if i == len(args) {
+				return parsedUploadArgs{}, fmt.Errorf("%s requires runs-on=value", option)
+			}
+			label, value, ok := strings.Cut(args[i], "=")
+			if !ok || label == "" || value == "" {
+				return parsedUploadArgs{}, fmt.Errorf("%s requires runs-on=value", option)
+			}
+			canonical, _, err := supportedRunnerTarget(label)
+			if err != nil {
+				return parsedUploadArgs{}, err
+			}
+			values := runnerQueues
+			if option == "--runner-image" {
+				values = runnerImages
+			}
+			if _, duplicate := values[canonical]; duplicate {
+				return parsedUploadArgs{}, fmt.Errorf("%s for %q may only be specified once", option, canonical)
+			}
+			values[canonical] = value
 			continue
 		}
 		if args[i] != "--runtime-queue" {
@@ -1481,23 +1797,389 @@ func uploadArgs(args []string) (workflowPath, eventPath string, err error) {
 			continue
 		}
 		if runtimeQueueSeen {
-			return "", "", fmt.Errorf("--runtime-queue may only be specified once")
+			return parsedUploadArgs{}, fmt.Errorf("--runtime-queue may only be specified once")
 		}
 		runtimeQueueSeen = true
 		i++
 		if i == len(args) {
-			return "", "", fmt.Errorf("--runtime-queue requires a queue")
+			return parsedUploadArgs{}, fmt.Errorf("--runtime-queue requires a queue")
 		}
 		runtimeQueue = args[i]
 	}
-	workflowPath, eventPath, err = workflowArgs(filtered)
+	workflowPath, eventPath, err := workflowArgs(filtered)
 	if err != nil {
-		return "", "", err
+		return parsedUploadArgs{}, err
 	}
 	if runtimeQueueSeen && runtimeQueue != legacyRuntimeQueue {
-		return "", "", fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
+		return parsedUploadArgs{}, fmt.Errorf("deprecated --runtime-queue must be %q", legacyRuntimeQueue)
 	}
-	return workflowPath, eventPath, err
+	runnerTargets := make(map[string]compiler.RunnerTarget, len(runnerQueues))
+	for label, queue := range runnerQueues {
+		image := runnerImages[label]
+		canonical, target, err := configuredRunnerTarget(label, queue, image)
+		if err != nil {
+			return parsedUploadArgs{}, err
+		}
+		runnerTargets[canonical] = target
+	}
+	for label := range runnerImages {
+		if _, ok := runnerQueues[label]; !ok {
+			return parsedUploadArgs{}, fmt.Errorf("--runner-image for %q requires --runner-queue", label)
+		}
+	}
+	return parsedUploadArgs{workflowPath: workflowPath, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets}, nil
+}
+
+func configuredRunnerTarget(label, queue, image string) (string, compiler.RunnerTarget, error) {
+	canonical, platform, err := supportedRunnerTarget(label)
+	if err != nil {
+		return "", compiler.RunnerTarget{}, err
+	}
+	if !runnerQueuePattern.MatchString(queue) {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner queue for %q is invalid", canonical)
+	}
+	if image != "" && !runnerImagePattern.MatchString(image) {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q must be an immutable registry sha256 reference", canonical)
+	}
+	if image != "" && platform == compiler.PlatformDarwinARM64 {
+		return "", compiler.RunnerTarget{}, fmt.Errorf("runner image for %q is unsupported on darwin/arm64", canonical)
+	}
+	if image == "" {
+		switch canonical {
+		case "ubuntu-latest", "ubuntu-24.04":
+			image = defaultNobleRunnerImage
+		case "ubuntu-22.04":
+			image = defaultJammyRunnerImage
+		}
+	}
+	return canonical, compiler.RunnerTarget{Queue: queue, Platform: platform, Image: image}, nil
+}
+
+func supportedRunnerTarget(label string) (string, compiler.Platform, error) {
+	if label != strings.TrimSpace(label) || strings.ContainsAny(label, "\r\n") {
+		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
+	}
+	canonical := strings.ToLower(label)
+	switch canonical {
+	case "ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04":
+		return canonical, compiler.PlatformLinuxAMD64, nil
+	case "macos-latest", "macos-15", "macos-14":
+		return canonical, compiler.PlatformDarwinARM64, nil
+	default:
+		return "", compiler.Platform{}, fmt.Errorf("unsupported runner label %q", label)
+	}
+}
+
+type runtimeDistribution struct {
+	contents []byte
+	digest   string
+}
+
+type pluginRuntimeAcquisition struct {
+	version string
+}
+
+const pluginDarwinAsset = "buildkite-gha_Darwin_arm64.tar.gz"
+
+func securePluginHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 2 * time.Minute,
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			if request.URL.Scheme != "https" {
+				return errors.New("release download redirected away from HTTPS")
+			}
+			if len(via) >= 10 {
+				return errors.New("too many release download redirects")
+			}
+			return nil
+		},
+	}
+}
+
+func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, linux runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
+	distributions := map[compiler.Platform]runtimeDistribution{}
+	if required[compiler.PlatformLinuxAMD64] {
+		distributions[compiler.PlatformLinuxAMD64] = linux
+	}
+	injected := os.Getenv(pluginDevDarwinRuntimeEnvironment)
+	if a.version != "dev" && injected != "" {
+		return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevDarwinRuntimeEnvironment)
+	}
+	if !required[compiler.PlatformDarwinARM64] {
+		return distributions, nil
+	}
+	if a.version == "dev" {
+		if injected == "" {
+			return nil, fmt.Errorf("%s is required for a dev build using darwin/arm64", pluginDevDarwinRuntimeEnvironment)
+		}
+		loaded, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformDarwinARM64: injected})
+		if err != nil {
+			return nil, err
+		}
+		distributions[compiler.PlatformDarwinARM64] = loaded[compiler.PlatformDarwinARM64]
+		return distributions, nil
+	}
+	if !stableVersionPattern.MatchString(a.version) {
+		return nil, fmt.Errorf("running version %q is not a stable semantic version", a.version)
+	}
+	darwin, err := acquirePluginDarwin(ctx, a.version, pluginHTTPClient, pluginReleaseBaseURL, pluginArchiveCachePath(a.version))
+	if err != nil {
+		return nil, err
+	}
+	distributions[compiler.PlatformDarwinARM64] = darwin
+	return distributions, nil
+}
+
+func acquirePluginDarwin(ctx context.Context, version string, client *http.Client, baseURL, cachePath string) (runtimeDistribution, error) {
+	checksums, err := downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/checksums.txt", pluginChecksumLimit)
+	if err != nil {
+		return runtimeDistribution{}, fmt.Errorf("download release checksums: %w", err)
+	}
+	expected, err := pluginAssetChecksum(checksums, pluginDarwinAsset)
+	if err != nil {
+		return runtimeDistribution{}, err
+	}
+	archive := readVerifiedPluginArchiveCache(cachePath, expected)
+	if archive == nil {
+		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+pluginDarwinAsset, pluginArchiveLimit)
+		if err != nil {
+			return runtimeDistribution{}, fmt.Errorf("download Darwin runtime: %w", err)
+		}
+		if sha256.Sum256(archive) != expected {
+			return runtimeDistribution{}, fmt.Errorf("darwin archive checksum verification failed")
+		}
+		writePluginArchiveCache(cachePath, archive)
+	}
+	contents, err := extractPluginDarwin(archive)
+	if err != nil {
+		return runtimeDistribution{}, err
+	}
+	if err := validateRuntimeDistributionBinary(compiler.PlatformDarwinARM64, contents); err != nil {
+		return runtimeDistribution{}, fmt.Errorf("validate Darwin runtime: %w", err)
+	}
+	digest := sha256.Sum256(contents)
+	return runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", digest)}, nil
+}
+
+func downloadPluginReleaseFile(ctx context.Context, client *http.Client, source string, limit int64) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
+	if err != nil || request.URL.Scheme != "https" {
+		return nil, fmt.Errorf("release URL must use HTTPS")
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected HTTP status %s", response.Status)
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > limit {
+		return nil, fmt.Errorf("exceeds %d-byte limit", limit)
+	}
+	return contents, nil
+}
+
+func pluginAssetChecksum(contents []byte, asset string) ([sha256.Size]byte, error) {
+	var result [sha256.Size]byte
+	matches := 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != asset {
+			continue
+		}
+		decoded, err := hex.DecodeString(fields[0])
+		if err != nil || len(decoded) != sha256.Size {
+			return result, fmt.Errorf("invalid checksum entry for %s", asset)
+		}
+		copy(result[:], decoded)
+		matches++
+	}
+	if matches != 1 {
+		return result, fmt.Errorf("checksums must contain exactly one valid entry for %s", asset)
+	}
+	return result, nil
+}
+
+func extractPluginDarwin(archive []byte) ([]byte, error) {
+	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, fmt.Errorf("open Darwin archive: %w", err)
+	}
+	defer func() { _ = gzipReader.Close() }()
+	tarReader := tar.NewReader(gzipReader)
+	seenBinary, seenLicense := false, false
+	var executable []byte
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read Darwin archive: %w", err)
+		}
+		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > runtimeDistributionLimit {
+			return nil, fmt.Errorf("darwin archive contains an unsafe member %q", header.Name)
+		}
+		switch header.Name {
+		case "buildkite-gha":
+			if seenBinary || header.Mode&0o111 == 0 {
+				return nil, fmt.Errorf("darwin archive has an invalid executable member")
+			}
+			seenBinary = true
+			executable, err = io.ReadAll(io.LimitReader(tarReader, runtimeDistributionLimit+1))
+			if err != nil || int64(len(executable)) != header.Size {
+				return nil, fmt.Errorf("read Darwin executable")
+			}
+		case "LICENSE":
+			if seenLicense {
+				return nil, fmt.Errorf("darwin archive contains duplicate LICENSE")
+			}
+			seenLicense = true
+		default:
+			return nil, fmt.Errorf("darwin archive contains unexpected member %q", header.Name)
+		}
+	}
+	if !seenBinary || !seenLicense {
+		return nil, fmt.Errorf("darwin archive must contain exactly buildkite-gha and LICENSE")
+	}
+	return executable, nil
+}
+
+func pluginArchiveCachePath(version string) string {
+	root := os.Getenv("MISE_DATA_DIR")
+	if !filepath.IsAbs(root) {
+		return ""
+	}
+	return filepath.Join(root, "buildkite-gha", "releases", version, pluginDarwinAsset)
+}
+
+func readVerifiedPluginArchiveCache(path string, expected [sha256.Size]byte) []byte {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > pluginArchiveLimit {
+		return nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil || sha256.Sum256(contents) != expected {
+		return nil
+	}
+	return contents
+}
+
+func writePluginArchiveCache(path string, contents []byte) {
+	if path == "" {
+		return
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return
+	}
+	realDirectory, err := filepath.EvalSymlinks(directory)
+	if err != nil || realDirectory != directory {
+		return
+	}
+	info, err := os.Lstat(directory)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+	temporary, err := os.CreateTemp(directory, ".archive-")
+	if err != nil {
+		return
+	}
+	name := temporary.Name()
+	defer func() { _ = os.Remove(name) }()
+	if _, err = temporary.Write(contents); err != nil || temporary.Sync() != nil || temporary.Close() != nil {
+		_ = temporary.Close()
+		return
+	}
+	_ = os.Rename(name, path)
+}
+
+func loadRuntimeDistributions(paths map[compiler.Platform]string) (map[compiler.Platform]runtimeDistribution, error) {
+	distributions := make(map[compiler.Platform]runtimeDistribution, len(paths))
+	for platform, path := range paths {
+		if !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("runtime distribution for %s must use an absolute path", platform)
+		}
+		pathInfo, err := os.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect runtime distribution for %s: %w", platform, err)
+		}
+		if pathInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("runtime distribution for %s is not a non-symlink executable regular file", platform)
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open runtime distribution for %s: %w", platform, err)
+		}
+		info, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("inspect opened runtime distribution for %s: %w", platform, err)
+		}
+		if !os.SameFile(pathInfo, info) {
+			_ = file.Close()
+			return nil, fmt.Errorf("runtime distribution for %s changed while being opened", platform)
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			_ = file.Close()
+			return nil, fmt.Errorf("runtime distribution for %s is not a non-symlink executable regular file", platform)
+		}
+		if info.Size() <= 0 || info.Size() > runtimeDistributionLimit {
+			_ = file.Close()
+			return nil, fmt.Errorf("runtime distribution for %s must be between 1 and %d bytes", platform, runtimeDistributionLimit)
+		}
+		contents, err := io.ReadAll(io.LimitReader(file, runtimeDistributionLimit+1))
+		closeErr := file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read runtime distribution for %s: %w", platform, err)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close runtime distribution for %s: %w", platform, closeErr)
+		}
+		if int64(len(contents)) != info.Size() {
+			return nil, fmt.Errorf("runtime distribution for %s changed while being read", platform)
+		}
+		if err := validateRuntimeDistributionBinary(platform, contents); err != nil {
+			return nil, fmt.Errorf("validate runtime distribution for %s: %w", platform, err)
+		}
+		sum := sha256.Sum256(contents)
+		distributions[platform] = runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", sum)}
+	}
+	return distributions, nil
+}
+
+func validateRuntimeDistributionBinary(platform compiler.Platform, contents []byte) error {
+	switch platform {
+	case compiler.PlatformLinuxAMD64:
+		binary, err := elf.NewFile(bytes.NewReader(contents))
+		if err != nil {
+			return fmt.Errorf("open ELF executable: %w", err)
+		}
+		defer func() { _ = binary.Close() }()
+		if binary.Class != elf.ELFCLASS64 || binary.Machine != elf.EM_X86_64 || binary.Type != elf.ET_EXEC {
+			return fmt.Errorf("want a thin 64-bit linux/amd64 executable")
+		}
+	case compiler.PlatformDarwinARM64:
+		binary, err := macho.NewFile(bytes.NewReader(contents))
+		if err != nil {
+			return fmt.Errorf("open Mach-O executable: %w", err)
+		}
+		defer func() { _ = binary.Close() }()
+		if binary.Cpu != macho.CpuArm64 || binary.Type != macho.TypeExec {
+			return fmt.Errorf("want a thin darwin/arm64 executable")
+		}
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+	return nil
 }
 
 func compileArgs(args []string) (workflowPath, eventPath, format string, err error) {
@@ -1536,9 +2218,39 @@ func executable() (path string, contents []byte, digest string, err error) {
 	if err != nil {
 		return "", nil, "", fmt.Errorf("locate compiler executable: %w", err)
 	}
-	contents, err = os.ReadFile(path)
+	readPath := path
+	if runtime.GOOS == "linux" {
+		// /proc/self/exe remains bound to the running inode if the launch path is
+		// replaced. The plugin importer relies on these exact bytes for Linux jobs.
+		readPath = "/proc/self/exe"
+	}
+	file, err := os.Open(readPath)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("read compiler executable: %w", err)
+		return "", nil, "", fmt.Errorf("open running compiler executable: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return "", nil, "", fmt.Errorf("inspect running compiler executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() <= 0 || info.Size() > runtimeDistributionLimit {
+		_ = file.Close()
+		return "", nil, "", fmt.Errorf("running compiler executable must be an executable regular file between 1 and %d bytes", runtimeDistributionLimit)
+	}
+	contents, err = io.ReadAll(io.LimitReader(file, runtimeDistributionLimit+1))
+	closeErr := file.Close()
+	if err != nil || closeErr != nil {
+		return "", nil, "", fmt.Errorf("read running compiler executable: %w", errors.Join(err, closeErr))
+	}
+	if int64(len(contents)) != info.Size() {
+		return "", nil, "", fmt.Errorf("running compiler executable changed while being read")
+	}
+	platform, err := compiler.ParsePlatform(runtime.GOOS + "/" + runtime.GOARCH)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("validate running compiler executable: %w", err)
+	}
+	if err := validateRuntimeDistributionBinary(platform, contents); err != nil {
+		return "", nil, "", fmt.Errorf("validate running compiler executable: %w", err)
 	}
 	sum := sha256.Sum256(contents)
 	return path, contents, fmt.Sprintf("sha256:%x", sum), nil
