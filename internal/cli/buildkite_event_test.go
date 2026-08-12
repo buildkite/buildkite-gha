@@ -148,6 +148,28 @@ func TestBuildkiteWebhookEventSourceUsesPayloadButPreservesExecutionIdentity(t *
 	}
 }
 
+func TestBuildkiteWebhookPushUsesBranchRefForPullRequestAssociatedBuild(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":         "https://github.com/buildkite/buildkite-gha",
+		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":       "feature",
+		"BUILDKITE_PULL_REQUEST": "42",
+		"BUILDKITE_GITHUB_EVENT": "push",
+	}
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(`{"ref":"refs/heads/feature"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["event"] != "push" || snapshot["ref"] != "refs/heads/feature" {
+		t.Fatalf("snapshot event/ref = %q / %q", snapshot["event"], snapshot["ref"])
+	}
+}
+
 func TestBuildkiteWebhookEventSourceEventAndActorFallbacks(t *testing.T) {
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
