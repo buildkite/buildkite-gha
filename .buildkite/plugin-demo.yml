@@ -37,7 +37,7 @@ steps:
     plugins:
       - github-actions#v0.9.3:
           workflow: .github/workflows/macos-actions-proof.yml
-          version: 0.10.3
+          source-ref: "$DEMO_COMMIT"
           runners:
             - runs-on: macos-14
               queue: mac-small
