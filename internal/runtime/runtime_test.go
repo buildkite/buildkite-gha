@@ -1092,6 +1092,33 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	}
 }
 
+func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: background timeout dispatch\n")
+	release := filepath.Join(workspace, "release")
+	queuedMarker := filepath.Join(workspace, "queued-started")
+	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+3)
+	for i := 0; i < maxActiveBackgroundSteps; i++ {
+		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		plan.Step{ID: "queued", Kind: "run", Background: true, TimeoutMinutes: 0.001, Command: `touch "$QUEUED_MARKER"`},
+		plan.Step{ID: "release", Kind: "run", Command: `sleep 0.2; touch "$RELEASE"`},
+		plan.Step{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(queuedMarker); err != nil {
+		t.Fatalf("queued timed step did not run: %v", err)
+	}
+}
+
 func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()

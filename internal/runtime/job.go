@@ -562,14 +562,17 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 		evalSnapshot := stepEval
 		if step.Background {
+			cancelStep()
 			step := step
-			supervisor.start(stepCtx, step.ID,
-				func(stepCtx context.Context) stepExecution {
-					defer cancelStep()
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
+			supervisor.start(runCtx, step.ID,
+				func(taskCtx context.Context) stepExecution {
+					stepCtx, cancelExecution := stepContext(taskCtx, step.TimeoutMinutes)
+					defer cancelExecution()
+					executionEval := cloneExpressionContext(evalSnapshot)
+					bindHashFilesContext(stepCtx, &executionEval)
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, executionEval, &posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
-					cancelStep()
 					return cancelledStepExecution(ctx, stepCtx, step)
 				},
 			)
