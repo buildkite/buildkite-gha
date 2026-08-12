@@ -102,7 +102,7 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 			defer ts.Close()
 			opts := []Option{WithTestEndpoints(ts.URL)}
 			if tt.token != "" {
-				opts = append(opts, WithScopedGitHubTokenProvider(tt.tokenRepository, func(context.Context) (string, error) {
+				opts = append(opts, WithGitHubActionSourceTokenProvider(tt.tokenRepository, func(context.Context) (string, error) {
 					return tt.token, nil
 				}))
 			}
@@ -148,7 +148,7 @@ func TestResolverFullSHADirectAndRefEncoding(t *testing.T) {
 			defer ts.Close()
 			opts := []Option{WithTestEndpoints(ts.URL)}
 			if tt.authenticated {
-				opts = append(opts, WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+				opts = append(opts, WithGitHubActionSourceTokenProvider("pipeline/repo", func(context.Context) (string, error) {
 					provisions++
 					return "test-token", nil
 				}))
@@ -639,7 +639,7 @@ func TestStoreExactCommitDownloadsDirectlyFromCodeloadWithoutCredentials(t *test
 	defer apiServer.Close()
 	ref, _ := Parse("o/r@v1")
 	resolved := Resolved{Reference: ref, Commit: testSHA}
-	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, archiveServer.URL), WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+	store, err := NewStore(t.TempDir(), apiServer.Client(), WithTestEndpoints(apiServer.URL, archiveServer.URL), WithGitHubActionSourceTokenProvider("pipeline/repo", func(context.Context) (string, error) {
 		tokenProvisions++
 		return token, nil
 	}))
@@ -672,7 +672,7 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 			_, _ = w.Write(archive)
 		}))
 		defer server.Close()
-		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL), WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+		store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL), WithGitHubActionSourceTokenProvider("pipeline/repo", func(context.Context) (string, error) {
 			return "test-token", nil
 		}))
 		if err != nil {

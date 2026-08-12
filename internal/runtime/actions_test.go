@@ -251,7 +251,7 @@ func TestActionLockResolverDownloadsExactCommitDirectlyFromCodeload(t *testing.T
 		_, _ = w.Write(archive)
 	}))
 	defer codeloadServer.Close()
-	store, err := source.NewStore(t.TempDir(), codeloadServer.Client(), source.WithTestEndpoints(apiServer.URL, codeloadServer.URL), source.WithScopedGitHubTokenProvider("pipeline/repo", func(context.Context) (string, error) {
+	store, err := source.NewStore(t.TempDir(), codeloadServer.Client(), source.WithTestEndpoints(apiServer.URL, codeloadServer.URL), source.WithGitHubActionSourceTokenProvider("pipeline/repo", func(context.Context) (string, error) {
 		tokenProvisions++
 		return token, nil
 	}))

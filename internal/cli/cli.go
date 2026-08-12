@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -1535,7 +1536,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
 	}
-	authentication := jobScopedActionSourceAuthentication(stderr)
+	authentication := importerJobActionSourceAuthentication(stderr)
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	jobCount := 0
@@ -1935,12 +1936,15 @@ func hostedError(kind hostedFailureKind, err error) error {
 }
 
 type actionSourceAuthentication struct {
-	provider gharuntime.ScopedTokenProvider
-	redactor gharuntime.Redactor
-	warnings io.Writer
+	provider   gharuntime.ActionSourceTokenProvider
+	redactor   gharuntime.Redactor
+	warnings   io.Writer
+	once       sync.Once
+	credential string
+	err        error
 }
 
-func jobScopedActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
+func importerJobActionSourceAuthentication(warnings io.Writer) *actionSourceAuthentication {
 	authentication := &actionSourceAuthentication{
 		redactor: gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		warnings: warnings,
@@ -1961,7 +1965,7 @@ func (a *actionSourceAuthentication) option(repository string) actionsource.Opti
 	if a == nil {
 		return nil
 	}
-	return actionsource.WithScopedGitHubTokenProvider(repository, func(ctx context.Context) (string, error) {
+	return actionsource.WithGitHubActionSourceTokenProvider(repository, func(ctx context.Context) (string, error) {
 		return a.token(ctx, repository)
 	})
 }
@@ -1970,11 +1974,18 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	a.once.Do(func() {
+		a.credential, a.err = a.provision(ctx, repository)
+	})
+	return a.credential, a.err
+}
+
+func (a *actionSourceAuthentication) provision(ctx context.Context, repository string) (string, error) {
 	if a.provider == nil {
-		a.warnAnonymousFallback("job-scoped GitHub source authentication is unavailable")
+		a.warnAnonymousFallback("GitHub action source authentication is unavailable")
 		return "", nil
 	}
-	token, err := a.provider.ScopedToken(ctx, repository, map[string]string{"contents": "read"})
+	token, err := a.provider.ActionSourceToken(ctx, repository)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -1982,7 +1993,7 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		if errors.Is(err, context.Canceled) {
 			return "", err
 		}
-		a.warnAnonymousFallback("could not mint a job-scoped GitHub source token")
+		a.warnAnonymousFallback("could not mint a GitHub action source token")
 		return "", nil
 	}
 	if err := a.redactor.AddRedaction(ctx, token); err != nil {
@@ -1992,7 +2003,7 @@ func (a *actionSourceAuthentication) token(ctx context.Context, repository strin
 		if errors.Is(err, context.Canceled) {
 			return "", err
 		}
-		a.warnAnonymousFallback("could not register the job-scoped GitHub source token with the Buildkite Agent redactor")
+		a.warnAnonymousFallback("could not register the GitHub action source token with the Buildkite Agent redactor")
 		return "", nil
 	}
 	return token, nil
