@@ -6,140 +6,112 @@ agents:
   queue: "hosted"
 
 steps:
-  - label: ":pipeline: Load shell upload proof"
-    key: "shell-upload-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "shell-upload" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml"
+  - group: ":toolbox: On-demand suites"
+    key: "on-demand-suites"
+    steps:
+      - label: ":pipeline: Load compatibility proof"
+        key: "compatibility-proof-loader"
+        if: build.env("COMPATIBILITY_PROOF") != null && build.env("SMOKE_PROBE") != "hosted"
+        command: |
+          set -euo pipefail
+          proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
+          case "$$proof" in
+            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|upload-artifact|artifact-roundtrip) ;;
+            *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
+          esac
+          buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
 
-  - label: ":pipeline: Load concurrent steps proof"
-    key: "concurrent-steps-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "concurrent-steps" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml"
+      - label: ":github: Load released plugin demo"
+        key: "plugin-demo-loader"
+        if: build.env("DEMO_SUITE") == "plugin"
+        command: |
+          set -euo pipefail
+          commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
+          [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+          scripts/verify-source-checkout "$$commit"
+          test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
+          test -z "$$(git status --porcelain --untracked-files=all)"
+          buildkite-agent pipeline upload .buildkite/plugin-demo.yml
 
-  - label: ":pipeline: Load public actions proof"
-    key: "public-actions-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "public-actions" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/public-actions-proof.yml"
+      - label: ":pipeline: Load consolidated hosted smoke proof"
+        key: "hosted-smoke-loader"
+        if: build.env("SMOKE_PROBE") == "hosted"
+        command: |
+          set -euo pipefail
+          commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
+          [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
+          proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"
+          [[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]] || {
+            echo "COMPATIBILITY_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT" >&2
+            exit 1
+          }
+          scripts/verify-source-checkout "$$commit"
+          test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
+          test -z "$$(git status --porcelain --untracked-files=all)"
+          buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml
+          buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml
+          buildkite-agent pipeline upload .buildkite/public-actions-proof.yml
+          buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml
+          buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml
+          buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml
+          buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml
+          buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml
+          buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml
+          buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml
+          buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
 
-  - label: ":docker: Load hosted Docker proof"
-    key: "hosted-docker-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "hosted-docker" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml"
+  - group: ":test_tube: CI"
+    key: "ci"
+    steps:
+      - label: ":go: Repository checks"
+        key: "checks"
+        if: build.env("DEMO_SUITE") != "plugin"
+        cache: ".buildkite/cache-volume"
+        env:
+          BUILDKITE_GHA_LIVE_REQUIRED: "1"
+        plugins:
+          - setup-go#v0.1.0:
+              mise-version: "2026.5.12"
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: "mise run --jobs 1 check"
 
-  - label: ":docker: Load Dockerfile action proof"
-    key: "dockerfile-action-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "dockerfile-action" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml"
+      - label: ":go: macOS arm64 build and tests"
+        key: "macos-arm64"
+        timeout_in_minutes: 20
+        agents:
+          queue: "mac-small"
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: |
+          set -euo pipefail
+          test "$$(mise exec -- go env GOOS)" = "darwin"
+          test "$$(mise exec -- go env GOARCH)" = "arm64"
+          mise exec -- go build ./...
+          mise exec -- go test -count=1 ./...
 
-  - label: ":docker: Load container runtime proof"
-    key: "container-runtime-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "container-runtime" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml"
+      - label: ":github: Starter workflow compatibility"
+        key: "starter-workflows-corpus"
+        soft_fail: true
+        timeout_in_minutes: 10
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: "mise run corpus:starter-profile"
 
-  - label: ":memo: Load summary annotation proof"
-    key: "summary-annotation-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "summary-annotation" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml"
-
-  - label: ":warning: Load workflow command annotation proof"
-    key: "workflow-annotations-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "workflow-annotations" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml"
-
-  - label: ":package: Load upload-artifact proof"
-    key: "upload-artifact-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "upload-artifact" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml"
-
-  - label: ":package: Load artifact roundtrip proof"
-    key: "artifact-roundtrip-loader"
-    if: build.env("COMPATIBILITY_PROOF") == "artifact-roundtrip" && build.env("SMOKE_PROBE") != "hosted"
-    command: "buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml"
-
-  - label: ":github: Load released plugin demo"
-    key: "plugin-demo-loader"
-    if: build.env("DEMO_SUITE") == "plugin"
-    command: |
-      set -euo pipefail
-      commit="$${DEMO_COMMIT:?DEMO_COMMIT is required}"
-      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      scripts/verify-source-checkout "$$commit"
-      test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
-      test -z "$$(git status --porcelain --untracked-files=all)"
-      buildkite-agent pipeline upload .buildkite/plugin-demo.yml
-
-  - label: ":pipeline: Load consolidated hosted smoke proof"
-    key: "hosted-smoke-loader"
-    if: build.env("SMOKE_PROBE") == "hosted"
-    command: |
-      set -euo pipefail
-      commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
-      [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
-      proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"
-      [[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]] || {
-        echo "COMPATIBILITY_PROOF_COMMIT $$proof_commit conflicts with SMOKE_COMMIT" >&2
-        exit 1
-      }
-      scripts/verify-source-checkout "$$commit"
-      test "$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}" = "$$commit"
-      test -z "$$(git status --porcelain --untracked-files=all)"
-      buildkite-agent pipeline upload .buildkite/shell-upload-proof.yml
-      buildkite-agent pipeline upload .buildkite/concurrent-steps-proof.yml
-      buildkite-agent pipeline upload .buildkite/public-actions-proof.yml
-      buildkite-agent pipeline upload .buildkite/hosted-docker-proof.yml
-      buildkite-agent pipeline upload .buildkite/dockerfile-action-proof.yml
-      buildkite-agent pipeline upload .buildkite/container-runtime-proof.yml
-      buildkite-agent pipeline upload .buildkite/summary-annotation-proof.yml
-      buildkite-agent pipeline upload .buildkite/workflow-annotations-proof.yml
-      buildkite-agent pipeline upload .buildkite/upload-artifact-proof.yml
-      buildkite-agent pipeline upload .buildkite/artifact-roundtrip-proof.yml
-      buildkite-agent pipeline upload .buildkite/hosted-smoke-control.yml
-
-  - label: ":go: Repository checks"
-    key: "checks"
-    env:
-      BUILDKITE_GHA_LIVE_REQUIRED: "1"
-    plugins:
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
-    command: "mise run --jobs 1 check"
-
-  - label: ":go: macOS arm64 build and tests"
-    key: "macos-arm64"
-    timeout_in_minutes: 20
-    agents:
-      queue: "mac-small"
-    plugins:
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
-    command: |
-      set -euo pipefail
-      test "$$(mise exec -- go env GOOS)" = "darwin"
-      test "$$(mise exec -- go env GOARCH)" = "arm64"
-      mise exec -- go build ./...
-      mise exec -- go test -count=1 ./...
-
-  - label: ":github: Starter workflow compatibility"
-    key: "starter-workflows-corpus"
-    soft_fail: true
-    timeout_in_minutes: 10
-    plugins:
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
-    command: "mise run corpus:starter-profile"
-
-  - label: ":github: Exact-source plugin smoke"
-    key: "plugin-source-smoke-importer"
-    if: build.env("DEMO_SUITE") != "plugin"
-    env:
-      BUILDKITE_PLUGIN_CONFIGURATION: '{"workflow":".github/workflows/example-basic.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}'
-    timeout_in_minutes: 20
-    retry:
-      automatic: false
-    plugins:
-      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
-          version: "2026.5.12"
-    command: "mise exec -- go run ./cmd/buildkite-gha plugin"
+      - label: ":github: Exact-source plugin smoke"
+        key: "plugin-source-smoke-importer"
+        if: build.env("DEMO_SUITE") != "plugin"
+        env:
+          BUILDKITE_PLUGIN_CONFIGURATION: '{"workflow":"testdata/smoke/.github/workflows/shell.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}'
+        timeout_in_minutes: 20
+        retry:
+          automatic: false
+        plugins:
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+        command: "mise exec -- go run ./cmd/buildkite-gha plugin"
 
   - wait: ~
 

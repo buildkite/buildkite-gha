@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"os"
 	"strings"
@@ -98,7 +97,7 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 			out.WriteString(markdownText(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
 		}
 		out.WriteString("\n  ")
-		out.WriteString(markdownText(diagnostic.Message))
+		out.WriteString(markdownText(annotationDiagnosticMessage(diagnostic)))
 		if diagnostic.Stage != "" {
 			out.WriteString(" · stage: ")
 			out.WriteString(markdownText(diagnostic.Stage))
@@ -135,9 +134,17 @@ func truncateProcessingAnnotation(body string) string {
 	return body[:end] + notice
 }
 
+func annotationDiagnosticMessage(diagnostic compatibility.Diagnostic) string {
+	if diagnostic.Location == nil {
+		return diagnostic.Message
+	}
+	prefix := fmt.Sprintf("%s:%d:%d: ", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
+	return strings.TrimPrefix(diagnostic.Message, prefix)
+}
+
 func markdownText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
-	value = html.EscapeString(value)
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 	replacer := strings.NewReplacer(
 		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
 		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",

@@ -1,7 +1,6 @@
 name: Dockerfile action differential oracle
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:

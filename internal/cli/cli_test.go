@@ -112,7 +112,7 @@ func TestUploadHelpFormsMatch(t *testing.T) {
 		}
 		outputs = append(outputs, stdout.String())
 	}
-	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "tracked .yml and .yaml files directly under .github/workflows") || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
+	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "explicit .yml or .yaml path") || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
 		t.Fatalf("upload help outputs differ or omit runner profile or aggregate workflow options:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
 	}
 }
@@ -170,22 +170,15 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
-	if !configuration.explicitWorkflowPaths {
-		t.Fatal("workflows array did not retain explicit path semantics")
-	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux target = %#v", got)
 	}
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
-	minimal, err := parsePluginConfiguration(`{"workflows":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.explicitWorkflowPaths || len(minimal.runnerTargets) != 0 {
+	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
-	}
-	legacy, err := parsePluginConfiguration(`{"workflow":"legacy.yml"}`)
-	if err != nil || !slices.Equal(legacy.Workflows, []string{"legacy.yml"}) {
-		t.Fatalf("legacy configuration = %#v, %v", legacy, err)
 	}
 
 	for _, test := range []struct {
@@ -194,12 +187,12 @@ func TestParsePluginConfiguration(t *testing.T) {
 		want   string
 	}{
 		{name: "malformed", source: `{`, want: "decode"},
-		{name: "missing workflows", source: `{}`, want: "workflows is required"},
+		{name: "missing workflow selection", source: `{}`, want: "workflow or workflows is required"},
 		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
 		{name: "both workflow fields", source: `{"workflow":"one.yml","workflows":"two.yml"}`, want: "mutually exclusive"},
 		{name: "empty workflow", source: `{"workflow":""}`, want: "workflow must be a non-empty string"},
-		{name: "empty workflows string", source: `{"workflows":""}`, want: "non-empty string or array"},
-		{name: "empty workflows array", source: `{"workflows":[]}`, want: "non-empty string or array"},
+		{name: "workflows string", source: `{"workflows":"one.yml"}`, want: "workflows must be a non-empty array"},
+		{name: "empty workflows array", source: `{"workflows":[]}`, want: "workflows must be a non-empty array"},
 		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
@@ -296,8 +289,8 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := json.Marshal(map[string]any{
-		"workflows": workflowPath,
-		"version":   "0.8.0",
+		"workflow": workflowPath,
+		"version":  "0.8.0",
 		"runners": []map[string]string{
 			{"runs-on": "ubuntu-latest", "queue": "hosted"},
 		},
@@ -373,35 +366,47 @@ func TestPluginUploadsPluralWorkflowList(t *testing.T) {
 	}
 }
 
-func TestPluginRejectsGlobInSingleEntryWorkflowList(t *testing.T) {
+func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 	requireImporterHost(t)
-	configuration, err := json.Marshal(map[string]any{
-		"workflows": []string{filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*.yml")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(pluginConfigurationEnvironment, string(configuration))
-	setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-glob")
-	runner := &cliCaptureRunner{}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "explicit paths") {
-		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
-	}
-	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-		t.Fatalf("invalid workflow list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	workflowDirectory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
+	for _, test := range []struct {
+		name      string
+		field     string
+		workflows any
+		want      string
+	}{
+		{name: "all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
+		{name: "string glob", field: "workflow", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
+		{name: "array glob", field: "workflows", workflows: []string{filepath.Join(workflowDirectory, "*.yml")}, want: "explicit paths"},
+		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "does not name a regular tracked file"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configuration, err := json.Marshal(map[string]any{test.field: test.workflows})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(pluginConfigurationEnvironment, string(configuration))
+			setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-explicit")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("invalid workflow selection reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+			}
+		})
 	}
 }
 
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
-	root := t.TempDir()
-	workflowPath := filepath.Join(root, "mixed.yml")
-	workflow := []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
-	if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"mixed.yml": "on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n",
+	})
+	t.Chdir(repository)
+	workflowPath := filepath.Join(".github", "workflows", "mixed.yml")
 	linuxPath, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +421,7 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 		0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0x00, 0x00,
 	}
-	darwinPath := filepath.Join(root, "buildkite-gha-darwin")
+	darwinPath := filepath.Join(t.TempDir(), "buildkite-gha-darwin")
 	if err := os.WriteFile(darwinPath, darwinContents, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -494,10 +499,23 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 			Command string
 		}{Image: step.Image, Queue: step.Agents["queue"], Command: step.Command}
 	}
-	if linux := steps["gha-linux"]; linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
+	var linux, macos struct {
+		Image   string
+		Queue   string
+		Command string
+	}
+	for key, step := range steps {
+		switch {
+		case strings.HasSuffix(key, "-linux"):
+			linux = step
+		case strings.HasSuffix(key, "-macos"):
+			macos = step
+		}
+	}
+	if linux.Queue != "linux" || linux.Image != image || !strings.Contains(linux.Command, "--hosted-tool-cache") || !strings.Contains(linux.Command, strings.TrimPrefix(cliTestRuntimeDigest(), "sha256:")) {
 		t.Fatalf("Linux pipeline step = %#v", linux)
 	}
-	if macos := steps["gha-macos"]; macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
+	if macos.Queue != "macos" || macos.Image != "" || strings.Contains(macos.Command, "--hosted-tool-cache") || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) {
 		t.Fatalf("Darwin pipeline step = %#v", macos)
 	}
 }
@@ -2100,16 +2118,32 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
 	report := compatibility.NewProcessingReport("<workflow>|name", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-		Level: "error", Code: "E_TEST", Message: "line one\n<script>*unsafe*</script> " + strings.Repeat("界", processingAnnotationBodyLimit),
+		Level: "error", Code: "E_TEST", Message: `line one
+<script>*unsafe*</script> "quoted" ` + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
 	style, body := processingAnnotation(report)
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
-	for _, want := range []string{"&lt;workflow&gt;\\|name", "&lt;script&gt;\\*unsafe\\*&lt;/script&gt;", "Additional diagnostics omitted"} {
+	for _, want := range []string{"&lt;workflow&gt;\\|name", `&lt;script&gt;\*unsafe\*&lt;/script&gt; "quoted"`, "Additional diagnostics omitted"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation lacks %q", want)
 		}
+	}
+}
+
+func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "warning", Code: "W_TEST", Message: "ci.yml:4:23: warning message",
+		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 23},
+	})
+	_, body := processingAnnotation(report)
+	if count := strings.Count(body, "ci.yml:4:23"); count != 1 {
+		t.Fatalf("annotation location count = %d, want 1: %q", count, body)
+	}
+	if !strings.Contains(body, "warning message") {
+		t.Fatalf("annotation = %q", body)
 	}
 }
 
@@ -2508,111 +2542,7 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 }
 
-func TestExpandWorkflowPatternSortsDeduplicatesAndRejectsNoMatch(t *testing.T) {
-	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
-	first, err := expandWorkflowPattern(pattern)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := expandWorkflowPattern(pattern)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantNames := []string{"artifact-multi-prefix.yml", "cache-v5.yml", "cache-v6.yml", "concurrent.yml", "shell.yml"}
-	gotNames := make([]string, 0, len(first))
-	for _, workflow := range first {
-		gotNames = append(gotNames, filepath.Base(workflow.CanonicalPath))
-	}
-	if !reflect.DeepEqual(first, second) || !reflect.DeepEqual(gotNames, wantNames) {
-		t.Fatalf("expanded workflows = %#v and %#v", first, second)
-	}
-	for _, workflow := range first {
-		if workflow.Identity == "" || workflow.StepKeyNamespace != workflow.Identity {
-			t.Fatalf("glob workflow identity = %#v", workflow)
-		}
-	}
-	duplicated, err := workflowInputs([]workflowInput{first[1], first[0], first[1]}, true)
-	if err != nil || len(duplicated) != 2 || duplicated[0].CanonicalPath != first[0].CanonicalPath || duplicated[1].CanonicalPath != first[1].CanonicalPath {
-		t.Fatalf("deduplicated workflows/error = %#v / %v", duplicated, err)
-	}
-	if _, err := expandWorkflowPattern(filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "missing-*.yml")); err == nil || !strings.Contains(err.Error(), "matched no tracked files") {
-		t.Fatalf("no-match error = %v", err)
-	}
-}
-
-func TestExpandWorkflowPatternPreservesLiteralMetacharacterPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "workflow[1].yml")
-	if err := os.WriteFile(path, []byte("on: push\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	inputs, err := expandWorkflowPattern(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(inputs) != 1 || inputs[0].Path != path || inputs[0].StepKeyNamespace != "" {
-		t.Fatalf("literal metacharacter input = %#v", inputs)
-	}
-}
-
-func TestExpandWorkflowPatternNamespacesLiteralDirectoryMatches(t *testing.T) {
-	directory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
-	inputs, err := expandWorkflowPattern(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(inputs) != 10 {
-		t.Fatalf("literal directory matched %d workflows, want 10", len(inputs))
-	}
-	for _, input := range inputs {
-		if input.StepKeyNamespace == "" || input.StepKeyNamespace != input.Identity {
-			t.Fatalf("literal directory workflow is not namespaced: %#v", input)
-		}
-	}
-}
-
-func TestExpandWorkflowPatternStarSelectsTopLevelYAMLWorkflows(t *testing.T) {
-	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
-	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"first.yml":   workflowSource,
-		"second.yaml": workflowSource,
-	})
-	repository, err := filepath.EvalSymlinks(repository)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflowDirectory := filepath.Join(repository, ".github", "workflows")
-	if err := os.WriteFile(filepath.Join(workflowDirectory, "notes.txt"), []byte("not a workflow\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nestedDirectory := filepath.Join(workflowDirectory, "nested")
-	if err := os.MkdirAll(nestedDirectory, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nestedDirectory, "nested.yml"), []byte(workflowSource), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(repository, "root.yml"), []byte(workflowSource), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := exec.Command("git", "-C", repository, "add", ".").CombinedOutput(); err != nil {
-		t.Fatalf("git add shorthand fixtures: %v: %s", err, output)
-	}
-	t.Chdir(repository)
-	inputs, err := expandWorkflowOperands([]string{"*"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make([]string, 0, len(inputs))
-	for _, input := range inputs {
-		got = append(got, input.CanonicalPath)
-	}
-	want := []string{".github/workflows/first.yml", ".github/workflows/second.yaml"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("* workflows = %q, want %q", got, want)
-	}
-}
-
-func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
+func TestRunUploadRejectsExplicitTrackedSymlinks(t *testing.T) {
 	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	for _, test := range []struct {
@@ -2651,7 +2581,7 @@ func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not name a regular tracked file") {
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/linked.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not name a regular tracked file") {
 				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
@@ -2661,7 +2591,7 @@ func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
 	}
 }
 
-func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
+func TestExpandExplicitWorkflowPathsCanonicalizesTrackedPaths(t *testing.T) {
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"a.yml":           workflowSource,
@@ -2699,11 +2629,11 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 
 	aPath := filepath.Join(".github", "workflows", "a.yml")
 	bPath := filepath.Join(".github", "workflows", "b.yaml")
-	first, err := expandWorkflowOperands([]string{filepath.Join(repository, bPath), "./" + aPath, aPath})
+	first, err := expandExplicitWorkflowPaths([]string{filepath.Join(repository, bPath), "./" + aPath, aPath})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := expandWorkflowOperands([]string{aPath, filepath.Join(repository, bPath)})
+	second, err := expandExplicitWorkflowPaths([]string{aPath, filepath.Join(repository, bPath)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2715,7 +2645,7 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 			t.Fatalf("explicit workflow identity = %#v", input)
 		}
 	}
-	metacharacter, err := expandWorkflowOperands([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath})
+	metacharacter, err := expandExplicitWorkflowPaths([]string{filepath.Join(".github", "workflows", "workflow[1].yml"), aPath})
 	if err != nil || len(metacharacter) != 2 || metacharacter[1].CanonicalPath != ".github/workflows/workflow[1].yml" {
 		t.Fatalf("literal metacharacter list = %#v, %v", metacharacter, err)
 	}
@@ -2723,7 +2653,7 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leadingDash, err := expandWorkflowOperands(operands)
+	leadingDash, err := expandExplicitWorkflowPaths(operands)
 	if err != nil || len(leadingDash) != 2 || leadingDash[0].CanonicalPath != "-leading.yml" {
 		t.Fatalf("leading-dash explicit path = %#v, %v", leadingDash, err)
 	}
@@ -2743,8 +2673,8 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 		{name: "symlink", operands: []string{symlinkPath, aPath}, want: "regular tracked file"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := expandWorkflowOperands(test.operands); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("expandWorkflowOperands(%q) error = %v, want %q", test.operands, err, test.want)
+			if _, err := expandExplicitWorkflowPaths(test.operands); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expandExplicitWorkflowPaths(%q) error = %v, want %q", test.operands, err, test.want)
 			}
 		})
 	}
@@ -2800,28 +2730,42 @@ func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
 	}
 }
 
-func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
+func TestRunUploadRejectsWorkflowSelectorsBeforeBuildkite(t *testing.T) {
 	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"a.yml": workflowSource})
 	t.Chdir(repository)
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "invalid-list-importer")
-	runner := &cliCaptureRunner{}
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "a.yml")}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "glob pattern") {
-		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
-	}
-	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-		t.Fatalf("invalid explicit list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+	for _, operands := range [][]string{
+		{"*"},
+		{filepath.Join(".github", "workflows", "*.yml")},
+		{filepath.Join(".github", "workflows", "*.yml"), filepath.Join(".github", "workflows", "a.yml")},
+	} {
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"upload"}, operands...)
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "glob pattern") {
+			t.Fatalf("run(%q) code/stderr = %d / %q", operands, code, stderr.String())
+		}
+		if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+			t.Fatalf("invalid workflow selector reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+		}
 	}
 }
 
-func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
+func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing.T) {
 	requireImporterHost(t)
-	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
+	workflowDirectory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
+	workflowPaths := []string{
+		filepath.Join(workflowDirectory, "artifact-multi-prefix.yml"),
+		filepath.Join(workflowDirectory, "cache-v5.yml"),
+		filepath.Join(workflowDirectory, "cache-v6.yml"),
+		filepath.Join(workflowDirectory, "concurrent.yml"),
+		filepath.Join(workflowDirectory, "shell.yml"),
+	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	inputs, err := expandWorkflowPattern(pattern)
+	inputs, err := expandExplicitWorkflowPaths(workflowPaths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2829,7 +2773,8 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "aggregate-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, pattern}, &stdout, &stderr, "dev", runner); code != 0 {
+	args := append([]string{"upload", "--event-path", eventPath}, workflowPaths...)
+	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Uploaded 12 jobs from 5 workflows") || stderr.Len() != 0 || len(runner.commands) != 14 {
@@ -2942,7 +2887,14 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "checks-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+	workflowPaths := []string{
+		".github/workflows/a.yml",
+		".github/workflows/b.yml",
+		".github/workflows/unnamed.yml",
+		".github/workflows/reusable.yml",
+	}
+	args := append([]string{"upload", "--event-path", eventPath}, workflowPaths...)
+	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	var pipeline struct {
@@ -3084,6 +3036,12 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 		"workflow_dispatch": writeUploadEvent(t, repository, "workflow_dispatch", "refs/heads/main", map[string]any{}),
 		"schedule":          writeUploadEvent(t, repository, "schedule", "refs/heads/main", map[string]any{}),
 	}
+	workflowPaths := []string{
+		".github/workflows/dispatch.yml",
+		".github/workflows/pull-request.yml",
+		".github/workflows/push.yml",
+		".github/workflows/schedule.yml",
+	}
 	for _, test := range []struct {
 		name, event, source, workflow string
 	}{
@@ -3099,7 +3057,8 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 			t.Setenv("BUILDKITE_SOURCE", test.source)
 			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", events[test.event], ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+			args := append([]string{"upload", "--event-path", events[test.event]}, workflowPaths...)
+			if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 			}
 			var pipeline struct {
@@ -3165,6 +3124,12 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 		"push.yml":         "name: Push\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"schedule.yml":     "name: Schedule\non:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
+	workflowPaths := []string{
+		".github/workflows/dispatch.yml",
+		".github/workflows/pull-request.yml",
+		".github/workflows/push.yml",
+		".github/workflows/schedule.yml",
+	}
 	for _, test := range []struct {
 		name, source, event, workflow string
 		pullRequest                   bool
@@ -3192,7 +3157,8 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 			t.Setenv("BUILDKITE_SOURCE", test.source)
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+			args := append([]string{"upload"}, workflowPaths...)
+			if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 			}
 			var pipeline struct {
@@ -3317,7 +3283,12 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{
+		"upload", "--event-path", eventPath,
+		".github/workflows/a-invalid.yml",
+		".github/workflows/b-action.yml",
+		".github/workflows/c-success.yml",
+	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	var annotationBodies []string

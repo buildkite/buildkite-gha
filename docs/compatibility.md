@@ -59,7 +59,7 @@ Steps remain inside one job because they share a workspace, environment files, a
 
 ### Aggregate workflow upload
 
-`*` selects every tracked `.yml` and `.yaml` file directly under `.github/workflows`. Upload also accepts one literal, directory, or tracked glob, or two or more explicit workflow paths. Lists require regular, tracked `.yml` or `.yaml` files inside the repository; directories, missing or untracked files, outside paths, symlinks, and globs fail. Inputs are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned.
+The plugin accepts one explicit `workflow` path or a non-empty `workflows` path array. Plugin paths and aggregate `upload` operands must identify regular, tracked `.yml` or `.yaml` files inside the repository; directories, missing or untracked files, outside paths, symlinks, and globs fail. A custom importer may upload one explicit regular workflow outside the repository. Inputs are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned.
 
 All directly runnable workflows are represented in one artifact and pipeline transaction. Each becomes one aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. A workflow that does not declare it becomes a skipped group with an ignored placeholder and no plan artifacts. The label is static across events. The group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Each group depends on the importer, while its child jobs omit that redundant dependency and their own check notifications.
 

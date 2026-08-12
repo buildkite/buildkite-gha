@@ -1,0 +1,61 @@
+name: Native macOS actions proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Verify native runner identity
+        shell: bash
+        env:
+          RUNNER_CONTEXT: ${{ runner.os }}/${{ runner.arch }}
+        run: |
+          test "$RUNNER_CONTEXT" = macOS/ARM64
+          test "$RUNNER_OS/$RUNNER_ARCH" = macOS/ARM64
+          test "$(uname -s)/$(uname -m)" = Darwin/arm64
+
+      - name: Verify image and tool boundaries
+        shell: bash
+        run: |
+          test -z "${ImageOS:-}"
+          test "${RUNNER_TOOL_CACHE:-}" != /opt/hostedtoolcache
+          if buildkite-gha-intentionally-missing-tool; then
+            echo "unexpectedly found the missing-tool probe" >&2
+            exit 1
+          else
+            test "$?" = 127
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Produce shell output
+        id: shell
+        shell: bash
+        run: echo "result=macos" >> "$GITHUB_OUTPUT"
+
+      - name: Run local JavaScript action
+        id: javascript
+        uses: ./.github/actions/oracle-javascript
+        with:
+          message: ${{ steps.shell.outputs.result }}
+
+      - name: Run local composite action
+        id: composite
+        uses: ./.github/actions/oracle-composite
+        with:
+          message: ${{ steps.javascript.outputs.result }}
+
+      - name: Verify action results
+        shell: bash
+        env:
+          RESULT: ${{ steps.composite.outputs.result }}
+        run: |
+          test "$RESULT" = macos-javascript-composite
+          test "$SMOKE_COMPOSITE_SEEN" = true

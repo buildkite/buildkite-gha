@@ -1,7 +1,6 @@
 name: Local actions differential oracle
 
 on:
-  push:
   workflow_dispatch:
 
 permissions:

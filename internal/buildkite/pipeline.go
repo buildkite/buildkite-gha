@@ -18,6 +18,7 @@ const distributionDirectory = ".buildkite-gha/distributions"
 const maxConcurrencyGroupLength = 200
 const runtimeCacheName = "buildkite-gha"
 const runtimeCacheRoot = "/cache/bkcache/buildkite-gha"
+const darwinRuntimeCacheRoot = "/tmp/bkcache/buildkite-gha"
 
 // ContinueOnErrorExitStatus is reserved for a workflow failure that the job's
 // immutable plan explicitly allows Buildkite to soft-fail.
@@ -92,7 +93,7 @@ func MiseDataDir(platforms ...string) string {
 	if len(platforms) != 0 {
 		platform = platforms[0]
 	}
-	return runtimeCacheRoot + "/mise/" + platformCacheKey(platform) + "/" + MinimumMiseVersion
+	return platformMiseCachePath(platform) + "/" + MinimumMiseVersion
 }
 
 // Job describes one expanded workflow job after queue policy has been applied.
@@ -376,7 +377,11 @@ func platformCacheKey(platform string) string {
 }
 
 func platformMiseCachePath(platform string) string {
-	return runtimeCacheRoot + "/mise/" + platformCacheKey(platform)
+	root := runtimeCacheRoot
+	if platform == "darwin/arm64" {
+		root = darwinRuntimeCacheRoot
+	}
+	return root + "/mise/" + platformCacheKey(platform)
 }
 
 type dependency struct {
