@@ -184,7 +184,7 @@ permissions:
 
 Supported values are `read`, `write`, and `none`. Supported names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `packages`, `pages`, `pull-requests`, `security-events`, and `statuses`.
 
-An omitted map defaults to `contents: read` when a token is needed. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions. These forms remain compilable when no job needs a token. Hosted token issuance requires one explicit, non-empty top-level map and rejects job-level maps and reusable-workflow jobs.
+An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions. These forms remain compilable when no job needs a token. Hosted token issuance accepts the omitted default or an explicit, non-empty top-level map. It rejects job-level maps and reusable-workflow jobs. Write access therefore requires an explicit top-level map.
 
 The `read-all` and `write-all` values, the `id-token` permission, and noncanonical names are unsupported. An empty map, or a map containing only `none`, creates no token.
 
@@ -647,7 +647,7 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 **🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
-Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, declare an explicit non-empty top-level permission map, and contain no job-level permission maps or reusable-workflow jobs.
+Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps or reusable-workflow jobs. The workflow-token endpoint must interpret omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 
 If the selected workflow contains a reusable-workflow job, no direct or expanded job can receive a token. This includes `actions/checkout` in a called workflow when its effective `token` input defaults to `${{ github.token }}`. Tokenless local reusable workflows remain supported.
 
