@@ -145,6 +145,16 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 	snapshot["payload"] = payload
 	if event := strings.TrimSpace(getenv("BUILDKITE_GITHUB_EVENT")); githubEventNamePattern.MatchString(event) {
 		snapshot["event"] = event
+		// Buildkite can associate a push-created build with an open pull
+		// request. Keep the authoritative execution ref consistent with the
+		// linked webhook event rather than retaining refs/pull/<n>/head.
+		if event == "push" {
+			if tag := strings.TrimSpace(getenv("BUILDKITE_TAG")); tag != "" {
+				snapshot["ref"] = "refs/tags/" + tag
+			} else if branch := strings.TrimSpace(getenv("BUILDKITE_BRANCH")); branch != "" {
+				snapshot["ref"] = "refs/heads/" + branch
+			}
+		}
 	}
 	if sender, ok := payload["sender"].(map[string]any); ok {
 		if login, ok := sender["login"].(string); ok && safeGitHubLogin(login) {
