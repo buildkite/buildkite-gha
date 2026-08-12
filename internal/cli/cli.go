@@ -1498,6 +1498,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
 		if validationErr != nil {
 			processingReports[i].Result = "incompatible"
+			out.annotate(processingReports[i])
 		}
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
@@ -1636,7 +1637,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	for i, input := range workflows {
 		if input.Applicable {
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
-			out.annotate(processingReports[i])
+			if !processingReportHasErrors(processingReports[i]) {
+				out.annotate(processingReports[i])
+			}
 		}
 	}
 	artifacts := make([]transport.Artifact, 0, 1+len(runtimeDistributions)+len(planArtifacts))

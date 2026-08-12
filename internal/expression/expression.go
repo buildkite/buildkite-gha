@@ -192,7 +192,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties %q and %q", matchedKey, candidate)
+					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -208,7 +208,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties %q and %q", matchedKey, candidate)
+					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}

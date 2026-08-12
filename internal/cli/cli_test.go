@@ -3236,12 +3236,19 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	requireImporterHost(t)
 	directory := t.TempDir()
 	workflowPath := filepath.Join(directory, "invalid-push.yml")
-	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n"
+	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const sentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
-	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{"runner": sentinel})
+	const valueSentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
+	const keySentinel = "EVENT_SECRET_KEY"
+	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{
+		"runner": valueSentinel,
+		"runners": map[string]any{
+			keySentinel:                  "one",
+			strings.ToLower(keySentinel): "two",
+		},
+	})
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "failing-applicable-importer")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
@@ -3249,7 +3256,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	if strings.Contains(stdout.String(), sentinel) || strings.Contains(stderr.String(), sentinel) {
+	if strings.Contains(stdout.String(), valueSentinel) || strings.Contains(stderr.String(), valueSentinel) || strings.Contains(stdout.String(), keySentinel) || strings.Contains(stderr.String(), keySentinel) {
 		t.Fatalf("event-derived runner leaked to output: stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
 	var pipeline struct {
@@ -3275,19 +3282,55 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		"Compiler error: alpha [E_EXPRESSION_INVALID]",
 		"Compiler error: beta [E_EXPRESSION_INVALID]",
 	}
-	const safeReason = "resolved runner target is not admitted by policy: runner label is not mapped by policy"
+	wantReasons := []string{
+		"resolved runner target is not admitted by policy: runner label is not mapped by policy",
+		`job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties`,
+	}
 	for i, step := range pipeline.Steps[0].Steps {
-		if step.Label != wantLabels[i] || step.Command != `printf '%s\n' '`+safeReason+`' && exit 1` || !step.Checkout.Skip {
+		if step.Label != wantLabels[i] || step.Command != `printf '%s\n' '`+wantReasons[i]+`' && exit 1` || !step.Checkout.Skip {
 			t.Fatalf("compiler failure step %d = %#v", i, step)
 		}
 		command := exec.Command("sh", "-c", step.Command)
 		printed, err := command.CombinedOutput()
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != safeReason+"\n" {
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != wantReasons[i]+"\n" {
 			t.Fatalf("compiler failure command %d output/error = %q / %v", i, printed, err)
 		}
 	}
-	if strings.Contains(string(pipelineCommand.stdin), sentinel) {
+	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) {
 		t.Fatalf("event-derived runner leaked to aggregate pipeline: %s", pipelineCommand.stdin)
+	}
+}
+
+func TestRunUploadPublishesValidationAnnotationsBeforeLaterFailure(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"a-invalid.yml": "on: push\njobs:\n  invalid:\n    runs-on: windows-latest\n    steps: [{run: true}]\n",
+		"b-action.yml":  "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var annotationBodies []string
+	for _, command := range runner.commands {
+		if len(command.args) != 0 && command.args[0] == "annotate" {
+			annotationBodies = append(annotationBodies, string(command.stdin))
+		}
+		if len(command.args) > 1 && command.args[0] == "pipeline" && command.args[1] == "upload" {
+			t.Fatalf("later action failure uploaded a pipeline: %#v", command)
+		}
+	}
+	if len(annotationBodies) != 2 || !strings.Contains(annotationBodies[0], "unsupported operating system") || !strings.Contains(annotationBodies[1], "action could not be resolved or validated") {
+		t.Fatalf("mixed failure annotations = %#v", annotationBodies)
 	}
 }
 
