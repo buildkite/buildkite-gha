@@ -232,7 +232,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate json blocker", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "dynamic.yml")
-		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      matrix: ${{ steps.matrix.outputs.value }}\n    steps:\n      - id: matrix\n        run: true\n  build:\n    needs: prepare\n    runs-on: ubuntu-latest\n    strategy:\n      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -332,6 +332,61 @@ func TestRunValidateAndCompile(t *testing.T) {
 			t.Fatalf("compile IR = %#v, error = %v", ir, err)
 		}
 	})
+}
+
+func TestCommandsKeepValidatedRuntimeMatrixIncompatibleWithoutUpload(t *testing.T) {
+	workflow := filepath.Join(t.TempDir(), "dynamic.yml")
+	if err := os.WriteFile(workflow, []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: true
+  generated:
+    needs: producer
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.producer.outputs.include) }}
+    steps:
+      - run: true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "gha-importer")
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "validate", args: []string{"validate", "--format", "json", workflow}},
+		{name: "compile pipeline", args: []string{"compile", "--event-path", eventPath, workflow}},
+		{name: "compile IR", args: []string{"compile", "--format", "ir-json", "--event-path", eventPath, workflow}},
+		{name: "upload", args: []string{"upload", "--event-path", eventPath, workflow}},
+		{name: "upload before event metadata", args: []string{"upload", workflow}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			runner := &cliCaptureRunner{}
+			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("run() code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("runtime matrix command made Buildkite calls: %#v", runner.commands)
+			}
+			output := stdout.String() + stderr.String()
+			if !strings.Contains(output, "incompatible") || strings.Contains(output, "runtime_matrices") || strings.Contains(output, compiler.RuntimeMatrixSchemaV1) {
+				t.Fatalf("command output = %q", output)
+			}
+			if test.name != "validate" && stdout.Len() != 0 {
+				t.Fatalf("unsafe command wrote stdout = %q", stdout.String())
+			}
+		})
+	}
 }
 
 func TestProcessingReportAggregatesIndependentErrorsAndRetainsPartialSuccess(t *testing.T) {

@@ -130,6 +130,7 @@ type Report struct {
 	Instances             int
 	Warnings              []Warning
 	Jobs                  []JobInstance
+	RuntimeMatrices       []RuntimeMatrixDescriptor
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -145,6 +146,7 @@ type ParsedJob struct {
 type expansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
+	runtimeMatrices       []RuntimeMatrixDescriptor
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
 	notEvaluatedInstances map[string]bool
@@ -187,7 +189,7 @@ func ParseWorkflow(path string, source []byte) (Report, error) {
 func expansionReport(expanded expansionResult, warnings []Warning) Report {
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: warnings,
+		Jobs: expanded.candidates, RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
@@ -843,11 +845,32 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	failedMatrices := make(map[string]bool)
 	for _, id := range order {
 		job := jobs[id]
-		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
+		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], jobs, matricesByJob)
+		var matrices []map[string]any
+		if deferred {
+			position := job.Matrix.Span.Start
+			if job.Matrix.Expression != nil {
+				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
+			} else if job.Matrix.IncludeExpression != nil {
+				position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
+			}
+			if matrixErr == nil {
+				result.runtimeMatrices = append(result.runtimeMatrices, descriptor)
+				matrixErr = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
+			}
+			matrixErr = locatedJobError(sourcePaths[id], job, position.Line, position.Column, matrixErr.Error())
+		} else if !deferred {
+			matrices, matrixErr = expandMatrix(sourcePaths[id], job, context)
+		}
 		if matrixErr != nil {
 			line, column := job.Span.Start.Line, job.Span.Start.Column
 			if job.Matrix != nil {
 				line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
+				if job.Matrix.Expression != nil {
+					line, column = job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column
+				} else if job.Matrix.IncludeExpression != nil {
+					line, column = job.Matrix.IncludeExpression.Span.Start.Line, job.Matrix.IncludeExpression.Span.Start.Column
+				}
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
@@ -1228,16 +1251,26 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 		position := job.Matrix.Span.Start
 		if job.Matrix.Expression != nil {
 			position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
+		} else if job.Matrix.IncludeExpression != nil {
+			position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
 		}
 		return nil, locatedJobError(path, job, position.Line, position.Column, err.Error())
 	}
+	matrices, err := expandMatrixDefinition(matrix)
+	if err != nil {
+		return nil, jobError(path, job, err.Error())
+	}
+	return matrices, nil
+}
+
+func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 	matrices := []map[string]any{{}}
 	if len(matrix.Rows) == 0 {
 		matrices = nil
 	}
 	for _, row := range matrix.Rows {
 		if len(row.Values) == 0 {
-			return nil, jobError(path, job, fmt.Sprintf("matrix dimension %q has no values", row.Name))
+			return nil, fmt.Errorf("matrix dimension %q has no values", row.Name)
 		}
 		var next []map[string]any
 		for _, current := range matrices {
@@ -1249,7 +1282,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 				combination[row.Name] = value.Data
 				next = append(next, combination)
 				if len(next) > maxMatrixInstances {
-					return nil, jobError(path, job, fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances))
+					return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
 				}
 			}
 		}
@@ -1283,7 +1316,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 			included = append(included, includedMatrix{values: cloneAnyMap(values)})
 		}
 		if len(included) > maxMatrixInstances {
-			return nil, jobError(path, job, fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances))
+			return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
 		}
 	}
 	matrices = matrices[:0]
@@ -1291,7 +1324,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 		matrices = append(matrices, matrix.values)
 	}
 	if len(matrices) == 0 {
-		return nil, jobError(path, job, "matrix excludes every combination")
+		return nil, fmt.Errorf("matrix excludes every combination")
 	}
 	return matrices, nil
 }
@@ -1329,6 +1362,9 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 		for j, value := range values {
 			resolved.Rows[i].Values[j] = workflow.Value{Data: value, Span: row.Span}
 		}
+	}
+	if matrix.IncludeExpression != nil {
+		return nil, fmt.Errorf("runtime-dependent matrix include expressions are unsupported")
 	}
 	return &resolved, nil
 }

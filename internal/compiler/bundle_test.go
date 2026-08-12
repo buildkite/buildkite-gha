@@ -56,6 +56,39 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: echo 'include=[]' >> "$GITHUB_OUTPUT"
+  generated:
+    needs: producer
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.steps }}"
+`)
+	bundle, err := CompileBundle("runtime-matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("CompileBundle() error = %v", err)
+	}
+	if len(bundle.Plans) != 0 || len(bundle.Pipeline) != 0 {
+		t.Fatalf("unsafe runtime matrix produced %d plans and %d pipeline bytes", len(bundle.Plans), len(bundle.Pipeline))
+	}
+	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].LogicalJobID != "producer" {
+		t.Fatalf("partial safe IR jobs = %#v", bundle.IR.Jobs)
+	}
+}
+
 func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	options := defaultOptions()
