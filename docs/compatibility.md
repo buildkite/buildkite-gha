@@ -590,6 +590,8 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 **🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Effective `permissions` determine the token scope. The Buildkite organization must enable the job-bound token service. The server-side Buildkite policy for repositories and permissions remains authoritative.
 
+The tokens endpoint does not support GitHub merge queues or GitHub Enterprise Server.
+
 A job can request a token for a pull request comment:
 
 ```yaml
