@@ -59,7 +59,14 @@ type Workflow struct {
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
+	Failures        []Failure
 	Jobs            []Job
+}
+
+// Failure is one synthetic child step that reports a safely rendered failure.
+type Failure struct {
+	Label   string
+	Message string
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -135,7 +142,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 	usedKeys := map[string]string{pipeline.CompilerStep: "compiler step"}
 	usedDigests := make(map[string]string)
 	for i, workflow := range workflows {
-		if len(workflow.Jobs) == 0 && (!aggregate || workflow.SkipReason == "") {
+		if len(workflow.Jobs) == 0 && len(workflow.Failures) == 0 && (!aggregate || workflow.SkipReason == "") {
 			return nil, fmt.Errorf("workflow %d requires at least one generated job", i+1)
 		}
 		if aggregate {
@@ -154,6 +161,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Condition != "" && workflow.SkipReason != "" {
 				return nil, fmt.Errorf("workflow %q cannot have both a trigger condition and skip reason", workflow.GroupKey)
 			}
+			if workflow.SkipReason != "" && len(workflow.Failures) != 0 {
+				return nil, fmt.Errorf("workflow %q cannot have both failures and skip reason", workflow.GroupKey)
+			}
 			if utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
 				return nil, fmt.Errorf("workflow %q skip reason exceeds %d characters", workflow.GroupKey, maxSkipReasonLength)
 			}
@@ -161,6 +171,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("workflow group key %q collides with %s", workflow.GroupKey, owner)
 			}
 			usedKeys[workflow.GroupKey] = "workflow group"
+		}
+		for j, failure := range workflow.Failures {
+			if failure.Label == "" || failure.Message == "" {
+				return nil, fmt.Errorf("workflow %d failure %d requires a label and message", i+1, j+1)
+			}
 		}
 		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
 		if err != nil {
@@ -246,6 +261,12 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(":"))
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		return nil
+	}
+	for _, failure := range workflow.Failures {
+		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(failure.Label))
+		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
+		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 	}
 	if workflow.ConcurrencyGate != nil {
 		dependencies := []dependency{{Step: pipeline.CompilerStep}}
