@@ -1097,6 +1097,33 @@ func TestCancelQueuedBackgroundNeverStartsIt(t *testing.T) {
 	}
 }
 
+func TestQueuedBackgroundTimeoutStartsAtDispatch(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: background timeout dispatch\n")
+	release := filepath.Join(workspace, "release")
+	queuedMarker := filepath.Join(workspace, "queued-started")
+	steps := make([]plan.Step, 0, maxActiveBackgroundSteps+3)
+	for i := 0; i < maxActiveBackgroundSteps; i++ {
+		steps = append(steps, plan.Step{ID: fmt.Sprintf("blocker-%d", i), Kind: "run", Background: true, Command: `while [ ! -f "$RELEASE" ]; do sleep 0.01; done`})
+	}
+	steps = append(steps,
+		plan.Step{ID: "queued", Kind: "run", Background: true, TimeoutMinutes: 0.001, Command: `touch "$QUEUED_MARKER"`},
+		plan.Step{ID: "release", Kind: "run", Command: `sleep 0.2; touch "$RELEASE"`},
+		plan.Step{ID: "wait", Kind: "wait-all"},
+	)
+	job := runtimePlan(t, workspace, workflowPath, steps)
+	job.Env = map[string]string{"RELEASE": release, "QUEUED_MARKER": queuedMarker}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(queuedMarker); err != nil {
+		t.Fatalf("queued timed step did not run: %v", err)
+	}
+}
+
 func TestCancelQueuedBackgroundNeverRegistersPostAction(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
@@ -4569,6 +4596,107 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 	}
 }
 
+func TestRemoteActionPreFailurePropagatesEnvironmentToLaterPre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: failed remote pre effects\n")
+	remote := t.TempDir()
+	for _, name := range []string{"fails", "after"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+		writeFixtureFile(t, remote, name+"/pre.js", "")
+		writeFixtureFile(t, remote, name+"/main.js", "")
+	}
+	marker := filepath.Join(workspace, "observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = fails:pre ]; then
+  printf '%s\n' 'PRE_EFFECT=available' >> "$GITHUB_ENV"
+  exit 7
+fi
+if [ "$action:$phase" = after:pre ]; then
+  test "$PRE_EFFECT" = available
+  touch "$MARKER"
+fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	failsID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "fails", Kind: "uses", Uses: remoteLifecycleUses("fails"), Action: &plan.ActionSelector{Lock: failsID}, ContinueOnError: true},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"MARKER": marker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(failsID, "fails", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later pre did not observe failed pre environment: %v", err)
+	}
+}
+
+func TestRemoteCompositeSoftPreFailurePreservesSuccessForLaterPre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: softened composite pre failure\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "parent/action.yml", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: owner/repo/child@v1\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	writeFixtureFile(t, remote, "after/action.yml", "name: after\nruns:\n  using: node24\n  pre: pre.js\n  pre-if: success()\n  main: main.js\n")
+	writeFixtureFile(t, remote, "after/pre.js", "")
+	writeFixtureFile(t, remote, "after/main.js", "")
+	marker := filepath.Join(workspace, "observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = child:pre ]; then exit 7; fi
+if [ "$action:$phase" = after:pre ]; then touch "$MARKER"; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	parentID, childID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2), remoteLifecycleLockID(3)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "parent", Kind: "uses", Uses: remoteLifecycleUses("parent"), Action: &plan.ActionSelector{Lock: parentID}, ContinueOnError: true},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"MARKER": marker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(parentID, "parent", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later success pre did not run: %v", err)
+	}
+}
+
 func TestRemotePreparationErrorStillDrainsRegisteredPosts(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -4869,6 +4997,35 @@ jobs:
 	result, err := (Runner{Node24: node, Actions: store, Stdout: &logs, Stderr: &logs}).RunJob(ctx, plans[0], workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v\nlogs:\n%s", result, err, logs.String())
+	}
+}
+
+func TestCompiledWorkflowUsesHashFilesAfterWorkspacePreparation(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "hash-files.yml")
+	workflow := []byte(`on: push
+jobs:
+  hash:
+    runs-on: ubuntu-latest
+    steps:
+      - run: printf 'runtime contents' > payload
+      - if: hashFiles('payload') != ''
+        env:
+          PAYLOAD_HASH: ${{ hashFiles('payload') }}
+        run: test "$PAYLOAD_HASH" = "93f7a1af9e76c89675b5bc8c5f5c6aa62f1c78bc0c95693f0296b25274843527"
+`)
+	writeFixtureFile(t, workspace, ".github/workflows/hash-files.yml", string(workflow))
+	event, err := os.ReadFile(fixturePath(t, "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compileUntrustedPlans(workflowPath, workflow, event, "0.0.0-test", "sha256:"+strings.Repeat("2", 64), "hosted")
+	if err != nil || len(plans) != 1 {
+		t.Fatalf("compile hashFiles workflow = %#v, %v", plans, err)
+	}
+	result, err := (Runner{}).RunJob(context.Background(), plans[0], workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
 }
 

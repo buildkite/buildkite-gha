@@ -83,6 +83,7 @@ esac
 	}
 
 	workflowDigest := sha256.Sum256(workflowSource)
+	headDigest := githubHash(sha + "\n")
 	checkoutID, localID := "a-0000000000000001", "a-0000000000000002"
 	job := plan.Job{
 		Schema: plan.SchemaV3,
@@ -99,6 +100,7 @@ esac
 		RequiredCapabilities: []string{"network", "provider-token-read"},
 		Steps: []plan.Step{
 			{ID: "checkout", Kind: "uses", Uses: "actions/checkout@v7", Action: &plan.ActionSelector{Lock: checkoutID}},
+			{ID: "hash", Kind: "run", Shell: "sh", Condition: "hashFiles('.git/HEAD') != ''", Env: map[string]string{"HEAD_HASH": "${{ hashFiles('.git/HEAD') }}"}, Command: "test \"$HEAD_HASH\" = " + headDigest},
 			{ID: "local", Kind: "uses", Uses: "./.github/actions/local", Action: &plan.ActionSelector{Lock: localID}},
 		},
 		Actions: []plan.ActionLock{

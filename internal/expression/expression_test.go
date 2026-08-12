@@ -436,7 +436,9 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		scope  ConditionScope
 		want   string
 	}{
-		{name: "unsupported function", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" is unsupported`},
+		{name: "hashFiles needs a pattern", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" requires 1 to 255 arguments`},
+		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
+		{name: "unsupported function", source: "contains('a', 'b')", scope: StepCondition, want: `condition function "contains" is unsupported`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
 		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition, want: "condition comparison > is unsupported"},
 		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
@@ -456,6 +458,48 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 				t.Fatalf("ValidateCondition() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
+	hash := func(patterns []string) (string, error) {
+		if !reflect.DeepEqual(patterns, []string{"*.go", "!generated/**"}) {
+			t.Fatalf("hashFiles patterns = %#v", patterns)
+		}
+		return "digest", nil
+	}
+	context := Context{HashFiles: hash}
+	if got, err := EvaluateStep("key-${{ hashFiles('*.go', '!generated/**') }}", context); err != nil || got != "key-digest" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	if _, err := Evaluate("${{ hashFiles('*.go') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+		t.Fatalf("Evaluate() hashFiles error = %v", err)
+	}
+	if _, err := EvaluateStep("${{ contains('a', 'b') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+		t.Fatalf("EvaluateStep() contains error = %v", err)
+	}
+
+	condition := ConditionContext{HashFiles: hash}
+	if got, err := EvaluateCondition("hashFiles('*.go', '!generated/**') != ''", condition); err != nil || !got {
+		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if err := ValidateCondition("hashFiles('*.go') != ''", StepCondition); err != nil {
+		t.Fatalf("ValidateCondition() = %v", err)
+	}
+}
+
+func TestCompileConditionValidationAdmitsRuntimeHashFilesWithoutFilesystemAccess(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"pull_request": map[string]any{"draft": false}}}}
+	source := "github.event.pull_request.draft && hashFiles('go.sum') != ''"
+	if err := ValidateCompileConditionWithMatrix(source, StepCondition, context, nil); err != nil {
+		t.Fatalf("ValidateCompileConditionWithMatrix() = %v", err)
+	}
+	resolved, err := EvaluateCompileCondition(source, context)
+	if err != nil || resolved {
+		t.Fatalf("EvaluateCompileCondition() = %v, %v", resolved, err)
+	}
+	if _, err := EvaluateCompile(Expression{Text: "${{ hashFiles('go.sum') }}"}, context); err == nil || !strings.Contains(err.Error(), `unsupported compile-time function "hashFiles"`) {
+		t.Fatalf("EvaluateCompile() hashFiles error = %v", err)
 	}
 }
 
@@ -653,6 +697,13 @@ func TestEvaluateConditionFailsClosed(t *testing.T) {
 	}
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
+	}
+	hashCalled := false
+	if got, err := EvaluateCondition("hashFiles('**') != ''", ConditionContext{Unsuccessful: true, HashFiles: func([]string) (string, error) {
+		hashCalled = true
+		return "digest", nil
+	}}); err != nil || got || hashCalled {
+		t.Fatalf("implicit success guard = %v, %v, hash called %v; want false, nil, false", got, err, hashCalled)
 	}
 	if _, err := EvaluateCondition("needs.missing.result", ConditionContext{}); err == nil {
 		t.Fatal("EvaluateCondition() accepted an unavailable need result")

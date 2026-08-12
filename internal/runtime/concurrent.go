@@ -155,14 +155,23 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
-	stepCtx := runCtx
-	cancelStep := func() {}
-	if step.TimeoutMinutes > 0 {
-		stepCtx, cancelStep = context.WithTimeout(runCtx, durationMinutes(step.TimeoutMinutes))
+func stepContext(parent context.Context, timeoutMinutes float64) (context.Context, context.CancelFunc) {
+	if timeoutMinutes > 0 {
+		return context.WithTimeout(parent, durationMinutes(timeoutMinutes))
 	}
-	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared)
-	cancelStep()
+	return context.WithCancel(parent)
+}
+
+func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
+	if eval.HashFilesContext != nil {
+		eval.HashFiles = func(patterns []string) (string, error) {
+			return eval.HashFilesContext(ctx, patterns)
+		}
+	}
+}
+
+func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
+	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }
 
@@ -226,19 +235,21 @@ func commitResultEnvironment(env map[string]string, result Result) {
 
 func cloneExpressionContext(in expression.Context) expression.Context {
 	return expression.Context{
-		Inputs:       cloneStrings(in.Inputs),
-		Matrix:       cloneAnyMap(in.Matrix),
-		Steps:        cloneNestedStrings(in.Steps),
-		StepStatuses: cloneStepStatuses(in.StepStatuses),
-		Needs:        cloneNestedStrings(in.Needs),
-		NeedResults:  cloneStrings(in.NeedResults),
-		Secrets:      cloneStrings(in.Secrets),
-		Vars:         cloneStrings(in.Vars),
-		Env:          cloneStrings(in.Env),
-		GitHub:       cloneAnyMap(in.GitHub),
-		Runner:       cloneStrings(in.Runner),
-		Services:     cloneNestedStrings(in.Services),
-		JobStatus:    in.JobStatus,
+		Inputs:           cloneStrings(in.Inputs),
+		Matrix:           cloneAnyMap(in.Matrix),
+		Steps:            cloneNestedStrings(in.Steps),
+		StepStatuses:     cloneStepStatuses(in.StepStatuses),
+		Needs:            cloneNestedStrings(in.Needs),
+		NeedResults:      cloneStrings(in.NeedResults),
+		Secrets:          cloneStrings(in.Secrets),
+		Vars:             cloneStrings(in.Vars),
+		Env:              cloneStrings(in.Env),
+		GitHub:           cloneAnyMap(in.GitHub),
+		Runner:           cloneStrings(in.Runner),
+		Services:         cloneNestedStrings(in.Services),
+		JobStatus:        in.JobStatus,
+		HashFiles:        in.HashFiles,
+		HashFilesContext: in.HashFilesContext,
 	}
 }
 

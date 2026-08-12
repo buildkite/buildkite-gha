@@ -214,17 +214,16 @@ jobs:
 			want: `conditions.yml:5:9: job "test": job condition: condition reference "github.event.action" is unavailable at runtime`,
 		},
 		{
-			name: "named step function",
+			name: "job hash function",
 			source: `on: push
 jobs:
   test:
     runs-on: ubuntu-latest
+    if: hashFiles('go.sum') != ''
     steps:
-      - id: inspect
-        if: hashFiles('go.sum') != ''
-        run: true
+      - run: true
 `,
-			want: `conditions.yml:7:13: job "test": step "inspect" condition: condition function "hashFiles" is unsupported`,
+			want: `conditions.yml:5:9: job "test": job condition: condition function "hashFiles" is unavailable in job conditions`,
 		},
 		{
 			name: "anonymous step context",

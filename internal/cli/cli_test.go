@@ -1186,7 +1186,7 @@ jobs:
   bad-condition:
     runs-on: ubuntu-latest
     steps:
-      - if: ${{ hashFiles('go.sum') }}
+      - if: ${{ contains('go.sum', 'sum') }}
         run: true
   bad-runner:
     runs-on: windows-latest

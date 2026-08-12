@@ -25,6 +25,7 @@ type ConditionContext struct {
 	Failure      bool
 	Cancelled    bool
 	Unsuccessful bool
+	HashFiles    func([]string) (string, error)
 }
 
 // ConditionScope identifies the runtime phase in which a workflow condition
@@ -119,6 +120,19 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 				return fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
 			}
 			return nil
+		case "hashfiles":
+			if scope != StepCondition {
+				return fmt.Errorf("condition function %q is unavailable in job conditions", node.Callee)
+			}
+			if len(node.Args) == 0 || len(node.Args) > 255 {
+				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
+			}
+			for _, argument := range node.Args {
+				if err := validateHashFilesArgument(argument, scope, matrix, matrixKnown); err != nil {
+					return err
+				}
+			}
+			return nil
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
@@ -192,6 +206,16 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 			}
 			_, err := evaluateCompileNode(node, context)
 			return err
+		case strings.EqualFold(node.Callee, "hashFiles") && scope == StepCondition:
+			if len(node.Args) == 0 || len(node.Args) > 255 {
+				return fmt.Errorf("condition function %q requires 1 to 255 arguments", node.Callee)
+			}
+			for _, argument := range node.Args {
+				if err := validateHashFilesArgument(argument, scope, matrix, true); err != nil {
+					return err
+				}
+			}
+			return nil
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
@@ -215,7 +239,12 @@ func conditionOperandCategory(node actionlint.ExprNode, matrix map[string]any) s
 	switch node := node.(type) {
 	case *actionlint.NullNode:
 		return "null"
-	case *actionlint.BoolNode, *actionlint.NotOpNode, *actionlint.LogicalOpNode, *actionlint.CompareOpNode, *actionlint.FuncCallNode:
+	case *actionlint.BoolNode, *actionlint.NotOpNode, *actionlint.LogicalOpNode, *actionlint.CompareOpNode:
+		return "boolean"
+	case *actionlint.FuncCallNode:
+		if strings.EqualFold(node.Callee, "hashFiles") {
+			return "string"
+		}
 		return "boolean"
 	case *actionlint.IntNode, *actionlint.FloatNode:
 		return "number"
@@ -357,14 +386,14 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 	if empty {
 		return !context.Unsuccessful && !context.Cancelled, nil
 	}
+	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
+		return false, nil
+	}
 	value, err := evaluateConditionNode(node, context)
 	if err != nil {
 		return false, err
 	}
 	result := conditionTruthy(value)
-	if !containsStatusFunction(node) && (context.Unsuccessful || context.Cancelled) {
-		return false, nil
-	}
 	return result, nil
 }
 
@@ -431,23 +460,77 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 			return nil, fmt.Errorf("condition comparison %s is unsupported", node.Kind)
 		}
 	case *actionlint.FuncCallNode:
-		if len(node.Args) != 0 {
-			return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
-		}
 		switch strings.ToLower(node.Callee) {
 		case "always":
+			if len(node.Args) != 0 {
+				return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+			}
 			return true, nil
 		case "success":
+			if len(node.Args) != 0 {
+				return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+			}
 			return !context.Unsuccessful && !context.Cancelled, nil
 		case "failure":
+			if len(node.Args) != 0 {
+				return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+			}
 			return context.Failure, nil
 		case "cancelled":
+			if len(node.Args) != 0 {
+				return nil, fmt.Errorf("condition function %q arguments are unsupported", node.Callee)
+			}
 			return context.Cancelled, nil
+		case "hashfiles":
+			if context.HashFiles == nil {
+				return nil, fmt.Errorf("condition function %q is unavailable", node.Callee)
+			}
+			patterns, err := evaluateHashFilesArguments(node.Args, func(argument actionlint.ExprNode) (any, error) {
+				return evaluateConditionHashFilesArgument(argument, context)
+			})
+			if err != nil {
+				return nil, err
+			}
+			return context.HashFiles(patterns)
 		default:
 			return nil, fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
 	default:
 		return nil, fmt.Errorf("unsupported condition expression")
+	}
+}
+
+func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
+	switch node.(type) {
+	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
+		return nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		return validateConditionNode(node, scope, matrix, matrixKnown)
+	default:
+		return fmt.Errorf("condition function %q arguments must be literals or direct context references", "hashFiles")
+	}
+}
+
+func evaluateConditionHashFilesArgument(node actionlint.ExprNode, context ConditionContext) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.NullNode:
+		return nil, nil
+	case *actionlint.BoolNode:
+		return node.Value, nil
+	case *actionlint.IntNode:
+		return node.Value, nil
+	case *actionlint.FloatNode:
+		return node.Value, nil
+	case *actionlint.StringNode:
+		return node.Value, nil
+	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+		root, path, err := referencePath(node)
+		if err != nil {
+			return nil, err
+		}
+		return resolveConditionReference(root, path, context)
+	default:
+		return nil, fmt.Errorf("arguments must be literals or direct context references")
 	}
 }
 
