@@ -1,0 +1,30 @@
+name: Oracle - nested GITHUB_TOKEN leaf
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: Branch label
+        required: true
+        type: string
+    outputs:
+      token-fingerprint:
+        description: SHA-256 fingerprint of this job's token
+        value: ${{ jobs.inspect.outputs.token-fingerprint }}
+
+jobs:
+  inspect:
+    name: ${{ inputs.label }} / inspect token
+    runs-on: ubuntu-latest
+    outputs:
+      token-fingerprint: ${{ steps.token.outputs.fingerprint }}
+    steps:
+      - name: Fingerprint token without exposing it
+        id: token
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$GH_TOKEN"
+          fingerprint="$(printf '%s' "$GH_TOKEN" | sha256sum | cut -d ' ' -f 1)"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"

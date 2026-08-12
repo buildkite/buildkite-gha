@@ -1,0 +1,51 @@
+name: Oracle - nested GITHUB_TOKEN scopes
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  contents:
+    name: Contents token
+    permissions:
+      contents: read
+    uses: ./.github/workflows/github-token-nesting-middle.yml
+    with:
+      label: contents
+
+  issues:
+    name: Issues token
+    permissions:
+      issues: read
+    uses: ./.github/workflows/github-token-nesting-middle.yml
+    with:
+      label: issues
+
+  verify:
+    name: Verify distinct job tokens
+    needs: [contents, issues]
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare token fingerprints
+        shell: bash
+        env:
+          CONTENTS_FINGERPRINT: ${{ needs.contents.outputs.token-fingerprint }}
+          ISSUES_FINGERPRINT: ${{ needs.issues.outputs.token-fingerprint }}
+        run: |
+          test -n "$CONTENTS_FINGERPRINT"
+          test -n "$ISSUES_FINGERPRINT"
+          test "$CONTENTS_FINGERPRINT" != "$ISSUES_FINGERPRINT"
+          {
+            echo '## Nested `GITHUB_TOKEN` result'
+            echo
+            echo 'The nested jobs received distinct tokens.'
+            echo
+            echo '| Branch | Caller permission | Token fingerprint |'
+            echo '| --- | --- | --- |'
+            printf '| contents | `contents: read` | `%s…` |\n' "${CONTENTS_FINGERPRINT:0:12}"
+            printf '| issues | `issues: read` | `%s…` |\n' "${ISSUES_FINGERPRINT:0:12}"
+            echo
+            echo 'Open each nested job and inspect **Set up job → GITHUB_TOKEN Permissions** to see its effective scope.'
+          } >> "$GITHUB_STEP_SUMMARY"

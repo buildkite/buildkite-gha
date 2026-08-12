@@ -1,0 +1,20 @@
+name: Oracle - nested GITHUB_TOKEN middle
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        description: Branch label
+        required: true
+        type: string
+    outputs:
+      token-fingerprint:
+        description: SHA-256 fingerprint of the leaf job token
+        value: ${{ jobs.leaf.outputs.token-fingerprint }}
+
+jobs:
+  leaf:
+    name: ${{ inputs.label }} / nested call
+    uses: ./.github/workflows/github-token-nesting-leaf.yml
+    with:
+      label: ${{ inputs.label }}
