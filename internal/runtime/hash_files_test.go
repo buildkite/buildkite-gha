@@ -437,6 +437,38 @@ func TestHashFilesStepConditionFailureRunsFailureCleanup(t *testing.T) {
 	}
 }
 
+func TestHashFilesRemotePreFailureUsesStepConclusion(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: hashFiles remote pre failure\n")
+	writeFixtureFile(t, workspace, "target", "value")
+	if err := os.Symlink("target", filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action/action.yml", "name: pre failure\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "action/pre.js", "")
+	writeFixtureFile(t, remote, "action/main.js", "")
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	marker := filepath.Join(workspace, "continued")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "invalid", Kind: "uses", Uses: remoteLifecycleUses("action"), Action: &plan.ActionSelector{Lock: lockID}, ContinueOnError: true, Env: map[string]string{"HASH": "${{ hashFiles('link') }}"}},
+		{ID: "after", Kind: "run", Shell: "sh", Condition: "steps.invalid.outcome == 'failure' && steps.invalid.conclusion == 'success'", Command: "touch " + marker},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(lockID, "action", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later step did not run: %v", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string

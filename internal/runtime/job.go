@@ -456,6 +456,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	var runErr error
 	prepared := remotePreparations{}
 	preStatus := remotePreparationStatus{}
+	preFailures := make(map[int]stepExecution)
 	if job.Schema == plan.SchemaV3 || job.Schema == plan.SchemaV4 || ((job.Schema == plan.SchemaV5 || job.Schema == plan.SchemaV6 || job.Schema == plan.SchemaV7 || job.Schema == plan.SchemaV8) && len(job.Actions) != 0) {
 		for stepIndex, step := range job.Steps {
 			eval.JobStatus = jobStatusValue(runErr != nil, runCtx.Err() != nil)
@@ -486,15 +487,20 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preEval := cloneExpressionContext(eval)
 			bindHashFilesContext(preCtx, &preEval)
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
+			if preErr != nil {
+				execution := classifyStepExecution(ctx, preCtx, step, preResult, fmt.Errorf("action %q pre: %w", step.Uses, preErr))
+				preFailures[stepIndex] = execution
+				if execution.conclusion != "success" {
+					preStatus.unsuccessful = true
+				}
+				cancelPre()
+				continue
+			}
 			cancelPre()
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
-			if preErr != nil {
-				preStatus.unsuccessful = true
-				runErr = errors.Join(runErr, fmt.Errorf("action %q pre: %w", step.Uses, preErr))
-			}
 		}
 	}
 	for stepIndex, step := range job.Steps {
@@ -532,6 +538,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: outcome, Conclusion: conclusion, Outputs: map[string]string{}}
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
+			continue
+		}
+		if execution, ok := preFailures[stepIndex]; ok {
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 			continue
 		}
 
