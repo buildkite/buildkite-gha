@@ -144,6 +144,9 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		if context.EventPredicate == "" || context.Branch == "" || context.Tag == "" {
 			return "", false, fmt.Errorf("push requires effective event, branch, and tag expressions")
 		}
+		if context.Branch == "null" && context.Tag == "null" {
+			return "", false, fmt.Errorf("push event snapshot requires ref to start with refs/heads/ or refs/tags/")
+		}
 		parts := []string{context.EventPredicate}
 		branch, hasBranchFilter, err := refFilters(context.Branch, t.Branches, t.BranchesIgnore)
 		if err != nil {

@@ -2380,6 +2380,54 @@ func TestExpandWorkflowPatternNamespacesLiteralDirectoryMatches(t *testing.T) {
 	}
 }
 
+func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
+	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	for _, test := range []struct {
+		name   string
+		target func(repository string) string
+	}{
+		{
+			name: "outside repository",
+			target: func(string) string {
+				path := filepath.Join(t.TempDir(), "outside.yml")
+				if err := os.WriteFile(path, []byte(workflowSource), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "inside repository",
+			target: func(repository string) string {
+				return filepath.Join(repository, ".github", "workflows", "regular.yml")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := writeUploadWorkflowRepository(t, map[string]string{"regular.yml": workflowSource})
+			link := filepath.Join(repository, ".github", "workflows", "linked.yml")
+			if err := os.Symlink(test.target(repository), link); err != nil {
+				t.Fatal(err)
+			}
+			if output, err := exec.Command("git", "-C", repository, "add", ".github/workflows/linked.yml").CombinedOutput(); err != nil {
+				t.Fatalf("git add symlink: %v: %s", err, output)
+			}
+			eventPath := writeUploadEvent(t, repository, "push", "refs/heads/main", map[string]any{})
+			t.Chdir(repository)
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_STEP_KEY", "symlink-importer")
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "does not name a regular tracked file") {
+				t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+			}
+			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("tracked symlink reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
 func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -3100,6 +3148,38 @@ func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 				t.Fatalf("incomplete pull request reached Buildkite: commands %#v, uploads %#v", runner.commands, runner.uploaded)
 			}
 		})
+	}
+}
+
+func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
+	workflow := "on:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{"push.yml": workflow})
+	eventPath := writeUploadEvent(t, repository, "push", "refs/pull/42/head", map[string]any{})
+	workflowPath := filepath.Join(repository, ".github", "workflows", "push.yml")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
+		t.Fatalf("validate code/stderr = %d / %q", code, stderr.String())
+	}
+	var report compatibility.ProcessingReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Result != "incompatible" || report.Admission.Result == "admitted" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, "refs/heads/") {
+		t.Fatalf("malformed push profile report = %#v", report)
+	}
+
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "malformed-push-importer")
+	runner := &cliCaptureRunner{}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/push.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "refs/heads/") {
+		t.Fatalf("upload code/stderr = %d / %q", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "null == null") || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("malformed push emitted a condition or reached Buildkite: stderr %q, commands %#v, uploads %#v", stderr.String(), runner.commands, runner.uploaded)
 	}
 }
 

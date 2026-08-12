@@ -1800,15 +1800,11 @@ func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
 			return nil, fmt.Errorf("workflow path %q is outside the checked-out git repository", operand)
 		}
 		canonical := filepath.ToSlash(filepath.Clean(relative))
-		info, err := os.Lstat(absolute)
-		if err != nil {
+		if err := requireRegularWorkflowFile(absolute, operand); err != nil {
 			if strings.ContainsAny(operand, "*?[") {
 				return nil, fmt.Errorf("multiple workflow operands must be explicit paths; glob pattern %q is not allowed", operand)
 			}
-			return nil, fmt.Errorf("workflow path %q does not name a regular tracked file", operand)
-		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("workflow path %q does not name a regular tracked file", operand)
+			return nil, err
 		}
 		extension := filepath.Ext(canonical)
 		if extension != ".yml" && extension != ".yaml" {
@@ -1872,7 +1868,11 @@ func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
 			continue
 		}
 		canonical := string(entry)
-		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
+		path := filepath.Join(root, filepath.FromSlash(canonical))
+		if err := requireRegularWorkflowFile(path, canonical); err != nil {
+			return nil, err
+		}
+		matches = append(matches, workflowInput{Path: path, CanonicalPath: canonical})
 	}
 	if len(matches) == 0 && !patternHasMeta {
 		if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
@@ -1883,6 +1883,14 @@ func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
 		return nil, fmt.Errorf("workflow pattern %q matched no tracked files", pattern)
 	}
 	return workflowInputs(matches, patternHasMeta || len(matches) > 1)
+}
+
+func requireRegularWorkflowFile(path, displayPath string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("workflow path %q does not name a regular tracked file", displayPath)
+	}
+	return nil
 }
 
 func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInput, error) {

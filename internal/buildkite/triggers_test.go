@@ -144,6 +144,23 @@ func TestTranslateEventTriggerConditionRejectsIncompletePullRequestSnapshot(t *t
 	}
 }
 
+func TestTranslateEventTriggerConditionRejectsUnclassifiablePushSnapshot(t *testing.T) {
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
+		Event:    "push",
+		Branches: []string{"main"},
+	}}, "push", TriggerConditionContext{
+		EventPredicate: "true",
+		Branch:         "null",
+		Tag:            "null",
+	})
+	if err == nil || !strings.Contains(err.Error(), "refs/heads/") {
+		t.Fatalf("unclassifiable push error = %v", err)
+	}
+	if condition != "" || applicable {
+		t.Fatalf("unclassifiable push condition/applicability = %q / %t", condition, applicable)
+	}
+}
+
 func TestTriggerEventSkipReason(t *testing.T) {
 	triggers := []workflow.Trigger{
 		{Event: "push", Branches: []string{"main"}},
