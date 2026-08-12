@@ -176,9 +176,10 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		return 1
 	}
 	return uploadParsed(parsedUploadArgs{
-		workflowOperands:  []string{configuration.Workflow},
-		runnerTargets:     configuration.runnerTargets,
-		pluginAcquisition: &pluginRuntimeAcquisition{version: version},
+		workflowOperands:      configuration.Workflows,
+		explicitWorkflowPaths: configuration.explicitWorkflowPaths,
+		runnerTargets:         configuration.runnerTargets,
+		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
@@ -190,8 +191,9 @@ func validateImporterPlatform(goos, goarch string) error {
 }
 
 type pluginConfiguration struct {
-	Workflow      string
-	runnerTargets map[string]compiler.RunnerTarget
+	Workflows             []string
+	explicitWorkflowPaths bool
+	runnerTargets         map[string]compiler.RunnerTarget
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -215,14 +217,46 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "runners", "version", "source-ref", "minimum-release-age":
+		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
 	}
-	workflow, ok := encoded["workflow"].(string)
-	if !ok || strings.TrimSpace(workflow) == "" {
-		return pluginConfiguration{}, fmt.Errorf("%s workflow is required", pluginConfigurationEnvironment)
+	legacyWorkflow, hasLegacyWorkflow := encoded["workflow"]
+	workflowsValue, hasWorkflows := encoded["workflows"]
+	if hasLegacyWorkflow && hasWorkflows {
+		return pluginConfiguration{}, fmt.Errorf("%s workflow and workflows are mutually exclusive", pluginConfigurationEnvironment)
+	}
+	var workflows []string
+	explicitWorkflowPaths := false
+	if hasLegacyWorkflow {
+		workflow, ok := legacyWorkflow.(string)
+		if !ok || strings.TrimSpace(workflow) == "" {
+			return pluginConfiguration{}, fmt.Errorf("%s workflow must be a non-empty string", pluginConfigurationEnvironment)
+		}
+		workflows = []string{workflow}
+	} else {
+		switch value := workflowsValue.(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				workflows = []string{value}
+			}
+		case []any:
+			if len(value) != 0 {
+				explicitWorkflowPaths = true
+				workflows = make([]string, len(value))
+				for index, entry := range value {
+					workflow, ok := entry.(string)
+					if !ok || strings.TrimSpace(workflow) == "" {
+						return pluginConfiguration{}, fmt.Errorf("%s workflows entry %d must be a non-empty string", pluginConfigurationEnvironment, index)
+					}
+					workflows[index] = workflow
+				}
+			}
+		}
+		if len(workflows) == 0 {
+			return pluginConfiguration{}, fmt.Errorf("%s workflows is required and must be a non-empty string or array of non-empty strings", pluginConfigurationEnvironment)
+		}
 	}
 	targets := make(map[string]compiler.RunnerTarget)
 	if runnersValue, configured := encoded["runners"]; configured {
@@ -268,7 +302,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflow: workflow, runnerTargets: targets}, nil
+	return pluginConfiguration{Workflows: workflows, explicitWorkflowPaths: explicitWorkflowPaths, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
@@ -1362,7 +1396,13 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
-	workflows, err := expandWorkflowOperands(workflowOperands)
+	var workflows []workflowInput
+	var err error
+	if uploadArguments.explicitWorkflowPaths {
+		workflows, err = expandExplicitWorkflowPaths(workflowOperands)
+	} else {
+		workflows, err = expandWorkflowOperands(workflowOperands)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
@@ -1784,6 +1824,10 @@ func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
 	if len(operands) == 1 {
 		return expandWorkflowPattern(operands[0])
 	}
+	return expandExplicitWorkflowPaths(operands)
+}
+
+func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
 	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
@@ -1802,7 +1846,7 @@ func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
 		canonical := filepath.ToSlash(filepath.Clean(relative))
 		if err := requireRegularWorkflowFile(absolute, operand); err != nil {
 			if strings.ContainsAny(operand, "*?[") {
-				return nil, fmt.Errorf("multiple workflow operands must be explicit paths; glob pattern %q is not allowed", operand)
+				return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 			}
 			return nil, err
 		}
@@ -1814,7 +1858,7 @@ func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
 		entries := bytes.Split(output, []byte{0})
 		if err != nil || len(entries) != 2 || string(entries[0]) != canonical || len(entries[1]) != 0 {
 			if strings.ContainsAny(operand, "*?[") {
-				return nil, fmt.Errorf("multiple workflow operands must be explicit paths; glob pattern %q is not allowed", operand)
+				return nil, fmt.Errorf("workflow list entries must be explicit paths; glob pattern %q is not allowed", operand)
 			}
 			return nil, fmt.Errorf("workflow path %q is not tracked by git", operand)
 		}
@@ -2194,6 +2238,7 @@ func bundleUsesActions(bundle compiler.Bundle) bool {
 
 type parsedUploadArgs struct {
 	workflowOperands         []string
+	explicitWorkflowPaths    bool
 	eventPath                string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget

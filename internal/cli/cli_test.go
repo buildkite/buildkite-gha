@@ -148,7 +148,7 @@ func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 func TestParsePluginConfiguration(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	configuration, err := parsePluginConfiguration(`{
-  "workflow": ".github/workflows/ci.yml",
+  "workflows": [".github/workflows/ci.yml", ".github/workflows/release.yml"],
   "version": "0.8.0",
   "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
@@ -160,8 +160,11 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if configuration.Workflow != ".github/workflows/ci.yml" || len(configuration.runnerTargets) != 2 {
+	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
+	}
+	if !configuration.explicitWorkflowPaths {
+		t.Fatal("workflows array did not retain explicit path semantics")
 	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
 		t.Fatalf("Linux target = %#v", got)
@@ -169,9 +172,13 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
-	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
-	if err != nil || minimal.Workflow != "workflow.yml" || len(minimal.runnerTargets) != 0 {
+	minimal, err := parsePluginConfiguration(`{"workflows":"workflow.yml"}`)
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.explicitWorkflowPaths || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
+	}
+	legacy, err := parsePluginConfiguration(`{"workflow":"legacy.yml"}`)
+	if err != nil || !slices.Equal(legacy.Workflows, []string{"legacy.yml"}) {
+		t.Fatalf("legacy configuration = %#v, %v", legacy, err)
 	}
 
 	for _, test := range []struct {
@@ -180,8 +187,14 @@ func TestParsePluginConfiguration(t *testing.T) {
 		want   string
 	}{
 		{name: "malformed", source: `{`, want: "decode"},
-		{name: "missing workflow", source: `{}`, want: "workflow is required"},
+		{name: "missing workflows", source: `{}`, want: "workflows is required"},
 		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
+		{name: "both workflow fields", source: `{"workflow":"one.yml","workflows":"two.yml"}`, want: "mutually exclusive"},
+		{name: "empty workflow", source: `{"workflow":""}`, want: "workflow must be a non-empty string"},
+		{name: "empty workflows string", source: `{"workflows":""}`, want: "non-empty string or array"},
+		{name: "empty workflows array", source: `{"workflows":[]}`, want: "non-empty string or array"},
+		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
+		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
 		{name: "retired source acquisition field", source: `{"workflow":"ci.yml","buildkite-gha-source-ref":"latest"}`, want: "unknown field"},
 		{name: "null runners", source: `{"workflow":"ci.yml","runners":null}`, want: "non-empty array"},
@@ -276,8 +289,8 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := json.Marshal(map[string]any{
-		"workflow": workflowPath,
-		"version":  "0.8.0",
+		"workflows": workflowPath,
+		"version":   "0.8.0",
 		"runners": []map[string]string{
 			{"runs-on": "ubuntu-latest", "queue": "hosted"},
 		},
@@ -316,6 +329,60 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
+	}
+}
+
+func TestPluginUploadsPluralWorkflowList(t *testing.T) {
+	requireImporterHost(t)
+	configuration, err := json.Marshal(map[string]any{
+		"workflows": []string{
+			filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml"),
+			filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-workflows")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 5 jobs from 2 workflows") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 {
+		t.Fatalf("workflow groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestPluginRejectsGlobInSingleEntryWorkflowList(t *testing.T) {
+	requireImporterHost(t)
+	configuration, err := json.Marshal(map[string]any{
+		"workflows": []string{filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*.yml")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-workflows-glob")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "explicit paths") {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+		t.Fatalf("invalid workflow list reached Buildkite: stdout %q, commands %#v, uploads %#v", stdout.String(), runner.commands, runner.uploaded)
 	}
 }
 
