@@ -51,9 +51,7 @@ plugins:
       version: "0.8.0"
 ```
 
-Native macOS labels require an explicit queue mapping. Each mapping binds a
-`runs-on` label to a Buildkite queue; Linux mappings may also select an
-immutable digest-pinned image:
+Native macOS labels require a queue mapping:
 
 ```yaml
 plugins:
@@ -61,16 +59,11 @@ plugins:
       version: "<release-with-linux-and-darwin-assets>"
       workflow: .github/workflows/ci.yml
       runners:
-        - runs-on: ubuntu-latest
-          queue: hosted
-          image: buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03
         - runs-on: macos-14
           queue: macos-sonoma-arm64
 ```
 
-The macOS queue must provide native Apple-silicon agents and the tools the
-workflow uses. A label such as `macos-14` does not promise GitHub's image or
-Xcode inventory.
+A macOS label selects native Darwin/arm64, not a GitHub image or Xcode inventory.
 
 The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
 

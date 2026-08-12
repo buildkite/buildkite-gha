@@ -274,25 +274,10 @@ jobs:
 
 Results and outputs come from verified producer manifests. Retrying one producer can make selection ambiguous; retry the whole build.
 
-Runner labels are compatibility labels, not GitHub image selection. The
-selected Buildkite agent must provide the tools the workflow uses. Supported
-Linux labels retain default Buildkite agent targeting when they are not mapped.
-Every macOS label must be mapped to an explicit native Apple-silicon queue:
-
-```yaml
-plugins:
-  - github-actions#main:
-      workflow: .github/workflows/ci.yml
-      runners:
-        - runs-on: macos-14
-          queue: macos-sonoma-arm64
-```
-
-Each runner profile requires `runs-on` and `queue`. An optional `image` must be
-an immutable digest-pinned Linux image. Images are rejected for macOS. Duplicate,
-unsupported, or unmapped required labels fail closed. `macos-latest`, `macos-15`,
-and `macos-14` select the native Darwin/arm64 runtime, but do not promise GitHub's
-macOS image, installed Xcode versions, or tool inventory.
+Runner labels do not select GitHub images. Unmapped Linux labels use default
+Buildkite targeting. macOS labels require a runner profile with a native queue;
+images are Linux-only. macOS labels select Darwin/arm64, not a GitHub image or
+Xcode inventory.
 
 ### Matrix strategies
 
@@ -324,8 +309,7 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
 
-macOS jobs reject job containers, services, Dockerfile actions (including those
-reached through composite actions), and every other Docker capability.
+macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
 
 ## Step syntax
 
@@ -486,7 +470,7 @@ Nested calls from a repository-local composite must be local. Public composites 
 | Action declaration | Runtime |
 | --- | --- |
 | `node16` | Managed Node 16.20.2, with one end-of-job deprecation warning. |
-| `node20` | Managed Node 20.20.2. |
+| `node20` | Managed Node 24.18.0. |
 | `node24` | Managed Node 24.18.0. |
 
 Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are supported. Other Node declarations are rejected.
@@ -644,15 +628,12 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Runner tools
 
-Accepted Ubuntu and macOS labels do not select GitHub-hosted images. The
-Buildkite agent must provide external tools used by shell steps. The runtime
-sets `RUNNER_OS=Linux` and `RUNNER_ARCH=X64` on Linux, and
-`RUNNER_OS=macOS` and `RUNNER_ARCH=ARM64` on macOS.
+Accepted labels do not select GitHub-hosted images. Agents must provide tools
+used by shell steps. The runtime sets `RUNNER_OS` and `RUNNER_ARCH` to
+`Linux`/`X64` or `macOS`/`ARM64`.
 
-By default, `RUNNER_TOOL_CACHE` points to a fresh job-private directory. A Linux
-runner profile may select an immutable runtime image; generated jobs then use
-that image's baked `/opt/hostedtoolcache` inventory. Mutable image tags and all
-macOS images are rejected. Dockerfile actions do not receive `RUNNER_TOOL_CACHE`.
+`RUNNER_TOOL_CACHE` is job-private unless a Linux runner profile selects an
+immutable image with `/opt/hostedtoolcache`. macOS images are unsupported.
 
 ### Results, retries, and cancellation
 
