@@ -1,6 +1,7 @@
 name: Oracle - nested GITHUB_TOKEN scopes
 
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions: {}
