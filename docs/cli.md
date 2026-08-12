@@ -113,17 +113,7 @@ workflow requires it. Custom importers can use the public flags below.
 
 ### Select workflows
 
-The public `upload` command retains selector expansion for custom importers.
-
-Use `*` for every tracked `.yml` and `.yaml` file directly under `.github/workflows`:
-
-```sh
-buildkite-gha upload '*'
-```
-
-Quote `*` in shells and YAML. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
-
-Two or more operands switch to explicit-list mode:
+Pass every workflow path explicitly:
 
 ```sh
 buildkite-gha upload -- \
@@ -131,7 +121,7 @@ buildkite-gha upload -- \
   .github/workflows/release.yml
 ```
 
-Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, missing or untracked files, files outside the repository, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs. A tracked filename containing glob metacharacters remains literal, but an unmatched glob mixed into a list—or two glob operands—is rejected rather than expanded independently.
+Every operand must name one regular `.yml` or `.yaml` file. When uploading more than one workflow, every path must be tracked inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, globs, missing files, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs; aggregate uploads also reject untracked and outside paths.
 
 `--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
 

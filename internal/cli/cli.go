@@ -55,7 +55,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] [--] <workflow-pattern | workflow-path> [<workflow-path>...]\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -67,7 +67,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nThe * shorthand selects tracked .yml and .yaml files directly under .github/workflows. One workflow operand preserves literal, directory, and tracked glob expansion. Two or more operands are explicit tracked .yml/.yaml paths; use -- before paths that begin with a dash. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -1403,7 +1403,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	if uploadArguments.explicitWorkflowPaths {
 		workflows, err = expandExplicitWorkflowPaths(workflowOperands)
 	} else {
-		workflows, err = expandWorkflowOperands(workflowOperands)
+		workflows, err = resolveWorkflowOperands(workflowOperands)
 	}
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
@@ -1429,11 +1429,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	if runnableWorkflowCount == 0 {
-		if len(workflowOperands) == 1 {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: workflow pattern %q matched only reusable workflow_call workflows; there is nothing to upload\n", workflowOperands[0])
-		} else {
-			_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
-		}
+		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1819,17 +1815,35 @@ type workflowInput struct {
 	ReusableOnly, Applicable                              bool
 }
 
-func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
-	if len(operands) == 0 {
-		return nil, fmt.Errorf("workflow path is required")
+func resolveWorkflowOperands(operands []string) ([]workflowInput, error) {
+	if len(operands) != 1 {
+		return expandExplicitWorkflowPaths(operands)
 	}
-	if len(operands) == 1 {
-		return expandWorkflowPattern(operands[0])
+	path, err := filepath.Abs(operands[0])
+	if err != nil {
+		return nil, fmt.Errorf("resolve workflow path %q: %w", operands[0], err)
 	}
-	return expandExplicitWorkflowPaths(operands)
+	if err := requireRegularWorkflowFile(path, operands[0]); err != nil {
+		return expandExplicitWorkflowPaths(operands)
+	}
+	extension := filepath.Ext(path)
+	if extension != ".yml" && extension != ".yaml" {
+		return nil, fmt.Errorf("workflow path %q must end in .yml or .yaml", operands[0])
+	}
+	canonical := filepath.ToSlash(filepath.Clean(operands[0]))
+	if rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output(); rootErr == nil {
+		root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
+		if relative, relativeErr := filepath.Rel(root, path); relativeErr == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			canonical = filepath.ToSlash(filepath.Clean(relative))
+		}
+	}
+	return workflowInputs([]workflowInput{{Path: path, CanonicalPath: canonical}}, false)
 }
 
 func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
+	if len(operands) == 0 {
+		return nil, fmt.Errorf("workflow path is required")
+	}
 	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
@@ -1867,77 +1881,6 @@ func expandExplicitWorkflowPaths(operands []string) ([]workflowInput, error) {
 		matches = append(matches, workflowInput{Path: filepath.Join(root, filepath.FromSlash(canonical)), CanonicalPath: canonical})
 	}
 	return workflowInputs(matches, true)
-}
-
-func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
-	allWorkflows := pattern == "*"
-	patternHasMeta := allWorkflows || strings.ContainsAny(pattern, "*?[")
-	if info, err := os.Stat(pattern); !allWorkflows && err == nil && !info.IsDir() {
-		// An existing path is always literal, even when its filename contains
-		// glob metacharacters. This preserves the pre-pattern CLI contract.
-		patternHasMeta = false
-	}
-	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-	if rootErr != nil {
-		if !patternHasMeta {
-			if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
-				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
-			}
-		}
-		return nil, fmt.Errorf("locate checked-out git repository: %w", rootErr)
-	}
-	root := strings.TrimSpace(string(rootBytes))
-	pathspecs := []string{
-		":(top,glob).github/workflows/*.yml",
-		":(top,glob).github/workflows/*.yaml",
-	}
-	if !allWorkflows {
-		absolutePattern, err := filepath.Abs(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("resolve workflow pattern %q: %w", pattern, err)
-		}
-		relativePattern, err := filepath.Rel(root, absolutePattern)
-		if err != nil || relativePattern == ".." || strings.HasPrefix(relativePattern, ".."+string(filepath.Separator)) {
-			if !patternHasMeta {
-				if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
-					return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
-				}
-			}
-			return nil, fmt.Errorf("workflow pattern %q is outside the checked-out git repository", pattern)
-		}
-		pathspecMagic := ":(literal)"
-		if patternHasMeta {
-			pathspecMagic = ":(glob)"
-		}
-		pathspecs = []string{pathspecMagic + filepath.ToSlash(relativePattern)}
-	}
-	commandArgs := append([]string{"-C", root, "ls-files", "-z", "--"}, pathspecs...)
-	command := exec.Command("git", commandArgs...)
-	output, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("expand workflow pattern %q against tracked files: %w", pattern, err)
-	}
-	var matches []workflowInput
-	for _, entry := range bytes.Split(output, []byte{0}) {
-		if len(entry) == 0 {
-			continue
-		}
-		canonical := string(entry)
-		path := filepath.Join(root, filepath.FromSlash(canonical))
-		if err := requireRegularWorkflowFile(path, canonical); err != nil {
-			return nil, err
-		}
-		matches = append(matches, workflowInput{Path: path, CanonicalPath: canonical})
-	}
-	if len(matches) == 0 && !patternHasMeta {
-		if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
-			return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
-		}
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("workflow pattern %q matched no tracked files", pattern)
-	}
-	return workflowInputs(matches, patternHasMeta || len(matches) > 1)
 }
 
 func requireRegularWorkflowFile(path, displayPath string) error {
