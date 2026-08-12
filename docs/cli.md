@@ -95,7 +95,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-It requires `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow` and
 `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`; it also accepts the plugin-owned

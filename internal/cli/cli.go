@@ -65,7 +65,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprintf(stdout, "\nEach repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue; a matching --runner-image may select one immutable Linux image. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Linux defaults to the importer executable when omitted; macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprintf(stdout, "\nEach repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue; a matching --runner-image may select one immutable Linux image. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -159,8 +159,8 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
 	}
-	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: importer requires linux/amd64, running on %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	if err := validateImporterPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
 	configuration, err := parsePluginConfiguration(os.Getenv(pluginConfigurationEnvironment))
@@ -176,6 +176,13 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		runnerTargets:     configuration.runnerTargets,
 		pluginAcquisition: &pluginRuntimeAcquisition{version: version},
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
+}
+
+func validateImporterPlatform(goos, goarch string) error {
+	if goos != "linux" || goarch != "amd64" {
+		return fmt.Errorf("importer requires linux/amd64, running on %s/%s", goos, goarch)
+	}
+	return nil
 }
 
 type pluginConfiguration struct {
@@ -1237,6 +1244,10 @@ func writeCompilerWarnings(stderr io.Writer, command, path string, warnings []co
 }
 
 func upload(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	if err := validateImporterPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+		return 1
+	}
 	uploadArguments, err := parseUploadArgs(args)
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)

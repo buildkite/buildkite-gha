@@ -185,6 +185,23 @@ func TestParsePluginConfiguration(t *testing.T) {
 	}
 }
 
+func TestValidateImporterPlatform(t *testing.T) {
+	if err := validateImporterPlatform("linux", "amd64"); err != nil {
+		t.Fatalf("linux/amd64 importer rejected: %v", err)
+	}
+	for _, platform := range []struct {
+		goos   string
+		goarch string
+	}{
+		{goos: "darwin", goarch: "arm64"},
+		{goos: "linux", goarch: "arm64"},
+	} {
+		if err := validateImporterPlatform(platform.goos, platform.goarch); err == nil || !strings.Contains(err.Error(), "importer requires linux/amd64") {
+			t.Fatalf("validateImporterPlatform(%q, %q) error = %v", platform.goos, platform.goarch, err)
+		}
+	}
+}
+
 func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	executable, err := os.Executable()
