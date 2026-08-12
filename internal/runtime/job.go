@@ -487,8 +487,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preEval := cloneExpressionContext(eval)
 			bindHashFilesContext(preCtx, &preEval)
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
+			commitResultEnvironment(jobResult.Env, preResult)
+			mergeInto(jobResult.State, preResult.State)
+			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
+			eval.Env = jobResult.Env
 			if preErr != nil {
-				execution := classifyStepExecution(ctx, preCtx, step, preResult, fmt.Errorf("action %q pre: %w", step.Uses, preErr))
+				execution := classifyStepExecution(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre: %w", step.Uses, preErr))
 				preFailures[stepIndex] = execution
 				if execution.conclusion != "success" {
 					preStatus.unsuccessful = true
@@ -497,10 +501,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			cancelPre()
-			commitResultEnvironment(jobResult.Env, preResult)
-			mergeInto(jobResult.State, preResult.State)
-			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
-			eval.Env = jobResult.Env
 		}
 	}
 	for stepIndex, step := range job.Steps {

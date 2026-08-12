@@ -4431,6 +4431,58 @@ if [ "$action:$phase" = fails:pre ]; then exit 7; fi
 	}
 }
 
+func TestRemoteActionPreFailurePropagatesEnvironmentToLaterPre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: failed remote pre effects\n")
+	remote := t.TempDir()
+	for _, name := range []string{"fails", "after"} {
+		writeFixtureFile(t, remote, name+"/action.yml", "name: "+name+"\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+		writeFixtureFile(t, remote, name+"/pre.js", "")
+		writeFixtureFile(t, remote, name+"/main.js", "")
+	}
+	marker := filepath.Join(workspace, "observed")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+action=$(basename "$(dirname "$1")")
+phase=$(basename "$1" .js)
+if [ "$action:$phase" = fails:pre ]; then
+  printf '%s\n' 'PRE_EFFECT=available' >> "$GITHUB_ENV"
+  exit 7
+fi
+if [ "$action:$phase" = after:pre ]; then
+  test "$PRE_EFFECT" = available
+  touch "$MARKER"
+fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	failsID, afterID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "fails", Kind: "uses", Uses: remoteLifecycleUses("fails"), Action: &plan.ActionSelector{Lock: failsID}, ContinueOnError: true},
+		{ID: "after", Kind: "uses", Uses: remoteLifecycleUses("after"), Action: &plan.ActionSelector{Lock: afterID}},
+	})
+	job.Schema = plan.SchemaV3
+	job.RequiredCapabilities = []string{"network"}
+	job.Env = map[string]string{"MARKER": marker}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(failsID, "fails", digest, nil),
+		remoteLifecycleLock(afterID, "after", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("later pre did not observe failed pre environment: %v", err)
+	}
+}
+
 func TestRemotePreparationErrorStillDrainsRegisteredPosts(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
