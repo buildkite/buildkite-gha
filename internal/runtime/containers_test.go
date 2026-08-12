@@ -658,13 +658,11 @@ func TestRunJobContainerMalformedServicePortsIncludeMaskedDiagnostics(t *testing
 }
 
 func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.T) {
-	t.Parallel()
-
 	f := newJobDocker(t, "fail-later-service-create")
 	w, tmp := t.TempDir(), t.TempDir()
 	_, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{Image: "alpine"}, map[string]plan.Container{"a": {Image: "one"}, "b": {Image: "two"}})
-	if err == nil {
-		t.Fatal("expected create failure")
+	if err == nil || !strings.Contains(err.Error(), `create service "b"`) {
+		t.Fatalf("error=%v, want second service create failure", err)
 	}
 	calls := f.calls(t)
 	creates, removes := 0, 0
