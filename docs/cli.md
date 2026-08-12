@@ -103,26 +103,19 @@ buildkite-gha upload .github/workflows/ci.yml
 
 The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
-The hidden zero-argument `buildkite-gha plugin` entry point reads `workflows` and
-`runners` from `BUILDKITE_PLUGIN_CONFIGURATION`; `workflows` accepts one selector
-string or an array of explicit paths. It also accepts the plugin-owned `version`,
-`source-ref`, and `minimum-release-age` fields. The legacy singular `workflow`
-field remains supported for released plugin compatibility but cannot be combined
-with `workflows`. The Linux/amd64 importer fetches the same release's Darwin
-runtime only when a workflow requires it. Custom importers can use the public
-flags below.
+The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
+`workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
+to one explicit path or `workflows` to a non-empty array of explicit paths; the
+fields are mutually exclusive. Every path must identify a regular, tracked
+`.yml` or `.yaml` file inside the repository; directories and glob patterns are
+rejected. It also accepts the plugin-owned `version`, `source-ref`, and
+`minimum-release-age` fields. The Linux/amd64 importer fetches the same release's
+Darwin runtime only when a workflow requires it. Custom importers can use the
+public flags below.
 
 ### Select workflows
 
-Use `*` for every tracked `.yml` and `.yaml` file directly under `.github/workflows`:
-
-```sh
-buildkite-gha upload '*'
-```
-
-Quote `*` in shells and YAML. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
-
-Two or more operands switch to explicit-list mode:
+Pass every workflow path explicitly:
 
 ```sh
 buildkite-gha upload -- \
@@ -130,7 +123,7 @@ buildkite-gha upload -- \
   .github/workflows/release.yml
 ```
 
-Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, missing or untracked files, files outside the repository, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs. A tracked filename containing glob metacharacters remains literal, but an unmatched glob mixed into a list—or two glob operands—is rejected rather than expanded independently.
+Every operand must name one regular `.yml` or `.yaml` file. When uploading more than one workflow, every path must be tracked inside the repository. Aliases and duplicates are canonicalized, deduplicated, and sorted, so reversed arguments produce the same pipeline. Directories, globs, missing files, other extensions, and symlinks are rejected before any workflow is parsed or Buildkite command runs; aggregate uploads also reject untracked and outside paths.
 
 `--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
 
