@@ -53,7 +53,7 @@ Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted-tokenless] [--format text|json] <workflow>\n",
+	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] [--] <workflow-pattern | workflow-path> [<workflow-path>...]\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
@@ -63,7 +63,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	_, _ = fmt.Fprint(stdout, commandUsage[command])
 	switch command {
 	case "validate":
-		_, _ = fmt.Fprint(stdout, "\nThe hosted-tokenless profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
+		_, _ = fmt.Fprint(stdout, "\nThe hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility.\n")
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
@@ -80,7 +80,8 @@ const (
 	legacyRuntimeImageEnvironment               = "BUILDKITE_GHA_RUNTIME_IMAGE"
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
 	legacyGitHubAppGitCredentialsEnvironment    = "BUILDKITE_USE_GITHUB_APP_GIT_CREDENTIALS"
-	hostedTokenlessProfile                      = "hosted-tokenless"
+	hostedProfile                               = "hosted"
+	legacyHostedTokenlessProfile                = "hosted-tokenless"
 	runtimeMiseArchiveDigest                    = "bd0930c0b619f51ddb60e32e5cce18a5533567b2f1ba9fc4875b9f39a2bb3ed8"
 	runtimeMiseBinaryDigest                     = "a238972a3162d710b85b28c324372e96ca4e4b486c81fe78695000d9fbc77c48"
 	runtimeMiseDarwinARM64ArchiveDigest         = "5b883c868a0748dd0c595d30fd000ec5138dfabdeef2c30222866ebf34af1ae3"
@@ -1232,14 +1233,14 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		runtimeDistributions := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
-		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, nil)
+		preflight, profileErr := compileHosted(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
 				return 1
 			}
-			processingReport.Result = classifyHostedTokenlessFailure(&processingReport, workflowPath, profileErr)
+			processingReport.Result = classifyHostedFailure(&processingReport, workflowPath, profileErr)
 			_ = out.write(processingReport)
 			return 1
 		}
@@ -1294,9 +1295,10 @@ func validateArgs(args []string) (workflowPath, eventPath, format, profile strin
 		} else {
 			profileSeen = true
 			profile = args[i]
-			if profile != hostedTokenlessProfile {
-				return "", "", "", "", fmt.Errorf("--profile must be %q", hostedTokenlessProfile)
+			if profile != hostedProfile && profile != legacyHostedTokenlessProfile {
+				return "", "", "", "", fmt.Errorf("--profile must be %q", hostedProfile)
 			}
+			profile = hostedProfile
 		}
 	}
 	workflowPath, eventPath, err = workflowArgs(filtered)
@@ -1411,12 +1413,12 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	for i := range workflows {
 		workflows[i].Source, err = os.ReadFile(workflows[i].Path)
 		if err != nil {
-			report := compatibility.EnvironmentProcessingReport(workflows[i].Path, hostedTokenlessProfile, "workflow input could not be read")
+			report := compatibility.EnvironmentProcessingReport(workflows[i].Path, hostedProfile, "workflow input could not be read")
 			return out.fail(report, fmt.Errorf("read workflow %s: %w", workflows[i].CanonicalPath, err))
 		}
 		parsed, parseErr := workflow.Parse(workflows[i].Path, workflows[i].Source)
 		if parseErr != nil {
-			_, _ = validatedProcessingReport(out, workflows[i].Path, hostedTokenlessProfile, workflows[i].Source, nil, false)
+			_, _ = validatedProcessingReport(out, workflows[i].Path, hostedProfile, workflows[i].Source, nil, false)
 			return 1
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
@@ -1442,7 +1444,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		validation, validationErr := compiler.Validate(input.Path, input.Source)
 		if validation.RuntimeMatrixBoundary {
-			report := compatibility.InitialProcessingReport(input.Path, hostedTokenlessProfile, false, validation, validationErr)
+			report := compatibility.InitialProcessingReport(input.Path, hostedProfile, false, validation, validationErr)
 			report.Result = "incompatible"
 			_ = out.write(report)
 			return 1
@@ -1452,7 +1454,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	if err != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedTokenlessProfile, input.Source, "event input could not be acquired"), err)
+				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), err)
 			}
 		}
 		return 1
@@ -1461,7 +1463,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	if err != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				_, _ = validatedProcessingReport(out, input.Path, hostedTokenlessProfile, input.Source, eventSource, true)
+				_, _ = validatedProcessingReport(out, input.Path, hostedProfile, input.Source, eventSource, true)
 				return 1
 			}
 		}
@@ -1487,9 +1489,9 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		if !input.Applicable {
 			continue
 		}
-		validationOptions := hostedTokenlessOptions("", uploadArguments.runnerTargets, nil)
+		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedTokenlessProfile, input.Source, effectiveEvent.Source, true, &validationOptions)
+		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedProfile, input.Source, effectiveEvent.Source, true, &validationOptions)
 		if !ok {
 			return 1
 		}
@@ -1564,10 +1566,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			})
 			continue
 		}
-		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
+		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
-			processingReports[i].Result = classifyHostedTokenlessFailure(&processingReports[i], input.Path, err)
+			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			_ = out.write(processingReports[i])
 			return 1
 		}
@@ -1650,7 +1652,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {
-	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, hostedTokenlessOptions(groupLabel, configuredTargets, nil))
+	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, hostedOptions(groupLabel, configuredTargets, nil))
 	if err != nil {
 		return nil, err
 	}
@@ -1796,7 +1798,7 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 
 func triggerProcessingReport(path string, source []byte) compatibility.ProcessingReport {
 	parsed, _ := compiler.ParseWorkflow(path, source)
-	report := compatibility.NewProcessingReport(path, hostedTokenlessProfile)
+	report := compatibility.NewProcessingReport(path, hostedProfile)
 	report.LogicalJobs = parsed.LogicalJobs
 	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
 	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
@@ -1968,30 +1970,30 @@ func workflowInputs(matches []workflowInput, namespaceKeys bool) ([]workflowInpu
 	return out, nil
 }
 
-type hostedTokenlessCompilation struct {
+type hostedCompilation struct {
 	Bundle     compiler.Bundle
 	HasActions bool
 	Admitted   bool
 }
 
-type hostedTokenlessFailureKind string
+type hostedFailureKind string
 
 const (
-	hostedTokenlessEnvironmentFailure hostedTokenlessFailureKind = "environment"
-	hostedTokenlessEvaluationFailure  hostedTokenlessFailureKind = "evaluation"
-	hostedTokenlessAdmissionFailure   hostedTokenlessFailureKind = "admission"
+	hostedEnvironmentFailure hostedFailureKind = "environment"
+	hostedEvaluationFailure  hostedFailureKind = "evaluation"
+	hostedAdmissionFailure   hostedFailureKind = "admission"
 )
 
-type hostedTokenlessFailure struct {
-	Kind hostedTokenlessFailureKind
+type hostedFailure struct {
+	Kind hostedFailureKind
 	Err  error
 }
 
-func (e *hostedTokenlessFailure) Error() string { return e.Err.Error() }
-func (e *hostedTokenlessFailure) Unwrap() error { return e.Err }
+func (e *hostedFailure) Error() string { return e.Err.Error() }
+func (e *hostedFailure) Unwrap() error { return e.Err }
 
-func hostedTokenlessError(kind hostedTokenlessFailureKind, err error) error {
-	return &hostedTokenlessFailure{Kind: kind, Err: err}
+func hostedError(kind hostedFailureKind, err error) error {
+	return &hostedFailure{Kind: kind, Err: err}
 }
 
 type actionSourceAuthentication struct {
@@ -2064,7 +2066,7 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 	}
 }
 
-func hostedTokenlessOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
+func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
 	targets := map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64},
 		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64},
@@ -2090,26 +2092,26 @@ func hostedTokenlessOptions(groupLabel string, configuredTargets map[string]comp
 	return options
 }
 
-func compileHostedTokenless(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
-	return compileHostedTokenlessNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
+func compileHosted(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
 }
 
-func compileHostedTokenlessNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedTokenlessCompilation, error) {
-	options := hostedTokenlessOptions(groupLabel, configuredTargets, runtimeDistributions)
+func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
 	if err != nil {
-		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
+		return hostedCompilation{}, hostedError(hostedEvaluationFailure, err)
 	}
 	var ir compiler.IR
 	if err := json.Unmarshal(preflight, &ir); err != nil {
-		return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("decode compiler preflight: %w", err))
+		return hostedCompilation{}, hostedError(hostedEvaluationFailure, fmt.Errorf("decode compiler preflight: %w", err))
 	}
 	hasActions := irUsesActions(ir)
 	if hasActions {
 		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
+			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
 		}
 		defer func() { _ = os.RemoveAll(actionRoot) }()
 		var sourceOptions []actionsource.Option
@@ -2119,30 +2121,30 @@ func compileHostedTokenlessNamespaced(ctx context.Context, workflowPath string, 
 		}
 		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
 		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
+			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
 		}
 		store, err := actionsource.NewStore(actionRoot, nil)
 		if err != nil {
-			return hostedTokenlessCompilation{}, hostedTokenlessError(hostedTokenlessEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
+			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
 		}
 		options.ResolveActions = true
 		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
 	}
 	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
 	if err != nil {
-		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
+		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedEvaluationFailure, err)
 	}
 	if err := validateUnprivilegedBundle(bundle); err != nil {
-		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions}, hostedTokenlessError(hostedTokenlessAdmissionFailure, err)
+		return hostedCompilation{Bundle: bundle, HasActions: hasActions}, hostedError(hostedAdmissionFailure, err)
 	}
 	bundle, err = compiler.GenerateBundlePipeline(bundle, distributionDigest, importerStep, options)
 	if err != nil {
-		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedTokenlessError(hostedTokenlessEvaluationFailure, err)
+		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, err)
 	}
 	if !hasActions && bundleUsesActions(bundle) {
-		return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedTokenlessError(hostedTokenlessEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
+		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
-	return hostedTokenlessCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
+	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
@@ -2168,7 +2170,7 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					addFailure(artifact, "job or service containers are not admitted by the hosted profile", fmt.Errorf("job %q uses job or service containers, which hosted-tokenless upload does not admit", artifact.Job.Workflow.LogicalJobID))
+					addFailure(artifact, "job or service containers are not admitted by the hosted profile", fmt.Errorf("job %q uses job or service containers, which hosted upload does not admit", artifact.Job.Workflow.LogicalJobID))
 					continue
 				}
 				addFailure(artifact, "docker capability lacks compiler-verified action provenance", fmt.Errorf("job %q requires docker without compiler-verified Dockerfile action provenance", artifact.Job.Workflow.LogicalJobID))

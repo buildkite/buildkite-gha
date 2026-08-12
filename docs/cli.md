@@ -28,10 +28,12 @@ Resolve actions and apply production policy:
 
 ```sh
 buildkite-gha validate \
-  --profile hosted-tokenless \
+  --profile hosted \
   --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
 ```
+
+The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 
 Use `--format json` for a `buildkite-gha/processing-report/v1` report.
 

@@ -45,7 +45,7 @@ mise run release:check
 mise run smoke:profile
 ```
 
-The profile task uses the network to resolve selected public actions and apply the production `hosted-tokenless` policy. Admission still does not execute action code. See [`testdata/smoke/README.md`](../testdata/smoke/README.md) for the inventory and result meanings.
+The profile task uses the network to resolve selected public actions and apply the production `hosted` policy. Admission still does not execute action code. See [`testdata/smoke/README.md`](../testdata/smoke/README.md) for the inventory and result meanings.
 
 ## Verify runtime behavior
 

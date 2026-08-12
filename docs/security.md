@@ -57,7 +57,7 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
 
     ```sh
     buildkite-gha validate \
-      --profile hosted-tokenless \
+      --profile hosted \
       --event-path event.json \
       .github/workflows/ci.yml
     ```

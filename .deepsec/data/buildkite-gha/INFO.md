@@ -13,7 +13,7 @@ cache, and narrowly supported Docker action behaviour.
 
 ## Auth shape
 
-- `hosted-tokenless` admission is the production authority boundary. Fresh
+- `hosted` admission is the production authority boundary. Fresh
   compiler `PlanAuthorization` evidence decides whether requested Docker or
   provider-token capabilities may enter an uploaded plan.
 - `plan.Job.Validate`, `verifyWorkflow`, and runtime capability checks bind a
@@ -49,7 +49,7 @@ the same VM.
 ## Project-specific patterns to flag
 
 - Any path from workflow/event/plan fields to queue selection or
-  `RequiredCapabilities` that bypasses `hosted-tokenless` admission or relies
+  `RequiredCapabilities` that bypasses `hosted` admission or relies
   on encoded-plan claims instead of same-process compiler evidence.
 - Any Buildkite Agent access token, repository credential, GitHub token,
   workflow secret, or cache token persisted in plans, pipeline YAML, logs,

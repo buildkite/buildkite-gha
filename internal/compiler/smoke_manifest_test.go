@@ -62,7 +62,7 @@ func TestSmokeManifestInventory(t *testing.T) {
 		if fixture.Expectation != "compile-pass" && fixture.Expectation != "compile-unsupported" && fixture.Expectation != "runtime-pass" && fixture.Expectation != "runtime-unsupported" && fixture.Expectation != "future" {
 			t.Fatalf("%s: invalid expectation %q", fixture.ID, fixture.Expectation)
 		}
-		if fixture.ActionPreflight != "none" && fixture.ActionPreflight != "hosted-tokenless" {
+		if fixture.ActionPreflight != "none" && fixture.ActionPreflight != "hosted" {
 			t.Fatalf("%s: invalid action preflight %q", fixture.ID, fixture.ActionPreflight)
 		}
 		if strings.TrimSpace(fixture.Evidence) == "" || strings.TrimSpace(fixture.Note) == "" {

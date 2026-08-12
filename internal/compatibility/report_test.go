@@ -12,7 +12,7 @@ import (
 )
 
 func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
-	report := NewProcessingReport("ci.yml", "hosted-tokenless")
+	report := NewProcessingReport("ci.yml", "hosted")
 	report.LogicalJobs = 1
 	report.Instances = 1
 	report.Compile.Result = "incompatible"

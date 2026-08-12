@@ -6,8 +6,8 @@ readonly root
 readonly manifest="$root/testdata/smoke/manifest.json"
 profile=""
 if (( $# != 0 )); then
-  [[ $# == 2 && "$1" == --profile && "$2" == hosted-tokenless ]] || {
-    echo 'usage: scripts/smoke-local [--profile hosted-tokenless]' >&2
+  [[ $# == 2 && "$1" == --profile && "$2" == hosted ]] || {
+    echo 'usage: scripts/smoke-local [--profile hosted]' >&2
     exit 2
   }
   profile="$2"
@@ -29,7 +29,7 @@ jq -e '
     (.workflow | type == "string" and length > 0 and (startswith("testdata/") or IN(".github/workflows/example-basic.yml", ".github/workflows/example-artifacts.yml", ".github/workflows/example-advanced.yml")) and (contains("..") | not)) and
     (.event | type == "string" and length > 0 and startswith("testdata/") and (contains("..") | not)) and
     (.expectation | IN("compile-pass", "compile-unsupported", "runtime-pass", "runtime-unsupported", "future")) and
-    (.action_preflight | IN("none", "hosted-tokenless")) and
+    (.action_preflight | IN("none", "hosted")) and
     (.evidence | type == "string" and length > 0) and
     (.note | type == "string" and length > 0)) and
   ([.fixtures[].id] | length == (unique | length)) and
