@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>buildkite/renovate-config"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^docs\\/cli\\.md$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+) tag=(?<currentValue>\\S+)\\s+BUILDKITE_GHA_RUNTIME_IMAGE: buildkite\\.namespace-images\\.com/agent-base@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "versioningTemplate": "docker"
+    }
+  ]
+}

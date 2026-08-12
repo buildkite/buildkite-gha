@@ -128,7 +128,8 @@ Set an image by digest:
 
 ```yaml
 env:
-  BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:04a6656f92b90269b3259fffaba67e08a3d03d8dc79b40d45c9ac3d9000e9e03
+  # renovate: datasource=docker depName=buildkite/agent-base tag=ubuntu-noble-hosted-toolchains
+  BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24
 ```
 
 Tags and other mutable references are rejected. The image may provide a baked `/opt/hostedtoolcache` inventory.
