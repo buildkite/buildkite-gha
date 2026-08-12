@@ -155,7 +155,7 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	return executions
 }
 
-func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
+func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	stepCtx := runCtx
 	cancelStep := func() {}
 	if step.TimeoutMinutes > 0 {
@@ -166,7 +166,7 @@ func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *comma
 			return eval.HashFilesContext(stepCtx, patterns)
 		}
 	}
-	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared)
+	result, err := r.runJobStep(stepCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
 	cancelStep()
 	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }

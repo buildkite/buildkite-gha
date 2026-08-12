@@ -531,7 +531,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: jobResult.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil, HashFiles: eval.HashFiles}
+		stepEnv, err := evaluateStepMap(step.Env, eval)
+		if err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("step %q environment: %w", step.ID, err))
+			break
+		}
+		stepEval := cloneExpressionContext(eval)
+		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil, Unsuccessful: runErr != nil, Cancelled: runCtx.Err() != nil, HashFiles: eval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("step %q condition: %w", step.ID, err))
@@ -544,12 +551,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		}
 
 		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
-		evalSnapshot := cloneExpressionContext(eval)
+		evalSnapshot := stepEval
 		if step.Background {
 			step := step
 			supervisor.start(runCtx, step.ID,
 				func(stepCtx context.Context) stepExecution {
-					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, evalSnapshot, &posts, actions, prepared)
+					return r.executePlanStep(ctx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
 				},
 				func(stepCtx context.Context) stepExecution {
 					return cancelledStepExecution(ctx, stepCtx, step)
@@ -558,7 +565,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		processor.logSection(stepDisplayName(step, evalSnapshot))
-		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, evalSnapshot, &posts, actions, prepared)
+		execution := r.executePlanStep(ctx, runCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
 		}
@@ -976,8 +983,8 @@ func isRuntimeContextEnvironment(name string) bool {
 	}
 }
 
-func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
-	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, eval, posts, actions, prepared, nil)
+func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
+	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared, nil)
 }
 
 // verifyRemoteActionTree materializes and verifies every remote subtree before
@@ -1188,15 +1195,16 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			if inheritedEvalErr != nil {
 				return result, inheritedEvalErr
 			}
+			stepEnv, err := evaluate(step.Env, eval)
+			if err != nil {
+				return result, err
+			}
+			eval.Env = mergeStringMaps(eval.Env, stepEnv)
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
 				return result, err
 			}
 			inputs, err = resolveActionInputs(action, inputs, eval)
-			if err != nil {
-				return result, err
-			}
-			stepEnv, err := evaluate(step.Env, eval)
 			if err != nil {
 				return result, err
 			}
@@ -1220,13 +1228,14 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		stepEnv := map[string]string{}
 		compositeEvalErr := inheritedEvalErr
 		if compositeEvalErr == nil {
+			stepEnv, compositeEvalErr = evaluate(step.Env, eval)
+		}
+		if compositeEvalErr == nil {
+			eval.Env = mergeStringMaps(eval.Env, stepEnv)
 			inputs, compositeEvalErr = evaluate(step.With, eval)
 		}
 		if compositeEvalErr == nil {
 			inputs, compositeEvalErr = resolveActionInputs(action, inputs, eval)
-		}
-		if compositeEvalErr == nil {
-			stepEnv, compositeEvalErr = evaluate(step.Env, eval)
 		}
 		eval.Inputs = inputs
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
@@ -1263,10 +1272,13 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 }
 
-func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
-	stepEnv, err := evaluateStepMap(step.Env, eval)
-	if err != nil {
-		return newResult(), err
+func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
+	if stepEnv == nil {
+		var err error
+		stepEnv, err = evaluateStepMap(step.Env, eval)
+		if err != nil {
+			return newResult(), err
+		}
 	}
 	environment := r.invocationEnvironment(jobEnv, stepEnv)
 	result := newResult()
@@ -1541,7 +1553,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				}
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, eval, posts, actions, prepared, actionStack)
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, nil, eval, posts, actions, prepared, actionStack)
 			}
 		} else if strings.TrimSpace(step.Run) == "" {
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)

@@ -189,6 +189,25 @@ func TestRunJobPinsHashWorkspaceBeforePathReplacement(t *testing.T) {
 	}
 }
 
+func TestRunJobHashFilesArgumentsUseStepEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles step environment\n")
+	writeFixtureFile(t, workspace, "value", "contents")
+	digest := githubHash("contents")
+	job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{
+		ID:        "hash",
+		Kind:      "run",
+		Shell:     "sh",
+		Env:       map[string]string{"PATTERN": "value"},
+		Condition: "hashFiles(env.PATTERN) != ''",
+		Command:   `test "${{ hashFiles(env.PATTERN) }}" = "` + digest + `"`,
+	}})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() step environment hashFiles result = %#v, %v", result, err)
+	}
+}
+
 func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: hashFiles surfaces\n")
@@ -278,7 +297,7 @@ func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	execution := (Runner{}).executePlanStep(
 		context.Background(), context.Background(), nil, "", plan.Job{},
 		plan.Step{ID: "hash", Kind: "run", TimeoutMinutes: 0.001, Env: map[string]string{"HASH": "${{ hashFiles('value') }}"}},
-		"0", nil, eval, nil, nil, nil,
+		"0", nil, nil, eval, nil, nil, nil,
 	)
 	if !called || !errors.Is(execution.err, context.DeadlineExceeded) {
 		t.Fatalf("step timeout hashFiles execution = %#v", execution)
