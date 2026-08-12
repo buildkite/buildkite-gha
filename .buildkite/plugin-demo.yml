@@ -40,7 +40,7 @@ steps:
           version: 0.10.3
           runners:
             - runs-on: macos-14
-              queue: mac-small
+              queue: macos
 
   - label: ":rocket: Advanced released-plugin demo"
     key: "plugin-demo-advanced-importer"
