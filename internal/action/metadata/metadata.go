@@ -21,23 +21,28 @@ type Metadata struct {
 	// SourceRoot is the verified tree whose digest binds this action. For a
 	// workspace action it is Path; for a materialized GitHub action it is the
 	// repository root.
-	SourceRoot  string            `yaml:"-"`
-	Name        string            `yaml:"name"`
-	Description string            `yaml:"description"`
-	Author      string            `yaml:"author"`
-	Inputs      map[string]Input  `yaml:"inputs"`
-	Outputs     map[string]Output `yaml:"outputs"`
-	Runs        Runs              `yaml:"runs"`
-	Branding    Branding          `yaml:"branding"`
+	SourceRoot  string `yaml:"-"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	// DeprecationMessage is inert metadata emitted by deprecated actions.
+	DeprecationMessage string            `yaml:"deprecationMessage"`
+	Author             string            `yaml:"author"`
+	Inputs             map[string]Input  `yaml:"inputs"`
+	Outputs            map[string]Output `yaml:"outputs"`
+	Runs               Runs              `yaml:"runs"`
+	Branding           Branding          `yaml:"branding"`
 }
 
 // Input declares one action input.
 type Input struct {
-	Description              string  `yaml:"description"`
-	DeprecationMessage       string  `yaml:"deprecation-message"`
-	LegacyDeprecationMessage string  `yaml:"deprecationMessage"`
-	Required                 bool    `yaml:"required"`
-	Default                  *string `yaml:"default"`
+	Description              string `yaml:"description"`
+	DeprecationMessage       string `yaml:"deprecation-message"`
+	LegacyDeprecationMessage string `yaml:"deprecationMessage"`
+	// Type is accepted as inert metadata because some GitHub-hosted actions
+	// declare it even though action inputs are exposed as strings.
+	Type     string  `yaml:"type"`
+	Required bool    `yaml:"required"`
+	Default  *string `yaml:"default"`
 }
 
 // Output declares one action output.
