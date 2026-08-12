@@ -25,7 +25,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | Area | Status | Initial release boundary |
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
-| [Triggers and filters under `on`](#names-and-triggers) | ➖ Accepted, no effect | Buildkite creates and filters builds. Local `workflow_call` is supported for composition. |
+| [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. Local `workflow_call` is supported for composition. |
 | [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`. Runtime v0.9.0 supports native macOS arm64, but the released plugin cannot configure it yet. Labels do not provide GitHub image or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
@@ -59,6 +59,14 @@ No shadow GitHub Actions run is created. Buildkite owns scheduling, logs, retrie
 
 Steps remain inside one job because they share a workspace, environment files, action state, and post-action cleanup.
 
+### Aggregate workflow upload
+
+Upload accepts either one literal, directory, or tracked workflow glob, or two or more explicit workflow path operands. Explicit lists require regular, tracked `.yml` or `.yaml` files inside the repository and reject directories, missing or untracked paths, other extensions, paths outside the repository, symlinks, and independent glob expansion. Canonical repository-relative paths are deduplicated and sorted before stable workflow identities and namespaced job keys are assigned.
+
+All applicable workflows compile into one artifact and pipeline transaction. Each becomes one aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. The label is static across events. The group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Each group depends on the importer, while its child jobs omit that redundant dependency and their own check notifications.
+
+Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. A parse, trigger, event, compilation, admission, artifact, or upload failure aborts the whole transaction; no partial pipeline is uploaded.
+
 ## Workflow syntax
 
 ### Names and triggers
@@ -67,7 +75,7 @@ Steps remain inside one job because they share a workspace, environment files, a
 | --- | --- | --- |
 | `name` | ✅ Supported | Available as `github.workflow` and used to name generated work. |
 | `run-name` | ➖ Accepted, no effect | Buildkite names the build. The value is not retained. |
-| `on` | ➖ Accepted, no effect for build creation | Configure push, pull request, branch, tag, schedule, and manual triggers in Buildkite. |
+| `on` | 🟡 Supported subset | Does not create a Buildkite build. Selects and filters aggregate groups for the effective event as described below. |
 
 A workflow name is retained in generated work:
 
@@ -75,7 +83,7 @@ A workflow name is retained in generated work:
 name: CI
 ```
 
-The trigger declaration is accepted, but Buildkite controls when a build starts:
+Buildkite controls when a build starts. The trigger declaration controls whether and under which condition the workflow group participates in that existing build:
 
 ```yaml
 on:
@@ -83,7 +91,27 @@ on:
     branches: [main]
 ```
 
-The plugin derives `pull_request` for pull request builds and `push` for other builds. Scheduled and manual Buildkite builds therefore use push semantics. Direct CLI callers may supply another event name through an [event snapshot](cli.md#provide-an-event-snapshot). The `on.workflow_call` key is the exception: it defines the interface for a local reusable workflow.
+Upload selects one authoritative effective event, in this order:
+
+1. The event in an explicit `--event-path` snapshot.
+1. The GitHub event name accompanying Buildkite's reserved linked-webhook metadata.
+1. A Buildkite environment fallback: pull request builds use `pull_request`; `ui` and `api` use `workflow_dispatch`; `schedule` uses `schedule`; and every other source, including `trigger_job`, uses `push`.
+
+An explicit event snapshot never consults contradictory live Buildkite event fields. The fallback can classify `trigger_job` as `push` even when `build.source_event` is absent. The selected snapshot is then used consistently for applicability, event-dependent validation and compilation, the group condition, and the event suffix in its GitHub check.
+
+| Event | Supported trigger behavior |
+| --- | --- |
+| `push` | `branches`, `branches-ignore`, `tags`, and `tags-ignore`, including ordered negative patterns in an include list. Branch and tag filters select their corresponding ref kind. |
+| `pull_request` | `branches` and `branches-ignore` match the base branch. Omitted `types` defaults to `opened`, `synchronize`, and `reopened`; explicitly listed activity types must map exactly to a supported Buildkite source action. |
+| `workflow_dispatch` | Selected for Buildkite UI and API builds. Webhook-style branch, tag, type, and workflow filters are unsupported. |
+| `schedule` | Selected for Buildkite scheduled builds. Buildkite owns cron configuration and does not expose which schedule started a build, so every `on.schedule` workflow is eligible for every Buildkite scheduled build. |
+| `workflow_call` | Defines a local reusable-workflow interface. A reusable-only file is available to callers but does not become a top-level group. |
+
+Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
+
+`paths` and `paths-ignore` are unsupported because Buildkite `if_changed` has different semantics. Unsupported trigger events, path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are fatal rather than approximated. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
+
+A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds without uploading a pipeline.
 
 ### Reusable workflows
 
