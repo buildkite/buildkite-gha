@@ -107,6 +107,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 		return nil, runtimeMatrixBoundary, err
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
+	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
 	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
@@ -118,6 +119,46 @@ func hasReusableCall(parsed *workflow.Workflow) bool {
 		}
 	}
 	return false
+}
+
+func (resolver *reusableResolver) discoverRuntimeMatrixBoundaries(parsed *workflow.Workflow, depth int, scannedAtDepth map[string]int) {
+	resolver.runtimeMatrixBoundary = resolver.runtimeMatrixBoundary || hasRuntimeMatrixBoundary(parsed)
+	if depth >= maxReusableWorkflowDepth {
+		return
+	}
+	for _, job := range parsed.Jobs {
+		if job.Reusable == nil {
+			continue
+		}
+		calleePath, err := resolver.localWorkflowPath(job.Reusable.Uses)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		calleeDepth := depth + 1
+		previousDepth, scanned := scannedAtDepth[calleePath]
+		if scanned && previousDepth <= calleeDepth {
+			continue
+		}
+		if !scanned && len(scannedAtDepth) >= maxFlattenedJobs {
+			// An incomplete discovery cannot prove that no unvisited callee has a
+			// runtime matrix boundary. Reject before event metadata instead.
+			resolver.runtimeMatrixBoundary = true
+			return
+		}
+		scannedAtDepth[calleePath] = calleeDepth
+		source, err := os.ReadFile(calleePath)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		callee, err := workflow.Parse(calleePath, source)
+		if err != nil {
+			resolver.runtimeMatrixBoundary = true
+			continue
+		}
+		resolver.discoverRuntimeMatrixBoundaries(callee, calleeDepth, scannedAtDepth)
+	}
 }
 
 func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.Workflow, namespace, labelPrefix string, inputs map[string]any, externalNeeds map[string]needBinding, permissionCeiling *workflow.Permissions, secretAuthority bool, depth int) (reusableResolution, error) {
