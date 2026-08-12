@@ -1590,40 +1590,19 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
-			label := input.Name
-			if label == "" {
-				label = input.CanonicalPath
-			}
-			failures := make([]buildkitepipeline.Failure, 0, len(processingReports[i].Diagnostics))
-			for _, diagnostic := range processingReports[i].Diagnostics {
-				if diagnostic.Level != "error" {
-					continue
-				}
-				failureLabel := "Compiler error"
-				if diagnostic.Job != "" {
-					failureLabel += ": " + diagnostic.Job
-				}
-				if diagnostic.Step != 0 {
-					failureLabel += fmt.Sprintf(", step %d", diagnostic.Step)
-				}
-				if diagnostic.Code != "" {
-					failureLabel += " [" + diagnostic.Code + "]"
-				}
-				failures = append(failures, buildkitepipeline.Failure{Label: failureLabel, Message: diagnostic.Message})
-			}
-			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
-				GroupLabel: label,
-				GroupKey:   "gha-workflow-" + input.Identity,
-				CheckName:  "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")",
-				Condition:  input.TriggerCondition,
-				Failures:   failures,
-			})
+			generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
 			continue
 		}
 		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
+			var failure *hostedFailure
+			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
+				out.annotate(processingReports[i])
+				generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
+				continue
+			}
 			_ = out.write(processingReports[i])
 			return 1
 		}
@@ -1717,6 +1696,28 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 		}
 	}
 	return false
+}
+
+func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) buildkitepipeline.Workflow {
+	label := input.Name
+	if label == "" {
+		label = input.CanonicalPath
+	}
+	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
+	report.Finalize()
+	messages := make([]string, 0, len(report.Diagnostics))
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			messages = append(messages, diagnostic.Message)
+		}
+	}
+	return buildkitepipeline.Workflow{
+		GroupLabel: label,
+		GroupKey:   "gha-workflow-" + input.Identity,
+		CheckName:  "Buildkite / " + label + " (" + event + ")",
+		Condition:  input.TriggerCondition,
+		Failure:    &buildkitepipeline.Failure{Label: "Compiler errors", Message: strings.Join(messages, "\n")},
+	}
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {

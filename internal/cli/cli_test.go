@@ -3506,39 +3506,35 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 3 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Skip != "" || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
-	}
-	wantLabels := []string{
-		"Compiler error: alpha [E_EXPRESSION_INVALID]",
-		"Compiler error: beta [E_EXPRESSION_INVALID]",
-		"Compiler error: gamma [E_EXPRESSION_INVALID]",
 	}
 	wantReasons := []string{
 		"resolved runner target is not admitted by policy: runner label is not mapped by policy",
 		`job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties`,
 		`job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON`,
 	}
-	for i, step := range pipeline.Steps[0].Steps {
-		if step.Label != wantLabels[i] || step.Command != `printf '%s\n' '`+wantReasons[i]+`' && exit 1` || !step.Checkout.Skip {
-			t.Fatalf("compiler failure step %d = %#v", i, step)
-		}
-		command := exec.Command("sh", "-c", step.Command)
-		printed, err := command.CombinedOutput()
-		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != wantReasons[i]+"\n" {
-			t.Fatalf("compiler failure command %d output/error = %q / %v", i, printed, err)
-		}
+	step := pipeline.Steps[0].Steps[0]
+	wantMessage := strings.Join(wantReasons, "\n")
+	if step.Label != "Compiler errors" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
+		t.Fatalf("compiler failure step = %#v", step)
+	}
+	command := exec.Command("sh", "-c", step.Command)
+	printed, err := command.CombinedOutput()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != wantMessage+"\n" {
+		t.Fatalf("compiler failure command output/error = %q / %v", printed, err)
 	}
 	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) || strings.Contains(string(pipelineCommand.stdin), strings.ToLower(keySentinel)) || strings.Contains(string(pipelineCommand.stdin), jsonSentinel) {
 		t.Fatalf("event-derived runner leaked to aggregate pipeline: %s", pipelineCommand.stdin)
 	}
 }
 
-func TestRunUploadPublishesValidationAnnotationsBeforeLaterFailure(t *testing.T) {
+func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"a-invalid.yml": "on: push\njobs:\n  invalid:\n    runs-on: windows-latest\n    steps: [{run: true}]\n",
-		"b-action.yml":  "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+		"a-invalid.yml": "name: Invalid\non: push\njobs:\n  first:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  second:\n    runs-on: macos-15\n    steps: [{run: true}]\n",
+		"b-action.yml":  "name: Missing action\non: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+		"c-success.yml": "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
 	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
 	if err != nil {
@@ -3550,7 +3546,7 @@ func TestRunUploadPublishesValidationAnnotationsBeforeLaterFailure(t *testing.T)
 	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 1 {
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	var annotationBodies []string
@@ -3558,12 +3554,37 @@ func TestRunUploadPublishesValidationAnnotationsBeforeLaterFailure(t *testing.T)
 		if len(command.args) != 0 && command.args[0] == "annotate" {
 			annotationBodies = append(annotationBodies, string(command.stdin))
 		}
-		if len(command.args) > 1 && command.args[0] == "pipeline" && command.args[1] == "upload" {
-			t.Fatalf("later action failure uploaded a pipeline: %#v", command)
-		}
 	}
 	if len(annotationBodies) != 2 || !strings.Contains(annotationBodies[0], "unsupported operating system") || !strings.Contains(annotationBodies[1], "action could not be resolved or validated") {
 		t.Fatalf("mixed failure annotations = %#v", annotationBodies)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+			Skip  string `yaml:"skip"`
+			Steps []struct {
+				Label   string `yaml:"label"`
+				Key     string `yaml:"key"`
+				Command string `yaml:"command"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
+	}
+	for i, group := range pipeline.Steps[:2] {
+		if group.Skip != "" || len(group.Steps) != 1 || group.Steps[0].Label != "Compiler errors" || !strings.HasSuffix(group.Steps[0].Command, " && exit 1") {
+			t.Fatalf("failed workflow group %d = %#v", i, group)
+		}
+	}
+	if strings.Count(pipeline.Steps[0].Steps[0].Command, "resolved runner target is not admitted by policy") != 2 {
+		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Steps[0].Command)
+	}
+	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
+		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
 	}
 }
 
