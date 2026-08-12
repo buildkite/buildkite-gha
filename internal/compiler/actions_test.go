@@ -1077,6 +1077,10 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	if err != nil || len(plans) != 2 || plans[1].Actions[0].Commit != actionintegration.DownloadArtifactV5Commit {
 		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
 	}
+	plans, err = compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: '{junit-results-backend,product-junit-results}-*'\n          path: out\n          merge-multiple: true\n")
+	if err != nil || len(plans) != 2 || plans[1].Steps[0].With["pattern"] != "{junit-results-backend,product-junit-results}-*" {
+		t.Fatalf("download-artifact PostHog pattern plans = %#v, %v", plans, err)
+	}
 
 	for name, with := range map[string]string{
 		"missing name":  "        with:\n          path: out\n",

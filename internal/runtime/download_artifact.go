@@ -51,6 +51,14 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 		values[strings.ToLower(k)] = strings.TrimSpace(v)
 	}
 	name, pattern := values["name"], values["pattern"]
+	var patterns []string
+	var err error
+	if pattern != "" {
+		patterns, err = actionintegration.DownloadArtifactPatterns(pattern)
+		if err != nil {
+			return result, fmt.Errorf("bounded download-artifact adapter: %w", err)
+		}
+	}
 	destinationSlash, err := actionintegration.NormalizeDownloadArtifactPath(values["path"])
 	if err != nil {
 		return result, fmt.Errorf("bounded download-artifact adapter: %w", err)
@@ -78,10 +86,13 @@ func (r Runner) runDownloadArtifact(ctx context.Context, processor *commandProce
 	for _, need := range needs {
 		for _, artifact := range need.Artifacts {
 			matched := artifact.Name == name
-			if pattern != "" {
-				matched, err = doublestar.Match(pattern, artifact.Name)
+			for _, candidate := range patterns {
+				matched, err = doublestar.Match(candidate, artifact.Name)
 				if err != nil {
 					return result, fmt.Errorf("match artifact pattern: %w", err)
+				}
+				if matched {
+					break
 				}
 			}
 			if matched {

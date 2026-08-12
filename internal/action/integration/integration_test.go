@@ -82,6 +82,49 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactPatterns(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		pattern string
+		want    []string
+	}{
+		{name: "single glob", pattern: "junit-results-backend-*", want: []string{"junit-results-backend-*"}},
+		{name: "PostHog prefixes", pattern: "{junit-results-backend,product-junit-results}-*", want: []string{"junit-results-backend-*", "product-junit-results-*"}},
+		{name: "duplicate prefix", pattern: "{junit,junit}-*", want: []string{"junit-*"}},
+		{name: "maximum alternatives", pattern: "{a,b,c,d,e,f,g,h}-*", want: []string{"a-*", "b-*", "c-*", "d-*", "e-*", "f-*", "g-*", "h-*"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DownloadArtifactPatterns(test.pattern)
+			if err != nil || strings.Join(got, "|") != strings.Join(test.want, "|") {
+				t.Fatalf("DownloadArtifactPatterns(%q) = %#v, %v, want %#v", test.pattern, got, err, test.want)
+			}
+		})
+	}
+
+	rejected := map[string]string{
+		"empty alternative":        "{a,}-*",
+		"one alternative":          "{a}-*",
+		"too many alternatives":    "{a,b,c,d,e,f,g,h,i}-*",
+		"nested":                   "{a,{b,c}}-*",
+		"trailing brace":           "{a,b}-*}",
+		"missing close":            "{a,b-*",
+		"missing suffix":           "{a,b}",
+		"non-leading group":        "prefix-{a,b}-*",
+		"glob alternative":         "{a*,b}-*",
+		"traversal":                "{../a,b}-*",
+		"control character":        "{a,b\x1f}-*",
+		"unsupported second group": "{a,b}-{c,d}*",
+		"oversized expansion":      "{" + strings.Repeat("a", MaxDownloadArtifactPatternBytes) + ",b}-*",
+	}
+	for name, pattern := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DownloadArtifactPatterns(pattern); err == nil {
+				t.Fatalf("DownloadArtifactPatterns(%q) succeeded", pattern)
+			}
+		})
+	}
+}
+
 func TestNormalizeDownloadArtifactPath(t *testing.T) {
 	for input, want := range map[string]string{"": ".", ".": ".", "./": ".", "././": ".", "out": "out", "out/": "out", "./out/": "out", "././out/": "out", "./nested/out///": "nested/out"} {
 		t.Run("accept "+input, func(t *testing.T) {

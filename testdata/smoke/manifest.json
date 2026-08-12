@@ -38,6 +38,15 @@
       "action_preflight": "hosted-tokenless"
     },
     {
+      "id": "smoke-artifact-multi-prefix",
+      "workflow": "testdata/smoke/.github/workflows/artifact-multi-prefix.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Parser, compiler, and runtime tests cover bounded expansion, direct-needs matching, deterministic deduplication, merge order, and atomic staging.",
+      "note": "This PostHog-shaped two-prefix fixture is compile-only; hosted producer-to-consumer execution remains unproven.",
+      "action_preflight": "hosted-tokenless"
+    },
+    {
       "id": "example-basic",
       "workflow": ".github/workflows/example-basic.yml",
       "event": "testdata/smoke/events/push.json",
