@@ -6,8 +6,8 @@ agents:
   queue: "hosted"
 
 steps:
-  - group: ":toolbox: Compatibility suites"
-    key: "compatibility-suites"
+  - group: ":toolbox: On-demand suites"
+    key: "on-demand-suites"
     steps:
       - label: ":pipeline: Load compatibility proof"
         key: "compatibility-proof-loader"
@@ -35,10 +35,10 @@ steps:
 
       - label: ":pipeline: Load consolidated hosted smoke proof"
         key: "hosted-smoke-loader"
-        if: build.env("SMOKE_PROBE") == "hosted" || (build.env("SMOKE_PROBE") == null && build.env("COMPATIBILITY_PROOF") == null && build.env("DEMO_SUITE") != "plugin")
+        if: build.env("SMOKE_PROBE") == "hosted"
         command: |
           set -euo pipefail
-          commit="$${SMOKE_COMMIT:-$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}}"
+          commit="$${SMOKE_COMMIT:?SMOKE_COMMIT is required}"
           [[ "$$commit" =~ ^[0-9a-f]{40}$$ ]]
           proof_commit="$${COMPATIBILITY_PROOF_COMMIT:-}"
           [[ -z "$$proof_commit" || "$$proof_commit" == "$$commit" ]] || {
