@@ -14,7 +14,7 @@ GitHub Actions syntax changes over time. If a feature is not listed here, treat 
 | 🚧 **Not available in production** | The compiler or runtime supports it, but production upload blocks it. |
 | ❌ **Unsupported** | Rejected or outside the compatibility contract. |
 
-[Open compatibility issues](https://github.com/buildkite/buildkite-gha/issues?q=is%3Aissue%20state%3Aopen%20label%3Acompatibility) track requests and planned outcomes. They do not describe current support or promise a delivery date.
+Looking for something else? [Browse open compatibility issues](https://github.com/buildkite/buildkite-gha/issues?q=is%3Aissue%20state%3Aopen%20label%3Acompatibility). This page is the source of truth for what works today.
 
 | Area | Status | Initial release boundary |
 | --- | --- | --- |

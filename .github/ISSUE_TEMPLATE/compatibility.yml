@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check the [compatibility contract](https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md) first. An open issue does not mean the feature is supported or promise a delivery date.
+        Start with the [compatibility contract](https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md). It lists what works today.
 
   - type: textarea
     id: workflow
