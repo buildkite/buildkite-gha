@@ -622,7 +622,7 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 	}
 }
 
-func TestCheckedInPipelinesTargetHostedQueue(t *testing.T) {
+func TestCheckedInPipelinesTargetApprovedQueues(t *testing.T) {
 	root := filepath.Join("..", "..", ".buildkite")
 	count := 0
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
@@ -641,6 +641,7 @@ func TestCheckedInPipelinesTargetHostedQueue(t *testing.T) {
 				Queue string `yaml:"queue"`
 			} `yaml:"agents"`
 			Steps []struct {
+				Key    string `yaml:"key"`
 				Agents struct {
 					Queue string `yaml:"queue"`
 				} `yaml:"agents"`
@@ -657,6 +658,12 @@ func TestCheckedInPipelinesTargetHostedQueue(t *testing.T) {
 			t.Errorf("%s has no steps", path)
 		}
 		for index, step := range document.Steps {
+			if path == filepath.Join(root, "pipeline.yml") && step.Key == "macos-arm64" {
+				if step.Agents.Queue != "mac-small" {
+					t.Errorf("%s step %d queue = %q, want mac-small", path, index, step.Agents.Queue)
+				}
+				continue
+			}
 			if step.Agents.Queue != "" && step.Agents.Queue != "hosted" {
 				t.Errorf("%s step %d overrides queue with %q, want hosted", path, index, step.Agents.Queue)
 			}
@@ -683,10 +690,14 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			Queue string `yaml:"queue"`
 		} `yaml:"agents"`
 		Steps []struct {
-			Key     string            `yaml:"key"`
-			Command string            `yaml:"command"`
-			If      string            `yaml:"if"`
-			Env     map[string]string `yaml:"env"`
+			Key              string            `yaml:"key"`
+			Command          string            `yaml:"command"`
+			If               string            `yaml:"if"`
+			Env              map[string]string `yaml:"env"`
+			TimeoutInMinutes int               `yaml:"timeout_in_minutes"`
+			Agents           struct {
+				Queue string `yaml:"queue"`
+			} `yaml:"agents"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(source, &document); err != nil {
@@ -699,9 +710,11 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 		t.Fatalf("default pipeline queue = %q, want hosted", document.Agents.Queue)
 	}
 	steps := make(map[string]struct {
-		command     string
-		condition   string
-		environment map[string]string
+		command          string
+		condition        string
+		environment      map[string]string
+		timeoutInMinutes int
+		queue            string
 	}, len(document.Steps))
 	for _, step := range document.Steps {
 		if step.Key != "" {
@@ -710,16 +723,35 @@ func TestDefaultPipelineRunsRepositoryChecks(t *testing.T) {
 			}
 		}
 		steps[step.Key] = struct {
-			command     string
-			condition   string
-			environment map[string]string
-		}{command: step.Command, condition: step.If, environment: step.Env}
+			command          string
+			condition        string
+			environment      map[string]string
+			timeoutInMinutes int
+			queue            string
+		}{command: step.Command, condition: step.If, environment: step.Env, timeoutInMinutes: step.TimeoutInMinutes, queue: step.Agents.Queue}
 	}
 	if got := steps["checks"]; got.command != "mise run --jobs 1 check" || got.condition != "" {
 		t.Fatalf("repository checks = %#v", got)
 	}
 	if got := steps["checks"].environment["BUILDKITE_GHA_LIVE_REQUIRED"]; got != "1" {
 		t.Fatalf("repository checks BUILDKITE_GHA_LIVE_REQUIRED = %q, want required live prerequisites", got)
+	}
+	macOS := steps["macos-arm64"]
+	if macOS.condition != "" || macOS.queue != "mac-small" || macOS.timeoutInMinutes != 20 {
+		t.Fatalf("macOS arm64 checks = %#v", macOS)
+	}
+	for _, required := range []string{
+		`test "$$(mise exec -- go env GOOS)" = "darwin"`,
+		`test "$$(mise exec -- go env GOARCH)" = "arm64"`,
+		`mise exec -- go build ./...`,
+		`mise exec -- go test -count=1 ./...`,
+	} {
+		if !strings.Contains(macOS.command, required) {
+			t.Fatalf("macOS arm64 checks lack %q:\n%s", required, macOS.command)
+		}
+	}
+	if strings.Contains(macOS.command, "-run") {
+		t.Fatalf("macOS arm64 checks filter tests:\n%s", macOS.command)
 	}
 	pluginDemo := steps["plugin-demo-loader"]
 	if pluginDemo.condition != `build.env("DEMO_SUITE") == "plugin"` {

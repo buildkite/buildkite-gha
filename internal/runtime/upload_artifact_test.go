@@ -629,7 +629,7 @@ func TestUploadArtifactAdapterBypassesVerifiedUpstreamLifecycle(t *testing.T) {
 	workflowPath := ".github/workflows/upload.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: upload proof\n")
 	writeFixtureFile(t, workspace, "payload/result.txt", "payload")
-	remote := t.TempDir()
+	remote := canonicalTempDir(t)
 	writeFixtureFile(t, remote, "action.yml", "name: upload artifact\nruns:\n  using: node24\n  pre: dist/pre.js\n  main: dist/main.js\n  post: dist/post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "dist/"+phase+".js", "throw new Error('adapter must not execute upstream JavaScript')\n")
@@ -685,7 +685,7 @@ func TestUploadArtifactV6ConditionalMatrixAndExpressionName(t *testing.T) {
 	workflowPath := ".github/workflows/upload.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: conditional upload proof\n")
 	writeFixtureFile(t, workspace, "artifacts.tar.gz", "archive")
-	remote := t.TempDir()
+	remote := canonicalTempDir(t)
 	writeFixtureFile(t, remote, "action.yml", "name: upload artifact\nruns:\n  using: node24\n  main: dist/upload/index.js\n")
 	writeFixtureFile(t, remote, "dist/upload/index.js", "throw new Error('adapter must not execute upstream JavaScript')\n")
 	digest, err := source.DigestTree(remote)

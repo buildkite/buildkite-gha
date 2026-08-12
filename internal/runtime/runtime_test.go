@@ -537,6 +537,7 @@ func TestRunDockerFakeLifecycle(t *testing.T) {
 }
 
 func TestRunDockerPreservesExplicitPath(t *testing.T) {
+	requireLinuxAMD64(t)
 	t.Parallel()
 
 	for _, test := range []struct {
@@ -587,6 +588,7 @@ func TestRunDockerPreservesExplicitPath(t *testing.T) {
 }
 
 func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
+	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "success")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker dynamic PATH test\n")
@@ -608,6 +610,7 @@ func TestRunDockerPreservesPathWrittenThroughGitHubEnv(t *testing.T) {
 }
 
 func TestRunDockerActionEnvironmentUsesInvocationBeforeActionDefaults(t *testing.T) {
+	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "success")
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, ".github/workflows/test.yml", "name: Docker environment precedence test\n")
@@ -760,6 +763,7 @@ func TestRunDockerCancellationCleansOwnedResources(t *testing.T) {
 }
 
 func TestRunJobLegacyDockerPlanUsesFakeBackend(t *testing.T) {
+	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "success")
 	workspace := fixturePath(t)
 	job := runtimePlan(t, workspace, "smoke/.github/workflows/ci.yml", []plan.Step{{ID: "docker", Kind: "uses", Uses: "./actions/docker"}})
@@ -4987,6 +4991,13 @@ func canonicalTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func requireLinuxAMD64(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("requires a linux/amd64 runtime host")
+	}
 }
 
 func requireNode24(t *testing.T) string {

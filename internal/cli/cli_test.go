@@ -49,6 +49,22 @@ const (
 	stageResolution      = string(compiler.StageResolution)
 )
 
+func requireImporterHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
+		t.Skip("the importer requires linux/amd64")
+	}
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestRunHelpAndVersion(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -116,6 +132,7 @@ func TestPluginIsHiddenAndZeroArgument(t *testing.T) {
 }
 
 func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
+	requireImporterHost(t)
 	t.Setenv(pluginConfigurationEnvironment, "")
 	t.Setenv("BUILDKITE_PLUGIN_GITHUB_ACTIONS_WORKFLOW", "legacy.yml")
 	runner := &cliCaptureRunner{}
@@ -252,6 +269,7 @@ func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
 }
 
 func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	executable, err := os.Executable()
 	if err != nil {
@@ -302,6 +320,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 }
 
 func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
+	requireImporterHost(t)
 	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, "mixed.yml")
@@ -446,7 +465,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cache := filepath.Join(t.TempDir(), pluginDarwinAsset)
+	cache := filepath.Join(canonicalTempDir(t), pluginDarwinAsset)
 	distribution, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache)
 	if err != nil {
 		t.Fatal(err)
@@ -802,6 +821,9 @@ jobs:
 		{name: "upload before event metadata", args: []string{"upload", workflow}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.args[0] == "upload" {
+				requireImporterHost(t)
+			}
 			var stdout, stderr bytes.Buffer
 			runner := &cliCaptureRunner{}
 			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
@@ -839,6 +861,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("invalid boundary before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", invalidWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -881,6 +904,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("exact boundary survives an earlier graph failure", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", graphFailureWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -934,6 +958,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("reusable boundary discovery does not depend on fail-fast order", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", reusableBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -975,6 +1000,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("shared boundary is rescanned when reached at a shallower depth", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", sharedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -1009,6 +1035,7 @@ jobs:
 		}
 	}
 	t.Run("depth-limited reusable discovery fails closed before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", depthBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -1052,6 +1079,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("incomplete reusable discovery fails closed before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", malformedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -1924,6 +1952,7 @@ jobs:
 	})
 
 	t.Run("upload", func(t *testing.T) {
+		requireImporterHost(t)
 		t.Setenv("BUILDKITE", "true")
 		t.Setenv("BUILDKITE_STEP_KEY", "concurrency-importer")
 		runner := &cliCaptureRunner{}
@@ -1997,6 +2026,7 @@ jobs:
 	})
 
 	t.Run("upload before Buildkite calls", func(t *testing.T) {
+		requireImporterHost(t)
 		t.Setenv("BUILDKITE", "true")
 		t.Setenv("BUILDKITE_STEP_KEY", "condition-importer")
 		runner := &cliCaptureRunner{}
@@ -2012,6 +2042,7 @@ jobs:
 }
 
 func TestUploadAcceptsConditionalActionInputDefault(t *testing.T) {
+	requireImporterHost(t)
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "complex-default")
@@ -2122,6 +2153,7 @@ func TestValidateHostedTokenlessProfileRejectsProtectedCapabilityAfterCompile(t 
 }
 
 func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
@@ -2206,6 +2238,7 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 }
 
 func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
+	requireImporterHost(t)
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, "mixed.yml")
 	workflow := []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n  macos:\n    needs: linux\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n")
@@ -2423,6 +2456,7 @@ func TestExpandWorkflowPatternStarSelectsTopLevelYAMLWorkflows(t *testing.T) {
 }
 
 func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
+	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	for _, test := range []struct {
 		name   string
@@ -2560,6 +2594,7 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 }
 
 func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
+	requireImporterHost(t)
 	workflow := func(name string) string {
 		return "name: " + name + "\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	}
@@ -2609,6 +2644,7 @@ func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
 }
 
 func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
+	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"a.yml": workflowSource})
 	t.Chdir(repository)
@@ -2625,6 +2661,7 @@ func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
 }
 
 func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
+	requireImporterHost(t)
 	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	inputs, err := expandWorkflowPattern(pattern)
@@ -2714,6 +2751,7 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 }
 
 func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
+	requireImporterHost(t)
 	repository := t.TempDir()
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
@@ -2806,6 +2844,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 }
 
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
 	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
@@ -2872,6 +2911,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 }
 
 func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T) {
+	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"dispatch.yml":     "name: Dispatch\non: workflow_dispatch\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"pull-request.yml": "name: Pull request\non: pull_request\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.runner }}\n    steps: [{run: true}]\n",
@@ -2961,6 +3001,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 }
 
 func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
+	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"dispatch.yml":     "name: Dispatch\non: workflow_dispatch\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"pull-request.yml": "name: Pull request\non:\n  pull_request:\n    branches: [main]\n    types: [synchronize]\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.base.ref == 'main' && 'ubuntu-latest' || 'ubuntu-22.04' }}\n    steps: [{run: true}]\n",
@@ -3034,6 +3075,7 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 }
 
 func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "invalid-push.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.missing_runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3057,6 +3099,7 @@ func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
 }
 
 func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "pull-request.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3094,7 +3137,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 
 func writeUploadWorkflowRepository(t *testing.T, sources map[string]string) string {
 	t.Helper()
-	repository := t.TempDir()
+	repository := canonicalTempDir(t)
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
 		t.Fatal(err)
@@ -3137,6 +3180,7 @@ func writeUploadEvent(t *testing.T, directory, event, ref string, payload map[st
 }
 
 func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "issues.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3158,6 +3202,7 @@ func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
 }
 
 func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
+	requireImporterHost(t)
 	for _, test := range []struct {
 		name, workflow, want string
 		payload              map[string]any
@@ -3194,6 +3239,7 @@ func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 }
 
 func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
+	requireImporterHost(t)
 	workflow := "on:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"push.yml": workflow})
 	eventPath := writeUploadEvent(t, repository, "push", "refs/pull/42/head", map[string]any{})
@@ -3226,6 +3272,7 @@ func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
 }
 
 func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T) {
+	requireImporterHost(t)
 	repository := t.TempDir()
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
@@ -3318,6 +3365,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 }
 
 func TestRunUploadRejectsAllReusableOnlyMatches(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "reusable.yml")
 	source := "on: workflow_call\njobs:\n  shared:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(source), 0o600); err != nil {
@@ -3336,6 +3384,7 @@ func TestRunUploadRejectsAllReusableOnlyMatches(t *testing.T) {
 }
 
 func TestRunUploadRejectsAllReusableExplicitPaths(t *testing.T) {
+	requireImporterHost(t)
 	reusable := "on: workflow_call\njobs:\n  shared:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"first.yml":  reusable,
@@ -3526,6 +3575,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 }
 
 func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
@@ -3581,6 +3631,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 }
 
 func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
@@ -3669,6 +3720,7 @@ jobs:
 }
 
 func TestRunUploadRejectsLegacyTargetingEnvironment(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	for _, environment := range []string{legacyTargetQueueEnvironment, legacyRuntimeImageEnvironment} {
@@ -3689,6 +3741,7 @@ func TestRunUploadRejectsLegacyTargetingEnvironment(t *testing.T) {
 }
 
 func TestRunUploadUsesWorkflowGroupInsteadOfContainingGroup(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
@@ -3719,6 +3772,7 @@ func TestRunUploadUsesWorkflowGroupInsteadOfContainingGroup(t *testing.T) {
 }
 
 func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	sha := "0123456789abcdef0123456789abcdef01234567"
 	t.Setenv("BUILDKITE", "true")
@@ -3762,6 +3816,7 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 }
 
 func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "webhook.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-${{ github.event.marker }}\n    steps:\n      - run: echo selected\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3816,6 +3871,7 @@ func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 }
 
 func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	t.Setenv("BUILDKITE", "true")
 	t.Setenv("BUILDKITE_STEP_KEY", "webhook-importer")
@@ -3850,6 +3906,7 @@ func TestRunUploadRejectsInvalidWebhookMetadata(t *testing.T) {
 }
 
 func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "concurrent.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
@@ -3896,6 +3953,7 @@ func TestRunUploadCompilesConcurrentSmokePipeline(t *testing.T) {
 }
 
 func TestRunUploadJavaScriptActionRequiresRuntimeMiseWithoutTransport(t *testing.T) {
+	requireImporterHost(t)
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "action.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "local")
@@ -4006,6 +4064,7 @@ func TestPrepareMiseDataDirFallsBackWhenCacheIsUnavailable(t *testing.T) {
 }
 
 func TestRunUploadAllowsCompilerVerifiedLocalDockerfileAction(t *testing.T) {
+	requireImporterHost(t)
 	root := t.TempDir()
 	workflowPath := filepath.Join(root, ".github", "workflows", "docker.yml")
 	actionRoot := filepath.Join(root, ".github", "actions", "docker")
@@ -4061,7 +4120,7 @@ func writeFakeNode(t *testing.T, root string, major int) string {
 
 func setFakeMise(t *testing.T, version string) string {
 	t.Helper()
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	mise := filepath.Join(root, "mise")
 	script := "#!/bin/sh\nif [ -n \"${MISE_TEST_POISON:-}\" ]; then printf 'poisoned\\n'; else printf '" + version + " linux-x64 (test)\\n'; fi\n"
 	if err := os.WriteFile(mise, []byte(script), 0o700); err != nil {
@@ -4104,7 +4163,7 @@ func TestResolveRuntimeMiseAcceptsNewerVersion(t *testing.T) {
 }
 
 func TestResolveRuntimeMiseAcceptsPrefixedVersionOutput(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	mise := filepath.Join(root, "mise")
 	if err := os.WriteFile(mise, []byte("#!/bin/sh\nprintf 'mise v2026.8.1 linux-x64 (test)\\n'\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -4269,7 +4328,7 @@ func TestValidateRuntimeMiseRejectsOversizedCacheEntry(t *testing.T) {
 }
 
 func TestManagedMiseCacheIsNotExecutedBeforePrivateCopy(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	marker := filepath.Join(t.TempDir(), "executed")
 	binary := []byte("#!/bin/sh\nprintf ran > '" + marker + "'\nprintf '" + buildkitepipeline.MinimumMiseVersion + " linux-x64 (test)\\n'\n")
 	digest := sha256.Sum256(binary)
@@ -4519,6 +4578,7 @@ func TestRunJobSkipsActionJobBeforePreparingRuntimeMise(t *testing.T) {
 }
 
 func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
@@ -4892,6 +4952,9 @@ func TestRunUsageErrors(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if len(test.args) != 0 && test.args[0] == "upload" {
+				requireImporterHost(t)
+			}
 			t.Setenv("BUILDKITE", "")
 			t.Setenv("BUILDKITE_STEP_KEY", "")
 			var stdout, stderr bytes.Buffer
@@ -5568,21 +5631,31 @@ func TestLoadRuntimeDistributionsValidatesPlatformBinaryAndSymlink(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformLinuxAMD64: executable})
+	platform, err := compiler.ParsePlatform(runtime.GOOS + "/" + runtime.GOARCH)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := distributions[compiler.PlatformLinuxAMD64].digest; got != cliTestRuntimeDigest() {
+	distributions, err := loadRuntimeDistributions(map[compiler.Platform]string{platform: executable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := distributions[platform].digest; got != cliTestRuntimeDigest() {
 		t.Fatalf("runtime digest = %q, want %q", got, cliTestRuntimeDigest())
 	}
-	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformDarwinARM64: executable}); err == nil || !strings.Contains(err.Error(), "Mach-O") {
-		t.Fatalf("Darwin runtime accepted Linux executable: %v", err)
+	other := compiler.PlatformDarwinARM64
+	wantFormat := "Mach-O"
+	if platform == compiler.PlatformDarwinARM64 {
+		other = compiler.PlatformLinuxAMD64
+		wantFormat = "ELF"
+	}
+	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{other: executable}); err == nil || !strings.Contains(err.Error(), wantFormat) {
+		t.Fatalf("%s runtime accepted %s executable: %v", other, platform, err)
 	}
 	symlink := filepath.Join(t.TempDir(), "runtime")
 	if err := os.Symlink(executable, symlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformLinuxAMD64: symlink}); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+	if _, err := loadRuntimeDistributions(map[compiler.Platform]string{platform: symlink}); err == nil || !strings.Contains(err.Error(), "non-symlink") {
 		t.Fatalf("runtime symlink error = %v", err)
 	}
 }

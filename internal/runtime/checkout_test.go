@@ -686,7 +686,7 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 }
 
 func TestCheckoutUsesCommandScopedAgentCredentialHelper(t *testing.T) {
-	workspace := t.TempDir()
+	workspace := canonicalTempDir(t)
 	checkoutDirectory := filepath.Join(workspace, "test-catalog")
 	poisonedGlobalConfig := []byte("[url \"https://attacker.invalid/\"]\n\tinsteadOf = https://github.com/\n")
 	if err := os.WriteFile(filepath.Join(workspace, ".no-global-gitconfig"), poisonedGlobalConfig, 0o600); err != nil {
