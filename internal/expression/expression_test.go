@@ -648,6 +648,42 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	}
 }
 
+func TestCompileInputLiteralRepresentations(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    string
+		wantErr string
+	}{
+		{name: "nil is the null literal", value: nil, want: "null"},
+		{name: "true", value: true, want: "true"},
+		{name: "false", value: false, want: "false"},
+		{name: "plain string is quoted", value: "ready", want: "'ready'"},
+		{name: "apostrophes escape by doubling", value: "it's ready", want: "'it''s ready'"},
+		{name: "empty string stays a literal", value: "", want: "''"},
+		{name: "json number preserves source text", value: json.Number("0.30"), want: "0.30"},
+		{name: "int", value: 42, want: "42"},
+		{name: "float64 uses shortest form", value: 2.5, want: "2.5"},
+		{name: "aggregate values cannot be literals", value: []any{"x"}, wantErr: "cannot be represented"},
+		{name: "maps cannot be literals", value: map[string]any{"x": "y"}, wantErr: "cannot be represented"},
+		{name: "typed numerics outside the YAML model fail closed", value: int32(7), wantErr: "cannot be represented"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := compileInputLiteral(test.value)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("compileInputLiteral(%#v) error = %v, want %q", test.value, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("compileInputLiteral(%#v) = %q, %v, want %q", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs.label }}"
 	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
