@@ -64,9 +64,8 @@ type Workflow struct {
 	Jobs            []Job
 }
 
-// Failure is one synthetic child step that reports a safely rendered failure.
+// Failure replaces a failed aggregate workflow with one synthetic command step.
 type Failure struct {
-	Label   string
 	Message string
 }
 
@@ -159,13 +158,10 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Condition == "" && workflow.SkipReason == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
 			}
-			if workflow.Condition != "" && workflow.SkipReason != "" {
+			if workflow.Failure == nil && workflow.Condition != "" && workflow.SkipReason != "" {
 				return nil, fmt.Errorf("workflow %q cannot have both a trigger condition and skip reason", workflow.GroupKey)
 			}
-			if workflow.SkipReason != "" && workflow.Failure != nil {
-				return nil, fmt.Errorf("workflow %q cannot have both failures and skip reason", workflow.GroupKey)
-			}
-			if utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
+			if workflow.Failure == nil && utf8.RuneCountInString(workflow.SkipReason) > maxSkipReasonLength {
 				return nil, fmt.Errorf("workflow %q skip reason exceeds %d characters", workflow.GroupKey, maxSkipReasonLength)
 			}
 			if owner, exists := usedKeys[workflow.GroupKey]; exists {
@@ -174,8 +170,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			usedKeys[workflow.GroupKey] = "workflow group"
 		}
 		if workflow.Failure != nil {
-			if workflow.Failure.Label == "" || workflow.Failure.Message == "" {
-				return nil, fmt.Errorf("workflow %d failure requires a label and message", i+1)
+			if workflow.Failure.Message == "" {
+				return nil, fmt.Errorf("workflow %d failure requires a message", i+1)
+			}
+			if len(workflow.Jobs) != 0 || workflow.ConcurrencyGate != nil {
+				return nil, fmt.Errorf("workflow %d failure cannot include jobs or a concurrency gate", i+1)
 			}
 		}
 		jobs, err := orderJobs(pipeline.CompilerStep, workflow.Jobs)
@@ -229,6 +228,21 @@ type preparedWorkflow struct {
 }
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
+	if failure := workflow.Failure; failure != nil {
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
+		if workflow.Condition != "" {
+			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
+		}
+		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
+		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
+		out.WriteString("    notify:\n")
+		out.WriteString("      - github_check:\n")
+		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		out.WriteString("    checkout:\n      skip: true\n")
+		return nil
+	}
 	stepIndent := "  "
 	if workflow.Grouped {
 		groupLabel := workflow.GroupLabel
@@ -262,12 +276,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(":"))
 		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 		return nil
-	}
-	if failure := workflow.Failure; failure != nil {
-		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar(failure.Label))
-		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
-		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
-		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
 	}
 	if workflow.ConcurrencyGate != nil {
 		dependencies := []dependency{{Step: pipeline.CompilerStep}}
