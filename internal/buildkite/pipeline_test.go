@@ -1849,32 +1849,36 @@ func TestArtifactRoundtripProofContract(t *testing.T) {
 
 func TestCacheFixtureContract(t *testing.T) {
 	root := filepath.Join("..", "..")
-	fixture, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", ".github", "workflows", "cache-v6.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixtureText := string(fixture)
-	for _, fragment := range []string{
-		"cache-producer:",
-		"cache-consumer:",
-		"needs: cache-producer",
-		"actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-		"CACHE_ROUNDTRIP_KEY: cache-roundtrip-__CACHE_ROUNDTRIP_NONCE__",
-		`CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}`,
-		`test "$CACHE_HIT" != true`,
-		`test "$CACHE_HIT" = true`,
-		"CACHE_ROUNDTRIP_PRODUCER=",
-		"CACHE_ROUNDTRIP_CONSUMER=",
+	for name, commit := range map[string]string{
+		"cache-v5.yml": "caa296126883cff596d87d8935842f9db880ef25",
+		"cache-v6.yml": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
 	} {
-		if !strings.Contains(fixtureText, fragment) {
-			t.Fatalf("Cache roundtrip fixture lacks %q: %s", fragment, fixture)
+		fixture, err := os.ReadFile(filepath.Join(root, "testdata", "smoke", ".github", "workflows", name))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if count := strings.Count(fixtureText, "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"); count != 2 {
-		t.Fatalf("Cache roundtrip fixture has %d audited cache action invocations, want two", count)
-	}
-	if strings.Contains(fixtureText, "restore-keys:") {
-		t.Fatal("Cache roundtrip fixture permits a non-exact restore")
+		fixtureText := string(fixture)
+		for _, fragment := range []string{
+			"cache-producer:",
+			"cache-consumer:",
+			"needs: cache-producer",
+			"actions/cache@" + commit,
+			`CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}`,
+			`test "$CACHE_HIT" != true`,
+			`test "$CACHE_HIT" = true`,
+			"CACHE_ROUNDTRIP_PRODUCER=",
+			"CACHE_ROUNDTRIP_CONSUMER=",
+		} {
+			if !strings.Contains(fixtureText, fragment) {
+				t.Fatalf("Cache roundtrip fixture %s lacks %q: %s", name, fragment, fixture)
+			}
+		}
+		if count := strings.Count(fixtureText, "actions/cache@"+commit); count != 2 {
+			t.Fatalf("Cache roundtrip fixture %s has %d audited cache action invocations, want two", name, count)
+		}
+		if strings.Contains(fixtureText, "restore-keys:") {
+			t.Fatalf("Cache roundtrip fixture %s permits a non-exact restore", name)
+		}
 	}
 }
 

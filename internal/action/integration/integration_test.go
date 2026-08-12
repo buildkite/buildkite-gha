@@ -124,11 +124,13 @@ func TestCheckoutCommitsAreExact(t *testing.T) {
 	}
 }
 
-func TestCacheCommitIsExactV6(t *testing.T) {
-	if err := ValidateCacheCommit(CacheCommit); err != nil {
-		t.Fatal(err)
+func TestCacheCommitsAreExact(t *testing.T) {
+	for _, commit := range []string{CacheV503Commit, CacheV5Commit, CacheCommit} {
+		if err := ValidateCacheCommit(commit); err != nil {
+			t.Fatalf("audited commit %s rejected: %v", commit, err)
+		}
 	}
-	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v5.0.3") || !strings.Contains(err.Error(), CacheV503Commit) || !strings.Contains(err.Error(), "v5.1.0") || !strings.Contains(err.Error(), CacheV5Commit) || !strings.Contains(err.Error(), "v6.1.0") || !strings.Contains(err.Error(), CacheCommit) {
 		t.Fatalf("unrecognized cache commit error = %v", err)
 	}
 }

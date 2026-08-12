@@ -268,7 +268,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
 		})
 		if err != nil && cacheRequired {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache v6 service: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache service: %v\n", err)
 			return 1
 		}
 		if err != nil {
