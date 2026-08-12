@@ -89,7 +89,7 @@ func TestUploadHelpFormsMatch(t *testing.T) {
 		}
 		outputs = append(outputs, stdout.String())
 	}
-	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
+	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], ".github/workflows/*.{yml,yaml}") || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
 		t.Fatalf("upload help outputs differ or omit runner profile or aggregate workflow options:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
 	}
 }
@@ -2377,6 +2377,48 @@ func TestExpandWorkflowPatternNamespacesLiteralDirectoryMatches(t *testing.T) {
 		if input.StepKeyNamespace == "" || input.StepKeyNamespace != input.Identity {
 			t.Fatalf("literal directory workflow is not namespaced: %#v", input)
 		}
+	}
+}
+
+func TestExpandWorkflowPatternStarSelectsTopLevelYAMLWorkflows(t *testing.T) {
+	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"first.yml":   workflowSource,
+		"second.yaml": workflowSource,
+	})
+	repository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflowDirectory := filepath.Join(repository, ".github", "workflows")
+	if err := os.WriteFile(filepath.Join(workflowDirectory, "notes.txt"), []byte("not a workflow\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nestedDirectory := filepath.Join(workflowDirectory, "nested")
+	if err := os.MkdirAll(nestedDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDirectory, "nested.yml"), []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "root.yml"), []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", repository, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add shorthand fixtures: %v: %s", err, output)
+	}
+	t.Chdir(repository)
+	inputs, err := expandWorkflowOperands([]string{"*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		got = append(got, input.CanonicalPath)
+	}
+	want := []string{".github/workflows/first.yml", ".github/workflows/second.yaml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("* workflows = %q, want %q", got, want)
 	}
 }
 

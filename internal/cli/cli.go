@@ -67,7 +67,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nOne workflow operand preserves literal, directory, and tracked glob expansion. Two or more operands are explicit tracked .yml/.yaml paths; use -- before paths that begin with a dash. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nThe * shorthand selects .github/workflows/*.{yml,yaml}. One workflow operand preserves literal, directory, and tracked glob expansion. Two or more operands are explicit tracked .yml/.yaml paths; use -- before paths that begin with a dash. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -1824,8 +1824,9 @@ func expandWorkflowOperands(operands []string) ([]workflowInput, error) {
 }
 
 func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
-	patternHasMeta := strings.ContainsAny(pattern, "*?[")
-	if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
+	allWorkflows := pattern == "*"
+	patternHasMeta := allWorkflows || strings.ContainsAny(pattern, "*?[")
+	if info, err := os.Stat(pattern); !allWorkflows && err == nil && !info.IsDir() {
 		// An existing path is always literal, even when its filename contains
 		// glob metacharacters. This preserves the pre-pattern CLI contract.
 		patternHasMeta = false
@@ -1840,24 +1841,32 @@ func expandWorkflowPattern(pattern string) ([]workflowInput, error) {
 		return nil, fmt.Errorf("locate checked-out git repository: %w", rootErr)
 	}
 	root := strings.TrimSpace(string(rootBytes))
-	absolutePattern, err := filepath.Abs(pattern)
-	if err != nil {
-		return nil, fmt.Errorf("resolve workflow pattern %q: %w", pattern, err)
+	pathspecs := []string{
+		":(top,glob).github/workflows/*.yml",
+		":(top,glob).github/workflows/*.yaml",
 	}
-	relativePattern, err := filepath.Rel(root, absolutePattern)
-	if err != nil || relativePattern == ".." || strings.HasPrefix(relativePattern, ".."+string(filepath.Separator)) {
-		if !patternHasMeta {
-			if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
-				return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
-			}
+	if !allWorkflows {
+		absolutePattern, err := filepath.Abs(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workflow pattern %q: %w", pattern, err)
 		}
-		return nil, fmt.Errorf("workflow pattern %q is outside the checked-out git repository", pattern)
+		relativePattern, err := filepath.Rel(root, absolutePattern)
+		if err != nil || relativePattern == ".." || strings.HasPrefix(relativePattern, ".."+string(filepath.Separator)) {
+			if !patternHasMeta {
+				if info, statErr := os.Stat(pattern); statErr == nil && !info.IsDir() {
+					return workflowInputs([]workflowInput{{Path: pattern, CanonicalPath: filepath.ToSlash(filepath.Clean(pattern))}}, false)
+				}
+			}
+			return nil, fmt.Errorf("workflow pattern %q is outside the checked-out git repository", pattern)
+		}
+		pathspecMagic := ":(literal)"
+		if patternHasMeta {
+			pathspecMagic = ":(glob)"
+		}
+		pathspecs = []string{pathspecMagic + filepath.ToSlash(relativePattern)}
 	}
-	pathspecMagic := ":(literal)"
-	if patternHasMeta {
-		pathspecMagic = ":(glob)"
-	}
-	command := exec.Command("git", "-C", root, "ls-files", "-z", "--", pathspecMagic+filepath.ToSlash(relativePattern))
+	commandArgs := append([]string{"-C", root, "ls-files", "-z", "--"}, pathspecs...)
+	command := exec.Command("git", commandArgs...)
 	output, err := command.Output()
 	if err != nil {
 		return nil, fmt.Errorf("expand workflow pattern %q against tracked files: %w", pattern, err)
