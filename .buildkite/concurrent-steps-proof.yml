@@ -9,7 +9,7 @@ steps:
           version: "2026.5.12"
     command: |
       set -euo pipefail
-      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-}}"
+      commit="$${COMPATIBILITY_PROOF_COMMIT:-$${SMOKE_COMMIT:-$${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}}}"
       scripts/verify-source-checkout "$$commit"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-concurrent-steps.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
