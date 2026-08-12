@@ -570,7 +570,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			post.state = post.invocation.state
 			post.node = post.invocation.node
 		}
-		runPost, conditionErr := evaluateLifecycleCondition(post.condition, runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
+		runPost, conditionErr := expression.EvaluateActionLifecycleCondition(post.condition, runErr != nil, ctx.Err() != nil || runCtx.Err() != nil)
 		if conditionErr != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("post action %q condition: %w", post.action.Name, conditionErr))
 			continue
@@ -1148,11 +1148,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if usesCheckoutAdapter(lock) || usesUploadArtifactAdapter(lock) || usesDownloadArtifactAdapter(lock) {
 			return result, nil
 		}
-		runPre, err := evaluateLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
+		runPre, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, status.unsuccessful, ctx.Err() != nil)
 		if err != nil {
 			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}
-		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
+		if _, err := expression.EvaluateActionLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
 			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
 		}
 		if action.Runs.Pre == "" && action.Runs.Post == "" {
@@ -1382,10 +1382,10 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		if action.Runs.Main == "" {
 			return result, fmt.Errorf("JavaScript action %q has no main entry point", step.Uses)
 		}
-		if _, err := evaluateLifecycleCondition(action.Runs.PreIf, false, false); err != nil {
+		if _, err := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, false, false); err != nil {
 			return result, fmt.Errorf("JavaScript action %q pre-if: %w", step.Uses, err)
 		}
-		if _, err := evaluateLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
+		if _, err := expression.EvaluateActionLifecycleCondition(action.Runs.PostIf, false, false); err != nil {
 			return result, fmt.Errorf("JavaScript action %q post-if: %w", step.Uses, err)
 		}
 		major, _ := actionNodeMajor(actionRuntime)
@@ -1418,7 +1418,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			invocation.postRegistered = true
 		}
 		if javascript.Pre != "" && !wasPrepared {
-			runPre, _ := evaluateLifecycleCondition(action.Runs.PreIf, false, false)
+			runPre, _ := expression.EvaluateActionLifecycleCondition(action.Runs.PreIf, false, false)
 			if runPre {
 				if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javascript.Pre, nil, state, &result); err != nil {
 					return result, err
@@ -1720,25 +1720,6 @@ func postForInvocation(invocation *preparedInvocation, condition string) *regist
 		return nil
 	}
 	return &registeredPost{condition: condition, invocation: invocation}
-}
-
-func evaluateLifecycleCondition(value string, unsuccessful, cancelled bool) (bool, error) {
-	value = strings.TrimSpace(value)
-	if strings.HasPrefix(value, "${{") && strings.HasSuffix(value, "}}") {
-		value = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${{"), "}}"))
-	}
-	switch strings.ToLower(value) {
-	case "", "always()":
-		return true, nil
-	case "success()":
-		return !unsuccessful && !cancelled, nil
-	case "failure()":
-		return unsuccessful && !cancelled, nil
-	case "cancelled()":
-		return cancelled, nil
-	default:
-		return false, fmt.Errorf("condition %q is unsupported", value)
-	}
 }
 
 func jobStatusValue(unsuccessful, cancelled bool) string {
