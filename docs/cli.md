@@ -39,9 +39,11 @@ Use `--format json` for a `buildkite-gha/processing-report/v1` report.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 
+When `validate`, `compile`, or `upload` runs in a Buildkite job, it also publishes report warnings and errors as job-scoped Buildkite annotations. Annotation failures produce a warning but do not change the command result.
+
 Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a skipped group during upload. Unsupported triggers and malformed data are incompatible.
 
-Validation may use the public network to resolve actions. It does not call Buildkite, install Node, or execute workflow code.
+Validation may use the public network to resolve actions. Apart from annotation publication when it runs in a Buildkite job, it does not call Buildkite, install Node, or execute workflow code.
 
 ## Provide an event snapshot
 

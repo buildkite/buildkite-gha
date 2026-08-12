@@ -1,22 +1,44 @@
 package cli
 
 import (
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/transport"
+)
+
+const (
+	processingAnnotationContext   = "buildkite-gha-processing"
+	processingAnnotationBodyLimit = 1024 * 1024
 )
 
 // processingOutput owns where one command writes processing reports and
 // command diagnostics.
 type processingOutput struct {
-	command string
-	format  string
-	reports io.Writer
-	stderr  io.Writer
+	command       string
+	format        string
+	reports       io.Writer
+	stderr        io.Writer
+	annotationJob string
+	agent         transport.Agent
+}
+
+func newProcessingOutput(command, format string, reports, stderr io.Writer, agent transport.Agent) processingOutput {
+	out := processingOutput{command: command, format: format, reports: reports, stderr: stderr}
+	if os.Getenv("BUILDKITE") == "true" && os.Getenv("BUILDKITE_JOB_ID") != "" {
+		out.annotationJob = os.Getenv("BUILDKITE_JOB_ID")
+		out.agent = agent
+	}
+	return out
 }
 
 // write emits the report, reporting write failures on stderr.
@@ -25,7 +47,98 @@ func (o processingOutput) write(report compatibility.ProcessingReport) error {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
 		return err
 	}
+	o.annotate(report)
 	return nil
+}
+
+func (o processingOutput) annotate(report compatibility.ProcessingReport) {
+	if o.annotationJob == "" {
+		return
+	}
+	style, body := processingAnnotation(report)
+	if body == "" {
+		return
+	}
+	digest := sha256.Sum256([]byte(report.Workflow))
+	annotationContext := fmt.Sprintf("%s-%x", processingAnnotationContext, digest[:6])
+	if err := o.agent.AnnotateJob(context.Background(), o.annotationJob, annotationContext, style, body); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: processing annotation: %v\n", o.command, err)
+	}
+}
+
+func processingAnnotation(report compatibility.ProcessingReport) (style, body string) {
+	style = "warning"
+	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level != "warning" && diagnostic.Level != "error" {
+			continue
+		}
+		if diagnostic.Level == "error" {
+			style = "error"
+		}
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	if len(diagnostics) == 0 {
+		return "", ""
+	}
+
+	var out strings.Builder
+	out.WriteString("### GitHub Actions workflow diagnostics\n\n")
+	out.WriteString("**Workflow:** ")
+	out.WriteString(markdownText(report.Workflow))
+	out.WriteString("\n")
+	for _, diagnostic := range diagnostics {
+		out.WriteString("\n- **")
+		out.WriteString(strings.ToUpper(diagnostic.Level))
+		out.WriteString(" ")
+		out.WriteString(markdownText(diagnostic.Code))
+		out.WriteString("**")
+		if diagnostic.Location != nil {
+			out.WriteString(" · ")
+			out.WriteString(markdownText(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
+		}
+		out.WriteString("\n  ")
+		out.WriteString(markdownText(diagnostic.Message))
+		if diagnostic.Stage != "" {
+			out.WriteString(" · stage: ")
+			out.WriteString(markdownText(diagnostic.Stage))
+		}
+		if diagnostic.Job != "" {
+			out.WriteString(" · job: ")
+			out.WriteString(markdownText(diagnostic.Job))
+		}
+		if diagnostic.Action != "" {
+			out.WriteString(" · action: ")
+			out.WriteString(markdownText(diagnostic.Action))
+		}
+		if diagnostic.Step != 0 {
+			_, _ = fmt.Fprintf(&out, " · step: %d", diagnostic.Step)
+		}
+		out.WriteString("\n")
+	}
+	return style, truncateProcessingAnnotation(out.String())
+}
+
+func truncateProcessingAnnotation(body string) string {
+	if len(body) <= processingAnnotationBodyLimit {
+		return body
+	}
+	const notice = "\n\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
+	end := processingAnnotationBodyLimit - len(notice)
+	for !utf8.ValidString(body[:end]) {
+		end--
+	}
+	return body[:end] + notice
+}
+
+func markdownText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = html.EscapeString(value)
+	replacer := strings.NewReplacer(
+		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
+		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",
+	)
+	return replacer.Replace(value)
 }
 
 // fail emits the report and the failure that ended the command.

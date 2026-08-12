@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
@@ -38,6 +39,12 @@ const (
 	cliTestJobID         = "22222222-2222-4222-8222-222222222222"
 	cliTestProducerJobID = "33333333-3333-4333-8333-333333333333"
 )
+
+func TestMain(m *testing.M) {
+	_ = os.Unsetenv("BUILDKITE")
+	_ = os.Unsetenv("BUILDKITE_JOB_ID")
+	os.Exit(m.Run())
+}
 
 // Stable stage IDs asserted throughout the report expectations below.
 const (
@@ -2038,6 +2045,74 @@ jobs:
 	})
 }
 
+func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+
+	t.Run("error", func(t *testing.T) {
+		workflowPath := filepath.Join(t.TempDir(), "unsupported.yml")
+		if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runner := &cliCaptureRunner{}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 1 {
+			t.Fatalf("commands = %#v, want one annotation", runner.commands)
+		}
+		annotation := runner.commands[0]
+		if len(annotation.args) != 9 || annotation.args[0] != "annotate" || annotation.args[2] != "job" || annotation.args[4] != cliTestJobID || !strings.HasPrefix(annotation.args[6], processingAnnotationContext+"-") || annotation.args[8] != "error" {
+			t.Fatalf("annotation args = %#v", annotation.args)
+		}
+		for _, want := range []string{"GitHub Actions workflow diagnostics", "E\\_EXPRESSION\\_INVALID", "resolved runner target is not admitted by policy", "job: test"} {
+			if !strings.Contains(string(annotation.stdin), want) {
+				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
+			}
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || report.Result != "incompatible" {
+			t.Fatalf("report = %#v, error = %v", report, err)
+		}
+	})
+
+	t.Run("warning publication failure is non-fatal", func(t *testing.T) {
+		workflowPath := filepath.Join(t.TempDir(), "warning.yml")
+		workflow := []byte("on: push\nconcurrency:\n  group: ci\n  cancel-in-progress: true\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+		if err := os.WriteFile(workflowPath, workflow, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runner := &cliCaptureRunner{failAnnotation: true}
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"validate", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+		}
+		if len(runner.commands) != 1 || runner.commands[0].args[8] != "warning" {
+			t.Fatalf("commands = %#v, want one warning annotation", runner.commands)
+		}
+		if !strings.Contains(stderr.String(), "warning: processing annotation: annotation unavailable") {
+			t.Fatalf("stderr = %q", stderr.String())
+		}
+	})
+}
+
+func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
+	report := compatibility.NewProcessingReport("<workflow>|name", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Code: "E_TEST", Message: "line one\n<script>*unsafe*</script> " + strings.Repeat("界", processingAnnotationBodyLimit),
+	})
+	style, body := processingAnnotation(report)
+	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
+		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
+	}
+	for _, want := range []string{"&lt;workflow&gt;\\|name", "&lt;script&gt;\\*unsafe\\*&lt;/script&gt;", "Additional diagnostics omitted"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("annotation lacks %q", want)
+		}
+	}
+}
+
 func TestUnsupportedConditionPreflightAppliesToEveryCompilerEntryPoint(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "conditions.yml")
 	if err := os.WriteFile(workflowPath, []byte(`on: push
@@ -2092,9 +2167,10 @@ jobs:
 		}
 	})
 
-	t.Run("upload before Buildkite calls", func(t *testing.T) {
+	t.Run("upload annotates before artifact or pipeline calls", func(t *testing.T) {
 		requireImporterHost(t)
 		t.Setenv("BUILDKITE", "true")
+		t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
 		t.Setenv("BUILDKITE_STEP_KEY", "condition-importer")
 		runner := &cliCaptureRunner{}
 		var stdout, stderr bytes.Buffer
@@ -2102,8 +2178,8 @@ jobs:
 		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
 			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 		}
-		if len(runner.commands) != 0 {
-			t.Fatalf("unsupported condition made Buildkite calls: %#v", runner.commands)
+		if len(runner.commands) != 1 || runner.commands[0].args[0] != "annotate" || runner.commands[0].args[8] != "error" {
+			t.Fatalf("unsupported condition commands = %#v, want one error annotation", runner.commands)
 		}
 	})
 }
