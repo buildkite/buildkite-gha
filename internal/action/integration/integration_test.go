@@ -58,8 +58,9 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 	}
 	for name, inputs := range map[string]map[string]string{
 		"all": nil, "absolute": {"name": "x", "path": "/tmp"},
-		"name and pattern": {"name": "x", "pattern": "x-*", "merge-multiple": "true"},
-		"merge":            {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
+		"name and pattern":              {"name": "x", "pattern": "x-*", "merge-multiple": "true"},
+		"PostHog pattern without merge": {"pattern": "{junit-results-backend,product-junit-results}-*"},
+		"merge":                         {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
 		"duplicate": {"name": "x", "Name": "y"}, "token": {"name": "x", "github-token": ""},
 		"drive path": {"name": "x", "path": "C:/out"},
 	} {
@@ -77,6 +78,49 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 		t.Run("v8 "+name, func(t *testing.T) {
 			if ValidateDownloadArtifactInputs(DownloadArtifactV801Commit, inputs) == nil {
 				t.Fatal("unsupported v8 mode accepted")
+			}
+		})
+	}
+}
+
+func TestDownloadArtifactPatterns(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		pattern string
+		want    []string
+	}{
+		{name: "single glob", pattern: "junit-results-backend-*", want: []string{"junit-results-backend-*"}},
+		{name: "PostHog prefixes", pattern: "{junit-results-backend,product-junit-results}-*", want: []string{"junit-results-backend-*", "product-junit-results-*"}},
+		{name: "duplicate prefix", pattern: "{junit,junit}-*", want: []string{"junit-*"}},
+		{name: "maximum alternatives", pattern: "{a,b,c,d,e,f,g,h}-*", want: []string{"a-*", "b-*", "c-*", "d-*", "e-*", "f-*", "g-*", "h-*"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DownloadArtifactPatterns(test.pattern)
+			if err != nil || strings.Join(got, "|") != strings.Join(test.want, "|") {
+				t.Fatalf("DownloadArtifactPatterns(%q) = %#v, %v, want %#v", test.pattern, got, err, test.want)
+			}
+		})
+	}
+
+	rejected := map[string]string{
+		"empty alternative":        "{a,}-*",
+		"one alternative":          "{a}-*",
+		"too many alternatives":    "{a,b,c,d,e,f,g,h,i}-*",
+		"nested":                   "{a,{b,c}}-*",
+		"trailing brace":           "{a,b}-*}",
+		"missing close":            "{a,b-*",
+		"missing suffix":           "{a,b}",
+		"non-leading group":        "prefix-{a,b}-*",
+		"glob alternative":         "{a*,b}-*",
+		"traversal":                "{../a,b}-*",
+		"control character":        "{a,b\x1f}-*",
+		"unsupported second group": "{a,b}-{c,d}*",
+		"oversized expansion":      "{" + strings.Repeat("a", MaxDownloadArtifactPatternBytes) + ",b}-*",
+	}
+	for name, pattern := range rejected {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DownloadArtifactPatterns(pattern); err == nil {
+				t.Fatalf("DownloadArtifactPatterns(%q) succeeded", pattern)
 			}
 		})
 	}
@@ -124,11 +168,13 @@ func TestCheckoutCommitsAreExact(t *testing.T) {
 	}
 }
 
-func TestCacheCommitIsExactV6(t *testing.T) {
-	if err := ValidateCacheCommit(CacheCommit); err != nil {
-		t.Fatal(err)
+func TestCacheCommitsAreExact(t *testing.T) {
+	for _, commit := range []string{CacheV503Commit, CacheV5Commit, CacheCommit} {
+		if err := ValidateCacheCommit(commit); err != nil {
+			t.Fatalf("audited commit %s rejected: %v", commit, err)
+		}
 	}
-	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v5.0.3") || !strings.Contains(err.Error(), CacheV503Commit) || !strings.Contains(err.Error(), "v5.1.0") || !strings.Contains(err.Error(), CacheV5Commit) || !strings.Contains(err.Error(), "v6.1.0") || !strings.Contains(err.Error(), CacheCommit) {
 		t.Fatalf("unrecognized cache commit error = %v", err)
 	}
 }

@@ -12,10 +12,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -102,6 +104,96 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	}
 	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
+	}
+}
+
+func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testing.T) {
+	repo := t.TempDir()
+	for _, path := range []string{"", "restore", "save"} {
+		writeAction(t, repo, path)
+	}
+	digest := digestTree(t, repo)
+	for version, commit := range map[string]string{
+		"v5.0.3": actionintegration.CacheV503Commit,
+		"v5.1.0": actionintegration.CacheV5Commit,
+		"v6.1.0": actionintegration.CacheCommit,
+	} {
+		for _, path := range []string{"", "restore", "save"} {
+			name := version + "/root"
+			if path != "" {
+				name = version + "/" + path
+			}
+			t.Run(name, func(t *testing.T) {
+				lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: commit, Path: path, SourceDigest: digest}
+				job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}
+				materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
+				if _, resolved, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: lock.ID}); err != nil || !reflect.DeepEqual(resolved, lock) {
+					t.Fatalf("resolve() = %#v, %v", resolved, err)
+				}
+				if materializer.calls != 1 || materializer.resolved.Commit != commit || materializer.resolved.Reference.Path != path || materializer.resolved.SourceDigest != digest {
+					t.Fatalf("materializer calls/resolved = %d / %#v", materializer.calls, materializer.resolved)
+				}
+			})
+		}
+	}
+
+	lock := plan.ActionLock{ID: "cache", Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40), SourceDigest: digest}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: repo, SourceDigest: digest}}
+	if _, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: lock.ID}); err == nil {
+		t.Fatal("unproved cache commit resolved")
+	}
+	if materializer.calls != 0 {
+		t.Fatalf("unproved cache commit reached materializer %d times", materializer.calls)
+	}
+}
+
+func TestActionLockResolverAllowsSymlinkedRepositoryAncestor(t *testing.T) {
+	base := canonicalTempDir(t)
+	realRoot := filepath.Join(base, "real")
+	if err := os.Mkdir(realRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalRoot := filepath.Join(base, "logical")
+	if err := os.Symlink(realRoot, logicalRoot); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	repository := filepath.Join(logicalRoot, "repository")
+	writeAction(t, repository, "nested")
+	digest := digestTree(t, repository)
+	commit := strings.Repeat("a", 40)
+	job := plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{{
+		ID: "lock", Source: "github", Repository: "owner/repo", Commit: commit, Path: "nested", SourceDigest: digest,
+	}}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{
+		RepositoryRoot: repository,
+		ActionRoot:     filepath.Join(repository, "nested"),
+		SourceDigest:   digest,
+	}}
+	resolved, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalRepository, err := filepath.EvalSymlinks(repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.SourceRoot != canonicalRepository {
+		t.Fatalf("resolved source root = %q, want %q", resolved.SourceRoot, canonicalRepository)
+	}
+	actionRuntime, err := resolved.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := resolved.ValidateEntrypoints(actionRuntime); err != nil {
+		t.Fatalf("validate entry points through aliased ancestor: %v", err)
+	}
+	linkedRepository := filepath.Join(base, "linked-repository")
+	if err := os.Symlink(repository, linkedRepository); err != nil {
+		t.Fatal(err)
+	}
+	materializer.result.RepositoryRoot = linkedRepository
+	if _, _, err := newActionLockResolver(job, "", materializer).resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("resolver accepted symlink repository root: %v", err)
 	}
 }
 

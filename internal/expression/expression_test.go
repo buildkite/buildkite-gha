@@ -52,6 +52,43 @@ func TestReferencePathOwnsOnlyOneStaticReference(t *testing.T) {
 	}
 }
 
+func TestRuntimeMatrixOutputAcceptsOnlyExactDirectNeedOutput(t *testing.T) {
+	for _, source := range []string{
+		"${{ fromJSON(needs.build_django_matrix.outputs.include) }}",
+		"${{ fromJson( needs.Build-Django.outputs.Matrix_1 ) }}",
+	} {
+		expr, err := Parse(source, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RuntimeMatrixOutput(expr)
+		if err != nil {
+			t.Fatalf("RuntimeMatrixOutput(%q) error = %v", source, err)
+		}
+		if got.Job == "" || got.Output == "" {
+			t.Fatalf("RuntimeMatrixOutput(%q) = %#v", source, got)
+		}
+	}
+
+	for _, source := range []string{
+		"${{ needs.build.outputs.matrix }}",
+		"${{ fromJSON(vars.matrix) }}",
+		"${{ fromJSON(needs.build.outputs.matrix || '[]') }}",
+		"${{ fromJSON(needs.build.outputs.matrix).include }}",
+		"${{ fromJSON(needs['build'].outputs.matrix) }}",
+		"${{ toJSON(needs.build.outputs.matrix) }}",
+		"${{ fromJSON(needs.build.result) }}",
+	} {
+		expr, err := Parse(source, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RuntimeMatrixOutput(expr); err == nil {
+			t.Fatalf("RuntimeMatrixOutput(%q) unexpectedly succeeded", source)
+		}
+	}
+}
+
 func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 	for _, template := range []string{
 		"literal",
@@ -61,6 +98,8 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"${{ secrets.TOKEN }}",
 		"${{ vars.RELEASE }}",
 		"${{ env.PATH }}",
+		"${{ runner.os }}",
+		"${{ runner['arch'] }}",
 		"${{ steps.build.outputs.release }}",
 		"${{ steps.build.outcome }}",
 		"${{ steps.build.conclusion }}",
@@ -93,6 +132,24 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T) {
+	runner := map[string]string{"os": "macOS", "arch": "ARM64"}
+	if got, err := Evaluate("${{ runner.os }}/${{ RUNNER.ARCH }}", Context{Runner: runner}); err != nil || got != "macOS/ARM64" {
+		t.Fatalf("Evaluate() = %q, %v", got, err)
+	}
+	if got, err := EvaluateCondition("runner.os == 'macOS' && runner.arch == 'ARM64'", ConditionContext{Runner: runner}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() = %v, %v", got, err)
+	}
+	if got, err := EvaluateActionInputDefault("${{ runner.os == 'macOS' && runner.arch || 'X64' }}", Context{Runner: runner}); err != nil || got != "ARM64" {
+		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
+	}
+	for _, reference := range []string{"runner.name", "runner.os.extra", "runner"} {
+		if err := validateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
+			t.Errorf("validateRuntimeTemplate(%q) unexpectedly succeeded", reference)
+		}
 	}
 }
 
@@ -362,6 +419,7 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
 		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
+		{name: "runner identity", source: "runner.os == 'Linux' && runner.arch == 'X64'", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {
@@ -464,6 +522,56 @@ func TestEvaluateFailsClosed(t *testing.T) {
 			_, err := Evaluate(test.template, Context{})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("Evaluate() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateActionLifecycleCondition(t *testing.T) {
+	tests := []struct {
+		name         string
+		condition    string
+		unsuccessful bool
+		cancelled    bool
+		want         bool
+		wantErr      bool
+	}{
+		{name: "empty means unconditional", condition: "", want: true},
+		{name: "empty stays true after failure", condition: "", unsuccessful: true, want: true},
+		{name: "empty stays true after cancellation", condition: "", cancelled: true, want: true},
+		{name: "whitespace only is empty", condition: "   ", unsuccessful: true, want: true},
+		{name: "always", condition: "always()", unsuccessful: true, cancelled: true, want: true},
+		{name: "success on success", condition: "success()", want: true},
+		{name: "success after failure", condition: "success()", unsuccessful: true, want: false},
+		{name: "success after cancellation", condition: "success()", cancelled: true, want: false},
+		{name: "failure after failure", condition: "failure()", unsuccessful: true, want: true},
+		{name: "cancellation dominates failure", condition: "failure()", unsuccessful: true, cancelled: true, want: false},
+		{name: "failure on success", condition: "failure()", want: false},
+		{name: "cancelled when cancelled", condition: "cancelled()", cancelled: true, want: true},
+		{name: "cancelled on success", condition: "cancelled()", want: false},
+		{name: "delimiters unwrap", condition: "${{ failure() }}", unsuccessful: true, want: true},
+		{name: "delimiters without spaces", condition: "${{always()}}", cancelled: true, want: true},
+		{name: "case is insensitive", condition: "ALWAYS()", want: true},
+		{name: "surrounding whitespace trims", condition: "  success()  ", want: true},
+		{name: "literals fail closed", condition: "true", wantErr: true},
+		{name: "references fail closed", condition: "github.event_name == 'push'", wantErr: true},
+		{name: "compound expressions fail closed", condition: "success() || failure()", wantErr: true},
+		{name: "arguments fail closed", condition: "success('build')", wantErr: true},
+		{name: "unknown functions fail closed", condition: "finished()", wantErr: true},
+		{name: "unopened delimiter fails closed", condition: "failure() }}", wantErr: true},
+		{name: "unclosed delimiter fails closed", condition: "${{ failure()", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := EvaluateActionLifecycleCondition(test.condition, test.unsuccessful, test.cancelled)
+			if test.wantErr {
+				if err == nil || got {
+					t.Fatalf("EvaluateActionLifecycleCondition(%q) = %v, %v, want false with error", test.condition, got, err)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateActionLifecycleCondition(%q, unsuccessful=%v, cancelled=%v) = %v, %v, want %v", test.condition, test.unsuccessful, test.cancelled, got, err, test.want)
 			}
 		})
 	}
@@ -624,6 +732,42 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	}
 	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
 		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestCompileInputLiteralRepresentations(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    string
+		wantErr string
+	}{
+		{name: "nil is the null literal", value: nil, want: "null"},
+		{name: "true", value: true, want: "true"},
+		{name: "false", value: false, want: "false"},
+		{name: "plain string is quoted", value: "ready", want: "'ready'"},
+		{name: "apostrophes escape by doubling", value: "it's ready", want: "'it''s ready'"},
+		{name: "empty string stays a literal", value: "", want: "''"},
+		{name: "json number preserves source text", value: json.Number("0.30"), want: "0.30"},
+		{name: "int", value: 42, want: "42"},
+		{name: "float64 uses shortest form", value: 2.5, want: "2.5"},
+		{name: "aggregate values cannot be literals", value: []any{"x"}, wantErr: "cannot be represented"},
+		{name: "maps cannot be literals", value: map[string]any{"x": "y"}, wantErr: "cannot be represented"},
+		{name: "typed numerics outside the YAML model fail closed", value: int32(7), wantErr: "cannot be represented"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := compileInputLiteral(test.value)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("compileInputLiteral(%#v) error = %v, want %q", test.value, err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("compileInputLiteral(%#v) = %q, %v, want %q", test.value, got, err, test.want)
+			}
+		})
 	}
 }
 

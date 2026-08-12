@@ -611,30 +611,36 @@ func TestCompileActionLocksDeterministic(t *testing.T) {
 	}
 }
 
-func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
+func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	for _, path := range []string{"", "restore", "save"} {
-		writeAction(t, remote, path, "name: cache v6\nruns:\n  using: node24\n  main: index.js\n")
+		writeAction(t, remote, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
 	}
-	for _, path := range []string{"", "restore", "save"} {
-		name := "root"
-		if path != "" {
-			name = path
-		}
-		t.Run(name, func(t *testing.T) {
-			uses := "actions/cache"
+	for version, commit := range map[string]string{
+		"v5.0.3": actionintegration.CacheV503Commit,
+		"v5.1.0": actionintegration.CacheV5Commit,
+		"v6.1.0": actionintegration.CacheCommit,
+	} {
+		for _, path := range []string{"", "restore", "save"} {
+			name := version + "/root"
 			if path != "" {
-				uses += "/" + path
+				name = version + "/" + path
 			}
-			uses += "@" + actionintegration.CacheCommit
-			_, locks, capabilities, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{uses})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(locks) != 1 || locks[0].Commit != actionintegration.CacheCommit || !reflect.DeepEqual(capabilities, []string{"network"}) {
-				t.Fatalf("cache v6 locks/capabilities = %#v / %#v", locks, capabilities)
-			}
-		})
+			t.Run(name, func(t *testing.T) {
+				uses := "actions/cache"
+				if path != "" {
+					uses += "/" + path
+				}
+				uses += "@" + commit
+				_, locks, capabilities, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: commit}, []string{uses})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(locks) != 1 || locks[0].Commit != commit || !reflect.DeepEqual(capabilities, []string{"network"}) {
+					t.Fatalf("cache locks/capabilities = %#v / %#v", locks, capabilities)
+				}
+			})
+		}
 	}
 
 	_, locks, _, _, err := compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}, commit: actionintegration.CacheCommit}, []string{"actions/cache@v6.1.0"})
@@ -647,8 +653,12 @@ func TestCompileActionLocksAllowsOnlyCacheV6Commit(t *testing.T) {
 
 	resolved := strings.Repeat("a", 40)
 	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), "supported: actions/cache@v6.1.0 (commit "+actionintegration.CacheCommit+")") {
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV503Commit) || !strings.Contains(err.Error(), actionintegration.CacheV5Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
+	}
+	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v5 resolved to commit "+resolved) {
+		t.Fatalf("moved actions/cache v5 error = %v", err)
 	}
 }
 
@@ -706,8 +716,8 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("tokenless action plans are not deterministic")
 	}
-	if len(first) != 3 || first[0].Schema != plan.SchemaV7 || first[1].Schema != plan.SchemaV7 || first[2].Schema != plan.SchemaV2 {
-		t.Fatalf("plan schemas = %#v, want two action v7 plans and one shell v2 plan", []string{first[0].Schema, first[1].Schema, first[2].Schema})
+	if len(first) != 3 || first[0].Schema != plan.SchemaV8 || first[1].Schema != plan.SchemaV8 || first[2].Schema != plan.SchemaV8 {
+		t.Fatalf("plan schemas = %#v, want v8 plans", []string{first[0].Schema, first[1].Schema, first[2].Schema})
 	}
 	actionJob := first[0]
 	if len(actionJob.Actions) != 3 || actionJob.Steps[0].Action == nil || actionJob.Steps[1].Action == nil || actionJob.Steps[2].Action == nil || *actionJob.Steps[1].Action != *actionJob.Steps[2].Action {
@@ -770,7 +780,7 @@ jobs:
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("workspace action plans are not deterministic")
 	}
-	if len(first) != 1 || first[0].Schema != plan.SchemaV7 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
+	if len(first) != 1 || first[0].Schema != plan.SchemaV8 || len(first[0].Actions) != 1 || first[0].Actions[0].Source != "workspace" || first[0].Steps[0].Action == nil {
 		t.Fatalf("workspace action plan = %#v", first)
 	}
 }
@@ -1077,6 +1087,10 @@ func TestDownloadArtifactAdapterInputCommitAndNeedsBoundary(t *testing.T) {
 	if err != nil || len(plans) != 2 || plans[1].Actions[0].Commit != actionintegration.DownloadArtifactV5Commit {
 		t.Fatalf("download-artifact v5 pattern plans = %#v, %v", plans, err)
 	}
+	plans, err = compile(actionintegration.DownloadArtifactV5Commit, "    needs: producer\n", "        with:\n          pattern: '{junit-results-backend,product-junit-results}-*'\n          path: out\n          merge-multiple: true\n")
+	if err != nil || len(plans) != 2 || plans[1].Steps[0].With["pattern"] != "{junit-results-backend,product-junit-results}-*" {
+		t.Fatalf("download-artifact PostHog pattern plans = %#v, %v", plans, err)
+	}
 
 	for name, with := range map[string]string{
 		"missing name":  "        with:\n          path: out\n",
@@ -1350,6 +1364,9 @@ jobs:
 		t.Fatal(err)
 	}
 	actionCache := filepath.Join(t.TempDir(), "actions")
+	if err := os.Mkdir(actionCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	store, err := source.NewStore(actionCache, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1368,7 +1385,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Schema != plan.SchemaV7 || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
+	if len(plans) != 1 || plans[0].Schema != plan.SchemaV8 || len(plans[0].Actions) != 3 || plans[0].RequiresMise == nil || !*plans[0].RequiresMise {
 		t.Fatalf("public action plan = %#v", plans)
 	}
 	wantCommits := map[string]string{

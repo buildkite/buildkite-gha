@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,6 +57,39 @@ func TestCompileBundleGoldenAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestCompileBundleDoesNotActivateValidatedRuntimeMatrixWithoutFencing(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        run: echo 'include=[]' >> "$GITHUB_OUTPUT"
+  generated:
+    needs: producer
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.steps }}"
+`)
+	bundle, err := CompileBundle("runtime-matrix.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("CompileBundle() error = %v", err)
+	}
+	if len(bundle.Plans) != 0 || len(bundle.Pipeline) != 0 {
+		t.Fatalf("unsafe runtime matrix produced %d plans and %d pipeline bytes", len(bundle.Plans), len(bundle.Pipeline))
+	}
+	if len(bundle.IR.Jobs) != 1 || bundle.IR.Jobs[0].LogicalJobID != "producer" {
+		t.Fatalf("partial safe IR jobs = %#v", bundle.IR.Jobs)
+	}
+}
+
 func TestBundlePlansPermitAdmissionBeforePipelineGeneration(t *testing.T) {
 	path := smokePath(".github", "workflows", "shell.yml")
 	options := defaultOptions()
@@ -85,7 +119,7 @@ func TestCompileBundlePreservesExplicitQueuePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Target.Queue != "customer-untrusted" || bundle.Plans[0].Job.Schema != plan.SchemaV2 {
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Target.Queue != "customer-untrusted" || bundle.Plans[0].Job.Schema != plan.SchemaV8 {
 		t.Fatalf("explicitly targeted plan = %#v", bundle.Plans)
 	}
 	if !bytes.Contains(bundle.Pipeline, []byte("agents:\n      queue: \"customer-untrusted\"")) {
@@ -116,13 +150,196 @@ func TestCompileBundlePreservesRuntimeImagePolicy(t *testing.T) {
 	}
 }
 
+func TestCompileBundleEmitsMixedLinuxAndDarwinRuntimes(t *testing.T) {
+	workflow := []byte(`on: push
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo linux
+  macos:
+    needs: linux
+    runs-on: macos-15
+    steps:
+      - run: echo macos
+`)
+	linuxDigest := "sha256:" + strings.Repeat("a", 64)
+	darwinDigest := "sha256:" + strings.Repeat("b", 64)
+	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("c", 64)
+	bundle, err := CompileBundleWithOptions("mixed.yml", workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Targets: map[string]RunnerTarget{
+				"ubuntu-24.04": {Queue: "linux", Platform: PlatformLinuxAMD64, Image: image},
+				"macos-15":     {Queue: "macos", Platform: PlatformDarwinARM64},
+			},
+			UntrustedQueues: []string{"linux", "macos"},
+		},
+		RuntimeDistributions: map[Platform]string{
+			PlatformLinuxAMD64:  linuxDigest,
+			PlatformDarwinARM64: darwinDigest,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(bundle.Plans))
+	}
+	plans := map[string]PlanArtifact{}
+	for _, artifact := range bundle.Plans {
+		plans[artifact.Job.Workflow.LogicalJobID] = artifact
+		if artifact.Job.Schema != plan.SchemaV8 || artifact.Job.Compiler.DistributionDigest != testDistributionDigest {
+			t.Fatalf("plan identity = schema %q compiler %q", artifact.Job.Schema, artifact.Job.Compiler.DistributionDigest)
+		}
+		if bytes.Contains(artifact.Contents, []byte(`"platform"`)) || bytes.Contains(artifact.Contents, []byte("darwin/arm64")) {
+			t.Fatalf("plan exposed internal platform selection:\n%s", artifact.Contents)
+		}
+	}
+	if got := plans["linux"].Job.RuntimeDistributionDigest(); got != linuxDigest {
+		t.Fatalf("Linux runtime digest = %q, want %q", got, linuxDigest)
+	}
+	if got := plans["macos"].Job.RuntimeDistributionDigest(); got != darwinDigest {
+		t.Fatalf("Darwin runtime digest = %q, want %q", got, darwinDigest)
+	}
+
+	var document struct {
+		Steps []struct {
+			Key     string            `yaml:"key"`
+			Image   string            `yaml:"image"`
+			Command string            `yaml:"command"`
+			Agents  map[string]string `yaml:"agents"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(bundle.Pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 2 {
+		t.Fatalf("pipeline steps = %#v", document.Steps)
+	}
+	steps := map[string]struct {
+		Key     string
+		Image   string
+		Command string
+		Agents  map[string]string
+	}{}
+	for _, step := range document.Steps {
+		steps[step.Key] = struct {
+			Key     string
+			Image   string
+			Command string
+			Agents  map[string]string
+		}{step.Key, step.Image, step.Command, step.Agents}
+	}
+	linux := steps["gha-linux"]
+	macos := steps["gha-macos"]
+	if linux.Agents["queue"] != "linux" || linux.Image != image || !strings.Contains(linux.Command, strings.TrimPrefix(linuxDigest, "sha256:")) || !strings.Contains(linux.Command, "--hosted-tool-cache") {
+		t.Fatalf("Linux step = %#v", linux)
+	}
+	if macos.Agents["queue"] != "macos" || macos.Image != "" || !strings.Contains(macos.Command, strings.TrimPrefix(darwinDigest, "sha256:")) || strings.Contains(macos.Command, "--hosted-tool-cache") || strings.Contains(macos.Command, "/opt/hostedtoolcache") {
+		t.Fatalf("macOS step = %#v", macos)
+	}
+}
+
+func TestCompileBundleRejectsDockerOnDarwin(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "docker.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	actionRoot := filepath.Join(workspace, ".github", "actions")
+	writeAction(t, actionRoot, "docker", "runs:\n  using: docker\n  image: Dockerfile\n")
+	writeAction(t, actionRoot, "composite", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/docker\n")
+	options := Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Targets: map[string]RunnerTarget{
+				"macos-15":      {Queue: "macos", Platform: PlatformDarwinARM64},
+				"ubuntu-latest": {Queue: "linux", Platform: PlatformLinuxAMD64},
+			},
+			UntrustedQueues: []string{"linux", "macos"},
+		},
+		RuntimeDistributions: map[Platform]string{
+			PlatformLinuxAMD64:  "sha256:" + strings.Repeat("a", 64),
+			PlatformDarwinARM64: "sha256:" + strings.Repeat("b", 64),
+		},
+	}
+	tests := []struct {
+		name     string
+		runsOn   string
+		workload string
+		reject   bool
+	}{
+		{name: "job container", runsOn: "macos-15", workload: "    container: node:24\n    steps:\n      - run: true\n", reject: true},
+		{name: "service container", runsOn: "macos-15", workload: "    services:\n      redis:\n        image: redis:7\n    steps:\n      - run: true\n", reject: true},
+		{name: "Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/docker\n", reject: true},
+		{name: "transitive Dockerfile action", runsOn: "macos-15", workload: "    steps:\n      - uses: ./.github/actions/composite\n", reject: true},
+		{name: "Linux Dockerfile action", runsOn: "ubuntu-latest", workload: "    steps:\n      - uses: ./.github/actions/docker\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workflow := []byte("on: push\njobs:\n  test:\n    runs-on: " + test.runsOn + "\n" + test.workload)
+			bundle, err := CompileBundleWithOptions(workflowPath, workflow, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+			if test.reject {
+				if err == nil || !strings.Contains(err.Error(), `requires Docker, which is unavailable on darwin/arm64`) {
+					t.Fatalf("CompileBundleWithOptions() error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bundle.Plans) != 1 || !slices.Contains(bundle.Plans[0].Job.RequiredCapabilities, "docker") {
+				t.Fatalf("Linux Docker plan = %#v", bundle.Plans)
+			}
+		})
+	}
+}
+
+func TestCompileBundleNamespacesTargetsAndDependencies(t *testing.T) {
+	path := smokePath(".github", "workflows", "shell.yml")
+	options := defaultOptions()
+	options.StepKeyNamespace = "0123456789abcdef"
+	bundle, err := CompileBundleWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.IR.Jobs) != 3 || len(bundle.Plans) != 3 || len(bundle.GeneratedWorkflow.Jobs) != 3 {
+		t.Fatalf("namespaced bundle size = IR %d, plans %d, jobs %d", len(bundle.IR.Jobs), len(bundle.Plans), len(bundle.GeneratedWorkflow.Jobs))
+	}
+	producer := "gha-0123456789abcdef-producer"
+	if bundle.IR.Jobs[0].Key != producer || bundle.Plans[0].Job.Target.StepKey != producer || bundle.GeneratedWorkflow.Jobs[0].Key != producer {
+		t.Fatalf("namespaced producer = IR %q, plan %q, pipeline %q", bundle.IR.Jobs[0].Key, bundle.Plans[0].Job.Target.StepKey, bundle.GeneratedWorkflow.Jobs[0].Key)
+	}
+	for i := 1; i < len(bundle.Plans); i++ {
+		if !strings.HasPrefix(bundle.Plans[i].Job.Target.StepKey, "gha-0123456789abcdef-consumer-") || !reflect.DeepEqual(bundle.Plans[i].Job.Dependencies, []string{producer}) || !reflect.DeepEqual(bundle.GeneratedWorkflow.Jobs[i].Dependencies, []string{producer}) {
+			t.Fatalf("namespaced consumer %d = target %q, plan needs %#v, pipeline needs %#v", i, bundle.Plans[i].Job.Target.StepKey, bundle.Plans[i].Job.Dependencies, bundle.GeneratedWorkflow.Jobs[i].Dependencies)
+		}
+	}
+}
+
+func TestCompileBundleNamespacesMaxParallelConcurrency(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    strategy:\n      max-parallel: 1\n      matrix:\n        target: [one, two]\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	options := defaultOptions()
+	options.StepKeyNamespace = "0123456789abcdef"
+	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range bundle.GeneratedWorkflow.Jobs {
+		if !strings.Contains(job.ConcurrencyGroup, "/0123456789abcdef/test") {
+			t.Fatalf("matrix concurrency group = %q, want workflow namespace", job.ConcurrencyGroup)
+		}
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workflows) != 8 {
-		t.Fatalf("smoke workflows = %d, want 8", len(workflows))
+	if len(workflows) != 10 {
+		t.Fatalf("smoke workflows = %d, want 10", len(workflows))
 	}
 	event := readFile(t, smokePath("events", "push.json"))
 	for _, path := range workflows {
@@ -490,7 +707,7 @@ jobs:
     steps:
       - run: true
 `)
-	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	bundle, err := CompileBundle(".github/workflows/token.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,13 +716,13 @@ jobs:
 		jobs[artifact.Job.Workflow.LogicalJobID] = artifact
 	}
 	token := jobs["token"]
-	if token.Job.Schema != plan.SchemaV7 || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
+	if token.Job.Schema != plan.SchemaV8 || token.Job.GitHubToken == nil || !reflect.DeepEqual(token.Job.GitHubToken.Permissions, map[string]string{"contents": "read", "pull_requests": "write"}) {
 		t.Fatalf("GitHub workflow token plan = %#v", token.Job)
 	}
 	if !reflect.DeepEqual(token.Job.RequiredSecrets, []string{"OTHER"}) || !reflect.DeepEqual(token.Job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {
 		t.Fatalf("token secret boundary = names %#v capabilities %#v", token.Job.RequiredSecrets, token.Job.RequiredCapabilities)
 	}
-	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) {
+	if !reflect.DeepEqual(token.Authorization.ProviderTokenWriteCapabilitySources, []string{"effective-permissions"}) || token.Authorization.WorkflowTokenPolicyFilename != "token.yml" {
 		t.Fatalf("token authorization = %#v", token.Authorization)
 	}
 	if jobs["tokenless"].Job.GitHubToken != nil || jobs["tokenless"].Job.HasCapability("provider-token-write") {

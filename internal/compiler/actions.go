@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -363,6 +364,22 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	if err != nil {
 		return "", plan.ActionLock{}, "", "", err
 	}
+	repositoryRoot, err := filepath.Abs(materialized.RepositoryRoot)
+	if err != nil {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("resolve materialized repository root: %w", err)
+	}
+	logicalInfo, err := os.Lstat(repositoryRoot)
+	if err != nil || !logicalInfo.IsDir() || logicalInfo.Mode()&os.ModeSymlink != 0 {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("materialized repository root is not a non-symlink directory")
+	}
+	repositoryRoot, err = filepath.EvalSymlinks(repositoryRoot)
+	if err != nil {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("canonicalize materialized repository root: %w", err)
+	}
+	canonicalInfo, err := os.Stat(repositoryRoot)
+	if err != nil || !os.SameFile(logicalInfo, canonicalInfo) {
+		return "", plan.ActionLock{}, "", "", fmt.Errorf("materialized repository root changed while canonicalizing")
+	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
@@ -387,11 +404,11 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 			if lock.Path != "" {
 				requested += "/" + lock.Path
 			}
-			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted; supported: %s@v6.1.0 (commit %s)", requested, lock.RequestedRef, lock.Commit, requested, actionintegration.CacheCommit)
+			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted: %w", requested, lock.RequestedRef, lock.Commit, err)
 		}
 	}
 	b.caps["network"] = true
-	return key, lock, materialized.RepositoryRoot, ref.Path, nil
+	return key, lock, repositoryRoot, ref.Path, nil
 }
 
 type memoizedActionSource struct {

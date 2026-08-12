@@ -40,8 +40,10 @@ const (
 
 	jobSummaryTruncationNotice       = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"
-	workflowWarningAnnotationHeading = "## GitHub Actions warnings\n\n"
-	workflowErrorAnnotationHeading   = "## GitHub Actions errors\n\n"
+	workflowWarningAnnotationHeading = "<h2 class=\"h4 mb2\">GitHub Actions warnings</h2>\n"
+	workflowErrorAnnotationHeading   = "<h2 class=\"h4 mb2\">GitHub Actions errors</h2>\n"
+	workflowCommandListHeading       = "<div class=\"mb2\">\n"
+	workflowCommandListEnd           = "</div>\n"
 )
 
 // Runner executes verified actions using explicitly configured host tools.
@@ -642,7 +644,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		return ctx.Err()
 	}
 	if cacheErr != nil && action.Cache {
-		return fmt.Errorf("configure actions/cache v6 service: %w", cacheErr)
+		return fmt.Errorf("configure actions/cache service: %w", cacheErr)
 	}
 	cacheToken := ""
 	if cacheErr == nil {
@@ -939,10 +941,13 @@ const (
 	Node16Version = "16.20.2"
 	Node20Version = "20.20.2"
 	Node24Version = "24.18.0"
-	// Digests are for bin/node in the official Linux x86-64 release archives.
-	node16Digest = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
-	node20Digest = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
-	node24Digest = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	// Digests are for bin/node in the official platform release archives.
+	node16LinuxAMD64Digest  = "8440cffda5a21bf7cfda43d2c396f79777585a4c5e03ed2801fe226953a7aa11"
+	node20LinuxAMD64Digest  = "6295488653f0d93b0a157841746fef7e72cc4328cfb60c4bbe0ca2668a836ffd"
+	node24LinuxAMD64Digest  = "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+	node16DarwinARM64Digest = "83325958463d59cb0b16433eefab0a03fd1ce7d565a27e0274f507b1f3839a6e"
+	node20DarwinARM64Digest = "38de4fc456c0c439bac48c727d378f749abb4e31f4116703bb1ee9a746fccbb6"
+	node24DarwinARM64Digest = "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a"
 )
 
 func nodeTool(major int) string {
@@ -1042,16 +1047,33 @@ func (r Runner) nodeDigest(major int) string {
 	if digest := r.nodeDigests[major]; digest != "" {
 		return digest
 	}
-	switch major {
-	case 16:
-		return node16Digest
-	case 20:
-		return node20Digest
-	case 24:
-		return node24Digest
+	return nodeDigest(runtime.GOOS, runtime.GOARCH, major)
+}
+
+func nodeDigest(goos, goarch string, major int) string {
+	switch goos + "/" + goarch {
+	case "linux/amd64":
+		switch major {
+		case 16:
+			return node16LinuxAMD64Digest
+		case 20:
+			return node20LinuxAMD64Digest
+		case 24:
+			return node24LinuxAMD64Digest
+		}
+	case "darwin/arm64":
+		switch major {
+		case 16:
+			return node16DarwinARM64Digest
+		case 20:
+			return node20DarwinARM64Digest
+		case 24:
+			return node24DarwinARM64Digest
+		}
 	default:
 		return ""
 	}
+	return ""
 }
 
 func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string) (string, string, error) {
@@ -1069,67 +1091,97 @@ func (r Runner) miseNodeInstallation(ctx context.Context, major int, mise string
 		return "", "", fmt.Errorf("resolve %s installation path: %w", tool, err)
 	}
 	if r.MiseDataDir != "" {
-		dataDir, err := filepath.Abs(r.MiseDataDir)
+		_, installation, err = canonicalPathWithinRealRoot(r.MiseDataDir, installation)
 		if err != nil {
-			return "", "", fmt.Errorf("resolve mise data directory: %w", err)
-		}
-		resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
-		if err != nil || resolvedDataDir != dataDir {
-			return "", "", errors.New("mise data directory contains a symlink")
-		}
-		resolvedInstallation, err := filepath.EvalSymlinks(installation)
-		if err != nil || resolvedInstallation != installation {
-			return "", "", fmt.Errorf("mise-resolved %s installation contains a symlink", tool)
-		}
-		relative, err := filepath.Rel(dataDir, installation)
-		if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return "", "", fmt.Errorf("mise resolved %s outside its runtime-owned data directory", tool)
+			return "", "", fmt.Errorf("validate mise-resolved %s installation: %w", tool, err)
 		}
 	}
 	node := filepath.Join(installation, "bin", "node")
+	if r.MiseDataDir != "" {
+		_, node, err = canonicalPathWithinRealRoot(r.MiseDataDir, node)
+		if err != nil {
+			return installation, node, fmt.Errorf("validate mise-resolved %s executable: %w", tool, err)
+		}
+	}
 	info, err := os.Lstat(node)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return installation, node, fmt.Errorf("mise-resolved %s executable is not a regular file", tool)
 	}
 	resolvedNode, err := filepath.EvalSymlinks(node)
-	if err != nil || resolvedNode != node {
+	if err != nil {
 		return installation, node, fmt.Errorf("mise-resolved %s executable contains a symlink", tool)
 	}
-	return installation, node, nil
+	return installation, resolvedNode, nil
 }
 
 func removeManagedNodeInstallation(dataDir, installation string) error {
-	dataDir, err := filepath.Abs(dataDir)
+	_, installation, err := canonicalPathWithinRealRoot(dataDir, installation)
 	if err != nil {
-		return fmt.Errorf("resolve mise data directory: %w", err)
-	}
-	resolvedDataDir, err := filepath.EvalSymlinks(dataDir)
-	if err != nil || resolvedDataDir != dataDir {
-		return errors.New("refusing to remove Node installation through a symlinked mise data directory")
-	}
-	installation, err = filepath.Abs(installation)
-	if err != nil {
-		return fmt.Errorf("resolve cached Node installation: %w", err)
-	}
-	relative, err := filepath.Rel(dataDir, installation)
-	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return errors.New("refusing to remove Node installation outside the mise data directory")
-	}
-	current := dataDir
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return fmt.Errorf("inspect cached Node installation: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to remove cached Node installation through symlink %q", current)
-		}
+		return fmt.Errorf("refusing to remove Node installation: %w", err)
 	}
 	if err := os.RemoveAll(installation); err != nil {
 		return fmt.Errorf("remove invalid cached Node installation: %w", err)
 	}
 	return nil
+}
+
+func canonicalPathWithinRealRoot(root, target string) (string, string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve root: %w", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect root: %w", err)
+	}
+	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return "", "", fmt.Errorf("root is not a non-symlink directory")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", fmt.Errorf("canonicalize root: %w", err)
+	}
+	canonicalRootInfo, err := os.Stat(resolvedRoot)
+	if err != nil || !os.SameFile(rootInfo, canonicalRootInfo) {
+		return "", "", fmt.Errorf("root changed while canonicalizing")
+	}
+	target, err = filepath.Abs(target)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve path: %w", err)
+	}
+	lexicalRoot := root
+	relative, relativeErr := filepath.Rel(root, target)
+	if relativeErr != nil || !pathWithinDirectory(relative) {
+		lexicalRoot = resolvedRoot
+		relative, relativeErr = filepath.Rel(resolvedRoot, target)
+	}
+	if relativeErr != nil || !pathWithinDirectory(relative) {
+		return "", "", fmt.Errorf("path is outside root")
+	}
+	current := lexicalRoot
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, statErr := os.Lstat(current)
+		if statErr != nil {
+			return "", "", fmt.Errorf("inspect path: %w", statErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf("path component %q is a symlink", current)
+		}
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", "", fmt.Errorf("canonicalize path: %w", err)
+	}
+	relative, err = filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil || !pathWithinDirectory(relative) {
+		return "", "", fmt.Errorf("path is outside root")
+	}
+	return resolvedRoot, resolvedTarget, nil
+}
+
+func pathWithinDirectory(relative string) bool {
+	return relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func verifyManagedNodeExecutable(ctx context.Context, major int, path, want string) error {
@@ -1298,19 +1350,22 @@ type commandProcessor struct {
 }
 
 type workflowCommandAnnotationBuffer struct {
-	body      string
+	commands  []workflowCommandAnnotation
+	rendered  int
 	truncated bool
+}
+
+type workflowCommandAnnotation struct {
+	file     string
+	title    string
+	location string
+	message  string
 }
 
 type parsedWorkflowCommand struct {
 	name       string
 	properties map[string]string
 	message    string
-}
-
-type workflowCommandMetadata struct {
-	label string
-	value string
 }
 
 func newCommandProcessor(stdout, stderr io.Writer) *commandProcessor {
@@ -1341,7 +1396,7 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 		case strings.EqualFold(command.name, "stop-commands"):
 			if !validWorkflowCommandStopToken(command.message) {
 				const message = "invalid ::stop-commands token: token is empty or collides with a workflow command"
-				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", parsedWorkflowCommand{message: message})
+				p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, parsedWorkflowCommand{message: message})
 				p.writeWorkflowCommandMessageLocked(target, "error", message)
 				return errInvalidWorkflowCommandStopToken
 			}
@@ -1352,11 +1407,11 @@ func (p *commandProcessor) process(target io.Writer, line string) error {
 			p.writeMaskedLineLocked(target, line)
 			return nil
 		case strings.EqualFold(command.name, "warning"):
-			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, "Warning", command)
+			p.appendWorkflowCommandLocked(&p.warnings, workflowWarningAnnotationHeading, command)
 			p.writeWorkflowCommandMessageLocked(target, "warning", command.message)
 			return nil
 		case strings.EqualFold(command.name, "error"):
-			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, "Error", command)
+			p.appendWorkflowCommandLocked(&p.errors, workflowErrorAnnotationHeading, command)
 			p.writeWorkflowCommandMessageLocked(target, "error", command.message)
 			return nil
 		case strings.EqualFold(command.name, "group"):
@@ -1443,7 +1498,7 @@ func (p *commandProcessor) writeWorkflowCommandMessageLocked(target io.Writer, s
 func (p *commandProcessor) trustedWarning(message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, "Warning", parsedWorkflowCommand{message: message})
+	p.appendWorkflowCommandLocked(&p.trustedWarnings, workflowWarningAnnotationHeading, parsedWorkflowCommand{message: message})
 	p.writeWorkflowCommandMessageLocked(p.stderr, "warning", message)
 }
 
@@ -1458,12 +1513,30 @@ func (p *commandProcessor) maskTextLocked(text string) string {
 	return text
 }
 
-func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading, severity string, command parsedWorkflowCommand) {
-	fragment := renderWorkflowCommand(severity, command)
-	if buffer.body == "" {
-		fragment = heading + fragment
+func (p *commandProcessor) appendWorkflowCommandLocked(buffer *workflowCommandAnnotationBuffer, heading string, command parsedWorkflowCommand) {
+	annotation := workflowCommandAnnotation{
+		file:     strings.Clone(commandText(command.properties["file"])),
+		title:    strings.Clone(commandText(command.properties["title"])),
+		location: strings.Clone(workflowCommandLocationLabel(command.properties)),
+		message:  strings.Clone(commandText(command.message)),
 	}
-	appendBoundedText(&buffer.body, &buffer.truncated, fragment, false, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	p.appendWorkflowCommandAnnotationLocked(buffer, heading, annotation)
+}
+
+func (p *commandProcessor) appendWorkflowCommandAnnotationLocked(buffer *workflowCommandAnnotationBuffer, heading string, command workflowCommandAnnotation) {
+	if buffer.truncated {
+		return
+	}
+	additional := len(renderWorkflowCommandListItem(command))
+	if len(buffer.commands) == 0 {
+		additional += len(heading) + len(workflowCommandListHeading) + len(workflowCommandListEnd)
+	}
+	if buffer.rendered+additional > maxJobAnnotationBytes-len(workflowCommandTruncationNotice) {
+		buffer.truncated = true
+		return
+	}
+	buffer.rendered += additional
+	buffer.commands = append(buffer.commands, command)
 }
 
 func (p *commandProcessor) suppress() {
@@ -1528,14 +1601,23 @@ func (p *commandProcessor) scrubError(err error) error {
 func (p *commandProcessor) workflowCommandAnnotations() (warnings string, warningsTruncated bool, errors string, errorsTruncated bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	warnings, warningsTruncated = p.warnings.body, p.warnings.truncated
-	if p.trustedWarnings.body != "" {
-		warnings, warningsTruncated = "", false
-		appendBoundedText(&warnings, &warningsTruncated, p.trustedWarnings.body, p.trustedWarnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
-		untrusted := strings.TrimPrefix(p.warnings.body, workflowWarningAnnotationHeading)
-		appendBoundedText(&warnings, &warningsTruncated, untrusted, p.warnings.truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	masks := normalizedMasks(p.masks)
+	var combinedWarnings workflowCommandAnnotationBuffer
+	for _, command := range p.trustedWarnings.commands {
+		p.appendWorkflowCommandAnnotationLocked(&combinedWarnings, workflowWarningAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
 	}
-	return warnings, warningsTruncated, p.errors.body, p.errors.truncated
+	for _, command := range p.warnings.commands {
+		p.appendWorkflowCommandAnnotationLocked(&combinedWarnings, workflowWarningAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
+	}
+	combinedWarnings.truncated = combinedWarnings.truncated || p.trustedWarnings.truncated || p.warnings.truncated
+	warnings, warningsTruncated = renderWorkflowCommandAnnotation(workflowWarningAnnotationHeading, combinedWarnings.commands, combinedWarnings.truncated)
+	var maskedErrors workflowCommandAnnotationBuffer
+	for _, command := range p.errors.commands {
+		p.appendWorkflowCommandAnnotationLocked(&maskedErrors, workflowErrorAnnotationHeading, maskWorkflowCommandAnnotation(command, masks))
+	}
+	maskedErrors.truncated = maskedErrors.truncated || p.errors.truncated
+	errors, errorsTruncated = renderWorkflowCommandAnnotation(workflowErrorAnnotationHeading, maskedErrors.commands, maskedErrors.truncated)
+	return warnings, warningsTruncated, errors, errorsTruncated
 }
 
 func (p *commandProcessor) addMaskLocked(value string) {
@@ -1588,52 +1670,119 @@ func decodeCommandProperty(value string) string {
 	return replacer.Replace(value)
 }
 
-func renderWorkflowCommand(severity string, command parsedWorkflowCommand) string {
-	var body strings.Builder
-	body.WriteString("### ")
-	body.WriteString(severity)
-	body.WriteString("\n\n")
-	metadata := []workflowCommandMetadata{
-		{label: "Title", value: command.properties["title"]},
-		{label: "File", value: command.properties["file"]},
+func renderWorkflowCommandAnnotation(heading string, commands []workflowCommandAnnotation, truncated bool) (string, bool) {
+	if len(commands) == 0 {
+		return "", truncated
 	}
-	line, endLine, column, endColumn := workflowCommandLocation(command.properties)
-	metadata = append(metadata,
-		workflowCommandMetadata{label: "Line", value: line},
-		workflowCommandMetadata{label: "End line", value: endLine},
-		workflowCommandMetadata{label: "Column", value: column},
-		workflowCommandMetadata{label: "End column", value: endColumn},
-	)
-	hasMetadata := false
-	for _, item := range metadata {
-		if item.value == "" {
-			continue
+	type commandGroup struct {
+		file     string
+		commands []workflowCommandAnnotation
+	}
+	groups := make([]commandGroup, 0)
+	groupIndexes := make(map[string]int)
+	for _, command := range commands {
+		file := command.file
+		index, ok := groupIndexes[file]
+		if !ok {
+			index = len(groups)
+			groupIndexes[file] = index
+			groups = append(groups, commandGroup{file: file})
 		}
-		if !hasMetadata {
-			body.WriteString("<p>")
-			hasMetadata = true
-		} else {
-			body.WriteString("<br>\n")
+		groups[index].commands = append(groups[index].commands, command)
+	}
+
+	var rendered strings.Builder
+	rendered.WriteString(heading)
+	rendered.WriteString(workflowCommandListHeading)
+	for _, group := range groups {
+		for _, command := range group.commands {
+			rendered.WriteString(renderWorkflowCommandListItem(command))
 		}
-		body.WriteString("<strong>")
-		body.WriteString(item.label)
-		body.WriteString(":</strong> <code>")
-		body.WriteString(commandHTML(item.value))
-		body.WriteString("</code>")
 	}
-	if hasMetadata {
-		body.WriteString("</p>\n\n")
+	rendered.WriteString(workflowCommandListEnd)
+
+	var body string
+	var bodyTruncated bool
+	appendBoundedText(&body, &bodyTruncated, rendered.String(), truncated, maxJobAnnotationBytes, workflowCommandTruncationNotice)
+	return body, bodyTruncated
+}
+
+func renderWorkflowCommandListItem(command workflowCommandAnnotation) string {
+	source := "General"
+	if command.file != "" {
+		location := filepath.Base(strings.ReplaceAll(command.file, "\\", "/"))
+		if command.location != "" {
+			location += ":" + command.location
+		}
+		source = "<code>" + commandHTML(location) + "</code>"
 	}
-	body.WriteString("<p>")
-	body.WriteString(commandHTML(command.message))
-	body.WriteString("</p>\n\n")
-	return body.String()
+	detail := commandHTML(command.message)
+	if command.title != "" {
+		detail = "<strong>" + commandHTML(command.title) + ":</strong> " + detail
+	}
+	return "<div class=\"border-top border-silver py2\"><div>" + detail +
+		"</div><div class=\"mt1\">" + source + "</div></div>\n"
+}
+
+func workflowCommandLocationLabel(properties map[string]string) string {
+	line, endLine, column, endColumn := workflowCommandLocation(properties)
+	if line == "" {
+		return ""
+	}
+	if endLine == "" {
+		endLine = line
+	}
+	if endColumn == "" {
+		endColumn = column
+	}
+	start := line
+	if column != "" {
+		start += ":" + column
+	}
+	end := endLine
+	if endColumn != "" {
+		end += ":" + endColumn
+	}
+	if end == "" || end == start || endLine == line && endColumn == column {
+		return start
+	}
+	return start + "–" + end
+}
+
+func normalizedMasks(masks []string) []string {
+	normalized := make([]string, 0, len(masks))
+	for _, mask := range masks {
+		if mask = commandText(mask); mask != "" {
+			normalized = append(normalized, mask)
+		}
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if len(normalized[i]) != len(normalized[j]) {
+			return len(normalized[i]) > len(normalized[j])
+		}
+		return normalized[i] < normalized[j]
+	})
+	return normalized
+}
+
+func maskWorkflowCommandAnnotation(command workflowCommandAnnotation, masks []string) workflowCommandAnnotation {
+	values := []*string{&command.file, &command.title, &command.location, &command.message}
+	for _, mask := range masks {
+		for _, value := range values {
+			*value = strings.ReplaceAll(*value, mask, "***")
+		}
+	}
+	return command
+}
+
+func commandText(value string) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.ReplaceAll(value, "\r", "\n")
 }
 
 func commandHTML(value string) string {
-	value = strings.ToValidUTF8(value, "\uFFFD")
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
+	value = commandText(value)
 	return strings.ReplaceAll(html.EscapeString(value), "\n", "<br>\n")
 }
 

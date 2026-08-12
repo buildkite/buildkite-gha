@@ -43,6 +43,12 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	}
 
 	event, ref := "push", ""
+	switch getenv("BUILDKITE_SOURCE") {
+	case "schedule":
+		event = "schedule"
+	case "ui", "api":
+		event = "workflow_dispatch"
+	}
 	payload := map[string]any{}
 	if pullRequest != "" && pullRequest != "false" {
 		number, parseErr := strconv.Atoi(pullRequest)
@@ -79,7 +85,10 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		if base := getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH"); base != "" {
 			pr["base"].(map[string]any)["ref"] = base
 		}
-		payload["number"], payload["pull_request"] = number, pr
+		// A Buildkite environment fallback represents a build of the current PR
+		// head rather than a distinct GitHub delivery. Use synchronize to give
+		// that compatibility snapshot deterministic head-update semantics.
+		payload["action"], payload["number"], payload["pull_request"] = "synchronize", number, pr
 	} else if strings.TrimSpace(tag) != "" {
 		ref = "refs/tags/" + tag
 		payload["ref"] = ref
@@ -155,7 +164,7 @@ func parseWebhookPayload(source []byte) (map[string]any, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()
-	value, err := decodeWebhookValue(decoder)
+	value, err := decodeJSONValue(decoder)
 	if err != nil {
 		return nil, fmt.Errorf("parse buildkite:webhook: %w", err)
 	}
@@ -172,7 +181,7 @@ func parseWebhookPayload(source []byte) (map[string]any, error) {
 	return payload, nil
 }
 
-func decodeWebhookValue(decoder *json.Decoder) (any, error) {
+func decodeJSONValue(decoder *json.Decoder) (any, error) {
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, err
@@ -196,7 +205,7 @@ func decodeWebhookValue(decoder *json.Decoder) (any, error) {
 			if _, exists := object[key]; exists {
 				return nil, fmt.Errorf("conflicting duplicate object key %q", key)
 			}
-			object[key], err = decodeWebhookValue(decoder)
+			object[key], err = decodeJSONValue(decoder)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +217,7 @@ func decodeWebhookValue(decoder *json.Decoder) (any, error) {
 	case '[':
 		array := []any{}
 		for decoder.More() {
-			value, err := decodeWebhookValue(decoder)
+			value, err := decodeJSONValue(decoder)
 			if err != nil {
 				return nil, err
 			}

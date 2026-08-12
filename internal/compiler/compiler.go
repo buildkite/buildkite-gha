@@ -78,10 +78,13 @@ type ExecutionBoundary struct {
 
 // WorkflowSource binds the IR to its input workflow bytes.
 type WorkflowSource struct {
-	Path             string `json:"path"`
-	Name             string `json:"name,omitempty"`
-	Digest           string `json:"digest"`
-	ConcurrencyGroup string `json:"concurrency_group,omitempty"`
+	Path                          string             `json:"path"`
+	Name                          string             `json:"name,omitempty"`
+	Digest                        string             `json:"digest"`
+	ConcurrencyGroup              string             `json:"concurrency_group,omitempty"`
+	Triggers                      []workflow.Trigger `json:"-"`
+	WorkflowTokenPolicyFilename   string             `json:"-"`
+	WorkflowTokenPolicyDiagnostic string             `json:"-"`
 }
 
 // JobInstance is one statically expanded job in the owned IR.
@@ -94,6 +97,8 @@ type JobInstance struct {
 	NeedOutputs             map[string][]NeedOutput `json:"need_outputs,omitempty"`
 	RunsOn                  []string                `json:"runs_on"`
 	Queue                   string                  `json:"queue"`
+	Platform                Platform                `json:"-"`
+	RuntimeImage            string                  `json:"runtime_image,omitempty"`
 	Matrix                  map[string]any          `json:"matrix,omitempty"`
 	FailFast                *bool                   `json:"fail_fast,omitempty"`
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
@@ -130,6 +135,8 @@ type Report struct {
 	Instances             int
 	Warnings              []Warning
 	Jobs                  []JobInstance
+	RuntimeMatrixBoundary bool
+	RuntimeMatrices       []RuntimeMatrixDescriptor
 	ParsedJobs            []ParsedJob
 	NotEvaluatedJobs      map[string]bool
 	NotEvaluatedInstances map[string]bool
@@ -145,6 +152,8 @@ type ParsedJob struct {
 type expansionResult struct {
 	instances             []JobInstance
 	candidates            []JobInstance
+	runtimeMatrixBoundary bool
+	runtimeMatrices       []RuntimeMatrixDescriptor
 	jobs                  []ParsedJob
 	notEvaluatedJobs      map[string]bool
 	notEvaluatedInstances map[string]bool
@@ -187,7 +196,8 @@ func ParseWorkflow(path string, source []byte) (Report, error) {
 func expansionReport(expanded expansionResult, warnings []Warning) Report {
 	return Report{
 		LogicalJobs: len(expanded.jobs), Instances: len(expanded.candidates),
-		Jobs: expanded.candidates, ParsedJobs: expanded.jobs, Warnings: warnings,
+		Jobs: expanded.candidates, RuntimeMatrixBoundary: expanded.runtimeMatrixBoundary,
+		RuntimeMatrices: expanded.runtimeMatrices, ParsedJobs: expanded.jobs, Warnings: warnings,
 		NotEvaluatedJobs: expanded.notEvaluatedJobs, NotEvaluatedInstances: expanded.notEvaluatedInstances,
 	}
 }
@@ -308,10 +318,17 @@ instances:
 				continue instances
 			}
 		}
+		runtimeDistributionDigest := options.RuntimeDistributions[instance.Platform]
+		if runtimeDistributionDigest == "" && instance.Platform == PlatformLinuxAMD64 {
+			runtimeDistributionDigest = compilerDistributionDigest
+		}
 		var builtJob plan.Job
 		var builtAuthorization PlanAuthorization
 		var encoded []byte
 		planErr := func() error {
+			if runtimeDistributionDigest == "" {
+				return fmt.Errorf("build plan for job %q: no runtime distribution configured for %s", instance.LogicalJobID, instance.Platform)
+			}
 			steps := make([]plan.Step, len(instance.Steps))
 			var actionIndexes []int
 			var actionRefs []string
@@ -347,7 +364,6 @@ instances:
 					actionInputs = append(actionInputs, step.With)
 				}
 			}
-			jobSchema := plan.Schema
 			var actions []plan.ActionLock
 			requiresMise := len(actionRefs) != 0
 			var capabilities []string
@@ -425,7 +441,6 @@ instances:
 						}
 					}
 				}
-				jobSchema = plan.SchemaV7
 				actions = locks
 				capabilities = append(append([]string{}, capabilities...), actionCapabilities...)
 				sort.Strings(capabilities)
@@ -445,9 +460,6 @@ instances:
 			if instance.Container != nil || len(instance.Services) != 0 {
 				if len(actionRefs) != 0 && !lockActions {
 					return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
-				}
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV4
 				}
 				capabilities = append(capabilities, "docker", "network")
 				sort.Strings(capabilities)
@@ -485,11 +497,6 @@ instances:
 					}
 				}
 			}
-			if len(needOutputs) != 0 {
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV5
-				}
-			}
 			secrets, err := requiredSecrets(instance, actionRequiredSecrets, actionInputsInspected)
 			if err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -512,25 +519,24 @@ instances:
 					permissions[strings.ReplaceAll(name, "-", "_")] = access
 				}
 				githubToken = &plan.GitHubToken{Permissions: permissions}
-				if jobSchema != plan.SchemaV7 {
-					jobSchema = plan.SchemaV6
-				}
 				capabilities = append(capabilities, "provider-token-write")
 				authorization.ProviderTokenWriteCapabilitySources = []string{"effective-permissions"}
-			}
-			if instance.Queue == "" {
-				jobSchema = plan.SchemaV7
+				authorization.WorkflowTokenPolicyFilename = ir.Workflow.WorkflowTokenPolicyFilename
 			}
 			if len(secrets) != 0 {
 				capabilities = append(capabilities, "secrets")
 			}
 			sort.Strings(capabilities)
 			capabilities = slices.Compact(capabilities)
+			if instance.Platform == PlatformDarwinARM64 && slices.Contains(capabilities, "docker") {
+				return fmt.Errorf("%s:%d:%d: job %q requires Docker, which is unavailable on darwin/arm64", instance.SourcePath, instance.Source.Start.Line, instance.Source.Start.Column, instance.LogicalJobID)
+			}
 			job := plan.Job{
-				Schema: jobSchema,
+				Schema: plan.SchemaV8,
 				Compiler: plan.Compiler{
 					Version: compilerVersion, DistributionDigest: compilerDistributionDigest,
 				},
+				Runtime: &plan.Runtime{DistributionDigest: runtimeDistributionDigest},
 				Workflow: plan.Workflow{
 					Path:         instance.SourcePath,
 					Digest:       instance.SourceDigest,
@@ -559,9 +565,7 @@ instances:
 				Steps:                   steps,
 				Actions:                 actions,
 			}
-			if jobSchema == plan.SchemaV7 {
-				job.RequiresMise = &requiresMise
-			}
+			job.RequiresMise = &requiresMise
 			if instance.Container != nil {
 				job.Container = &plan.Container{Image: instance.Container.Image, Env: cloneMap(instance.Container.Env), Ports: append([]string(nil), instance.Container.Ports...)}
 			}
@@ -684,6 +688,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	if err != nil {
 		return IR{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
+	workflowTokenPolicyFilename, workflowTokenPolicyDiagnostic := workflowTokenPolicyEvidence(path, parsed)
 	event, err := parseEvent(eventSource)
 	if err != nil {
 		return IR{}, processingFinding(StageEventValidation, CodeEventInvalid, "environment", err)
@@ -698,8 +703,11 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	expanded, expandErr := expand(path, source, parsed, context, options)
 	digest := sha256.Sum256(source)
 	ir := IR{
-		Schema:   schema,
-		Workflow: WorkflowSource{Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup},
+		Schema: schema,
+		Workflow: WorkflowSource{
+			Path: path, Name: parsed.Name, Digest: "sha256:" + hex.EncodeToString(digest[:]), ConcurrencyGroup: workflowConcurrencyGroup, Triggers: parsed.Triggers,
+			WorkflowTokenPolicyFilename: workflowTokenPolicyFilename, WorkflowTokenPolicyDiagnostic: workflowTokenPolicyDiagnostic,
+		},
 		Event:    event,
 		Vars:     vars,
 		Warnings: compilerWarnings(parsed.Concurrency, cancelInProgress),
@@ -710,6 +718,32 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 		Jobs: expanded.instances,
 	}
 	return ir, errors.Join(concurrencyErr, cancellationErr, expandErr)
+}
+
+func workflowTokenPolicyEvidence(path string, parsed *workflow.Workflow) (string, string) {
+	filename, err := plan.GitHubWorkflowPolicyFilename(canonicalWorkflowName(path))
+	if err != nil {
+		return "", err.Error()
+	}
+	if parsed.Permissions == nil || len(parsed.Permissions.Scopes) == 0 {
+		return "", "GitHub workflow access tokens require explicit non-empty top-level permissions"
+	}
+	permissions := make(map[string]string, len(parsed.Permissions.Scopes))
+	for name, access := range parsed.Permissions.Scopes {
+		permissions[strings.ReplaceAll(name, "-", "_")] = access
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
+		return "", err.Error()
+	}
+	for _, job := range parsed.Jobs {
+		if job.Permissions != nil {
+			return "", "GitHub workflow access tokens do not support job-level permissions"
+		}
+		if job.Reusable != nil {
+			return "", "GitHub workflow access tokens do not support reusable-workflow jobs"
+		}
+	}
+	return filename, ""
 }
 
 func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) []Warning {
@@ -723,6 +757,13 @@ func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) 
 		Column:  position.Column,
 		Message: "workflow concurrency cancel-in-progress is not enforced; Buildkite pipeline settings can approximate it for same-branch builds",
 	}}
+}
+
+// ParseEvent validates and decodes the event snapshot used for compilation.
+// Callers that select work before compiling must use this same parser so event
+// applicability cannot diverge from compiler semantics.
+func ParseEvent(source []byte) (Event, error) {
+	return parseEvent(source)
 }
 
 func parseEvent(source []byte) (Event, error) {
@@ -796,17 +837,18 @@ func canonicalWorkflowName(path string) string {
 }
 
 func expand(path string, source []byte, parsed *workflow.Workflow, context expression.CompileContext, options Options) (expansionResult, error) {
-	resolved, err := resolveReusableWorkflows(path, source, parsed, context)
+	resolved, runtimeMatrixBoundary, err := resolveReusableWorkflows(path, source, parsed, context)
 	if err != nil {
 		notEvaluatedJobs := make(map[string]bool, len(parsed.Jobs))
 		for _, job := range parsed.Jobs {
 			notEvaluatedJobs[job.ID] = true
 		}
-		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
+		return expansionResult{jobs: parsedJobs(path, parsed), notEvaluatedJobs: notEvaluatedJobs, runtimeMatrixBoundary: runtimeMatrixBoundary}, processingFinding(StageGraph, CodeGraphInvalid, "compatibility", err)
 	}
 	result := expansionResult{
-		jobs:             processingJobs(path, parsed, resolved),
-		notEvaluatedJobs: make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
+		jobs:                  processingJobs(path, parsed, resolved),
+		runtimeMatrixBoundary: runtimeMatrixBoundary,
+		notEvaluatedJobs:      make(map[string]bool), notEvaluatedInstances: make(map[string]bool),
 	}
 	jobs := make(map[string]workflow.Job, len(resolved))
 	sourcePaths := make(map[string]string, len(resolved))
@@ -843,11 +885,33 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	failedMatrices := make(map[string]bool)
 	for _, id := range order {
 		job := jobs[id]
-		matrices, matrixErr := expandMatrix(sourcePaths[id], job, context)
+		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], needBindings[id], jobs, matricesByJob)
+		var matrices []map[string]any
+		if deferred {
+			result.runtimeMatrixBoundary = true
+			position := job.Matrix.Span.Start
+			if job.Matrix.Expression != nil {
+				position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
+			} else if job.Matrix.IncludeExpression != nil {
+				position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
+			}
+			if matrixErr == nil {
+				result.runtimeMatrices = append(result.runtimeMatrices, descriptor)
+				matrixErr = errors.New("runtime matrix source is valid, but continuation upload is disabled because Buildkite transport has no authoritative current-attempt fence and durable idempotency boundary")
+			}
+			matrixErr = locatedJobError(sourcePaths[id], job, position.Line, position.Column, matrixErr.Error())
+		} else if !deferred {
+			matrices, matrixErr = expandMatrix(sourcePaths[id], job, context)
+		}
 		if matrixErr != nil {
 			line, column := job.Span.Start.Line, job.Span.Start.Column
 			if job.Matrix != nil {
 				line, column = job.Matrix.Span.Start.Line, job.Matrix.Span.Start.Column
+				if job.Matrix.Expression != nil {
+					line, column = job.Matrix.Expression.Span.Start.Line, job.Matrix.Expression.Span.Start.Column
+				} else if job.Matrix.IncludeExpression != nil {
+					line, column = job.Matrix.IncludeExpression.Span.Start.Line, job.Matrix.IncludeExpression.Span.Start.Column
+				}
 			}
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageMatrix, Code: CodeMatrixInvalid, Category: "compatibility",
@@ -890,7 +954,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				instanceJob.If = "false"
 				instanceJob.Steps = []workflow.Step{{Name: "Statically disabled job", Kind: "run", Run: ":", If: "false", Span: job.Span}}
 			}
-			key, err := instanceKey(job.ID, matrix)
+			key, err := namespacedInstanceKey(options.StepKeyNamespace, job.ID, matrix)
 			if err != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageMatrix, CodeMatrixInvalid, "compatibility", jobPath, 0, 0, job.ID, "", "", 0, jobError(jobPath, job, fmt.Sprintf("create deterministic instance key: %v", err))))
 				jobFailed = true
@@ -939,9 +1003,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, runsOnPosition(job).Line, runsOnPosition(job).Column, job.ID, key, "", 0, locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, runsOnErr.Error())))
 				valid = false
 			}
-			queue := ""
+			var target RunnerTarget
 			if runsOnErr == nil {
-				queue, err = options.Runners.resolve(labels, options.EventTrust)
+				target, err = options.Runners.resolve(labels, options.EventTrust)
 				if err != nil {
 					finding := &ProcessingFinding{
 						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
@@ -973,7 +1037,9 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			instance := candidate
 			instance.Label = instanceLabel(job, matrix, context)
 			instance.RunsOn = labels
-			instance.Queue = queue
+			instance.Queue = target.Queue
+			instance.Platform = target.Platform
+			instance.RuntimeImage = target.Image
 			instance.ConcurrencyGroup = concurrencyGroup
 			dependencyFailed := false
 			for _, need := range sortedKeys(needBindings[id]) {
@@ -1228,16 +1294,26 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 		position := job.Matrix.Span.Start
 		if job.Matrix.Expression != nil {
 			position = workflow.Position{Line: job.Matrix.Expression.Span.Start.Line, Column: job.Matrix.Expression.Span.Start.Column}
+		} else if job.Matrix.IncludeExpression != nil {
+			position = workflow.Position{Line: job.Matrix.IncludeExpression.Span.Start.Line, Column: job.Matrix.IncludeExpression.Span.Start.Column}
 		}
 		return nil, locatedJobError(path, job, position.Line, position.Column, err.Error())
 	}
+	matrices, err := expandMatrixDefinition(matrix)
+	if err != nil {
+		return nil, jobError(path, job, err.Error())
+	}
+	return matrices, nil
+}
+
+func expandMatrixDefinition(matrix *workflow.Matrix) ([]map[string]any, error) {
 	matrices := []map[string]any{{}}
 	if len(matrix.Rows) == 0 {
 		matrices = nil
 	}
 	for _, row := range matrix.Rows {
 		if len(row.Values) == 0 {
-			return nil, jobError(path, job, fmt.Sprintf("matrix dimension %q has no values", row.Name))
+			return nil, fmt.Errorf("matrix dimension %q has no values", row.Name)
 		}
 		var next []map[string]any
 		for _, current := range matrices {
@@ -1249,7 +1325,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 				combination[row.Name] = value.Data
 				next = append(next, combination)
 				if len(next) > maxMatrixInstances {
-					return nil, jobError(path, job, fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances))
+					return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
 				}
 			}
 		}
@@ -1283,7 +1359,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 			included = append(included, includedMatrix{values: cloneAnyMap(values)})
 		}
 		if len(included) > maxMatrixInstances {
-			return nil, jobError(path, job, fmt.Sprintf("matrix expands beyond %d instances", maxMatrixInstances))
+			return nil, fmt.Errorf("matrix expands beyond %d instances", maxMatrixInstances)
 		}
 	}
 	matrices = matrices[:0]
@@ -1291,7 +1367,7 @@ func expandMatrix(path string, job workflow.Job, context expression.CompileConte
 		matrices = append(matrices, matrix.values)
 	}
 	if len(matrices) == 0 {
-		return nil, jobError(path, job, "matrix excludes every combination")
+		return nil, fmt.Errorf("matrix excludes every combination")
 	}
 	return matrices, nil
 }
@@ -1329,6 +1405,9 @@ func resolveMatrix(matrix *workflow.Matrix, context expression.CompileContext) (
 		for j, value := range values {
 			resolved.Rows[i].Values[j] = workflow.Value{Data: value, Span: row.Span}
 		}
+	}
+	if matrix.IncludeExpression != nil {
+		return nil, fmt.Errorf("runtime-dependent matrix include expressions are unsupported")
 	}
 	return &resolved, nil
 }
@@ -1593,7 +1672,15 @@ func topologicalOrder(path string, jobs map[string]workflow.Job) ([]string, erro
 }
 
 func instanceKey(jobID string, matrix map[string]any) (string, error) {
-	prefix := "gha-" + sanitize(jobID)
+	return namespacedInstanceKey("", jobID, matrix)
+}
+
+func namespacedInstanceKey(namespace, jobID string, matrix map[string]any) (string, error) {
+	prefix := "gha-"
+	if namespace != "" {
+		prefix += namespace + "-"
+	}
+	prefix += sanitize(jobID)
 	if len(matrix) == 0 {
 		return prefix, nil
 	}

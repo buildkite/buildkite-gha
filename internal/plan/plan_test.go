@@ -304,6 +304,115 @@ func TestV7RequiresMiseRoundTripAndSchema(t *testing.T) {
 	}
 }
 
+func TestV8RuntimeDistributionRoundTripAndSchema(t *testing.T) {
+	requiresMise := false
+	job := validJob()
+	job.Schema = SchemaV8
+	job.Compiler.Version = "dev"
+	job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
+	job.RequiresMise = &requiresMise
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decoded.RuntimeDistributionDigest(); got != job.Runtime.DistributionDigest {
+		t.Fatalf("RuntimeDistributionDigest() = %q, want %q", got, job.Runtime.DistributionDigest)
+	}
+
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v8.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument, planDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &planDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(SchemaV8, schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(SchemaV8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(planDocument); err != nil {
+		t.Fatalf("v8 plan does not validate against schema: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(map[string]any)
+	}{
+		{name: "run step without command", edit: func(document map[string]any) {
+			delete(document["steps"].([]any)[0].(map[string]any), "command")
+		}},
+		{name: "unknown GitHub permission", edit: func(document map[string]any) {
+			document["required_capabilities"] = []any{"provider-token-write"}
+			document["github_token"] = map[string]any{"permissions": map[string]any{"future_permission": "read"}}
+			document["event"].(map[string]any)["repository"] = "buildkite/buildkite-gha"
+		}},
+		{name: "incomplete GitHub action lock", edit: func(document map[string]any) {
+			document["actions"] = []any{map[string]any{
+				"id":            "a-0000000000000001",
+				"source":        "github",
+				"source_digest": "sha256:" + strings.Repeat("a", 64),
+			}}
+		}},
+		{name: "invalid container", edit: func(document map[string]any) {
+			document["container"] = map[string]any{"image": "INVALID IMAGE", "ports": []any{"65536"}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var invalid map[string]any
+			if err := json.Unmarshal(encoded, &invalid); err != nil {
+				t.Fatal(err)
+			}
+			test.edit(invalid)
+			if err := schema.Validate(invalid); err == nil {
+				t.Fatal("v8 schema accepted a document rejected by the v7 contract")
+			}
+		})
+	}
+
+	job.Runtime = nil
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "runtime distribution digest is required") {
+		t.Fatalf("Validate() missing runtime error = %v", err)
+	}
+	job.Runtime = &Runtime{DistributionDigest: "invalid"}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "runtime distribution digest is required") {
+		t.Fatalf("Validate() invalid runtime error = %v", err)
+	}
+	job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
+	job.Compiler.Version = strings.Repeat("v", 257)
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "compiler version") {
+		t.Fatalf("Validate() oversized compiler version error = %v", err)
+	}
+}
+
+func TestLegacyPlansUseCompilerDistributionAsRuntime(t *testing.T) {
+	for _, schema := range []string{SchemaV1, SchemaV2, SchemaV3, SchemaV4, SchemaV5, SchemaV6, SchemaV7} {
+		job := validJob()
+		job.Schema = schema
+		if schema == SchemaV7 {
+			requiresMise := false
+			job.RequiresMise = &requiresMise
+		}
+		if got := job.RuntimeDistributionDigest(); got != job.Compiler.DistributionDigest {
+			t.Fatalf("schema %q runtime digest = %q, want compiler digest %q", schema, got, job.Compiler.DistributionDigest)
+		}
+		job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
+		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support a separate runtime distribution") {
+			t.Fatalf("schema %q runtime field error = %v", schema, err)
+		}
+	}
+}
+
 func TestV3RemoteNestedActionLocks(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	commit := strings.Repeat("c", 40)
@@ -654,6 +763,50 @@ func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) 
 	job.NeedOutputs["delegated"][0].StepKey = "gha-other"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "selects unknown producer") {
 		t.Fatalf("Validate() error = %v, want producer binding rejection", err)
+	}
+}
+
+func TestGitHubWorkflowPolicyFilename(t *testing.T) {
+	valid255 := strings.Repeat("a", 251) + ".yml"
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: ".github/workflows/ci.yml", want: "ci.yml"},
+		{path: "./.github/workflows/release.yaml", want: "release.yaml"},
+		{path: ".github/workflows/Release_1.2-test.yml", want: "Release_1.2-test.yml"},
+		{path: ".github/workflows/" + valid255, want: valid255},
+	} {
+		got, err := GitHubWorkflowPolicyFilename(test.path)
+		if err != nil || got != test.want {
+			t.Errorf("GitHubWorkflowPolicyFilename(%q) = %q, %v; want %q", test.path, got, err, test.want)
+		}
+	}
+
+	for _, path := range []string{
+		"", "ci.yml", "/.github/workflows/ci.yml", ".github/workflows/nested/ci.yml",
+		".github/workflows/../ci.yml", ".github/workflows/.ci.yml", ".github/workflows/ci.json",
+		".github/workflows/ci yml", ".github/workflows/" + strings.Repeat("a", 252) + ".yml",
+	} {
+		if _, err := GitHubWorkflowPolicyFilename(path); err == nil {
+			t.Errorf("GitHubWorkflowPolicyFilename(%q) succeeded", path)
+		}
+	}
+}
+
+func TestValidateGitHubWorkflowAccessTokenPermissions(t *testing.T) {
+	if err := ValidateGitHubWorkflowAccessTokenPermissions(map[string]string{"contents": "read", "pull_requests": "write"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, permissions := range []map[string]string{
+		nil,
+		{"models": "read"},
+		{"repository_projects": "read"},
+		{"contents": "admin"},
+	} {
+		if err := ValidateGitHubWorkflowAccessTokenPermissions(permissions); err == nil {
+			t.Errorf("ValidateGitHubWorkflowAccessTokenPermissions(%#v) succeeded", permissions)
+		}
 	}
 }
 

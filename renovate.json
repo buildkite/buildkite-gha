@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^internal\\/cli\\/cli\\.go$/"],
+      "matchStrings": [
+        "defaultNobleRunnerImage\\s+=\\s+\"buildkite\\.namespace-images\\.com/agent-base@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "buildkite/agent-base",
+      "currentValueTemplate": "ubuntu-noble-hosted-toolchains",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^internal\\/cli\\/cli\\.go$/"],
+      "matchStrings": [
+        "defaultJammyRunnerImage\\s+=\\s+\"buildkite\\.namespace-images\\.com/agent-base@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "buildkite/agent-base",
+      "currentValueTemplate": "ubuntu-jammy-hosted-toolchains",
+      "versioningTemplate": "docker"
+    }
+  ]
+}

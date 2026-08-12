@@ -117,16 +117,14 @@ steps:
     key: "plugin-source-smoke-importer"
     if: build.env("DEMO_SUITE") != "plugin"
     env:
-      BUILDKITE_GHA_TARGET_QUEUE: "hosted"
+      BUILDKITE_PLUGIN_CONFIGURATION: '{"workflow":".github/workflows/example-basic.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted"}]}'
     timeout_in_minutes: 20
     retry:
       automatic: false
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-      - github-actions#v0.4.4:
-          workflow: .github/workflows/example-basic.yml
-          buildkite-gha-source-ref: "${BUILDKITE_COMMIT}"
+    command: "mise exec -- go run ./cmd/buildkite-gha plugin"
 
   - wait: ~
 

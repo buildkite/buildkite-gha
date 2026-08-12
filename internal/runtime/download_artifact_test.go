@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
-	"golang.org/x/sys/unix"
 )
 
 type downloadStore struct {
@@ -274,15 +272,63 @@ func TestDownloadArtifactPatternMergesVerifiedDirectNeeds(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactMultiPrefixDeduplicatesAndOrdersVerifiedProducers(t *testing.T) {
+	backendArchive, backendSize, backendDigest := testDownloadZIP(t, "backend.xml")
+	productArchive, productSize, productDigest := testDownloadZIP(t, "product.xml")
+	backendPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("6", 64) + ".zip"
+	productPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("7", 64) + ".zip"
+	backend := plan.NeedArtifact{Name: "junit-results-backend-2", Path: backendPath, Digest: backendDigest, Size: backendSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	product := plan.NeedArtifact{Name: "product-junit-results-1", Path: productPath, Digest: productDigest, Size: productSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	store := &downloadStore{archives: map[string]string{backendPath: backendArchive, productPath: productArchive}}
+	workspace := t.TempDir()
+
+	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace,
+		map[string]plan.Need{"backend": {Artifacts: []plan.NeedArtifact{product}}, "products": {Artifacts: []plan.NeedArtifact{backend}}},
+		actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "{junit-results,junit-results-backend,product-junit-results}-*", "path": "junit", "merge-multiple": "true"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(store.paths, []string{backendPath, productPath}) {
+		t.Fatalf("deduplicated download order = %#v, want artifact-name order", store.paths)
+	}
+	for _, file := range []string{"backend.xml", "product.xml"} {
+		if _, err := os.Stat(filepath.Join(workspace, "junit", file)); err != nil {
+			t.Fatalf("merged file %q: %v", file, err)
+		}
+	}
+}
+
+func TestDownloadArtifactPatternRejectsTooManyMatchesBeforeDownload(t *testing.T) {
+	artifacts := make([]plan.NeedArtifact, transport.MaxResultArtifacts+1)
+	for i := range artifacts {
+		artifacts[i].Name = fmt.Sprintf("backend-%03d", i)
+	}
+	store := &downloadStore{}
+	_, err := (Runner{Artifacts: store}).runDownloadArtifact(
+		context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(),
+		map[string]plan.Need{"producer": {Artifacts: artifacts}}, actionintegration.DownloadArtifactV5Commit,
+		map[string]string{"pattern": "{backend,product}-*", "merge-multiple": "true"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "maximum is 64") {
+		t.Fatalf("match limit error = %v", err)
+	}
+	if len(store.paths) != 0 {
+		t.Fatalf("over-limit selection downloaded artifacts: %#v", store.paths)
+	}
+}
+
 func TestDownloadArtifactPatternStagesCompleteMergeBeforeDestinationMutation(t *testing.T) {
 	firstArchive, firstSize, firstDigest := testDownloadZIPPayload(t, "first", "result.xml")
 	secondArchive, secondSize, secondDigest := testDownloadZIPPayload(t, "second", "result.xml")
 	firstPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("4", 64) + ".zip"
 	secondPath := "buildkite-gha/v1/artifacts/" + strings.Repeat("5", 64) + ".zip"
-	first := plan.NeedArtifact{Name: "results-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
-	second := plan.NeedArtifact{Name: "results-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
+	first := plan.NeedArtifact{Name: "backend-results-a", Path: firstPath, Digest: firstDigest, Size: firstSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "11111111-1111-4111-8111-111111111111"}}
+	second := plan.NeedArtifact{Name: "product-results-b", Path: secondPath, Digest: secondDigest, Size: secondSize, FileCount: 1, Producer: plan.NeedProducer{JobID: "22222222-2222-4222-8222-222222222222"}}
 	needs := map[string]plan.Need{"test": {Artifacts: []plan.NeedArtifact{second, first}}}
-	inputs := map[string]string{"pattern": "results-*", "path": "merged", "merge-multiple": "true"}
+	inputs := map[string]string{"pattern": "{backend-results,product-results}-*", "path": "merged", "merge-multiple": "true"}
 
 	t.Run("later artifact name wins overlapping member", func(t *testing.T) {
 		workspace := t.TempDir()
@@ -927,6 +973,17 @@ func TestDownloadArtifactExtractionUsesVerifiedArchiveDescriptor(t *testing.T) {
 	}
 }
 
+func TestDownloadArtifactRejectsSymlinkWorkspaceRoot(t *testing.T) {
+	workspace := t.TempDir()
+	linkedWorkspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(workspace, linkedWorkspace); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if _, err := openPinnedDownloadRoot(linkedWorkspace); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("openPinnedDownloadRoot() accepted symlink root: %v", err)
+	}
+}
+
 func TestDownloadArtifactInstallUsesPinnedDestinationDescriptor(t *testing.T) {
 	workspace := t.TempDir()
 	destination := filepath.Join(workspace, "destination")
@@ -940,16 +997,20 @@ func TestDownloadArtifactInstallUsesPinnedDestinationDescriptor(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(staging, "result.txt"), []byte("payload"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	destinationFD, err := unix.Open(destination, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	stagedInfo, err := os.Stat(filepath.Join(staging, "result.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = unix.Close(destinationFD) }()
-	stagingFD, err := unix.Open(staging, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	destinationRoot, err := os.OpenRoot(destination)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = unix.Close(stagingFD) }()
+	defer func() { _ = destinationRoot.Close() }()
+	stagingRoot, err := os.OpenRoot(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stagingRoot.Close() }()
 	moved := destination + "-moved"
 	if err := os.Rename(destination, moved); err != nil {
 		t.Fatal(err)
@@ -957,7 +1018,17 @@ func TestDownloadArtifactInstallUsesPinnedDestinationDescriptor(t *testing.T) {
 	if err := os.Symlink(alternate, destination); err != nil {
 		t.Fatal(err)
 	}
-	if err := installDownloadMembersAt(context.Background(), stagingFD, destinationFD, []downloadMember{{name: "result.txt", size: 7}}); err != nil {
+	movedStaging := staging + "-moved"
+	if err := os.Rename(staging, movedStaging); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(staging, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "result.txt"), []byte("poison!"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installDownloadMembersAt(context.Background(), stagingRoot, destinationRoot, []downloadMember{{info: stagedInfo, name: "result.txt", staged: "result.txt", size: 7}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(moved, "result.txt")); err != nil || string(got) != "payload" {
@@ -965,6 +1036,62 @@ func TestDownloadArtifactInstallUsesPinnedDestinationDescriptor(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(alternate, "result.txt")); !os.IsNotExist(err) {
 		t.Fatalf("replacement destination target was mutated: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(staging, "result.txt")); err != nil || string(got) != "poison!" {
+		t.Fatalf("replacement staging contents = %q, %v", got, err)
+	}
+}
+
+func TestDownloadArtifactInstallRejectsFIFOStagingReplacementWithoutBlocking(t *testing.T) {
+	if nonBlockingOpenFlag == 0 {
+		t.Skip("nonblocking file opens are unavailable")
+	}
+	staging, destination := t.TempDir(), t.TempDir()
+	if err := testMkfifo(filepath.Join(staging, "payload"), 0o600); errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("FIFOs unsupported")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	stagingRoot, err := os.OpenRoot(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stagingRoot.Close() }()
+	destinationRoot, err := os.OpenRoot(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = destinationRoot.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		done <- installDownloadMembersAt(context.Background(), stagingRoot, destinationRoot, []downloadMember{{name: "payload", staged: "payload", size: 7}})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("FIFO staging replacement accepted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("FIFO staging replacement blocked")
+	}
+}
+
+func TestDownloadArtifactStagingRejectsFilesystemEquivalentMemberNames(t *testing.T) {
+	staging := t.TempDir()
+	root, err := os.OpenRoot(staging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	composed, decomposed := "caf\u00e9.txt", "cafe\u0301.txt"
+	if err := reserveDownloadMemberPath(root, composed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(staging, ".paths", decomposed)); errors.Is(err, os.ErrNotExist) {
+		t.Skip("filesystem treats Unicode normalization forms as distinct")
+	}
+	if err := reserveDownloadMemberPath(root, decomposed); err == nil {
+		t.Fatal("filesystem-equivalent artifact member names accepted")
 	}
 }
 
@@ -1038,14 +1165,16 @@ func TestDownloadArtifactDestinationCollisions(t *testing.T) {
 	}{
 		{name: "directory", create: func(name string) error { return os.MkdirAll(name, 0o755) }},
 		{name: "symlink", create: func(name string) error { return os.Symlink("elsewhere", name) }},
-		{name: "fifo", create: func(name string) error { return syscall.Mkfifo(name, 0o600) }},
+		{name: "fifo", create: func(name string) error { return testMkfifo(name, 0o600) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(workspace, test.name)
 			if err := os.MkdirAll(filepath.Join(destination, "nested"), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := test.create(filepath.Join(destination, "nested", "result.txt")); err != nil {
+			if err := test.create(filepath.Join(destination, "nested", "result.txt")); errors.Is(err, errors.ErrUnsupported) {
+				t.Skip("special file unsupported")
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			if err := extractDownloadZIP(context.Background(), archive, workspace, test.name, 1); err == nil {

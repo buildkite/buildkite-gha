@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and static matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview for Linux x86-64 workflows. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64. Runtime v0.9.0 also includes native macOS arm64 support, which requires the companion plugin release. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
 
 ## How it works
 
@@ -13,15 +13,15 @@ Buildkite creates the build. The plugin reads the workload from the workflow fil
 
 | GitHub Actions | Buildkite |
 | --- | --- |
-| Triggers and filters under `on:` | Configure these in Buildkite |
+| Triggers and filters under `on:` | Select applicable workflow groups inside an existing Buildkite build |
 | Workflow run | Existing Buildkite build |
 | Job | Buildkite command job |
 | Matrix entry | Buildkite command job |
 | `needs` | `depends_on` with verified result transport |
 | Step | Runs inside the job compatibility runtime |
-| `runs-on` | Linux compatibility check; Buildkite chooses the agent |
+| `runs-on` | Supported platform label; Buildkite queue mapping chooses the agent |
 
-Steps stay together because they share a workspace, environment changes, action state, and post-action cleanup. Local `workflow_call` remains useful for workflow composition, but `on:` never creates or filters a Buildkite build.
+Steps stay together because they share a workspace, environment changes, action state, and post-action cleanup. Buildkite still creates the build; `buildkite-gha` selects top-level workflows for its effective GitHub event before compiling them. Local `workflow_call` remains available for composition without creating its own group.
 
 ## Run an existing workflow
 
@@ -32,7 +32,8 @@ steps:
   - label: ":github: Test"
     key: "gha-ci"
     plugins:
-      - github-actions#main:
+      - github-actions#v0.8.0:
+          version: "0.9.0"
           workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
@@ -42,18 +43,42 @@ steps:
 
 The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship.
 
+Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`.
+
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.8.0` onward:
 
 ```yaml
 plugins:
-  - github-actions#main:
+  - github-actions#v0.8.0:
       workflow: .github/workflows/ci.yml
-      version: "0.8.0"
+      version: "0.9.0"
 ```
 
-The imported workflow is a dynamic part of the Buildkite pipeline. The native deploy job waits for the importer and every job it uploads. This approach lets you keep an existing workflow while moving jobs to native Buildkite steps over time.
+Runtime v0.9.0 adds `runner.os` and `runner.arch`. They resolve to `Linux` and
+`X64` through the released plugin path. Native macOS runtime support is also in
+v0.9.0, but released plugin v0.8.0 does not declare or support `runners` and
+schema validation rejects that configuration. The companion plugin change must
+ship before using this macOS configuration in production:
 
-Configure branch, tag, pull request, schedule, and manual triggers in Buildkite. The plugin uses the `pull_request` context for pull request builds and the `push` context for other builds. Filters under `on:` do not create or filter Buildkite builds.
+```yaml
+plugins:
+  - github-actions#main:
+      version: "0.9.0"
+      workflow: .github/workflows/ci.yml
+      runners:
+        - runs-on: ubuntu-latest
+          queue: hosted
+        - runs-on: macos-14
+          queue: macos-sonoma-arm64
+```
+
+Configured Linux profiles use the matching Noble or Jammy hosted-toolchains
+image. A macOS label selects native Darwin/arm64, not a GitHub image or Xcode
+inventory.
+
+The imported workflow is a dynamic part of the Buildkite pipeline. Upload can take one tracked workflow glob or a list of explicit workflow paths and creates one aggregate group per directly runnable workflow in a single transaction. Workflows that do not declare the selected event become skipped groups. Each `:github: <workflow>` group depends on the importer; its GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
+
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, manual/API, and scheduled builds to `push`, `pull_request`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, and pull request activity filters. Cross-event workflows are excluded before event-dependent compilation and retained as skipped groups.
 
 ## Check workflow compatibility
 
@@ -61,13 +86,13 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 | Good fit | Not currently supported |
 | --- | --- |
-| Linux x86-64 jobs using `bash` or `sh` | Windows, macOS, or Linux arm64 |
-| Local and public JavaScript, composite, and verified Dockerfile actions | Private actions or arbitrary reusable-workflow source |
+| Linux x86-64 jobs using `bash` or `sh` | Native macOS through a released plugin until the companion plugin release; Windows, Linux arm64, or macOS x86-64 |
+| Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | Ordinary workflow secrets, GitHub-compatible OIDC, or protected queues |
 | Scoped `GITHUB_TOKEN` use allowed by Buildkite policy | Ambient or workflow-authored `github.token` use |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |
-| Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path |
+| Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path; all Docker use on macOS |
 
 Some features support a limited subset or behave differently on Buildkite. Check the matrix before migrating a workflow.
 
@@ -88,7 +113,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-An `admitted` result means the workflow satisfies upload policy. It does not execute the workflow or prove that arbitrary action code works without GitHub services. Use `--format json` for machine-readable output.
+An `admitted` result means the workflow satisfies upload policy. A `not-applicable` result means the workflow does not declare the selected event and upload would skip it without compiling it. Validation does not execute the workflow or prove that arbitrary action code works without GitHub services. Use `--format json` for machine-readable output.
 
 See the [CLI guide](docs/cli.md) for event snapshots, compilation, direct upload, and agent targeting.
 

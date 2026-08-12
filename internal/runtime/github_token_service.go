@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
 const githubTokenResponseLimit = 64 << 10
@@ -22,7 +24,13 @@ var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
 // plan-declared permissions accepted by the Buildkite backend.
 type WorkflowTokenProvider interface {
-	WorkflowToken(context.Context, string, map[string]string) (string, error)
+	WorkflowToken(context.Context, string, string, map[string]string) (string, error)
+}
+
+// ScopedTokenProvider mints a repository-scoped credential without selecting
+// the workflow-policy authority.
+type ScopedTokenProvider interface {
+	ScopedToken(context.Context, string, map[string]string) (string, error)
 }
 
 // AgentGitHubTokenConfig carries the current Buildkite job's Agent connection
@@ -38,13 +46,18 @@ type AgentGitHubTokenConfig struct {
 // AgentGitHubTokens mints repository-scoped tokens through Buildkite's
 // job-bound Agent API endpoint.
 type AgentGitHubTokens struct {
-	mintURL  string
-	jobToken string
-	client   *http.Client
+	scopedURL   string
+	workflowURL string
+	jobToken    string
+	client      *http.Client
 }
 
 func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
-	mintURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID)
+	scopedURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID, "github_scoped_access_token")
+	if err != nil {
+		return nil, err
+	}
+	workflowURL, err := agentGitHubTokenURL(config.Endpoint, config.JobID, "github_workflow_access_token")
 	if err != nil {
 		return nil, err
 	}
@@ -61,17 +74,33 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	if bounded.Timeout == 0 {
 		bounded.Timeout = 15 * time.Second
 	}
-	return &AgentGitHubTokens{mintURL: mintURL, jobToken: config.JobToken, client: &bounded}, nil
+	return &AgentGitHubTokens{scopedURL: scopedURL, workflowURL: workflowURL, jobToken: config.JobToken, client: &bounded}, nil
 }
 
-func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository string, permissions map[string]string) (string, error) {
-	if !validWorkflowTokenPermissions(permissions) {
-		return "", fmt.Errorf("GitHub workflow token requires valid effective permissions")
+func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("GitHub workflow token provider is not configured")
 	}
-	return c.mint(ctx, repository, permissions, "workflow")
+	if err := plan.ValidateGitHubWorkflowPolicyFilename(workflow); err != nil {
+		return "", err
+	}
+	if err := plan.ValidateGitHubWorkflowAccessTokenPermissions(permissions); err != nil {
+		return "", err
+	}
+	return c.mint(ctx, c.workflowURL, repository, workflow, permissions, "workflow")
 }
 
-func (c *AgentGitHubTokens) mint(ctx context.Context, repository string, permissions map[string]string, purpose string) (string, error) {
+func (c *AgentGitHubTokens) ScopedToken(ctx context.Context, repository string, permissions map[string]string) (string, error) {
+	if c == nil {
+		return "", fmt.Errorf("GitHub scoped token provider is not configured")
+	}
+	if !validScopedTokenPermissions(permissions) {
+		return "", fmt.Errorf("GitHub scoped token requires valid permissions")
+	}
+	return c.mint(ctx, c.scopedURL, repository, "", permissions, "scoped")
+}
+
+func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workflow string, permissions map[string]string, purpose string) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("GitHub %s token provider is not configured", purpose)
 	}
@@ -80,15 +109,17 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, repository string, permiss
 	}
 	body, err := json.Marshal(struct {
 		RepositoryURL string            `json:"repo_url"`
+		Workflow      string            `json:"workflow,omitempty"`
 		Permissions   map[string]string `json:"permissions"`
 	}{
 		RepositoryURL: "https://github.com/" + repository,
+		Workflow:      workflow,
 		Permissions:   permissions,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode GitHub %s token request: %w", purpose, err)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.mintURL, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, mintURL, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("create GitHub %s token request: %w", purpose, err)
 	}
@@ -102,7 +133,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, repository string, permiss
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
-		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"))
+		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
 	if err != nil {
@@ -128,7 +159,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, repository string, permiss
 	return decoded.Token, nil
 }
 
-func validWorkflowTokenPermissions(permissions map[string]string) bool {
+func validScopedTokenPermissions(permissions map[string]string) bool {
 	if len(permissions) == 0 || len(permissions) > 15 {
 		return false
 	}
@@ -149,7 +180,7 @@ func validWorkflowTokenPermissions(permissions map[string]string) bool {
 	return true
 }
 
-func agentGitHubTokenURL(endpoint, jobID string) (string, error) {
+func agentGitHubTokenURL(endpoint, jobID, endpointName string) (string, error) {
 	if !validBuildkiteJobID(jobID) {
 		return "", fmt.Errorf("GitHub token Agent job ID is required")
 	}
@@ -157,26 +188,30 @@ func agentGitHubTokenURL(endpoint, jobID string) (string, error) {
 	if err != nil || !validCredentialServiceURL(u) {
 		return "", fmt.Errorf("safe GitHub token Agent endpoint using HTTPS or loopback HTTP is required")
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/github_scoped_access_token"
+	u.Path = strings.TrimRight(u.Path, "/") + "/jobs/" + jobID + "/" + endpointName
 	u.RawPath = ""
 	return u.String(), nil
 }
 
-func githubTokenStatusError(status int, retryAfter string) error {
+func githubTokenStatusError(status int, retryAfter, purpose string) error {
+	credential := "GitHub " + purpose + " token"
 	switch status {
 	case http.StatusBadRequest:
-		return fmt.Errorf("GitHub token request was rejected")
+		return fmt.Errorf("%s request was rejected", credential)
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("GitHub token request was denied")
+		return fmt.Errorf("%s request was denied", credential)
 	case http.StatusNotFound:
+		if purpose == "workflow" {
+			return fmt.Errorf("GitHub workflow access tokens are not enabled for this organization or pipeline")
+		}
 		return fmt.Errorf("GitHub scoped access tokens are not enabled for this organization")
 	case http.StatusServiceUnavailable:
 		retryAfter = strings.TrimSpace(retryAfter)
 		if retryAfterSecondsPattern.MatchString(retryAfter) {
-			return fmt.Errorf("GitHub token service is temporarily unavailable; retry after %s seconds", retryAfter)
+			return fmt.Errorf("%s service is temporarily unavailable; retry after %s seconds", credential, retryAfter)
 		}
-		return fmt.Errorf("GitHub token service is temporarily unavailable")
+		return fmt.Errorf("%s service is temporarily unavailable", credential)
 	default:
-		return fmt.Errorf("GitHub token service returned HTTP %d", status)
+		return fmt.Errorf("%s service returned HTTP %d", credential, status)
 	}
 }

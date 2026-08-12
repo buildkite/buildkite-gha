@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -117,9 +116,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(92)
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	_ = testFileLock(f, true)
 	_, _ = f.Write(b)
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = testFileLock(f, false)
 	_ = f.Close()
 	if len(args) == 0 {
 		os.Exit(2)
@@ -409,7 +408,7 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		if scenario == "fail-mount-probe" {
 			os.Exit(42)
 		}
-		if err := syscall.Exec("/bin/sh", args[i:], os.Environ()); err != nil {
+		if err := testExec("/bin/sh", args[i:], os.Environ()); err != nil {
 			os.Exit(126)
 		}
 	}
@@ -423,7 +422,7 @@ func fakeJobDockerExec(root, scenario string, args []string) {
 		}
 		nodeArgs := append([]string(nil), args[i:]...)
 		nodeArgs[0] = translate(nodeArgs[0])
-		if err := syscall.Exec(nodeArgs[0], nodeArgs, os.Environ()); err != nil {
+		if err := testExec(nodeArgs[0], nodeArgs, os.Environ()); err != nil {
 			os.Exit(126)
 		}
 	}
@@ -907,7 +906,7 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 		t.Fatal("cancellation hung")
 	}
 	pidb, _ := os.ReadFile(marker)
-	if p, _ := strconv.Atoi(strings.TrimSpace(string(pidb))); p > 0 && syscall.Kill(p, 0) == nil {
+	if p, _ := strconv.Atoi(strings.TrimSpace(string(pidb))); p > 0 && testProcessExists(p) {
 		t.Fatalf("child %d alive", p)
 	}
 	_ = b.cleanup()
@@ -1874,7 +1873,7 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	}
 	for _, artifact := range bundle.Plans {
 		job := artifact.Job
-		if job.Schema != plan.SchemaV7 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
+		if job.Schema != plan.SchemaV8 || !slices.Equal(job.RequiredCapabilities, []string{"docker", "network"}) {
 			t.Fatalf("compiled %s plan boundary = schema %q, capabilities %#v", job.Workflow.LogicalJobID, job.Schema, job.RequiredCapabilities)
 		}
 		wantSources := []string{"dockerfile-actions", "service-containers"}
@@ -1955,7 +1954,7 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 		if compileErr != nil {
 			t.Fatalf("compile %s: %v", test.name, compileErr)
 		}
-		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV7 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
+		if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Schema != plan.SchemaV8 || bundle.Plans[0].Job.Workflow.LogicalJobID != test.logicalJob || !slices.Equal(bundle.Plans[0].Authorization.DockerCapabilitySources, []string{test.provenance}) {
 			t.Fatalf("compiled %s boundary = %#v", test.name, bundle.Plans)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)

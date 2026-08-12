@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -499,6 +498,11 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 	if e != nil {
 		return "", 0, fmt.Errorf("resolve upload workspace: %w", e)
 	}
+	workspaceRoot, e := os.OpenRoot(workspace)
+	if e != nil {
+		return "", 0, fmt.Errorf("open upload workspace: %w", e)
+	}
+	defer func() { err = errors.Join(err, workspaceRoot.Close()) }()
 	h := sha256.New()
 	w := io.MultiWriter(f, h)
 	z := zip.NewWriter(w)
@@ -523,7 +527,12 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		if e != nil {
 			return "", 0, e
 		}
-		in, e := openUploadFileNoFollow(workspace, relative)
+		if e = rejectUploadSymlinkComponents(ctx, workspace, relative); e != nil {
+			return "", 0, e
+		}
+		// Root confines a concurrent path swap; O_NONBLOCK lets the regular-file
+		// check below reject a special-file replacement without hanging.
+		in, e := workspaceRoot.OpenFile(relative, os.O_RDONLY|nonBlockingOpenFlag, 0)
 		if e != nil {
 			return "", 0, e
 		}
@@ -573,39 +582,6 @@ func writeUploadZIP(ctx context.Context, path, workspace string, files []archive
 		return "", 0, fmt.Errorf("final ZIP exceeds 1 GiB")
 	}
 	return hex.EncodeToString(h.Sum(nil)), info.Size(), nil
-}
-
-func openUploadFileNoFollow(workspace, relative string) (*os.File, error) {
-	components := strings.Split(filepath.Clean(relative), string(filepath.Separator))
-	if len(components) == 0 || components[0] == "." || components[0] == ".." {
-		return nil, fmt.Errorf("invalid upload source path %q", relative)
-	}
-	dir, err := syscall.Open(workspace, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, err
-	}
-	for _, component := range components[:len(components)-1] {
-		next, openErr := syscall.Openat(dir, component, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-		closeErr := syscall.Close(dir)
-		if openErr != nil {
-			return nil, errors.Join(openErr, closeErr)
-		}
-		if closeErr != nil {
-			_ = syscall.Close(next)
-			return nil, closeErr
-		}
-		dir = next
-	}
-	fd, openErr := syscall.Openat(dir, components[len(components)-1], syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
-	closeErr := syscall.Close(dir)
-	if openErr != nil {
-		return nil, errors.Join(openErr, closeErr)
-	}
-	if closeErr != nil {
-		_ = syscall.Close(fd)
-		return nil, closeErr
-	}
-	return os.NewFile(uintptr(fd), relative), nil
 }
 
 type contextReader struct {

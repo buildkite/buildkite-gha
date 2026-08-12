@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
@@ -327,11 +326,19 @@ func TestExtractPAXCompatibilityAndRejection(t *testing.T) {
 
 func TestExtractDigestIndependentOfUmask(t *testing.T) {
 	archive := tarBytes(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/plain", Typeflag: tar.TypeReg, Size: 1, Mode: 0o666}, {Name: "root/executable", Typeflag: tar.TypeReg, Size: 1, Mode: 0o744}})
-	old := syscall.Umask(0o022)
-	defer syscall.Umask(old)
+	old, err := testUmask(0o022)
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("umask unsupported")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = testUmask(old) }()
 	digests := make([]string, 0, 2)
 	for _, mask := range []int{0o022, 0o077} {
-		syscall.Umask(mask)
+		if _, err := testUmask(mask); err != nil {
+			t.Fatal(err)
+		}
 		out := filepath.Join(t.TempDir(), "tree")
 		if err := extractTar(bytes.NewReader(archive), out, defaults()); err != nil {
 			t.Fatal(err)
@@ -506,6 +513,46 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	second, err := store.Materialize(context.Background(), resolved)
 	if err != nil || second != first || requests.Load() != 1 {
 		t.Fatalf("second = %q, %v; requests=%d", second, err, requests.Load())
+	}
+}
+
+func TestStoreCanonicalizesAliasedAncestorAndRejectsSymlinkRoot(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	realParent := filepath.Join(base, "real")
+	if err := os.Mkdir(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logicalParent := filepath.Join(base, "logical")
+	if err := os.Symlink(realParent, logicalParent); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	logicalRoot := filepath.Join(logicalParent, "actions")
+	if err := os.Mkdir(logicalRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(logicalRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.root != filepath.Join(realParent, "actions") {
+		t.Fatalf("store root = %q, want canonical root", store.root)
+	}
+	linkedRoot := filepath.Join(base, "linked-root")
+	if err := os.Symlink(store.root, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(linkedRoot, nil); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("NewStore() accepted symlink root: %v", err)
+	}
+	missingRoot := filepath.Join(base, "missing-root")
+	if _, err := NewStore(missingRoot, nil); err == nil || !strings.Contains(err.Error(), "non-symlink directory") {
+		t.Fatalf("NewStore() accepted missing root: %v", err)
+	}
+	if _, err := os.Lstat(missingRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("NewStore() created missing root: %v", err)
 	}
 }
 

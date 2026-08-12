@@ -506,6 +506,30 @@ jobs:
 	}
 }
 
+func TestParseRetainsRuntimeMatrixIncludeExpression(t *testing.T) {
+	parsed, err := Parse("matrix.yml", []byte(`on: push
+jobs:
+  django:
+    needs: build_django_matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.build_django_matrix.outputs.include) }}
+    steps:
+      - run: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrix := parsed.Jobs[0].Matrix
+	if matrix == nil || matrix.IncludeExpression == nil || matrix.IncludeExpression.Text != "${{ fromJson(needs.build_django_matrix.outputs.include) }}" {
+		t.Fatalf("matrix include expression = %#v", matrix)
+	}
+	if matrix.IncludeExpression.Span.Start.Line != 8 || matrix.IncludeExpression.Span.Start.Column != 18 {
+		t.Fatalf("matrix include expression span = %#v", matrix.IncludeExpression.Span)
+	}
+}
+
 func TestParseOwnsReusableWorkflowCallsAndInputDeclarations(t *testing.T) {
 	source := []byte(`on:
   workflow_call:
