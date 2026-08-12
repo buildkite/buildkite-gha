@@ -59,7 +59,7 @@ steps:
       - "plugin-demo-actions-importer"
       - "plugin-demo-macos-importer"
       - "plugin-demo-advanced-importer"
-    command: "echo 'The released plugin and CLI completed all service-free workflows.'"
+    command: "echo 'The released plugin completed all service-free workflows. Linux used the released CLI; macOS used the CLI source from DEMO_COMMIT.'"
 
   - label: ":package: Cache released-plugin demo"
     key: "plugin-demo-cache-importer"
