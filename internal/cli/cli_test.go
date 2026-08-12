@@ -821,6 +821,9 @@ jobs:
 		{name: "upload before event metadata", args: []string{"upload", workflow}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			if test.args[0] == "upload" {
+				requireImporterHost(t)
+			}
 			var stdout, stderr bytes.Buffer
 			runner := &cliCaptureRunner{}
 			if code := run(test.args, &stdout, &stderr, "dev", runner); code != 1 {
@@ -858,6 +861,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("invalid boundary before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", invalidWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -900,6 +904,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("exact boundary survives an earlier graph failure", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", graphFailureWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -953,6 +958,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("reusable boundary discovery does not depend on fail-fast order", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", reusableBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -994,6 +1000,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("shared boundary is rescanned when reached at a shallower depth", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", sharedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -1028,6 +1035,7 @@ jobs:
 		}
 	}
 	t.Run("depth-limited reusable discovery fails closed before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", depthBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -1071,6 +1079,7 @@ jobs:
 		t.Fatal(err)
 	}
 	t.Run("incomplete reusable discovery fails closed before event metadata", func(t *testing.T) {
+		requireImporterHost(t)
 		var stdout, stderr bytes.Buffer
 		runner := &cliCaptureRunner{}
 		if code := run([]string{"upload", malformedBoundaryWorkflow}, &stdout, &stderr, "dev", runner); code != 1 {
@@ -2447,6 +2456,7 @@ func TestExpandWorkflowPatternStarSelectsTopLevelYAMLWorkflows(t *testing.T) {
 }
 
 func TestRunUploadRejectsTrackedSymlinksMatchedByGlob(t *testing.T) {
+	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	for _, test := range []struct {
 		name   string
@@ -2584,6 +2594,7 @@ func TestExpandWorkflowOperandsCanonicalizesExplicitTrackedPaths(t *testing.T) {
 }
 
 func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
+	requireImporterHost(t)
 	workflow := func(name string) string {
 		return "name: " + name + "\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	}
@@ -2633,6 +2644,7 @@ func TestRunUploadExplicitPathsAreAtomicAndOrderIndependent(t *testing.T) {
 }
 
 func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
+	requireImporterHost(t)
 	workflowSource := "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"a.yml": workflowSource})
 	t.Chdir(repository)
@@ -2649,6 +2661,7 @@ func TestRunUploadRejectsMultipleOperandGlobBeforeBuildkite(t *testing.T) {
 }
 
 func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
+	requireImporterHost(t)
 	pattern := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "*e*.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	inputs, err := expandWorkflowPattern(pattern)
@@ -2738,6 +2751,7 @@ func TestRunUploadAggregatesGlobAtomicallyWithNamespacedJobs(t *testing.T) {
 }
 
 func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
+	requireImporterHost(t)
 	repository := t.TempDir()
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
@@ -2830,6 +2844,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 }
 
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
 	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
@@ -2896,6 +2911,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 }
 
 func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T) {
+	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"dispatch.yml":     "name: Dispatch\non: workflow_dispatch\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"pull-request.yml": "name: Pull request\non: pull_request\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.runner }}\n    steps: [{run: true}]\n",
@@ -2985,6 +3001,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 }
 
 func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
+	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"dispatch.yml":     "name: Dispatch\non: workflow_dispatch\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 		"pull-request.yml": "name: Pull request\non:\n  pull_request:\n    branches: [main]\n    types: [synchronize]\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.base.ref == 'main' && 'ubuntu-latest' || 'ubuntu-22.04' }}\n    steps: [{run: true}]\n",
@@ -3058,6 +3075,7 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 }
 
 func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "invalid-push.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.missing_runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3081,6 +3099,7 @@ func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
 }
 
 func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "pull-request.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ${{ github.event.pull_request.runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3161,6 +3180,7 @@ func writeUploadEvent(t *testing.T, directory, event, ref string, payload map[st
 }
 
 func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "issues.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3182,6 +3202,7 @@ func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
 }
 
 func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
+	requireImporterHost(t)
 	for _, test := range []struct {
 		name, workflow, want string
 		payload              map[string]any
@@ -3218,6 +3239,7 @@ func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 }
 
 func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
+	requireImporterHost(t)
 	workflow := "on:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"push.yml": workflow})
 	eventPath := writeUploadEvent(t, repository, "push", "refs/pull/42/head", map[string]any{})
@@ -3250,6 +3272,7 @@ func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
 }
 
 func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T) {
+	requireImporterHost(t)
 	repository := t.TempDir()
 	workflowDirectory := filepath.Join(repository, ".github", "workflows")
 	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
@@ -3342,6 +3365,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 }
 
 func TestRunUploadRejectsAllReusableOnlyMatches(t *testing.T) {
+	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "reusable.yml")
 	source := "on: workflow_call\njobs:\n  shared:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(source), 0o600); err != nil {
@@ -3360,6 +3384,7 @@ func TestRunUploadRejectsAllReusableOnlyMatches(t *testing.T) {
 }
 
 func TestRunUploadRejectsAllReusableExplicitPaths(t *testing.T) {
+	requireImporterHost(t)
 	reusable := "on: workflow_call\njobs:\n  shared:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"first.yml":  reusable,
