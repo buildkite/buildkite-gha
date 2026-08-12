@@ -1010,7 +1010,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 					finding := &ProcessingFinding{
 						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
 						Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-						Job: job.ID, Instance: key, Message: "resolved runner target is not admitted by policy",
+						Job: job.ID, Instance: key, Message: runnerRejectionMessage(err),
 						Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 					}
 					diagnostics = append(diagnostics, finding)

@@ -45,8 +45,10 @@ type ProcessingFinding struct {
 	Instance string
 	Action   string
 	Step     int
-	Message  string
-	Err      error
+	// Message replaces Err's text in the rendered report. Set it whenever Err
+	// can quote event-derived data, so that data cannot reach the report.
+	Message string
+	Err     error
 }
 
 func (e *ProcessingFinding) Error() string { return e.Err.Error() }
