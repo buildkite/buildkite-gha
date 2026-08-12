@@ -3269,17 +3269,89 @@ func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
 	}
 }
 
+func TestPluginStarExcludesUnsupportedWorkflows(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"invalid.yml": "on: [push\njobs: {}\n",
+		"issues.yml":  "name: Issues\non: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"push.yml":    "name: Push\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"secret.yml":  "name: Secret\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps: [{run: true}]\n",
+		"windows.yml": "name: Windows\non: push\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{"workflows":"*"}`)
+	setCLIPluginBuildkiteEnvironment(t, "star-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs from 1 workflows") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	for _, want := range []string{
+		`unsupported GitHub trigger event "issues"`,
+		"warning: excluding unsupported workflow .github/workflows/invalid.yml",
+		"warning: excluding unsupported workflow .github/workflows/issues.yml",
+		"warning: excluding unsupported workflow .github/workflows/secret.yml",
+		"warning: excluding unsupported workflow .github/workflows/windows.yml",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group string `yaml:"group"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: Push" {
+		t.Fatalf("wildcard pipeline groups = %#v", pipeline.Steps)
+	}
+}
+
+func TestPluginStarSucceedsWhenAllWorkflowsAreUnsupported(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"issues.yml": "on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	t.Chdir(repository)
+	t.Setenv(pluginConfigurationEnvironment, `{"workflows":"*"}`)
+	setCLIPluginBuildkiteEnvironment(t, "unsupported-star-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Excluded 1 unsupported workflow; no supported workflows to upload") || !strings.Contains(stderr.String(), "warning: excluding unsupported workflow .github/workflows/issues.yml") {
+		t.Fatalf("stdout/stderr = %q / %q", stdout.String(), stderr.String())
+	}
+	if len(runner.uploaded) != 0 {
+		t.Fatalf("unsupported wildcard selection uploaded artifacts: %#v", runner.uploaded)
+	}
+	for _, command := range runner.commands {
+		if len(command.args) >= 2 && command.args[0] == "pipeline" && command.args[1] == "upload" {
+			t.Fatalf("unsupported wildcard selection uploaded a pipeline: %#v", command)
+		}
+	}
+}
+
 func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 	requireImporterHost(t)
 	for _, test := range []struct {
 		name, workflow, want string
 		payload              map[string]any
+		wildcard             bool
 	}{
 		{
 			name:     "missing action",
 			workflow: "on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 			payload:  map[string]any{"pull_request": map[string]any{"base": map[string]any{"ref": "main"}}},
 			want:     "payload.action",
+			wildcard: true,
 		},
 		{
 			name:     "missing filtered base branch",
@@ -3296,7 +3368,11 @@ func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "incomplete-pull-request-importer")
 			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/pull-request.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+			workflowOperand := ".github/workflows/pull-request.yml"
+			if test.wildcard {
+				workflowOperand = "*"
+			}
+			if code := run([]string{"upload", "--event-path", eventPath, workflowOperand}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("run() code/stderr = %d / %q, want %q", code, stderr.String(), test.want)
 			}
 			if len(runner.commands) != 0 || len(runner.uploaded) != 0 {

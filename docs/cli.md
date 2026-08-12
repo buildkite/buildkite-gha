@@ -116,7 +116,7 @@ Use `*` for every tracked `.yml` and `.yaml` file directly under `.github/workfl
 buildkite-gha upload '*'
 ```
 
-Quote `*` in shells and YAML. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
+Quote `*` in shells and YAML. This exact selector reports and omits workflows that fail compatibility or hosted-profile admission. If none are supported, upload succeeds without adding steps. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
 
 Two or more operands switch to explicit-list mode:
 
@@ -132,7 +132,7 @@ Every list entry must resolve to one regular, tracked `.yml` or `.yaml` file ins
 
 All selected directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
 
-Any input, trigger translation, event validation, compilation, admission, artifact, or upload failure aborts the aggregate transaction. No partially compiled pipeline is uploaded.
+Other selectors remain strict: any workflow failure aborts the aggregate transaction. Event-input, environment, action-resolution, artifact, and upload failures also abort `*` discovery. No partially compiled pipeline is uploaded.
 
 ### Select the effective event
 
@@ -150,7 +150,7 @@ The selected snapshot establishes one effective GitHub event for applicability, 
 
 Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as skipped groups with an ignored placeholder and no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with an ignored-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
-Unsupported trigger events, path filters, inexact filters, malformed event data, and failures in any applicable workflow remain fatal. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+With `*`, unsupported trigger events, path filters, inexact filters, and other workflow compatibility failures omit that workflow. They remain fatal for other selectors. Malformed event data remains fatal in every mode. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
 
 After all applicable workflows pass, the command uploads the exact executable and content-addressed plans before running one:
 

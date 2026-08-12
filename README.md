@@ -42,7 +42,7 @@ steps:
 
 The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship.
 
-Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`.
+Use `workflow: "*"` to select every tracked `.yml` and `.yaml` file directly under `.github/workflows`. This discovery mode reports and omits unsupported workflows.
 
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
