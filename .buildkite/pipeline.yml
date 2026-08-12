@@ -70,7 +70,7 @@ steps:
           BUILDKITE_GHA_LIVE_REQUIRED: "1"
         plugins:
           - setup-go#v0.1.0:
-              cache-root: ".buildkite/cache-volume"
+              cache-root: "/cache/bkcache/.buildkite/cache-volume"
               mise-version: "2026.5.12"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.5.12"
