@@ -169,13 +169,9 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
-	minimal, err := parsePluginConfiguration(`{"workflows":"workflow.yml"}`)
+	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
 	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
-	}
-	legacy, err := parsePluginConfiguration(`{"workflow":"legacy.yml"}`)
-	if err != nil || !slices.Equal(legacy.Workflows, []string{"legacy.yml"}) {
-		t.Fatalf("legacy configuration = %#v, %v", legacy, err)
 	}
 
 	for _, test := range []struct {
@@ -184,12 +180,12 @@ func TestParsePluginConfiguration(t *testing.T) {
 		want   string
 	}{
 		{name: "malformed", source: `{`, want: "decode"},
-		{name: "missing workflows", source: `{}`, want: "workflows is required"},
+		{name: "missing workflow selection", source: `{}`, want: "workflow or workflows is required"},
 		{name: "duplicate workflow", source: `{"workflow":"one.yml","workflow":"two.yml"}`, want: "duplicate object key"},
 		{name: "both workflow fields", source: `{"workflow":"one.yml","workflows":"two.yml"}`, want: "mutually exclusive"},
 		{name: "empty workflow", source: `{"workflow":""}`, want: "workflow must be a non-empty string"},
-		{name: "empty workflows string", source: `{"workflows":""}`, want: "non-empty string or array"},
-		{name: "empty workflows array", source: `{"workflows":[]}`, want: "non-empty string or array"},
+		{name: "workflows string", source: `{"workflows":"one.yml"}`, want: "workflows must be a non-empty array"},
+		{name: "empty workflows array", source: `{"workflows":[]}`, want: "workflows must be a non-empty array"},
 		{name: "non-string workflow entry", source: `{"workflows":["one.yml",null]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
@@ -286,8 +282,8 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := json.Marshal(map[string]any{
-		"workflows": workflowPath,
-		"version":   "0.8.0",
+		"workflow": workflowPath,
+		"version":  "0.8.0",
 		"runners": []map[string]string{
 			{"runs-on": "ubuntu-latest", "queue": "hosted"},
 		},
@@ -372,11 +368,10 @@ func TestPluginRejectsNonExplicitWorkflowSelectors(t *testing.T) {
 		workflows any
 		want      string
 	}{
-		{name: "all shorthand", field: "workflows", workflows: "*", want: "explicit paths"},
-		{name: "legacy all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
-		{name: "string glob", field: "workflows", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
+		{name: "all shorthand", field: "workflow", workflows: "*", want: "explicit paths"},
+		{name: "string glob", field: "workflow", workflows: filepath.Join(workflowDirectory, "*.yml"), want: "explicit paths"},
 		{name: "array glob", field: "workflows", workflows: []string{filepath.Join(workflowDirectory, "*.yml")}, want: "explicit paths"},
-		{name: "directory", field: "workflows", workflows: workflowDirectory, want: "does not name a regular tracked file"},
+		{name: "directory", field: "workflow", workflows: workflowDirectory, want: "does not name a regular tracked file"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			configuration, err := json.Marshal(map[string]any{test.field: test.workflows})

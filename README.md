@@ -33,23 +33,21 @@ steps:
     key: "gha-ci"
     plugins:
       - github-actions#v0.9.3:
-          workflows:
-            - .github/workflows/ci.yml
+          workflow: .github/workflows/ci.yml
 
   - label: ":rocket: Deploy"
     depends_on: "gha-ci"
     command: .buildkite/deploy.sh
 ```
 
-The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. List every workflow to import explicitly; plugin configuration does not accept directories or glob patterns.
+The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. Set `workflow` to one explicit path or `workflows` to an explicit path list; plugin configuration does not accept directories or glob patterns.
 
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
 ```yaml
 plugins:
   - github-actions#v0.9.3:
-      workflows:
-        - .github/workflows/ci.yml
+      workflow: .github/workflows/ci.yml
       version: "0.10.1"
 ```
 
@@ -60,8 +58,7 @@ labels with a native Darwin/arm64 queue:
 ```yaml
 plugins:
   - github-actions#v0.9.3:
-      workflows:
-        - .github/workflows/ci.yml
+      workflow: .github/workflows/ci.yml
       runners:
         - runs-on: ubuntu-latest
           queue: hosted

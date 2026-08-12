@@ -101,15 +101,15 @@ buildkite-gha upload .github/workflows/ci.yml
 
 The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
-The hidden zero-argument `buildkite-gha plugin` entry point reads `workflows` and
-`runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Every `workflows` entry must be
-an explicit path to a regular, tracked `.yml` or `.yaml` file inside the
-repository; directories and glob patterns are rejected. It also accepts the
-plugin-owned `version`, `source-ref`, and `minimum-release-age` fields. The legacy
-singular `workflow` field remains supported as an explicit-path compatibility
-alias for released plugins but cannot be combined with `workflows`. The
-Linux/amd64 importer fetches the same release's Darwin runtime only when a
-workflow requires it. Custom importers can use the public flags below.
+The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
+`workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
+to one explicit path or `workflows` to a non-empty array of explicit paths; the
+fields are mutually exclusive. Every path must identify a regular, tracked
+`.yml` or `.yaml` file inside the repository; directories and glob patterns are
+rejected. It also accepts the plugin-owned `version`, `source-ref`, and
+`minimum-release-age` fields. The Linux/amd64 importer fetches the same release's
+Darwin runtime only when a workflow requires it. Custom importers can use the
+public flags below.
 
 ### Select workflows
 

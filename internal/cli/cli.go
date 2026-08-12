@@ -222,38 +222,32 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
 	}
-	legacyWorkflow, hasLegacyWorkflow := encoded["workflow"]
+	workflowValue, hasWorkflow := encoded["workflow"]
 	workflowsValue, hasWorkflows := encoded["workflows"]
-	if hasLegacyWorkflow && hasWorkflows {
+	if hasWorkflow && hasWorkflows {
 		return pluginConfiguration{}, fmt.Errorf("%s workflow and workflows are mutually exclusive", pluginConfigurationEnvironment)
 	}
 	var workflows []string
-	if hasLegacyWorkflow {
-		workflow, ok := legacyWorkflow.(string)
+	if hasWorkflow {
+		workflow, ok := workflowValue.(string)
 		if !ok || strings.TrimSpace(workflow) == "" {
 			return pluginConfiguration{}, fmt.Errorf("%s workflow must be a non-empty string", pluginConfigurationEnvironment)
 		}
 		workflows = []string{workflow}
 	} else {
-		switch value := workflowsValue.(type) {
-		case string:
-			if strings.TrimSpace(value) != "" {
-				workflows = []string{value}
-			}
-		case []any:
-			if len(value) != 0 {
-				workflows = make([]string, len(value))
-				for index, entry := range value {
-					workflow, ok := entry.(string)
-					if !ok || strings.TrimSpace(workflow) == "" {
-						return pluginConfiguration{}, fmt.Errorf("%s workflows entry %d must be a non-empty string", pluginConfigurationEnvironment, index)
-					}
-					workflows[index] = workflow
+		values, ok := workflowsValue.([]any)
+		if ok && len(values) != 0 {
+			workflows = make([]string, len(values))
+			for index, entry := range values {
+				workflow, ok := entry.(string)
+				if !ok || strings.TrimSpace(workflow) == "" {
+					return pluginConfiguration{}, fmt.Errorf("%s workflows entry %d must be a non-empty string", pluginConfigurationEnvironment, index)
 				}
+				workflows[index] = workflow
 			}
 		}
 		if len(workflows) == 0 {
-			return pluginConfiguration{}, fmt.Errorf("%s workflows is required and must be a non-empty string or array of non-empty strings", pluginConfigurationEnvironment)
+			return pluginConfiguration{}, fmt.Errorf("%s workflow or workflows is required; workflows must be a non-empty array of non-empty strings", pluginConfigurationEnvironment)
 		}
 	}
 	targets := make(map[string]compiler.RunnerTarget)
