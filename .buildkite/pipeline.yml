@@ -119,14 +119,14 @@ steps:
       mise exec -- go build ./...
       mise exec -- go test -count=1 ./...
 
-  - label: ":github: OSS workflow compatibility"
-    key: "oss-workflow-corpus"
+  - label: ":github: Starter workflow compatibility"
+    key: "starter-workflows-corpus"
     soft_fail: true
     timeout_in_minutes: 10
     plugins:
       - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
           version: "2026.5.12"
-    command: "mise run corpus:oss-profile"
+    command: "mise run corpus:starter-profile"
 
   - label: ":github: Exact-source plugin smoke"
     key: "plugin-source-smoke-importer"

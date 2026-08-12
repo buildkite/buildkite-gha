@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo 'usage: scripts/oss-corpus [--profile] [case ...]' >&2
+  echo 'usage: scripts/starter-workflows-corpus [--profile] [case ...]' >&2
 }
 
 sha256_digest() {
@@ -29,23 +29,21 @@ while (( $# > 0 )); do
 done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly root manifest="$root/testdata/oss/manifest.json"
-work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-oss-corpus.XXXXXXXX")"
+readonly root manifest="$root/testdata/starter-workflows/manifest.json"
+work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-starter-workflows.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
 cd "$root"
 jq -e '
-  .schema == "buildkite-gha/oss-corpus/v3" and
+  .schema == "buildkite-gha/starter-workflows-corpus/v1" and
+  (.repository == "actions/starter-workflows") and
+  (.commit | test("^[0-9a-f]{40}$")) and
+  (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
   (.cases | type == "array" and length > 0) and
   all(.cases[];
     (.id | test("^[a-z0-9]+(?:-[a-z0-9]+)*$")) and
-    (.repository | test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")) and
-    (.commit | test("^[0-9a-f]{40}$")) and
-    (.workflow | test("^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$")) and
-    (.workflow_sha256 | test("^[0-9a-f]{64}$")) and
-    (.default_branch | test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
-    (.event | IN("push", "pull_request")) and
-    ((.github_run == null) or (.github_run | test("^https://github.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/actions/runs/[1-9][0-9]*$")))) and
+    (.template | test("^ci/[A-Za-z0-9_.-]+\\.yml$")) and
+    (.template_sha256 | test("^[0-9a-f]{64}$"))) and
   ([.cases[].id] | length == (unique | length))
 ' "$manifest" >/dev/null
 
@@ -71,7 +69,7 @@ if $profile; then
   validate_args=(--profile hosted-tokenless)
 fi
 summary="$work/summary.md"
-printf '### OSS workflow compatibility — %s\n\n' "$mode" > "$summary"
+printf '### Starter workflow compatibility — %s\n\n' "$mode" > "$summary"
 passed=0
 blocked=0
 
@@ -85,16 +83,12 @@ clean_env() {
 }
 
 make_event() {
-  local repository=$1 commit=$2 branch=$3 event=$4 destination=$5
+  local repository=$1 commit=$2 branch=$3 destination=$4
   local owner=${repository%%/*} name=${repository#*/}
   jq -n \
     --arg owner "$owner" --arg name "$name" --arg sha "$commit" \
-    --arg branch "$branch" --arg event "$event" '
+    --arg branch "$branch" '
     def clone_url: "https://github.com/" + $owner + "/" + $name + ".git";
-    def payload_repo: {
-      clone_url: clone_url,
-      full_name: ($owner + "/" + $name)
-    };
     def repository: {
       owner: $owner,
       name: $name,
@@ -103,21 +97,30 @@ make_event() {
     };
     {
       provider: "github",
-      event: $event,
+      event: "push",
       repository: repository,
-      ref: (if $event == "pull_request" then "refs/pull/1/head" else "refs/heads/" + $branch end),
+      ref: ("refs/heads/" + $branch),
       sha: $sha,
-      actor: "buildkite-gha-corpus",
-      payload: (if $event == "pull_request" then {
-        number: 1,
-        pull_request: {
-          number: 1,
-          head: {sha: $sha, ref: "corpus", repo: payload_repo},
-          base: {ref: $branch, repo: payload_repo}
-        }
-      } else {ref: ("refs/heads/" + $branch)} end)
+      actor: "buildkite-gha-starter-corpus",
+      payload: {ref: ("refs/heads/" + $branch)}
     }
   ' > "$destination"
+}
+
+expand_template() {
+  local source=$1 branch=$2 destination=$3
+  local default_branch_placeholder=\$default-branch
+  local starter_placeholder_pattern="\\\$(default-branch|protected-branches|cron-daily|registry-url\\([^)]*\\))"
+  grep -Fq "$default_branch_placeholder" "$source" || {
+    echo "$source: expected \$default-branch starter placeholder" >&2
+    return 1
+  }
+  jq -Rrsj --arg branch "$branch" 'gsub("\\$default-branch"; $branch)' \
+    "$source" > "$destination"
+  if grep -Eq "$starter_placeholder_pattern" "$destination"; then
+    echo "$source: unsupported starter-workflow placeholder remains after expansion" >&2
+    return 1
+  fi
 }
 
 record_report() {
@@ -148,28 +151,32 @@ record_report() {
   fi
 }
 
+repository="$(jq -r '.repository' "$manifest")"
+commit="$(jq -r '.commit' "$manifest")"
+branch="$(jq -r '.default_branch' "$manifest")"
+event_path="$work/event.json"
+make_event "$repository" "$commit" "$branch" "$event_path"
+
 for id in "${case_ids[@]}"; do
   entry="$(jq -c --arg id "$id" '.cases[] | select(.id == $id)' "$manifest")"
-  repository="$(jq -r '.repository' <<<"$entry")"
-  commit="$(jq -r '.commit' <<<"$entry")"
-  workflow="$(jq -r '.workflow' <<<"$entry")"
-  workflow_sha256="$(jq -r '.workflow_sha256' <<<"$entry")"
-  branch="$(jq -r '.default_branch' <<<"$entry")"
-  event="$(jq -r '.event' <<<"$entry")"
+  template="$(jq -r '.template' <<<"$entry")"
+  template_sha256="$(jq -r '.template_sha256' <<<"$entry")"
 
   case_root="$work/cases/$id"
+  workflow=".github/workflows/$id.yml"
   workflow_path="$case_root/$workflow"
-  event_path="$work/$id.event.json"
+  source_path="$work/sources/$template"
   mkdir -p "$(dirname "$workflow_path")"
+  mkdir -p "$(dirname "$source_path")"
   clean_env curl -q --fail --silent --show-error --proto '=https' --tlsv1.2 \
-    --max-time 30 --max-filesize 1048576 --output "$workflow_path" \
-    "https://raw.githubusercontent.com/$repository/$commit/$workflow"
-  actual_sha256="$(sha256_digest "$workflow_path")"
-  [[ "$actual_sha256" == "$workflow_sha256" ]] || {
-    echo "$id: workflow digest=$actual_sha256, want $workflow_sha256" >&2
+    --max-time 30 --max-filesize 1048576 --output "$source_path" \
+    "https://raw.githubusercontent.com/$repository/$commit/$template"
+  actual_sha256="$(sha256_digest "$source_path")"
+  [[ "$actual_sha256" == "$template_sha256" ]] || {
+    echo "$id: template digest=$actual_sha256, want $template_sha256" >&2
     exit 1
   }
-  make_event "$repository" "$commit" "$branch" "$event" "$event_path"
+  expand_template "$source_path" "$branch" "$workflow_path"
 
   status=0
   report="$work/$id.$mode.json"
@@ -186,7 +193,7 @@ cat "$summary"
 if [[ "${BUILDKITE:-}" == true ]] && command -v buildkite-agent >/dev/null; then
   style=success
   (( blocked > 0 )) && style=warning
-  buildkite-agent annotate --context "oss-workflow-corpus-$mode" --style "$style" < "$summary" || \
+  buildkite-agent annotate --context "starter-workflows-corpus-$mode" --style "$style" < "$summary" || \
     echo 'warning: failed to publish Buildkite annotation' >&2
 fi
 if $profile; then

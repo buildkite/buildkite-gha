@@ -1,0 +1,58 @@
+{
+  "schema": "buildkite-gha/starter-workflows-corpus/v1",
+  "repository": "actions/starter-workflows",
+  "commit": "e3c451d60f119b71caebf13c98ac45da6e15b4b7",
+  "default_branch": "main",
+  "cases": [
+    {
+      "id": "go",
+      "template": "ci/go.yml",
+      "template_sha256": "7d2c07c5b5e8d4867a62f56426af500258c1d167b3efad5d39a1f29b1f4d45a5"
+    },
+    {
+      "id": "node",
+      "template": "ci/node.js.yml",
+      "template_sha256": "edd2d73bb194d0925bc82c4c266e36ab205c68c82998bc6a398a441d7d6027da"
+    },
+    {
+      "id": "python-package",
+      "template": "ci/python-package.yml",
+      "template_sha256": "904c8a8e79b9f723760b0ad6e97d7caef781b68be796b70abc9d6820eeeb1925"
+    },
+    {
+      "id": "ruby",
+      "template": "ci/ruby.yml",
+      "template_sha256": "6bccdadb957b328807b89e614f60af2741819a9ff37d650945076370b8aa736f"
+    },
+    {
+      "id": "rust",
+      "template": "ci/rust.yml",
+      "template_sha256": "d200bc9ac9289b8b4c68dc6ca35320c4a974c034e3358759274d2038ddd44281"
+    },
+    {
+      "id": "maven",
+      "template": "ci/maven.yml",
+      "template_sha256": "a9b4f06f38e6d6fa9847861d071aa54e3984bbae4948a58262cacef84c021533"
+    },
+    {
+      "id": "dotnet",
+      "template": "ci/dotnet.yml",
+      "template_sha256": "d5b5016b5a59b8fa40786aa8089b15f2e207f0fd6561935e0a0ec1222a68df43"
+    },
+    {
+      "id": "cmake-multi-platform",
+      "template": "ci/cmake-multi-platform.yml",
+      "template_sha256": "251f58c701753102802d0cb9a45f217d68ee1599475dcce1114641f3b42eacc0"
+    },
+    {
+      "id": "rubyonrails",
+      "template": "ci/rubyonrails.yml",
+      "template_sha256": "55ce42405084e2026313dbcee9bf6b7d85218d2fe385a30d80142af1032f3fed"
+    },
+    {
+      "id": "swift",
+      "template": "ci/swift.yml",
+      "template_sha256": "ae92a6b63806753c2ba8c6522e86d3e37e727f18fa992c3b740eafcbd27f90f7"
+    }
+  ]
+}
