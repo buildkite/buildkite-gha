@@ -128,6 +128,7 @@ Set an image by digest:
 
 ```yaml
 env:
+  # Renovate resolves this Docker Hub tag; Namespace must preserve its manifest digest.
   # renovate: datasource=docker depName=buildkite/agent-base tag=ubuntu-noble-hosted-toolchains
   BUILDKITE_GHA_RUNTIME_IMAGE: buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24
 ```
