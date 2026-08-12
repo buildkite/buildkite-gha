@@ -819,7 +819,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy: runner label is not mapped by policy" {
+		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `Runner label "macos-15" is not mapped`) {
 			t.Fatalf("macOS profile report = %#v", report)
 		}
 	})
@@ -1415,7 +1415,7 @@ runs:
 		t.Fatalf("actions = %#v, want both missing invocations failed", report.Actions)
 	}
 	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Code != compiler.CodeActionResolution || diagnostic.Message != "action could not be resolved or validated" {
+		if diagnostic.Instance == "" || diagnostic.Step == 0 || diagnostic.Code != compiler.CodeActionResolution || !strings.Contains(diagnostic.Message, `Action "`) || !strings.Contains(diagnostic.Message, "unsupported") {
 			t.Fatalf("diagnostic lacks invocation identity: %#v", diagnostic)
 		}
 	}
@@ -1693,7 +1693,7 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Message != "resolved runner target is not admitted by policy: runner label is not mapped by policy" {
+	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || report.Diagnostics[0].Message != "Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
@@ -2085,9 +2085,14 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		if len(annotation.args) != 9 || annotation.args[0] != "annotate" || annotation.args[2] != "job" || annotation.args[4] != cliTestJobID || !strings.HasPrefix(annotation.args[6], processingAnnotationContext+"-") || annotation.args[8] != "error" {
 			t.Fatalf("annotation args = %#v", annotation.args)
 		}
-		for _, want := range []string{"GitHub Actions workflow diagnostics", "E\\_EXPRESSION\\_INVALID", "resolved runner target is not admitted by policy", "job: test", "instance: gha-test"} {
+		for _, want := range []string{"GitHub Actions workflow diagnostics", `#### Runner label "windows-latest" uses an unsupported operating system`, "Job `test`"} {
 			if !strings.Contains(string(annotation.stdin), want) {
 				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
+			}
+		}
+		for _, unwanted := range []string{"E_EXPRESSION_INVALID", "stage:", "instance:", "gha-test"} {
+			if strings.Contains(string(annotation.stdin), unwanted) {
+				t.Fatalf("annotation = %q, does not want %q", annotation.stdin, unwanted)
 			}
 		}
 		var report compatibility.ProcessingReport
@@ -2145,6 +2150,117 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	}
 	if !strings.Contains(body, "warning message") {
 		t.Fatalf("annotation = %q", body)
+	}
+}
+
+func TestMarkdownCodeContainsWorkflowBackticks(t *testing.T) {
+	if got, want := markdownCode("action` **not bold** ``tail"), "``` action` **not bold** ``tail ```"; got != want {
+		t.Fatalf("markdownCode() = %q, want %q", got, want)
+	}
+}
+
+func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Code: "E_ACTION_UNSUPPORTED", Stage: string(compiler.StageResolution),
+		Message: `Action "actions/setup-java@v4" is unsupported: action metadata uses unsupported field "deprecationMessage"`,
+		Job:     "test", Instance: "gha-test-a1b2", Action: "actions/setup-java@v4", Step: 2,
+	})
+
+	_, body := processingAnnotation(report)
+	for _, want := range []string{
+		`#### Action metadata uses unsupported field "deprecationMessage"`,
+		"Action `actions/setup-java@v4` · Job `test` · Step 2",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("annotation = %q, want %q", body, want)
+		}
+	}
+	if count := strings.Count(body, "actions/setup-java@v4"); count != 1 {
+		t.Fatalf("action count = %d, want 1: %q", count, body)
+	}
+	for _, unwanted := range []string{"E_ACTION_UNSUPPORTED", "stage:", "instance:", "gha-test-a1b2"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("annotation = %q, does not want %q", body, unwanted)
+		}
+	}
+}
+
+func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
+	tests := []struct {
+		name       string
+		diagnostic compatibility.Diagnostic
+		want       string
+	}{
+		{
+			name: "action resolution",
+			diagnostic: compatibility.Diagnostic{Action: "owner/action@v1",
+				Message: `Action "owner/action@v1" could not be resolved: tag v1 was not found`},
+			want: "Tag v1 was not found",
+		},
+		{
+			name: "token configuration",
+			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
+				Message: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`},
+			want: `Job "test" needs GITHUB\_TOKEN, but job-level permissions are unsupported.`,
+		},
+		{
+			name: "hosted container",
+			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
+				Message: `Job "test" uses service container "postgres". The compiler supports this construct, but hosted production does not run job or service containers.`},
+			want: `Job "test" uses service container "postgres".`,
+		},
+		{
+			name: "third-party runtime warning",
+			diagnostic: compatibility.Diagnostic{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN",
+				Message: "Third-party action runtime behavior was not validated."},
+			want: "Third-party action runtime behavior was not validated.",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			heading, _ := annotationDiagnosticPresentation(test.diagnostic)
+			if heading != test.want {
+				t.Fatalf("heading = %q, want %q", heading, test.want)
+			}
+		})
+	}
+}
+
+func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testing.T) {
+	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Effective permissions: contents: read.`
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
+		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+			Level: "error", Code: "E_PROFILE", Stage: string(compiler.StageAdmission),
+			Message: message, Job: "test", Instance: instance,
+		})
+	}
+
+	var jsonOutput bytes.Buffer
+	if err := compatibility.WriteProcessing(&jsonOutput, "json", report); err != nil {
+		t.Fatal(err)
+	}
+	var decoded compatibility.ProcessingReport
+	if err := json.Unmarshal(jsonOutput.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Diagnostics) != 1 || decoded.Diagnostics[0].Message != message || decoded.Diagnostics[0].Instance != "" {
+		t.Fatalf("JSON diagnostics = %#v", decoded.Diagnostics)
+	}
+
+	var textOutput bytes.Buffer
+	if err := compatibility.WriteProcessing(&textOutput, "text", report); err != nil {
+		t.Fatal(err)
+	}
+	_, annotation := processingAnnotation(report)
+	if strings.Count(textOutput.String(), message) != 1 ||
+		strings.Count(annotation, `Job "test" needs GITHUB\_TOKEN, but job-level permissions are unsupported.`) != 1 ||
+		strings.Count(annotation, `Effective permissions: contents: read.`) != 1 {
+		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
+	}
+	if strings.Contains(annotation, "gha-test-") {
+		t.Fatalf("annotation exposes matrix instance IDs: %q", annotation)
 	}
 }
 
@@ -2325,7 +2441,7 @@ func TestValidateHostedProfileRejectsProtectedCapabilityAfterCompile(t *testing.
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, `capability "secrets"`) {
+	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, "uses GitHub Actions secrets") {
 		t.Fatalf("profile report = %#v", report)
 	}
 }
@@ -4784,7 +4900,12 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
 		}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), capability) {
+		err := validateUnprivilegedBundle(bundle)
+		want := capability
+		if capability == "provider-token-write" {
+			want = "GITHUB_TOKEN"
+		}
+		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
 		}
 	}
@@ -4807,7 +4928,7 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedCheckoutCredentials(t *test
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
 			err := validateUnprivilegedBundle(bundle)
-			if test.wantError && (err == nil || !strings.Contains(err.Error(), "checkout provenance")) {
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "unsupported GitHub checkout credentials")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 			if !test.wantError && err != nil {
@@ -4837,13 +4958,38 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: job, Authorization: test.authorization}}}
 			err := validateUnprivilegedBundle(bundle)
-			if test.wantError && (err == nil || !strings.Contains(err.Error(), "workflow policy")) {
+			if test.wantError && (err == nil || !strings.Contains(err.Error(), "GITHUB_TOKEN")) {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 			if !test.wantError && err != nil {
 				t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestGitHubTokenAdmissionDiagnosticExplainsCausePermissionsAndFix(t *testing.T) {
+	artifact := compiler.PlanArtifact{
+		Job: plan.Job{
+			Workflow:    plan.Workflow{LogicalJobID: "build"},
+			GitHubToken: &plan.GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}},
+		},
+		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
+	}
+	want := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write. Move the permissions map to the workflow top level.`
+	if got := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions"); got != want {
+		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, want %q", got, want)
+	}
+}
+
+func TestHostedContainerDiagnosticNamesServiceAndBoundary(t *testing.T) {
+	job := plan.Job{
+		Workflow: plan.Workflow{LogicalJobID: "test"},
+		Services: map[string]plan.Container{"postgres": {Image: "postgres:11-alpine"}},
+	}
+	want := `Job "test" uses service container "postgres" (image "postgres:11-alpine"). The compiler supports this construct, but hosted production does not run job or service containers. Replace the container with ordinary steps or an externally reachable service; runner configuration cannot enable containers in the hosted profile.`
+	if got := hostedContainerDiagnostic(job); got != want {
+		t.Fatalf("hostedContainerDiagnostic() = %q, want %q", got, want)
 	}
 }
 
@@ -4865,7 +5011,7 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 		Workflow:             plan.Workflow{LogicalJobID: "unproven-docker"},
 		RequiredCapabilities: []string{"docker"},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "without compiler-verified Dockerfile action provenance") {
+	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "unsupported Docker access") {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
@@ -4879,7 +5025,7 @@ func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"},
 		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: sources}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted upload does not admit") {
+		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted container unsupported") {
 			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", sources, err)
 		}
 	}

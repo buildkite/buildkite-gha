@@ -29,6 +29,8 @@ type PlanAuthorization struct {
 	ProviderTokenReadCapabilitySources  []string
 	ProviderTokenWriteCapabilitySources []string
 	WorkflowTokenPolicyFilename         string
+	GitHubTokenActions                  []string
+	GitHubTokenSecretReference          bool
 }
 
 // Bundle is the complete deterministic output of static compilation.

@@ -192,15 +192,55 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	if len(diagnostics) < 2 {
 		return diagnostics
 	}
-	out := diagnostics[:1]
-	for _, diagnostic := range diagnostics[1:] {
-		previous := out[len(out)-1]
-		if previous.Level == diagnostic.Level && previous.Code == diagnostic.Code && previous.Category == diagnostic.Category && previous.Stage == diagnostic.Stage && previous.Message == diagnostic.Message && previous.Job == diagnostic.Job && previous.Instance == diagnostic.Instance && previous.Action == diagnostic.Action && previous.Step == diagnostic.Step && sameLocation(previous.Location, diagnostic.Location) {
+	type diagnosticKey struct {
+		level, code, category, stage, message, job, action, location string
+		step                                                         int
+	}
+	type matrixDiagnostic struct {
+		index     int
+		instances map[string]bool
+	}
+	out := diagnostics[:0]
+	matrixFindings := map[diagnosticKey]*matrixDiagnostic{}
+	for _, diagnostic := range diagnostics {
+		key := diagnosticKey{
+			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
+			stage: diagnostic.Stage, message: diagnostic.Message, job: diagnostic.Job,
+			action: diagnostic.Action, step: diagnostic.Step,
+		}
+		if diagnostic.Location != nil {
+			key.location = fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
+		}
+		if diagnostic.Instance != "" {
+			if previous, ok := matrixFindings[key]; ok {
+				if previous.instances == nil {
+					continue
+				}
+				if previous.instances[diagnostic.Instance] {
+					continue
+				}
+				previous.instances[diagnostic.Instance] = true
+				out[previous.index].Instance = ""
+				continue
+			}
+			matrixFindings[key] = &matrixDiagnostic{index: len(out), instances: map[string]bool{diagnostic.Instance: true}}
+		} else if previous, ok := matrixFindings[key]; ok {
+			out[previous.index].Instance = ""
+			previous.instances = nil
+			continue
+		} else {
+			matrixFindings[key] = &matrixDiagnostic{index: len(out)}
+		}
+		if len(out) != 0 && sameDiagnostic(out[len(out)-1], diagnostic) {
 			continue
 		}
 		out = append(out, diagnostic)
 	}
 	return out
+}
+
+func sameDiagnostic(left, right Diagnostic) bool {
+	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Message == right.Message && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
 }
 
 func sameLocation(left, right *SourceLocation) bool {

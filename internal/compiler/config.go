@@ -332,16 +332,41 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	return target, nil
 }
 
-// runnerRejectionMessage renders a rejected runs-on resolution for a processing
-// report. It appends only the fixed rejection reason, so a resolved label built
-// from event payload data never reaches the report.
-func runnerRejectionMessage(err error) string {
-	const message = "resolved runner target is not admitted by policy"
+// runnerRejectionMessage renders a rejected runs-on resolution. Callers pass
+// labels only when they came from workflow-authored static data.
+func runnerRejectionMessage(err error, labels, supported []string) string {
+	const message = "runner target is unsupported"
 	var rejection *runnerPolicyRejection
-	if errors.As(err, &rejection) {
+	if !errors.As(err, &rejection) {
+		return message
+	}
+	label := ""
+	if len(labels) == 1 {
+		label = fmt.Sprintf(" %q", labels[0])
+	}
+	supportedTargets := "a configured runner target"
+	if len(supported) != 0 {
+		supportedTargets = strings.Join(supported, ", ")
+	}
+	switch rejection.reason {
+	case reasonUnsupportedOS:
+		return fmt.Sprintf("Runner label%s uses an unsupported operating system (Windows); supported runner labels: %s", label, supportedTargets)
+	case reasonUnmappedLabel:
+		return fmt.Sprintf("Runner label%s is not mapped to a runner target; configure a runner-target mapping for this label or use %s", label, supportedTargets)
+	default:
 		return message + ": " + rejection.reason
 	}
-	return message
+}
+
+func (policy RunnerPolicy) supportedLabels() []string {
+	labels := make(map[string]bool, len(policy.Labels)+len(policy.Targets))
+	for label := range policy.Labels {
+		labels[label] = true
+	}
+	for label := range policy.Targets {
+		labels[label] = true
+	}
+	return sortedKeys(labels)
 }
 
 func unsupportedOS(label string) bool {

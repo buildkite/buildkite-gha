@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/compatibility"
@@ -66,6 +67,7 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 }
 
 func processingAnnotation(report compatibility.ProcessingReport) (style, body string) {
+	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
 	for _, diagnostic := range report.Diagnostics {
@@ -87,35 +89,34 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	out.WriteString(markdownText(report.Workflow))
 	out.WriteString("\n")
 	for _, diagnostic := range diagnostics {
-		out.WriteString("\n- **")
-		out.WriteString(strings.ToUpper(diagnostic.Level))
-		out.WriteString(" ")
-		out.WriteString(markdownText(diagnostic.Code))
-		out.WriteString("**")
-		if diagnostic.Location != nil {
-			out.WriteString(" · ")
-			out.WriteString(markdownText(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
+		heading, details := annotationDiagnosticPresentation(diagnostic)
+		out.WriteString("\n#### ")
+		out.WriteString(heading)
+		context := make([]string, 0, 4)
+		if diagnostic.Action != "" {
+			context = append(context, "Action "+markdownCode(diagnostic.Action))
 		}
-		out.WriteString("\n  ")
-		out.WriteString(markdownText(annotationDiagnosticMessage(diagnostic)))
-		if diagnostic.Stage != "" {
-			out.WriteString(" · stage: ")
-			out.WriteString(markdownText(diagnostic.Stage))
+		if diagnostic.Location != nil {
+			context = append(context, markdownCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
 		}
 		if diagnostic.Job != "" {
-			out.WriteString(" · job: ")
-			out.WriteString(markdownText(diagnostic.Job))
-		}
-		if diagnostic.Instance != "" {
-			out.WriteString(" · instance: ")
-			out.WriteString(markdownText(diagnostic.Instance))
-		}
-		if diagnostic.Action != "" {
-			out.WriteString(" · action: ")
-			out.WriteString(markdownText(diagnostic.Action))
+			context = append(context, "Job "+markdownCode(diagnostic.Job))
 		}
 		if diagnostic.Step != 0 {
-			_, _ = fmt.Fprintf(&out, " · step: %d", diagnostic.Step)
+			context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
+		}
+		if len(context) != 0 {
+			out.WriteString("\n\n")
+			out.WriteString(strings.Join(context, " · "))
+		}
+		if len(details) != 0 {
+			out.WriteString("\n\n")
+		}
+		for i, sentence := range details {
+			if i != 0 {
+				out.WriteString("  \n")
+			}
+			out.WriteString(markdownText(sentence))
 		}
 		out.WriteString("\n")
 	}
@@ -140,6 +141,61 @@ func annotationDiagnosticMessage(diagnostic compatibility.Diagnostic) string {
 	}
 	prefix := fmt.Sprintf("%s:%d:%d: ", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
 	return strings.TrimPrefix(diagnostic.Message, prefix)
+}
+
+func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (heading string, details []string) {
+	message := annotationDiagnosticMessage(diagnostic)
+	if diagnostic.Action != "" {
+		for _, prefix := range []string{
+			fmt.Sprintf("Action %q is unsupported: ", diagnostic.Action),
+			fmt.Sprintf("Action %q could not be resolved: ", diagnostic.Action),
+		} {
+			if strings.HasPrefix(message, prefix) {
+				message = upperFirst(strings.TrimPrefix(message, prefix))
+				break
+			}
+		}
+	}
+	sentences := annotationSentences(message)
+	if len(sentences) == 0 {
+		return "Compatibility diagnostic", nil
+	}
+	return markdownText(sentences[0]), sentences[1:]
+}
+
+func annotationSentences(message string) []string {
+	parts := strings.Split(strings.Join(strings.Fields(message), " "), ". ")
+	for i := range parts[:len(parts)-1] {
+		parts[i] += "."
+	}
+	return parts
+}
+
+func upperFirst(value string) string {
+	if value == "" {
+		return value
+	}
+	first, size := utf8.DecodeRuneInString(value)
+	return string(unicode.ToUpper(first)) + value[size:]
+}
+
+func markdownCode(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
+	if strings.Contains(value, "`") {
+		longest, current := 0, 0
+		for _, r := range value {
+			if r == '`' {
+				current++
+				longest = max(longest, current)
+			} else {
+				current = 0
+			}
+		}
+		delimiter := strings.Repeat("`", longest+1)
+		return delimiter + " " + value + " " + delimiter
+	}
+	return "`" + value + "`"
 }
 
 func markdownText(value string) string {

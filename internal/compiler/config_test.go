@@ -255,7 +255,8 @@ func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
 			if err == nil {
 				t.Fatal("resolve() error = nil, want rejection")
 			}
-			if message := runnerRejectionMessage(err); message != "resolved runner target is not admitted by policy: "+test.want {
+			message := runnerRejectionMessage(err, nil, []string{"ubuntu-latest"})
+			if !strings.Contains(message, test.want) && !strings.Contains(message, "unsupported operating system") && !strings.Contains(message, "not mapped") {
 				t.Fatalf("runnerRejectionMessage() = %q, want reason %q", message, test.want)
 			}
 		})
@@ -263,8 +264,39 @@ func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
 }
 
 func TestRunnerRejectionMessageFallsBackWhenUnclassified(t *testing.T) {
-	if message := runnerRejectionMessage(errors.New("boom")); message != "resolved runner target is not admitted by policy" {
+	if message := runnerRejectionMessage(errors.New("boom"), nil, nil); message != "runner target is unsupported" {
 		t.Fatalf("runnerRejectionMessage() = %q, want the bare policy message", message)
+	}
+}
+
+func TestRunnerRejectionMessageNamesStaticLabelAndSupportedTargets(t *testing.T) {
+	supported := []string{"ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest"}
+	tests := []struct {
+		label string
+		want  string
+	}{
+		{
+			label: "windows-latest",
+			want:  `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`,
+		},
+		{
+			label: "macos-latest",
+			want:  `Runner label "macos-latest" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`,
+		},
+	}
+	policy := RunnerPolicy{Targets: map[string]RunnerTarget{
+		"ubuntu-22.04":  {Platform: PlatformLinuxAMD64},
+		"ubuntu-24.04":  {Platform: PlatformLinuxAMD64},
+		"ubuntu-latest": {Platform: PlatformLinuxAMD64},
+	}}
+	for _, test := range tests {
+		_, err := policy.resolve([]string{test.label}, EventTrusted)
+		if err == nil {
+			t.Fatalf("resolve(%q) error = nil", test.label)
+		}
+		if got := runnerRejectionMessage(err, []string{test.label}, supported); got != test.want {
+			t.Fatalf("runnerRejectionMessage(%q) = %q, want %q", test.label, got, test.want)
+		}
 	}
 }
 
