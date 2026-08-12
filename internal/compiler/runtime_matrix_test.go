@@ -190,6 +190,10 @@ func TestRuntimeMatrixDescriptorIsDeterministicStrictAndSchemaValid(t *testing.T
 	for _, source := range [][]byte{
 		bytes.Replace(first, []byte(`"schema":`), []byte(`"schema":"duplicate","schema":`), 1),
 		bytes.Replace(first, []byte(`"job":`), []byte(`"unknown":true,"job":`), 1),
+		bytes.Replace(first, []byte(`"schema":`), []byte(`"Schema":`), 1),
+		bytes.Replace(first, []byte(`"source":`), []byte(`"Source":`), 1),
+		bytes.Replace(first, []byte(`"start":`), []byte(`"Start":`), 1),
+		bytes.Replace(first, []byte(`"line":`), []byte(`"Line":`), 1),
 		append(append([]byte(nil), first...), []byte(`true`)...),
 	} {
 		if _, err := DecodeRuntimeMatrixDescriptor(source); err == nil {

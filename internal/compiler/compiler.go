@@ -845,7 +845,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	failedMatrices := make(map[string]bool)
 	for _, id := range order {
 		job := jobs[id]
-		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], jobs, matricesByJob)
+		descriptor, deferred, matrixErr := describeRuntimeMatrix(job, sourcePaths[id], sourceDigests[id], needBindings[id], jobs, matricesByJob)
 		var matrices []map[string]any
 		if deferred {
 			position := job.Matrix.Span.Start

@@ -1900,6 +1900,45 @@ jobs:
 	}
 }
 
+func TestValidateRecognizesRuntimeMatrixInsideReusableWorkflow(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.build.outputs.include }}
+    steps:
+      - id: build
+        run: echo 'include=[]' >> "$GITHUB_OUTPUT"
+  generated:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.producer.outputs.include) }}
+    steps:
+      - run: echo "${{ matrix.name }}"
+`)
+
+	report, err := Validate(callerPath, readFile(t, callerPath))
+	if err == nil || !strings.Contains(err.Error(), "continuation upload is disabled") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if len(report.RuntimeMatrices) != 1 {
+		t.Fatalf("runtime matrix descriptors = %#v", report.RuntimeMatrices)
+	}
+	descriptor := report.RuntimeMatrices[0]
+	if descriptor.Job != "delegated.generated" || descriptor.ProducerJob != "delegated.producer" || descriptor.ProducerStepKey != "gha-delegated-producer" || descriptor.ProducerOutput != "include" || descriptor.SourcePath != "./.github/workflows/reusable.yml" {
+		t.Fatalf("reusable runtime matrix descriptor = %#v", descriptor)
+	}
+}
+
 func TestValidateRuntimeMatrixDescriptorRejectsUnsupportedSourceBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name     string

@@ -54,7 +54,7 @@ type RuntimeMatrixDescriptor struct {
 	MaxGraphJobs    int           `json:"max_graph_jobs"`
 }
 
-func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeMatrixDescriptor, bool, error) {
+func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, needs map[string]needBinding, jobs map[string]workflow.Job, matricesByJob map[string][]map[string]any) (RuntimeMatrixDescriptor, bool, error) {
 	if job.Matrix == nil {
 		return RuntimeMatrixDescriptor{}, false, nil
 	}
@@ -77,7 +77,7 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, jo
 		return RuntimeMatrixDescriptor{}, true, errors.New("runtime matrix include output must be the complete matrix definition")
 	}
 
-	producerID, err := exactRuntimeMatrixNeed(job.Needs, reference.Job)
+	producerID, err := exactRuntimeMatrixNeed(needs, reference.Job)
 	if err != nil {
 		return RuntimeMatrixDescriptor{}, true, err
 	}
@@ -117,21 +117,25 @@ func describeRuntimeMatrix(job workflow.Job, sourcePath, sourceDigest string, jo
 	return descriptor, true, nil
 }
 
-func exactRuntimeMatrixNeed(needs []string, requested string) (string, error) {
-	matched := ""
-	for _, need := range needs {
+func exactRuntimeMatrixNeed(needs map[string]needBinding, requested string) (string, error) {
+	var matched *needBinding
+	for _, need := range sortedKeys(needs) {
 		if !strings.EqualFold(need, requested) {
 			continue
 		}
-		if matched != "" {
+		if matched != nil {
 			return "", fmt.Errorf("runtime matrix producer %q is ambiguous", requested)
 		}
-		matched = need
+		binding := needs[need]
+		matched = &binding
 	}
-	if matched == "" {
+	if matched == nil {
 		return "", fmt.Errorf("runtime matrix producer %q must be a direct prerequisite in needs", requested)
 	}
-	return matched, nil
+	if len(matched.members) != 1 {
+		return "", fmt.Errorf("runtime matrix producer %q must resolve to exactly one job", requested)
+	}
+	return matched.members[0], nil
 }
 
 func exactRuntimeMatrixOutput(outputs map[string]string, requested string) (string, error) {
@@ -207,6 +211,9 @@ func DecodeRuntimeMatrixDescriptor(source []byte) (RuntimeMatrixDescriptor, erro
 	if err := rejectRuntimeMatrixDuplicateKeys(source); err != nil {
 		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
 	}
+	if err := rejectRuntimeMatrixDescriptorKeyAliases(source); err != nil {
+		return RuntimeMatrixDescriptor{}, fmt.Errorf("decode runtime matrix descriptor: %w", err)
+	}
 	var descriptor RuntimeMatrixDescriptor
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.DisallowUnknownFields()
@@ -220,6 +227,46 @@ func DecodeRuntimeMatrixDescriptor(source []byte) (RuntimeMatrixDescriptor, erro
 		return RuntimeMatrixDescriptor{}, err
 	}
 	return descriptor, nil
+}
+
+func rejectRuntimeMatrixDescriptorKeyAliases(source []byte) error {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(source, &document); err != nil {
+		return err
+	}
+	topLevel := map[string]bool{
+		"schema": true, "job": true, "shape": true, "producer_job": true,
+		"producer_step_key": true, "producer_output": true, "source_path": true,
+		"source_digest": true, "source": true, "max_output_bytes": true,
+		"max_instances": true, "max_graph_jobs": true,
+	}
+	for _, key := range sortedKeys(document) {
+		if !topLevel[key] {
+			return fmt.Errorf("unknown JSON field %q", key)
+		}
+	}
+
+	var span map[string]json.RawMessage
+	if err := json.Unmarshal(document["source"], &span); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	for _, key := range sortedKeys(span) {
+		if key != "start" && key != "end" {
+			return fmt.Errorf("unknown JSON field %q in source", key)
+		}
+	}
+	for _, name := range []string{"start", "end"} {
+		var position map[string]json.RawMessage
+		if err := json.Unmarshal(span[name], &position); err != nil {
+			return fmt.Errorf("source.%s: %w", name, err)
+		}
+		for _, key := range sortedKeys(position) {
+			if key != "line" && key != "column" {
+				return fmt.Errorf("unknown JSON field %q in source.%s", key, name)
+			}
+		}
+	}
+	return nil
 }
 
 // ExpandRuntimeMatrixOutput strictly decodes one untrusted producer output and
