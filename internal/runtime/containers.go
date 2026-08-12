@@ -111,9 +111,15 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		b.mounts = append(b.mounts, m)
 	}
 	ok := false
+	workflowFailure := false
 	defer func() {
 		if !ok {
-			err = errors.Join(err, b.cleanup())
+			if cleanupErr := b.cleanup(); cleanupErr != nil {
+				err = errors.Join(err, markHardJobFailure(cleanupErr))
+			}
+		}
+		if workflowFailure && !isHardJobFailure(err) {
+			err = markWorkflowJobFailure(err)
 		}
 	}()
 	if err = validateDockerMountPath(workspace); err != nil {
@@ -139,6 +145,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 			return nil, err
 		}
 	}
+	workflowFailure = true
 	if spec.Image != "" {
 		if err = r.runStreaming(ctx, newCommandProcessor(r.stdout(), r.stderr()), "", env, docker, "pull", spec.Image); err != nil {
 			return nil, fmt.Errorf("pull job container image: %w", err)
@@ -190,7 +197,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		ports, portErr := b.readServicePorts(ctx, service.id, service.name, services[service.id].Ports)
 		if portErr != nil {
 			b.serviceDiagnostics(processor, service.name)
-			return nil, portErr
+			return nil, markHardJobFailure(portErr)
 		}
 		b.servicePorts[service.id] = ports
 	}

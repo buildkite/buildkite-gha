@@ -302,18 +302,39 @@ func TestParseContainerShortForms(t *testing.T) {
 }
 
 func TestParseRetainsSequentialRuntimeControls(t *testing.T) {
-	source := []byte("name: runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    if: always()\n    timeout-minutes: 5\n    steps:\n      - run: echo ok\n        if: success()\n        timeout-minutes: 2\n        continue-on-error: true\n")
+	source := []byte("name: runtime\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    if: always()\n    continue-on-error: true\n    timeout-minutes: 5\n    steps:\n      - run: echo ok\n        if: success()\n        timeout-minutes: 2\n        continue-on-error: true\n")
 	parsed, err := Parse("workflow.yml", source)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := parsed.Jobs[0]
-	if job.If != "always()" || job.TimeoutMinutes != 5 {
+	if job.If != "always()" || !job.ContinueOnError || job.TimeoutMinutes != 5 {
 		t.Fatalf("job controls = if %q timeout %v", job.If, job.TimeoutMinutes)
 	}
 	step := job.Steps[0]
 	if step.If != "success()" || step.TimeoutMinutes != 2 || !step.ContinueOnError {
 		t.Fatalf("step controls = %#v", step)
+	}
+}
+
+func TestParseRetainsAllYAMLBooleanSpellingsForJobContinueOnError(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  bool
+	}{
+		{value: "true", want: true}, {value: "True", want: true}, {value: "TRUE", want: true},
+		{value: "false"}, {value: "False"}, {value: "FALSE"},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    continue-on-error: " + test.value + "\n    steps: [{run: true}]\n")
+			parsed, err := Parse("workflow.yml", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Jobs[0].ContinueOnError != test.want {
+				t.Fatalf("continue-on-error %s = %t, want %t", test.value, parsed.Jobs[0].ContinueOnError, test.want)
+			}
+		})
 	}
 }
 
@@ -581,7 +602,9 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 	}{
 		{name: "fail fast", snippet: "    strategy:\n      fail-fast: ${{ inputs.flag }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix fail-fast is unsupported"},
 		{name: "max parallel", snippet: "    strategy:\n      max-parallel: ${{ inputs.count }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix max-parallel is unsupported"},
+		{name: "job continue on error", snippet: "    continue-on-error: ${{ matrix.experimental }}\n    steps:\n      - run: true\n", want: "expression-valued job continue-on-error is unsupported"},
 		{name: "continue on error", snippet: "    steps:\n      - run: true\n        continue-on-error: ${{ matrix.experimental }}\n", want: "expression-valued step continue-on-error is unsupported"},
+		{name: "job timeout", snippet: "    timeout-minutes: ${{ inputs.timeout }}\n    steps:\n      - run: true\n", want: "expression-valued job timeout-minutes is unsupported"},
 		{name: "timeout", snippet: "    steps:\n      - run: true\n        timeout-minutes: ${{ inputs.timeout }}\n", want: "expression-valued step timeout-minutes is unsupported"},
 	}
 	for _, test := range tests {

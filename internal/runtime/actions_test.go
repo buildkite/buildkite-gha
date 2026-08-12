@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,7 @@ type fakeActionMaterializer struct {
 	calls    int
 	resolved source.Resolved
 	result   source.Materialized
+	err      error
 }
 
 func (f *fakeActionMaterializer) Materialize(_ context.Context, r source.Resolved) (source.Materialized, error) {
@@ -34,7 +36,7 @@ func (f *fakeActionMaterializer) Materialize(_ context.Context, r source.Resolve
 	defer f.mu.Unlock()
 	f.calls++
 	f.resolved = r
-	return f.result, nil
+	return f.result, f.err
 }
 
 func writeAction(t *testing.T, root, path string) {
@@ -104,6 +106,30 @@ func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.
 	}
 	if _, _, err := r.resolve(context.Background(), plan.ActionSelector{Lock: "lock"}); err == nil {
 		t.Fatal("resolve after repository tampering succeeded")
+	}
+}
+
+func TestActionLockResolverHardensOnlyNonContextMaterializationFailures(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	lock := plan.ActionLock{ID: "lock", Source: "github", Repository: "owner/repo", Commit: commit, SourceDigest: "sha256:" + strings.Repeat("0", 64)}
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantHard bool
+	}{
+		{name: "step deadline", err: context.DeadlineExceeded},
+		{name: "integrity error racing deadline", err: errors.New("cache digest mismatch"), wantHard: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 0)
+			defer cancel()
+			materializer := &fakeActionMaterializer{err: tc.err}
+
+			_, _, err := newActionLockResolver(plan.Job{RequiredCapabilities: []string{"network"}, Actions: []plan.ActionLock{lock}}, "", materializer).resolve(ctx, plan.ActionSelector{Lock: lock.ID})
+			if !errors.Is(err, tc.err) || isHardJobFailure(err) != tc.wantHard {
+				t.Fatalf("resolve() error = %v, want hard = %t", err, tc.wantHard)
+			}
+		})
 	}
 }
 
@@ -337,11 +363,13 @@ runs:
 	workflowDigest := sha256.Sum256([]byte(workflowSource))
 	commit := strings.Repeat("a", 40)
 	remoteID, localID := "a-0000000000000001", "a-0000000000000002"
+	requiresMise := false
 	job := plan.Job{
-		Schema: plan.SchemaV3,
+		Schema: plan.Schema,
 		Compiler: plan.Compiler{
 			Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64),
 		},
+		Runtime: &plan.Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow: plan.Workflow{
 			Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(workflowDigest[:]), LogicalJobID: "v3",
 		},
@@ -361,6 +389,7 @@ runs:
 			},
 			{ID: localID, Source: "workspace", Path: "actions/local", SourceDigest: localDigest},
 		},
+		RequiresMise: &requiresMise,
 	}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
 	result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, "")

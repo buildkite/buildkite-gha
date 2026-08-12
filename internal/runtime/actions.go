@@ -103,7 +103,8 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error) {
+func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {
+	defer func() { err = markHardJobFailure(err) }()
 	if r == nil || selector.Lock == "" {
 		return "", fmt.Errorf("resolve action lock: selector is missing")
 	}
@@ -117,7 +118,12 @@ func (r *actionLockResolver) source(selector plan.ActionSelector) (string, error
 	return entry.lock.Source, nil
 }
 
-func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (metadata.Metadata, plan.ActionLock, error) {
+func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSelector) (_ metadata.Metadata, _ plan.ActionLock, err error) {
+	defer func() {
+		if ctxErr := ctx.Err(); ctxErr == nil || !errors.Is(err, ctxErr) {
+			err = markHardJobFailure(err)
+		}
+	}()
 	if r == nil || selector.Lock == "" {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock: selector is missing")
 	}
@@ -150,7 +156,6 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	}
 
 	var m metadata.Metadata
-	var err error
 	switch entry.lock.Source {
 	case "workspace":
 		m, err = r.verifyWorkspace(entry.lock)

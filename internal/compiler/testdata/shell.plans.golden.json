@@ -1,6 +1,6 @@
 [
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v8.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -71,7 +71,7 @@
     "requires_mise": false
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v8.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -107,7 +107,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a"
+          "plan_digest": "sha256:abb17c90ef0776497e3740045cb017113b24d0cf7331a728f0db70f4df9247c5"
         }
       ]
     },
@@ -137,7 +137,7 @@
     "requires_mise": false
   },
   {
-    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan-v8.schema.json",
+    "schema": "https://buildkite.com/schemas/buildkite-gha/job-plan.schema.json",
     "compiler": {
       "version": "0.0.0-test",
       "distribution_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -173,7 +173,7 @@
       "producer": [
         {
           "step_key": "gha-producer",
-          "plan_digest": "sha256:28474b59ab0efbf5bed2febaa392ed3d3bc0905ead4f232001a46d64efe2802a"
+          "plan_digest": "sha256:abb17c90ef0776497e3740045cb017113b24d0cf7331a728f0db70f4df9247c5"
         }
       ]
     },

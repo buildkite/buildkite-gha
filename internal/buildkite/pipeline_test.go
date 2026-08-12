@@ -138,6 +138,30 @@ func TestEmitMergesIntoContainingGroup(t *testing.T) {
 	}
 }
 
+func TestEmitMarksToleratedJobsAsSoftFailures(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs:               []Job{{Key: "report", Label: "Report", PlanDigest: testDigest("plan"), SoftFail: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			SoftFail []struct {
+				ExitStatus int `yaml:"exit_status"`
+			} `yaml:"soft_fail"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 || len(document.Steps[0].SoftFail) != 1 || document.Steps[0].SoftFail[0].ExitStatus != ContinueOnErrorExitStatus {
+		t.Fatalf("emitted pipeline = %s, want only exit status %d soft-failed", output, ContinueOnErrorExitStatus)
+	}
+}
+
 func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",

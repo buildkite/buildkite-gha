@@ -42,7 +42,7 @@ func TestDecodeFailsClosed(t *testing.T) {
 	}{
 		{name: "unknown field", source: strings.Replace(string(encoded), `"steps":`, `"unexpected":true,"steps":`, 1), want: "unknown field"},
 		{name: "duplicate key", source: strings.Replace(string(encoded), `"schema":`, `"schema":"duplicate","schema":`, 1), want: "duplicate JSON key"},
-		{name: "unknown schema", source: strings.Replace(string(encoded), Schema, "job-plan-v3", 1), want: "unsupported job plan schema"},
+		{name: "unknown schema", source: strings.Replace(string(encoded), Schema, "unsupported-schema", 1), want: "unsupported job plan schema"},
 		{name: "trailing JSON", source: string(encoded) + `{}`, want: "multiple JSON values"},
 	}
 	for _, test := range tests {
@@ -74,6 +74,23 @@ func TestValidateRejectsOutOfRangeTimeouts(t *testing.T) {
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "step-1") {
 		t.Fatalf("Validate() error = %v, want step timeout error", err)
 	}
+}
+
+func TestJobContinueOnErrorContract(t *testing.T) {
+	job := validJob()
+	job.ContinueOnError = true
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.ContinueOnError {
+		t.Fatalf("decoded plan = %#v, want continue_on_error", decoded)
+	}
+	validateJobPlanSchema(t, encoded)
 }
 
 func TestValidateConcurrentStepTopology(t *testing.T) {
@@ -204,9 +221,8 @@ func TestRequiredSecretsRequireCapability(t *testing.T) {
 	}
 }
 
-func TestV3ActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
+func TestActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV3
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "workspace", Path: "actions/build",
@@ -225,37 +241,14 @@ func TestV3ActionLocksRoundTripAndValidateAgainstSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(encoded) != string(reencoded) {
-		t.Fatalf("v3 encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
+		t.Fatalf("encoding is not deterministic\nfirst: %s\nsecond: %s", encoded, reencoded)
 	}
-
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v3.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(encoded, &planDocument); err != nil {
-		t.Fatal(err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV3, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v3 plan does not validate against schema: %v", err)
-	}
+	validateJobPlanSchema(t, encoded)
 }
 
-func TestV7RequiresMiseRoundTripAndSchema(t *testing.T) {
+func TestRequiresMiseRoundTripAndSchema(t *testing.T) {
 	requiresMise := false
 	job := validJob()
-	job.Schema = SchemaV7
 	job.Steps = []Step{{ID: "native", Kind: "uses", Uses: "actions/checkout@v4", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{
 		ID: "a-0000000000000001", Source: "github", Repository: "actions/checkout", RequestedRef: "v4",
@@ -270,29 +263,7 @@ func TestV7RequiresMiseRoundTripAndSchema(t *testing.T) {
 	if err != nil || decoded.RequiresMise == nil || *decoded.RequiresMise {
 		t.Fatalf("Decode() requires_mise = %#v, error = %v", decoded.RequiresMise, err)
 	}
-	compiler := jsonschema.NewCompiler()
-	source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document any
-	if err := json.Unmarshal(source, &document); err != nil {
-		t.Fatal(err)
-	}
-	if err := compiler.AddResource(SchemaV7, document); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var planDocument any
-	if err := json.Unmarshal(encoded, &planDocument); err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v7 plan does not validate against schema: %v", err)
-	}
+	validateJobPlanSchema(t, encoded)
 	job.RequiresMise = nil
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "explicit requires_mise") {
 		t.Fatalf("Validate() missing requires_mise error = %v", err)
@@ -304,10 +275,9 @@ func TestV7RequiresMiseRoundTripAndSchema(t *testing.T) {
 	}
 }
 
-func TestV8RuntimeDistributionRoundTripAndSchema(t *testing.T) {
+func TestRuntimeDistributionRoundTripAndSchema(t *testing.T) {
 	requiresMise := false
 	job := validJob()
-	job.Schema = SchemaV8
 	job.Compiler.Version = "dev"
 	job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
 	job.RequiresMise = &requiresMise
@@ -323,27 +293,13 @@ func TestV8RuntimeDistributionRoundTripAndSchema(t *testing.T) {
 		t.Fatalf("RuntimeDistributionDigest() = %q, want %q", got, job.Runtime.DistributionDigest)
 	}
 
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v8.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
+	var planDocument any
 	if err := json.Unmarshal(encoded, &planDocument); err != nil {
 		t.Fatal(err)
 	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV8, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV8)
-	if err != nil {
-		t.Fatal(err)
-	}
+	schema := compileJobPlanSchema(t)
 	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v8 plan does not validate against schema: %v", err)
+		t.Fatalf("plan does not validate against schema: %v", err)
 	}
 	for _, test := range []struct {
 		name string
@@ -375,7 +331,7 @@ func TestV8RuntimeDistributionRoundTripAndSchema(t *testing.T) {
 			}
 			test.edit(invalid)
 			if err := schema.Validate(invalid); err == nil {
-				t.Fatal("v8 schema accepted a document rejected by the v7 contract")
+				t.Fatal("schema accepted an invalid document")
 			}
 		})
 	}
@@ -395,29 +351,10 @@ func TestV8RuntimeDistributionRoundTripAndSchema(t *testing.T) {
 	}
 }
 
-func TestLegacyPlansUseCompilerDistributionAsRuntime(t *testing.T) {
-	for _, schema := range []string{SchemaV1, SchemaV2, SchemaV3, SchemaV4, SchemaV5, SchemaV6, SchemaV7} {
-		job := validJob()
-		job.Schema = schema
-		if schema == SchemaV7 {
-			requiresMise := false
-			job.RequiresMise = &requiresMise
-		}
-		if got := job.RuntimeDistributionDigest(); got != job.Compiler.DistributionDigest {
-			t.Fatalf("schema %q runtime digest = %q, want compiler digest %q", schema, got, job.Compiler.DistributionDigest)
-		}
-		job.Runtime = &Runtime{DistributionDigest: "sha256:" + strings.Repeat("c", 64)}
-		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support a separate runtime distribution") {
-			t.Fatalf("schema %q runtime field error = %v", schema, err)
-		}
-	}
-}
-
-func TestV3RemoteNestedActionLocks(t *testing.T) {
+func TestRemoteNestedActionLocks(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("b", 64)
 	commit := strings.Repeat("c", 40)
 	job := validJob()
-	job.Schema = SchemaV3
 	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
 		{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: commit, Path: "root", SourceDigest: digest, Children: map[string]ActionSelector{"owner/repo/root/child@v1": {Lock: "a-0000000000000002"}}},
@@ -432,10 +369,9 @@ func TestV3RemoteNestedActionLocks(t *testing.T) {
 	}
 }
 
-func TestV3ActionLockValidationMatrix(t *testing.T) {
+func TestActionLockValidationMatrix(t *testing.T) {
 	remote := func() Job {
 		job := validJob()
-		job.Schema = SchemaV3
 		job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "Owner/Repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("c", 40), Path: "root", SourceDigest: "sha256:" + strings.Repeat("b", 64)}}
 		return job
@@ -477,9 +413,8 @@ func TestV3ActionLockValidationMatrix(t *testing.T) {
 	}
 }
 
-func TestV3LocalChildPreservesParentIdentity(t *testing.T) {
+func TestLocalChildPreservesParentIdentity(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV3
 	digest := "sha256:" + strings.Repeat("a", 64)
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./root", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
@@ -500,9 +435,8 @@ func TestV3LocalChildPreservesParentIdentity(t *testing.T) {
 	}
 }
 
-func TestV3RemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
+func TestRemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV3
 	job.Steps = []Step{{ID: "remote", Kind: "uses", Uses: "owner/repo/root@v1", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{
 		{
@@ -524,10 +458,11 @@ func TestV3RemoteCompositeLocalChildUsesWorkspaceIdentity(t *testing.T) {
 	}
 }
 
-func TestV3ActionSelectorsAndPathsFailClosed(t *testing.T) {
+func TestActionSelectorsAndPathsFailClosed(t *testing.T) {
 	local := func() Job {
 		job := validJob()
-		job.Schema = SchemaV3
+		requiresMise := true
+		job.RequiresMise = &requiresMise
 		job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 		job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
 		return job
@@ -564,9 +499,8 @@ func TestV3ActionSelectorsAndPathsFailClosed(t *testing.T) {
 	}
 }
 
-func TestV3WorkspaceRootActionAndSharedChildDAG(t *testing.T) {
+func TestWorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV3
 	digest := "sha256:" + strings.Repeat("a", 64)
 	job.Steps = []Step{{ID: "root", Kind: "uses", Uses: "./", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	children := make(map[string]ActionSelector, 256)
@@ -589,10 +523,9 @@ func TestV3WorkspaceRootActionAndSharedChildDAG(t *testing.T) {
 	}
 }
 
-func TestV3ActionLockGraphDepthAndCycles(t *testing.T) {
+func TestActionLockGraphDepthAndCycles(t *testing.T) {
 	chain := func(count int) Job {
 		job := validJob()
-		job.Schema = SchemaV3
 		job.Steps = []Step{{ID: "root", Kind: "uses", Uses: "./action-" + leftPadHex(0), Action: &ActionSelector{Lock: "a-0000000000000000"}}}
 		job.Actions = make([]ActionLock, count)
 		for i := range count {
@@ -633,36 +566,54 @@ func leftPadHex(value int) string {
 	return string(encoded)
 }
 
-func TestLegacySchemasRejectActionFields(t *testing.T) {
-	encoded, err := Encode(validJob())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{
-		strings.Replace(string(encoded), `"steps":`, `"actions":[],"steps":`, 1),
-		strings.Replace(string(encoded), `"kind": "run",`, `"kind": "run","action":{"lock":"a-0000000000000001"},`, 1),
-	} {
-		if _, err := Decode([]byte(field)); err == nil || !strings.Contains(err.Error(), "not supported by legacy schemas") {
-			t.Fatalf("Decode() error = %v, want closed legacy contract rejection", err)
-		}
-	}
-}
-
 func validJob() Job {
 	return Job{
 		Schema:               Schema,
 		Compiler:             Compiler{Version: "0.0.0-test", DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
+		Runtime:              &Runtime{DistributionDigest: "sha256:" + strings.Repeat("2", 64)},
 		Workflow:             Workflow{Path: ".github/workflows/ci.yml", Digest: "sha256:" + strings.Repeat("0", 64), LogicalJobID: "test"},
 		Event:                Event{Provider: "github", Name: "push", PayloadDigest: "sha256:" + strings.Repeat("3", 64)},
 		Target:               Target{StepKey: "gha-test", Queue: "ubuntu-latest"},
 		RequiredCapabilities: []string{},
 		Steps:                []Step{{ID: "step-1", Kind: "run", Command: "true"}},
+		RequiresMise:         new(bool),
 	}
 }
 
-func TestV4ContainerContractAndLegacyRejection(t *testing.T) {
+func compileJobPlanSchema(t *testing.T) *jsonschema.Schema {
+	t.Helper()
+	source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(source, &document); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource(Schema, document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile(Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
+}
+
+func validateJobPlanSchema(t *testing.T, encoded []byte) {
+	t.Helper()
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := compileJobPlanSchema(t).Validate(document); err != nil {
+		t.Fatalf("plan does not validate against schema: %v", err)
+	}
+}
+
+func TestContainerContract(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV4
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
 	job.Services = map[string]Container{"redis": {Image: "redis:7", Ports: []string{"6379:6379"}}}
@@ -675,42 +626,14 @@ func TestV4ContainerContractAndLegacyRejection(t *testing.T) {
 	if _, err := Decode(encoded); err != nil {
 		t.Fatal(err)
 	}
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(encoded, &planDocument); err != nil {
-		t.Fatal(err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV4, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV4)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v4 plan does not validate against schema: %v", err)
-	}
-	job.Actions = nil
-	job.Steps = []Step{{ID: "step-1", Kind: "run", Command: "true"}}
-	for _, schema := range []string{SchemaV1, SchemaV2, SchemaV3} {
-		job.Schema = schema
-		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support containers") {
-			t.Fatalf("Validate(%s) error = %v", schema, err)
-		}
-	}
+	validateJobPlanSchema(t, encoded)
 }
 
-func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) {
+func TestPrerequisiteOutputProjectionContract(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("4", 64)
 	job := validJob()
-	job.Schema = SchemaV5
+	requiresMise := true
+	job.RequiresMise = &requiresMise
 	job.Dependencies = []string{"gha-delegated-first", "gha-delegated-second"}
 	job.NeedSources = map[string][]NeedSource{
 		"delegated": {
@@ -727,39 +650,13 @@ func TestV5PrerequisiteOutputProjectionContractAndLegacyRejection(t *testing.T) 
 	if _, err := Decode(encoded); err != nil {
 		t.Fatal(err)
 	}
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v5.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(encoded, &planDocument); err != nil {
-		t.Fatal(err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV5, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v5 plan does not validate against schema: %v", err)
-	}
+	validateJobPlanSchema(t, encoded)
 
 	job.Steps = []Step{{ID: "step-1", Kind: "run", Command: "true"}}
 	job.NeedOutputs["delegated"] = []NeedOutput{{Name: "result", StepKey: "gha-delegated-first", Output: "internal"}}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	job.Schema = SchemaV4
-	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "does not support prerequisite output projections") {
-		t.Fatalf("Validate() error = %v, want legacy projection rejection", err)
-	}
-	job.Schema = SchemaV5
 	job.NeedOutputs["delegated"][0].StepKey = "gha-other"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "selects unknown producer") {
 		t.Fatalf("Validate() error = %v, want producer binding rejection", err)
@@ -810,9 +707,8 @@ func TestValidateGitHubWorkflowAccessTokenPermissions(t *testing.T) {
 	}
 }
 
-func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
+func TestGitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV6
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
 	job.GitHubToken = &GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
@@ -820,27 +716,13 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v6.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
+	var planDocument any
 	if err := json.Unmarshal(encoded, &planDocument); err != nil {
 		t.Fatal(err)
 	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV6, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV6)
-	if err != nil {
-		t.Fatal(err)
-	}
+	schema := compileJobPlanSchema(t)
 	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v6 plan does not validate against schema: %v", err)
+		t.Fatalf("plan does not validate against schema: %v", err)
 	}
 	for _, test := range []struct {
 		name string
@@ -870,7 +752,7 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 			}
 			test.edit(changed)
 			if err := schema.Validate(changed); err == nil {
-				t.Fatalf("v6 schema accepted token plan with %s", test.name)
+				t.Fatalf("schema accepted token plan with %s", test.name)
 			}
 		})
 	}
@@ -882,7 +764,6 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	}{
 		{name: "missing capability", edit: func(j *Job) { j.RequiredCapabilities = []string{} }, want: "declared together"},
 		{name: "missing token", edit: func(j *Job) { j.GitHubToken = nil }, want: "declared together"},
-		{name: "legacy schema", edit: func(j *Job) { j.Schema = SchemaV5 }, want: "does not support GitHub workflow tokens"},
 		{name: "unknown permission", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"administration": "write"} }, want: "unsupported permission"},
 		{name: "invalid access", edit: func(j *Job) { j.GitHubToken.Permissions = map[string]string{"contents": "admin"} }, want: "unsupported permission"},
 		{name: "reserved ambient secret", edit: func(j *Job) {
@@ -908,12 +789,9 @@ func TestV6GitHubWorkflowTokenContractAndSchema(t *testing.T) {
 	}
 }
 
-func TestV7DefaultQueueContractAndSchema(t *testing.T) {
-	requiresMise := false
+func TestDefaultQueueContractAndSchema(t *testing.T) {
 	job := validJob()
-	job.Schema = SchemaV7
 	job.Target.Queue = ""
-	job.RequiresMise = &requiresMise
 	encoded, err := Encode(job)
 	if err != nil {
 		t.Fatal(err)
@@ -922,64 +800,20 @@ func TestV7DefaultQueueContractAndSchema(t *testing.T) {
 		t.Fatalf("default-targeted plan contains a queue:\n%s", encoded)
 	}
 
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v7.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument, planDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(encoded, &planDocument); err != nil {
-		t.Fatal(err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV7, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := schema.Validate(planDocument); err != nil {
-		t.Fatalf("v7 default-targeted plan does not validate against schema: %v", err)
-	}
+	validateJobPlanSchema(t, encoded)
 
 	job.Target.Queue = "explicit"
 	if err := job.Validate(); err != nil {
-		t.Fatalf("v7 explicit queue validation error = %v", err)
+		t.Fatalf("explicit queue validation error = %v", err)
 	}
 	job.Target.Queue = "invalid queue"
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "invalid target queue") {
-		t.Fatalf("v7 malformed queue error = %v", err)
-	}
-	for _, legacy := range []string{SchemaV1, SchemaV2, SchemaV3, SchemaV4, SchemaV5, SchemaV6} {
-		job := validJob()
-		job.Schema = legacy
-		job.Target.Queue = ""
-		if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "requires a target queue") {
-			t.Fatalf("legacy schema %q empty queue error = %v", legacy, err)
-		}
+		t.Fatalf("malformed queue error = %v", err)
 	}
 }
 
 func TestContainerPortGrammarMatchesSchema(t *testing.T) {
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "job-plan-v4.schema.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schemaDocument any
-	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource(SchemaV4, schemaDocument); err != nil {
-		t.Fatal(err)
-	}
-	schema, err := compiler.Compile(SchemaV4)
-	if err != nil {
-		t.Fatal(err)
-	}
+	schema := compileJobPlanSchema(t)
 
 	for _, test := range []struct {
 		port  string
@@ -993,7 +827,6 @@ func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 		t.Run(test.port, func(t *testing.T) {
 			goValid := validateContainer("node:24", nil, []string{test.port}) == nil
 			job := validJob()
-			job.Schema = SchemaV4
 			job.RequiredCapabilities = []string{"docker", "network"}
 			job.Container = &Container{Image: "node:24", Ports: []string{test.port}}
 			encoded, err := json.Marshal(job)
