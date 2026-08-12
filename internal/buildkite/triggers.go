@@ -8,13 +8,35 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
+// TriggerConditionContext supplies the trusted Buildkite expressions used to
+// select one effective event and apply its supported trigger filters.
+type TriggerConditionContext struct {
+	EventPredicate        string
+	Branch                string
+	Tag                   string
+	PullRequestBaseBranch string
+	PullRequestAction     string
+}
+
+// LiveTriggerConditionContext uses fields from the Buildkite build that
+// supplied the effective event snapshot.
+func LiveTriggerConditionContext(eventPredicate string) TriggerConditionContext {
+	return TriggerConditionContext{
+		EventPredicate:        eventPredicate,
+		Branch:                "build.branch",
+		Tag:                   "build.tag",
+		PullRequestBaseBranch: "build.pull_request.base_branch",
+		PullRequestAction:     "build.source_action",
+	}
+}
+
 // TranslateTriggerCondition converts GitHub's trigger selection into a
 // deterministic Buildkite conditional. It deliberately does not approximate
 // path filtering: Buildkite if_changed has materially different semantics.
 func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 	var terms []string
 	for _, t := range triggers {
-		term, contributes, err := translateTrigger(t)
+		term, contributes, err := translateTrigger(t, liveTriggerContext(t.Event))
 		if err != nil {
 			return "", err
 		}
@@ -28,7 +50,44 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 	return strings.Join(terms, " || "), nil
 }
 
-func translateTrigger(t workflow.Trigger) (string, bool, error) {
+// TranslateEventTriggerCondition validates every trigger but emits a
+// condition only for the selected effective event. A false applicable result
+// means the workflow must not be compiled for that event.
+func TranslateEventTriggerCondition(triggers []workflow.Trigger, event string, context TriggerConditionContext) (condition string, applicable bool, err error) {
+	var terms []string
+	for _, trigger := range triggers {
+		triggerContext := liveTriggerContext(trigger.Event)
+		if trigger.Event == event {
+			triggerContext = context
+		}
+		term, contributes, err := translateTrigger(trigger, triggerContext)
+		if err != nil {
+			return "", false, err
+		}
+		if trigger.Event == event && contributes {
+			terms = append(terms, "("+term+")")
+		}
+	}
+	if len(terms) == 0 {
+		return "", false, nil
+	}
+	return strings.Join(terms, " || "), true, nil
+}
+
+func liveTriggerContext(event string) TriggerConditionContext {
+	predicate := ""
+	switch event {
+	case "workflow_dispatch":
+		predicate = `(build.source == "ui" || build.source == "api")`
+	case "schedule":
+		predicate = `build.source == "schedule"`
+	case "push", "pull_request":
+		predicate = `build.source_event == ` + yamlScalar(event)
+	}
+	return LiveTriggerConditionContext(predicate)
+}
+
+func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (string, bool, error) {
 	if t.Paths != nil || t.PathsIgnore != nil {
 		return "", false, fmt.Errorf("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
 	}
@@ -39,7 +98,10 @@ func translateTrigger(t workflow.Trigger) (string, bool, error) {
 		if hasWebhookFilters(t) {
 			return "", false, fmt.Errorf("workflow_dispatch has unsupported webhook filters")
 		}
-		return `(build.source == "ui" || build.source == "api")`, true, nil
+		if context.EventPredicate == "" {
+			return "", false, fmt.Errorf("workflow_dispatch requires an effective event predicate")
+		}
+		return context.EventPredicate, true, nil
 	case "schedule":
 		if hasWebhookFilters(t) {
 			return "", false, fmt.Errorf("schedule has unsupported webhook filters")
@@ -47,34 +109,43 @@ func translateTrigger(t workflow.Trigger) (string, bool, error) {
 		// Buildkite does not expose the identity of the schedule that created a
 		// build. Cron ownership therefore stays in Buildkite, and every scheduled
 		// workflow group is eligible on any Buildkite scheduled build.
-		return `build.source == "schedule"`, true, nil
+		if context.EventPredicate == "" {
+			return "", false, fmt.Errorf("schedule requires an effective event predicate")
+		}
+		return context.EventPredicate, true, nil
 	case "push":
 		if t.Types != nil || t.Workflows != nil {
 			return "", false, fmt.Errorf("push has unsupported filters")
 		}
-		parts := []string{`build.source_event == "push"`}
-		branch, hasBranchFilter, err := refFilters("build.branch", t.Branches, t.BranchesIgnore)
+		if context.EventPredicate == "" || context.Branch == "" || context.Tag == "" {
+			return "", false, fmt.Errorf("push requires effective event, branch, and tag expressions")
+		}
+		parts := []string{context.EventPredicate}
+		branch, hasBranchFilter, err := refFilters(context.Branch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, fmt.Errorf("push branches: %w", err)
 		}
-		tag, hasTagFilter, err := refFilters("build.tag", t.Tags, t.TagsIgnore)
+		tag, hasTagFilter, err := refFilters(context.Tag, t.Tags, t.TagsIgnore)
 		if err != nil {
 			return "", false, fmt.Errorf("push tags: %w", err)
 		}
 		if hasBranchFilter && hasTagFilter {
-			parts = append(parts, "((build.tag == null && ("+branch+")) || (build.tag != null && ("+tag+")))")
+			parts = append(parts, "(("+context.Tag+" == null && ("+branch+")) || ("+context.Tag+" != null && ("+tag+")))")
 		} else if hasBranchFilter {
-			parts = append(parts, `build.tag == null`, branch)
+			parts = append(parts, context.Tag+" == null", branch)
 		} else if hasTagFilter {
-			parts = append(parts, `build.tag != null`, tag)
+			parts = append(parts, context.Tag+" != null", tag)
 		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
 		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
 			return "", false, fmt.Errorf("pull_request tag filters are unsupported")
 		}
-		parts := []string{`build.source_event == "pull_request"`}
-		b, hasBranchFilter, err := refFilters("build.pull_request.base_branch", t.Branches, t.BranchesIgnore)
+		if context.EventPredicate == "" || context.PullRequestBaseBranch == "" || context.PullRequestAction == "" {
+			return "", false, fmt.Errorf("pull_request requires effective event, base branch, and action expressions")
+		}
+		parts := []string{context.EventPredicate}
+		b, hasBranchFilter, err := refFilters(context.PullRequestBaseBranch, t.Branches, t.BranchesIgnore)
 		if err != nil {
 			return "", false, fmt.Errorf("pull_request branches: %w", err)
 		}
@@ -93,7 +164,7 @@ func translateTrigger(t workflow.Trigger) (string, bool, error) {
 			if !supportedPullRequestAction[a] {
 				return "", false, fmt.Errorf("pull_request activity type %q cannot be mapped exactly", a)
 			}
-			actions = append(actions, `build.source_action == `+yamlScalar(a))
+			actions = append(actions, context.PullRequestAction+` == `+yamlScalar(a))
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
 		return strings.Join(parts, " && "), true, nil

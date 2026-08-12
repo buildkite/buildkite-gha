@@ -51,6 +51,78 @@ func TestTranslateTriggerConditionRequiresDirectBuildSource(t *testing.T) {
 	}
 }
 
+func TestTranslateEventTriggerConditionSelectsOnlyEffectiveEvent(t *testing.T) {
+	triggers := []workflow.Trigger{
+		{Event: "push", Branches: []string{"main"}},
+		{Event: "pull_request", Types: []string{"opened"}},
+		{Event: "workflow_dispatch"},
+		{Event: "schedule"},
+		{Event: "workflow_call"},
+	}
+	condition, applicable, err := TranslateEventTriggerCondition(triggers, "push", LiveTriggerConditionContext(`build.source == "trigger_job"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applicable || !strings.Contains(condition, `build.source == "trigger_job"`) || !strings.Contains(condition, `build.branch =~ /^main$/`) {
+		t.Fatalf("push condition/applicability = %q / %t", condition, applicable)
+	}
+	for _, excluded := range []string{"pull_request", "source_action", `build.source == "ui"`, `build.source == "schedule"`} {
+		if strings.Contains(condition, excluded) {
+			t.Fatalf("push condition contains another event term %q: %s", excluded, condition)
+		}
+	}
+
+	condition, applicable, err = TranslateEventTriggerCondition(triggers, "issues", LiveTriggerConditionContext("true"))
+	if err != nil || applicable || condition != "" {
+		t.Fatalf("non-applicable condition = %q, %t, %v", condition, applicable, err)
+	}
+}
+
+func TestTranslateEventTriggerConditionValidatesInactiveTriggers(t *testing.T) {
+	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
+		{Event: "push"},
+		{Event: "pull_request", Paths: []string{"src/**"}},
+	}, "push", LiveTriggerConditionContext("true"))
+	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
+		t.Fatalf("inactive path filter error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionUsesSnapshotExpressions(t *testing.T) {
+	context := TriggerConditionContext{
+		EventPredicate:        "true",
+		Branch:                `"main"`,
+		Tag:                   `"v1"`,
+		PullRequestBaseBranch: `"release"`,
+		PullRequestAction:     `"opened"`,
+	}
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{Event: "push", Branches: []string{"main"}, Tags: []string{"v*"}}}, "push", context)
+	if err != nil || !applicable {
+		t.Fatalf("snapshot push condition = %q, %t, %v", condition, applicable, err)
+	}
+	for _, want := range []string{"true", `"v1" != null`, `"main" =~ /^main$/`, `"v1" =~ /^v[^\/]*$/`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("snapshot push condition missing %q: %s", want, condition)
+		}
+	}
+	if strings.Contains(condition, "build.") {
+		t.Fatalf("snapshot push condition reads live Buildkite fields: %s", condition)
+	}
+
+	condition, applicable, err = TranslateEventTriggerCondition([]workflow.Trigger{{Event: "pull_request", Branches: []string{"release"}, Types: []string{"opened"}}}, "pull_request", context)
+	if err != nil || !applicable {
+		t.Fatalf("snapshot pull request condition = %q, %t, %v", condition, applicable, err)
+	}
+	for _, want := range []string{"true", `"release" =~ /^release$/`, `"opened" == "opened"`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("snapshot pull request condition missing %q: %s", want, condition)
+		}
+	}
+	if strings.Contains(condition, "build.") {
+		t.Fatalf("snapshot pull request condition reads live Buildkite fields: %s", condition)
+	}
+}
+
 func TestTranslatePushSeparatesBranchAndTagFilters(t *testing.T) {
 	condition, err := TranslateTriggerCondition([]workflow.Trigger{{
 		Event:    "push",

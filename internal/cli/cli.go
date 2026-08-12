@@ -1360,6 +1360,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			return 1
 		}
 		workflows[i].ReusableOnly = parsed.ReusableOnly()
+		workflows[i].Triggers = parsed.Triggers
 		if !workflows[i].ReusableOnly {
 			runnableWorkflowCount++
 		}
@@ -1382,25 +1383,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			return 1
 		}
 	}
-	loadEvent := func() ([]byte, error) {
-		if eventPath != "" {
-			return os.ReadFile(eventPath)
-		}
-		webhook, metadataErr := agent.GetMetadataBounded(ctx, "buildkite:webhook", maxWebhookMetadataBytes+1)
-		switch {
-		case metadataErr == nil:
-			webhook = bytes.TrimSuffix(webhook, []byte("\n"))
-			if len(webhook) > maxWebhookMetadataBytes {
-				return nil, fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
-			}
-			return buildkiteWebhookEventSource(os.Getenv, webhook)
-		case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
-			return buildkiteEventSource(os.Getenv)
-		default:
-			return nil, metadataErr
-		}
-	}
-	eventSource, err := loadEvent()
+	eventSource, eventOrigin, err := loadEffectiveEventSource(ctx, eventPath, agent)
 	if err != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
@@ -1409,14 +1392,46 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		return 1
 	}
+	effectiveEvent, err := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
+	if err != nil {
+		for _, input := range workflows {
+			if !input.ReusableOnly {
+				_, _ = validatedProcessingReport(out, input.Path, hostedTokenlessProfile, input.Source, eventSource, true)
+				return 1
+			}
+		}
+		return 1
+	}
+	applicableWorkflowCount := 0
+	for i := range workflows {
+		if workflows[i].ReusableOnly {
+			continue
+		}
+		condition, applicable, triggerErr := buildkitepipeline.TranslateEventTriggerCondition(workflows[i].Triggers, effectiveEvent.Event.Event, effectiveEvent.TriggerContext)
+		if triggerErr != nil {
+			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
+			_ = out.write(triggerFailureProcessingReport(workflows[i], triggerErr))
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
+			return 1
+		}
+		workflows[i].Applicable = applicable
+		workflows[i].TriggerCondition = condition
+		if applicable {
+			applicableWorkflowCount++
+		}
+	}
+	if applicableWorkflowCount == 0 {
+		_, _ = fmt.Fprintf(stdout, "No directly runnable workflows matched GitHub event %q; no pipeline was uploaded.\n", effectiveEvent.Event.Event)
+		return 0
+	}
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
-		if input.ReusableOnly {
+		if !input.Applicable {
 			continue
 		}
 		validationOptions := hostedTokenlessOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedTokenlessProfile, input.Source, eventSource, true, &validationOptions)
+		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedTokenlessProfile, input.Source, effectiveEvent.Source, true, &validationOptions)
 		if !ok {
 			return 1
 		}
@@ -1425,7 +1440,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
 		for i, input := range workflows {
-			if input.ReusableOnly {
+			if !input.Applicable {
 				continue
 			}
 			processingReports[i].AddEnvironmentFailure("compiler executable could not be inspected")
@@ -1438,10 +1453,10 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	if uploadArguments.pluginAcquisition != nil {
 		requiredPlatforms := make(map[compiler.Platform]bool, 2)
 		for _, input := range workflows {
-			if input.ReusableOnly {
+			if !input.Applicable {
 				continue
 			}
-			platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, eventSource, "", uploadArguments.runnerTargets)
+			platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
 			if platformErr != nil {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
 				return 1
@@ -1455,17 +1470,17 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
 			return 1
 		}
-		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, eventSource, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
 	}
 	runtimeDistributions, err := loadRuntimeDistributions(runtimePaths)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, eventSource, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
 }
 
-func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, eventSource []byte, executablePath string, executableContents []byte, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath string, executableContents []byte, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
 	runtimeDigests := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
@@ -1475,10 +1490,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	jobCount := 0
 	for i, input := range workflows {
-		if input.ReusableOnly {
+		if !input.Applicable {
 			continue
 		}
-		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, eventSource, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
+		preflight, err := compileHostedTokenlessNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedTokenlessFailure(&processingReports[i], input.Path, err)
@@ -1486,15 +1501,6 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			return 1
 		}
 		bundle := preflight.Bundle
-		condition, err := buildkitepipeline.TranslateTriggerCondition(bundle.IR.Workflow.Triggers)
-		if err != nil {
-			triggerErr := fmt.Errorf("%s: translate workflow triggers: %w", input.CanonicalPath, err)
-			processingReports[i].AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", triggerErr)
-			processingReports[i].Result = "incompatible"
-			_ = out.write(processingReports[i])
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
-			return 1
-		}
 		label := bundle.IR.Workflow.Name
 		if label == "" {
 			label = input.CanonicalPath
@@ -1502,8 +1508,8 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		generated := bundle.GeneratedWorkflow
 		generated.GroupLabel = label
 		generated.GroupKey = "gha-workflow-" + input.Identity
-		generated.CheckName = "Buildkite / " + label + " (" + bundle.IR.Event.Event + ")"
-		generated.Condition = condition
+		generated.CheckName = "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")"
+		generated.Condition = input.TriggerCondition
 		generatedWorkflows = append(generatedWorkflows, generated)
 		planArtifacts = append(planArtifacts, bundle.Plans...)
 		jobCount += len(bundle.Plans)
@@ -1521,7 +1527,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		return 1
 	}
 	for i, input := range workflows {
-		if !input.ReusableOnly {
+		if input.Applicable {
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 		}
 	}
@@ -1604,10 +1610,118 @@ func configuredRunnerPlatform(labels []string, configuredTargets map[string]comp
 	return platform, err
 }
 
+type effectiveEventOrigin string
+
+const (
+	effectiveEventFromPath    effectiveEventOrigin = "event-path"
+	effectiveEventFromWebhook effectiveEventOrigin = "buildkite-webhook"
+	effectiveEventFromBuild   effectiveEventOrigin = "buildkite-environment"
+)
+
+type effectiveEventSelection struct {
+	Source         []byte
+	Event          compiler.Event
+	Origin         effectiveEventOrigin
+	TriggerContext buildkitepipeline.TriggerConditionContext
+}
+
+func loadEffectiveEventSource(ctx context.Context, eventPath string, agent transport.Agent) ([]byte, effectiveEventOrigin, error) {
+	if eventPath != "" {
+		source, err := os.ReadFile(eventPath)
+		return source, effectiveEventFromPath, err
+	}
+	webhook, metadataErr := agent.GetMetadataBounded(ctx, "buildkite:webhook", maxWebhookMetadataBytes+1)
+	switch {
+	case metadataErr == nil:
+		webhook = bytes.TrimSuffix(webhook, []byte("\n"))
+		if len(webhook) > maxWebhookMetadataBytes {
+			return nil, "", fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
+		}
+		source, err := buildkiteWebhookEventSource(os.Getenv, webhook)
+		return source, effectiveEventFromWebhook, err
+	case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
+		source, err := buildkiteEventSource(os.Getenv)
+		return source, effectiveEventFromBuild, err
+	default:
+		return nil, "", metadataErr
+	}
+}
+
+func newEffectiveEvent(source []byte, origin effectiveEventOrigin, getenv func(string) string) (effectiveEventSelection, error) {
+	event, err := compiler.ParseEvent(source)
+	if err != nil {
+		return effectiveEventSelection{}, err
+	}
+	effective := effectiveEventSelection{
+		Source: source, Event: event, Origin: origin,
+		TriggerContext: snapshotTriggerConditionContext(event),
+	}
+	if origin == effectiveEventFromPath {
+		return effective, nil
+	}
+	predicate := "true"
+	if buildSource := strings.TrimSpace(getenv("BUILDKITE_SOURCE")); buildSource != "" {
+		predicate = "build.source == " + triggerConditionLiteral(buildSource)
+	}
+	effective.TriggerContext.EventPredicate = predicate
+	return effective, nil
+}
+
+func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.TriggerConditionContext {
+	context := buildkitepipeline.TriggerConditionContext{
+		EventPredicate:        "true",
+		Branch:                "null",
+		Tag:                   "null",
+		PullRequestBaseBranch: "null",
+		PullRequestAction:     "null",
+	}
+	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
+		context.Branch = triggerConditionLiteral(branch)
+	}
+	if tag, ok := strings.CutPrefix(event.Ref, "refs/tags/"); ok {
+		context.Tag = triggerConditionLiteral(tag)
+	}
+	if action, ok := event.Payload["action"].(string); ok {
+		context.PullRequestAction = triggerConditionLiteral(action)
+	}
+	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
+		if base, ok := pullRequest["base"].(map[string]any); ok {
+			if branch, ok := base["ref"].(string); ok {
+				context.PullRequestBaseBranch = triggerConditionLiteral(branch)
+			}
+		}
+	}
+	return context
+}
+
+func triggerConditionLiteral(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func triggerFailureProcessingReport(input workflowInput, err error) compatibility.ProcessingReport {
+	parsed, _ := compiler.ParseWorkflow(input.Path, input.Source)
+	report := compatibility.NewProcessingReport(input.Path, hostedTokenlessProfile)
+	report.LogicalJobs = parsed.LogicalJobs
+	report.SetStage(string(compiler.StageWorkflowParsing), compatibility.Passed)
+	report.SetStage(string(compiler.StageEventValidation), compatibility.Passed)
+	for _, job := range parsed.ParsedJobs {
+		report.Jobs = append(report.Jobs, compatibility.JobResult{
+			ID: job.ID, Result: compatibility.NotEvaluated,
+			Location: &compatibility.SourceLocation{Path: job.Path, Line: job.Source.Start.Line, Column: job.Source.Start.Column},
+		})
+	}
+	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
+	report.Result = "incompatible"
+	return report
+}
+
 type workflowInput struct {
 	Path, CanonicalPath, Identity, StepKeyNamespace string
 	Source                                          []byte
-	ReusableOnly                                    bool
+	Triggers                                        []workflow.Trigger
+	TriggerCondition                                string
+	ReusableOnly, Applicable                        bool
 }
 
 func expandWorkflowPattern(pattern string) ([]workflowInput, error) {

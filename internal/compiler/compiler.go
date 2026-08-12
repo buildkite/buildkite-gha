@@ -759,6 +759,13 @@ func compilerWarnings(concurrency *workflow.Concurrency, cancelInProgress bool) 
 	}}
 }
 
+// ParseEvent validates and decodes the event snapshot used for compilation.
+// Callers that select work before compiling must use this same parser so event
+// applicability cannot diverge from compiler semantics.
+func ParseEvent(source []byte) (Event, error) {
+	return parseEvent(source)
+}
+
 func parseEvent(source []byte) (Event, error) {
 	if len(bytes.TrimSpace(source)) == 0 {
 		return Event{}, fmt.Errorf("event snapshot is required")

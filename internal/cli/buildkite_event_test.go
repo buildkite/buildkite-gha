@@ -55,7 +55,7 @@ func TestBuildkiteEventSourceMappings(t *testing.T) {
 			head := pr["head"].(map[string]any)
 			headRepo := head["repo"].(map[string]any)
 			baseRepo := pr["base"].(map[string]any)["repo"].(map[string]any)
-			if payload["number"] != float64(42) || head["sha"] != base["BUILDKITE_COMMIT"] || head["ref"] != "feature" || headRepo["full_name"] != "contributor/widgets" || baseRepo["full_name"] != "acme/widgets" || pr["base"].(map[string]any)["ref"] != "main" {
+			if payload["action"] != "synchronize" || payload["number"] != float64(42) || head["sha"] != base["BUILDKITE_COMMIT"] || head["ref"] != "feature" || headRepo["full_name"] != "contributor/widgets" || baseRepo["full_name"] != "acme/widgets" || pr["base"].(map[string]any)["ref"] != "main" {
 				t.Fatalf("pull request payload = %#v", payload)
 			}
 		}},
