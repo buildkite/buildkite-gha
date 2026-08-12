@@ -91,7 +91,7 @@ buildkite-gha compile \
   .github/workflows/ci.yml
 ```
 
-`compile` is read-only. It does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
+`compile` does not upload the executable, plans, or pipeline, so piping its YAML directly to `buildkite-agent pipeline upload` is incomplete.
 
 ## Upload from a custom importer
 

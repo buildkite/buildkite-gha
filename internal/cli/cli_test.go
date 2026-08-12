@@ -2100,16 +2100,32 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
 	report := compatibility.NewProcessingReport("<workflow>|name", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-		Level: "error", Code: "E_TEST", Message: "line one\n<script>*unsafe*</script> " + strings.Repeat("界", processingAnnotationBodyLimit),
+		Level: "error", Code: "E_TEST", Message: `line one
+<script>*unsafe*</script> "quoted" ` + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
 	style, body := processingAnnotation(report)
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
-	for _, want := range []string{"&lt;workflow&gt;\\|name", "&lt;script&gt;\\*unsafe\\*&lt;/script&gt;", "Additional diagnostics omitted"} {
+	for _, want := range []string{"&lt;workflow&gt;\\|name", `&lt;script&gt;\*unsafe\*&lt;/script&gt; "quoted"`, "Additional diagnostics omitted"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation lacks %q", want)
 		}
+	}
+}
+
+func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "warning", Code: "W_TEST", Message: "ci.yml:4:23: warning message",
+		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 23},
+	})
+	_, body := processingAnnotation(report)
+	if count := strings.Count(body, "ci.yml:4:23"); count != 1 {
+		t.Fatalf("annotation location count = %d, want 1: %q", count, body)
+	}
+	if !strings.Contains(body, "warning message") {
+		t.Fatalf("annotation = %q", body)
 	}
 }
 
