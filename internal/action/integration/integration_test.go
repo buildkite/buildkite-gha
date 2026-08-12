@@ -58,8 +58,9 @@ func TestDownloadArtifactExactContract(t *testing.T) {
 	}
 	for name, inputs := range map[string]map[string]string{
 		"all": nil, "absolute": {"name": "x", "path": "/tmp"},
-		"name and pattern": {"name": "x", "pattern": "x-*", "merge-multiple": "true"},
-		"merge":            {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
+		"name and pattern":              {"name": "x", "pattern": "x-*", "merge-multiple": "true"},
+		"PostHog pattern without merge": {"pattern": "{junit-results-backend,product-junit-results}-*"},
+		"merge":                         {"name": "x", "merge-multiple": "true"}, "ids": {"name": "x", "artifact-ids": "1"},
 		"duplicate": {"name": "x", "Name": "y"}, "token": {"name": "x", "github-token": ""},
 		"drive path": {"name": "x", "path": "C:/out"},
 	} {
