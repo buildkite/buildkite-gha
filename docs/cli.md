@@ -109,13 +109,13 @@ plugin release. Custom importers can use the public flags below.
 
 ### Select workflows
 
-Pass either one workflow operand or a list of explicit workflow paths. One operand preserves literal-file, directory, and tracked-glob behavior:
+Use `*` for every tracked `.yml` and `.yaml` file directly under `.github/workflows`:
 
 ```sh
 buildkite-gha upload '*'
 ```
 
-`*` maps to `.github/workflows/*.{yml,yaml}`. It selects tracked workflow files directly inside that directory, not nested workflows. Quote it in shells and YAML. Other glob and directory matches come from tracked Git files and use canonical repository-relative slash paths. A literal existing filename that contains `*`, `?`, or `[` remains literal. Multiple matches are sorted and deduplicated before stable workflow identities and job-key namespaces are assigned.
+Quote `*` in shells and YAML. A single operand can also be a literal file, directory, or tracked glob. Matches are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned. Existing filenames containing `*`, `?`, or `[` remain literal.
 
 Two or more operands switch to explicit-list mode:
 
