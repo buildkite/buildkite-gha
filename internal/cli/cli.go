@@ -925,36 +925,17 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 	if profile != "" && eventPath == "" {
 		return usageError(stderr, "validate: --event-path is required with --profile")
 	}
-	source, err := os.ReadFile(workflowPath)
-	if err != nil {
-		report := environmentProcessingReport(workflowPath, profile, "workflow input could not be read")
-		_ = compatibility.WriteProcessing(stdout, format, report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
+	out := processingOutput{command: "validate", format: format, reports: stdout, stderr: stderr}
+	var loadEvent func() ([]byte, error)
+	if eventPath != "" {
+		loadEvent = func() ([]byte, error) { return os.ReadFile(eventPath) }
+	}
+	source, event, ok := loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
+	if !ok {
 		return 1
 	}
-	var event []byte
-	if eventPath != "" {
-		event, err = os.ReadFile(eventPath)
-		if err != nil {
-			report := eventInputProcessingReport(workflowPath, profile, source, "event input could not be read")
-			_ = compatibility.WriteProcessing(stdout, format, report)
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
-			return 1
-		}
-	}
-
-	var report compiler.Report
-	if eventPath == "" {
-		report, err = compiler.Validate(workflowPath, source)
-	} else {
-		report, err = compiler.ValidateEvent(workflowPath, source, event)
-	}
-	processingReport := initialProcessingReport(workflowPath, profile, eventPath != "", report, err)
-	if err != nil {
-		processingReport.Result = "incompatible"
-		if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", writeErr)
-		}
+	processingReport, ok := validatedProcessingReport(out, workflowPath, profile, source, event, eventPath != "")
+	if !ok {
 		return 1
 	}
 	if profile != "" {
@@ -962,43 +943,20 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 		if executableErr != nil {
 			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
-			if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
-			}
+			_ = out.write(processingReport)
 			return 1
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		preflight, profileErr := compileHostedTokenless(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", "", "", nil)
-		applyProcessingEvidence(&processingReport, preflight.Bundle.Processing)
-		if preflight.Admitted {
-			processingReport.SetStage(stageAdmission, compatibility.Passed)
-			processingReport.Admission.Result = "admitted"
-		}
+		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: profile evaluation interrupted: %v\n", profileErr)
 				return 1
 			}
-			var failure *hostedTokenlessFailure
-			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
-				addProcessingFailure(&processingReport, workflowPath, stageAdmission, "E_PROFILE", "admission", profileErr)
-				processingReport.Admission.Result = "not-admitted"
-				processingReport.Result = "not-admitted"
-				if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
-					_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
-				}
-				return 1
-			}
-			if errors.As(profileErr, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
-				addEnvironmentFailure(&processingReport, "hosted workflow-processing environment could not be initialized")
-			} else {
-				addProcessingFailure(&processingReport, workflowPath, stageResolution, compiler.CodeActionResolution, "action-resolution", profileErr)
-			}
-			processingReport.Result = "indeterminate"
-			if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
-			}
+			processingReport.Result = classifyHostedTokenlessFailure(&processingReport, workflowPath, profileErr)
+			_ = out.write(processingReport)
 			return 1
 		}
 		processingReport.SetStage(stageAdmission, compatibility.Passed)
@@ -1010,15 +968,13 @@ func validate(args []string, stdout, stderr io.Writer, version string) int {
 			})
 		}
 		processingReport.Result = "admitted"
-		if writeErr := compatibility.WriteProcessing(stdout, format, processingReport); writeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write profile report: %v\n", writeErr)
+		if out.write(processingReport) != nil {
 			return 1
 		}
 		return 0
 	}
 	processingReport.Result = "compilable"
-	if err := compatibility.WriteProcessing(stdout, format, processingReport); err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: write report: %v\n", err)
+	if out.write(processingReport) != nil {
 		return 1
 	}
 	return 0
@@ -1071,27 +1027,13 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	source, err := os.ReadFile(workflowPath)
-	if err != nil {
-		report := environmentProcessingReport(workflowPath, "", "workflow input could not be read")
-		_ = compatibility.WriteProcessing(stderr, "text", report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
+	out := processingOutput{command: "compile", format: "text", reports: stderr, stderr: stderr}
+	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return os.ReadFile(eventPath) })
+	if !ok {
 		return 1
 	}
-	event, err := os.ReadFile(eventPath)
-	if err != nil {
-		report := eventInputProcessingReport(workflowPath, "", source, "event input could not be read")
-		_ = compatibility.WriteProcessing(stderr, "text", report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: %v\n", err)
-		return 1
-	}
-	validation, validationErr := compiler.ValidateEvent(workflowPath, source, event)
-	processingReport := initialProcessingReport(workflowPath, "", true, validation, validationErr)
-	if validationErr != nil {
-		processingReport.Result = "incompatible"
-		if writeErr := compatibility.WriteProcessing(stderr, "text", processingReport); writeErr != nil {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write report: %v\n", writeErr)
-		}
+	processingReport, ok := validatedProcessingReport(out, workflowPath, "", source, event, true)
+	if !ok {
 		return 1
 	}
 	var result []byte
@@ -1111,7 +1053,7 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 		if digestErr != nil {
 			addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
-			_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+			_ = out.write(processingReport)
 			return 1
 		}
 		bundle, compileErr := compiler.CompileBundle(workflowPath, source, event, version, digest, "gha-importer")
@@ -1123,15 +1065,11 @@ func compile(args []string, stdout, stderr io.Writer, version string) int {
 	if err != nil {
 		addProcessingFailure(&processingReport, workflowPath, stagePlans, compiler.CodePlanConstruction, "compatibility", err)
 		processingReport.Result = "incompatible"
-		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+		_ = out.write(processingReport)
 		return 1
 	}
-	if format == "ir-json" {
-		processingReport.Result = "compilable"
-	} else {
-		processingReport.Result = "compilable"
-	}
-	_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+	processingReport.Result = "compilable"
+	_ = out.write(processingReport)
 	writeCompilerWarnings(stderr, "compile", workflowPath, warnings)
 	if _, err := stdout.Write(result); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: compile: write output: %v\n", err)
@@ -1163,75 +1101,47 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
 		return usageError(stderr, "upload: BUILDKITE=true and BUILDKITE_STEP_KEY are required")
 	}
-	workflowSource, err := os.ReadFile(workflowPath)
-	if err != nil {
-		report := environmentProcessingReport(workflowPath, hostedTokenlessProfile, "workflow input could not be read")
-		_ = compatibility.WriteProcessing(stderr, "text", report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
-		return 1
-	}
+	out := processingOutput{command: "upload", format: "text", reports: stderr, stderr: stderr}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	var eventSource []byte
-	if eventPath != "" {
-		eventSource, err = os.ReadFile(eventPath)
-	} else {
+	loadEvent := func() ([]byte, error) {
+		if eventPath != "" {
+			return os.ReadFile(eventPath)
+		}
 		webhook, metadataErr := agent.GetMetadataBounded(ctx, "buildkite:webhook", maxWebhookMetadataBytes+1)
 		switch {
 		case metadataErr == nil:
 			webhook = bytes.TrimSuffix(webhook, []byte("\n"))
 			if len(webhook) > maxWebhookMetadataBytes {
-				err = fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
-			} else {
-				eventSource, err = buildkiteWebhookEventSource(os.Getenv, webhook)
+				return nil, fmt.Errorf("buildkite:webhook exceeds %d bytes", maxWebhookMetadataBytes)
 			}
+			return buildkiteWebhookEventSource(os.Getenv, webhook)
 		case errors.Is(metadataErr, transport.ErrMetadataUnavailable):
-			eventSource, err = buildkiteEventSource(os.Getenv)
+			return buildkiteEventSource(os.Getenv)
 		default:
-			err = metadataErr
+			return nil, metadataErr
 		}
 	}
-	if err != nil {
-		report := eventInputProcessingReport(workflowPath, hostedTokenlessProfile, workflowSource, "event input could not be acquired")
-		_ = compatibility.WriteProcessing(stderr, "text", report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
+	workflowSource, eventSource, ok := loadProcessingInputs(out, workflowPath, hostedTokenlessProfile, "event input could not be acquired", loadEvent)
+	if !ok {
 		return 1
 	}
-	validation, validationErr := compiler.ValidateEvent(workflowPath, workflowSource, eventSource)
-	processingReport := initialProcessingReport(workflowPath, hostedTokenlessProfile, true, validation, validationErr)
-	if validationErr != nil {
-		processingReport.Result = "incompatible"
-		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+	processingReport, ok := validatedProcessingReport(out, workflowPath, hostedTokenlessProfile, workflowSource, eventSource, true)
+	if !ok {
 		return 1
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
 		addEnvironmentFailure(&processingReport, "compiler executable could not be inspected")
 		processingReport.Result = "indeterminate"
-		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+		_ = out.write(processingReport)
 		return 1
 	}
 	preflight, err := compileHostedTokenless(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, os.Getenv("BUILDKITE_GROUP_LABEL"), targetQueue, runtimeImage, jobScopedActionSourceAuthentication(stderr))
-	applyProcessingEvidence(&processingReport, preflight.Bundle.Processing)
-	if preflight.Admitted {
-		processingReport.SetStage(stageAdmission, compatibility.Passed)
-		processingReport.Admission.Result = "admitted"
-	}
+	applyHostedPreflight(&processingReport, preflight)
 	if err != nil {
-		var failure *hostedTokenlessFailure
-		if errors.As(err, &failure) && failure.Kind == hostedTokenlessAdmissionFailure {
-			addProcessingFailure(&processingReport, workflowPath, stageAdmission, "E_PROFILE", "admission", err)
-			processingReport.Admission.Result = "not-admitted"
-			processingReport.Result = "not-admitted"
-		} else {
-			if errors.As(err, &failure) && failure.Kind == hostedTokenlessEnvironmentFailure {
-				addEnvironmentFailure(&processingReport, "hosted workflow-processing environment could not be initialized")
-			} else {
-				addProcessingFailure(&processingReport, workflowPath, stageResolution, compiler.CodeActionResolution, "action-resolution", err)
-			}
-			processingReport.Result = "indeterminate"
-		}
-		_ = compatibility.WriteProcessing(stderr, "text", processingReport)
+		processingReport.Result = classifyHostedTokenlessFailure(&processingReport, workflowPath, err)
+		_ = out.write(processingReport)
 		return 1
 	}
 	bundle := preflight.Bundle
