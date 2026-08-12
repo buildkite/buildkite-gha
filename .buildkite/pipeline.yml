@@ -104,6 +104,21 @@ steps:
           version: "2026.5.12"
     command: "mise run --jobs 1 check"
 
+  - label: ":go: macOS arm64"
+    key: "macos-arm64"
+    timeout_in_minutes: 20
+    agents:
+      queue: "mac-small"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      test "$$(mise exec -- go env GOOS)" = "darwin"
+      test "$$(mise exec -- go env GOARCH)" = "arm64"
+      mise exec -- go build ./...
+      mise exec -- go test -count=1 ./...
+
   - label: ":github: OSS workflow compatibility"
     key: "oss-workflow-corpus"
     soft_fail: true
