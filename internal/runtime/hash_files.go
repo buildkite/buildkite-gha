@@ -128,7 +128,7 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if err := verifyHashFileDirectories(root, directories, name); err != nil {
+		if err := verifyHashFileDirectories(ctx, root, directories, name); err != nil {
 			return "", err
 		}
 		fileDigest, read, err := hashWorkspaceFile(ctx, root, directories[path.Dir(name)], name, limits, total)
@@ -141,7 +141,7 @@ func hashWorkspaceRootFilesWithLimits(ctx context.Context, root *os.Root, source
 			limits.afterFileHash(name)
 		}
 	}
-	if err := verifyHashFileDirectories(root, directories, ""); err != nil {
+	if err := verifyHashFileDirectories(ctx, root, directories, ""); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(combined.Sum(nil)), nil
@@ -288,9 +288,12 @@ func walkHashFilesRoot(ctx context.Context, root *os.Root, limit int, beforeOpen
 	return walk(".", root, rootInfo)
 }
 
-func verifyHashFileDirectories(root *os.Root, directories map[string]fs.FileInfo, name string) error {
+func verifyHashFileDirectories(ctx context.Context, root *os.Root, directories map[string]fs.FileInfo, name string) error {
 	if name == "" {
 		for directory, before := range directories {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			after, err := root.Lstat(directory)
 			if err != nil || !sameHashFileInfo(before, after) {
 				return fmt.Errorf("hashFiles directory %q changed after traversal", directory)
@@ -299,6 +302,9 @@ func verifyHashFileDirectories(root *os.Root, directories map[string]fs.FileInfo
 		return nil
 	}
 	for directory := path.Dir(name); ; directory = path.Dir(directory) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		before, ok := directories[directory]
 		if !ok {
 			return fmt.Errorf("hashFiles directory %q was not traversed", directory)

@@ -361,6 +361,17 @@ func TestHashWorkspaceFilesOpensMatchesThroughPinnedDirectories(t *testing.T) {
 	}
 }
 
+func TestHashWorkspaceFilesFinalVerificationObservesCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, "nested/value", "value")
+	ctx, cancel := context.WithCancel(context.Background())
+	limits := defaultHashFilesLimits
+	limits.afterFileHash = func(string) { cancel() }
+	if _, err := hashWorkspaceFilesWithLimits(ctx, workspace, []string{"nested/value"}, limits, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("hashWorkspaceFilesWithLimits() error = %v, want context cancellation", err)
+	}
+}
+
 func TestHashFilesInterpolationUsesStepTimeoutContext(t *testing.T) {
 	for _, test := range []struct {
 		name      string
