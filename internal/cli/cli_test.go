@@ -1830,10 +1830,12 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 		if !step.Checkout.Skip || step.Agents != nil || len(step.DependsOn) == 0 || step.DependsOn[0].Step != "shell-upload-importer" || step.DependsOn[0].AllowFailure {
 			t.Fatalf("step %q lacks isolated checkout or exact importer dependency: %#v", step.Key, step)
 		}
-		if !strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
+		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
+			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `"$distribution" run-job --plan "$plan"`) {
+			!strings.Contains(step.Command, `run-job --plan-digest `) ||
+			!strings.Contains(step.Command, `--plan-producer 'shell-upload-importer'`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
 	}
@@ -3501,6 +3503,33 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	if !strings.Contains(string(result), `"result": "cli-ok"`) {
 		t.Fatalf("result = %s", result)
 	}
+	artifactDigest := transport.Digest(encoded)
+	artifactPath, err := buildkitepipeline.PlanPath(artifactDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactRunner := &cliCaptureRunner{dataByPath: map[string][]byte{artifactPath: encoded}}
+	artifactResultPath := filepath.Join(workspace, "artifact-result.json")
+	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer", "--result", artifactResultPath}, &stdout, &stderr, "dev", artifactRunner); code != 0 {
+		t.Fatalf("artifact Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if len(artifactRunner.commands) == 0 || !slices.Equal(artifactRunner.commands[0].args[:3], []string{"artifact", "download", artifactPath}) || artifactRunner.commands[0].args[4] != "--step" || artifactRunner.commands[0].args[5] != "gha-importer" {
+		t.Fatalf("plan artifact download = %#v", artifactRunner.commands)
+	}
+	if destination := artifactRunner.commands[0].args[3]; destination == workspace {
+		t.Fatalf("plan downloaded into workspace %q", destination)
+	} else if _, err := os.Stat(destination); !os.IsNotExist(err) {
+		t.Fatalf("private plan directory still exists: %v", err)
+	}
+	tamperedRunner := &cliCaptureRunner{dataByPath: map[string][]byte{artifactPath: []byte("tampered")}}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer"}, &stdout, &stderr, "dev", tamperedRunner); code != 1 || !strings.Contains(stderr.String(), "does not match expected digest") {
+		t.Fatalf("tampered artifact Run() code = %d, stderr = %q", code, stderr.String())
+	}
 	stdout.Reset()
 	stderr.Reset()
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
@@ -3945,14 +3974,29 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
-	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
 	}
-	if _, _, _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, err := runJobArgs([]string{"--plan", "one", "--hosted-tool-cache", "--hosted-tool-cache"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate hosted tool cache error", err)
 	}
-	if planPath, resultPath, hostedToolCache, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || planPath != "plan.json" || resultPath != "result.json" || !hostedToolCache {
-		t.Fatalf("runJobArgs() = %q, %q, %t, %v", planPath, resultPath, hostedToolCache, err)
+	if options, err := runJobArgs([]string{"--hosted-tool-cache", "--result", "result.json", "--plan", "plan.json"}); err != nil || options.planPath != "plan.json" || options.resultPath != "result.json" || !options.hostedToolCache {
+		t.Fatalf("runJobArgs() = %#v, %v", options, err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting plan source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "", "--plan-digest", "sha256:" + strings.Repeat("0", 64), "--plan-producer", "importer"}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty plan source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("runJobArgs() error = %v, want empty plan path error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan", "plan.json", "--plan-digest", ""}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("runJobArgs() error = %v, want conflicting empty digest source error", err)
+	}
+	if _, err := runJobArgs([]string{"--plan-digest", "sha256:" + strings.Repeat("0", 64)}); err == nil || !strings.Contains(err.Error(), "both --plan-digest and --plan-producer") {
+		t.Fatalf("runJobArgs() error = %v, want incomplete artifact source error", err)
 	}
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
