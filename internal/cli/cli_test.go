@@ -809,6 +809,7 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Setenv("BUILDKITE_BRANCH", "main")
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
 }
 
 func TestRunValidateAndCompile(t *testing.T) {
@@ -4519,6 +4520,7 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	t.Setenv("BUILDKITE_BRANCH", "main")
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Unverified Author")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
