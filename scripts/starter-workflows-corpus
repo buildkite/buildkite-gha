@@ -69,7 +69,7 @@ if $profile; then
   validate_args=(--profile hosted)
 fi
 summary="$work/summary.md"
-printf '### Starter workflow compatibility — %s\n\n' "$mode" > "$summary"
+printf '<h2 class="h4 mb2">Starter workflow compatibility — %s</h2>\n<div class="border-top border-gray pt2"></div>\n\n' "$mode" > "$summary"
 passed=0
 blocked=0
 

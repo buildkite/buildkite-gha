@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ import (
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
 	processingAnnotationBodyLimit = 1024 * 1024
+	processingAnnotationEnd       = "</div>\n"
+	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
 )
 
 // processingOutput owns where one command writes processing reports and
@@ -88,55 +91,94 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	}
 
 	var out strings.Builder
-	out.WriteString("### GitHub Actions workflow diagnostics\n\n")
-	out.WriteString("**Workflow:** ")
-	out.WriteString(markdownText(report.Workflow))
-	out.WriteString("\n")
-	for _, diagnostic := range diagnostics {
-		heading, details := annotationDiagnosticPresentation(diagnostic)
-		out.WriteString("\n#### ")
-		out.WriteString(heading)
-		context := make([]string, 0, 4)
-		if diagnostic.Action != "" {
-			context = append(context, "Action "+markdownCode(diagnostic.Action))
-		}
-		if diagnostic.Location != nil {
-			context = append(context, markdownCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
-		}
-		if diagnostic.Job != "" {
-			context = append(context, "Job "+markdownCode(diagnostic.Job))
-		}
-		if diagnostic.Step != 0 {
-			context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
-		}
-		if len(context) != 0 {
-			out.WriteString("\n\n")
-			out.WriteString(strings.Join(context, " · "))
-		}
-		if len(details) != 0 {
-			out.WriteString("\n\n")
-		}
-		for i, sentence := range details {
-			if i != 0 {
-				out.WriteString("  \n")
-			}
-			out.WriteString(markdownText(sentence))
-		}
-		out.WriteString("\n")
+	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
+	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
+	out.WriteString(annotationCode(report.Workflow))
+	out.WriteString("</div>\n<div class=\"mb2\">\n")
+	rows := make([]string, len(diagnostics))
+	bodyBytes := out.Len() + len(processingAnnotationEnd)
+	for i, diagnostic := range diagnostics {
+		rows[i] = renderProcessingDiagnostic(diagnostic)
+		bodyBytes += len(rows[i])
 	}
-	return style, truncateProcessingAnnotation(out.String())
+	if bodyBytes <= processingAnnotationBodyLimit {
+		for _, row := range rows {
+			out.WriteString(row)
+		}
+		out.WriteString(processingAnnotationEnd)
+		return style, out.String()
+	}
+
+	remaining := processingAnnotationBodyLimit - out.Len() - len(processingAnnotationEnd) - len(processingAnnotationNotice)
+	for i, row := range rows {
+		if len(row) > remaining {
+			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining); row != "" {
+				out.WriteString(row)
+			}
+			out.WriteString(processingAnnotationEnd)
+			out.WriteString(processingAnnotationNotice)
+			return style, out.String()
+		}
+		out.WriteString(row)
+		remaining -= len(row)
+	}
+	panic("processing annotation exceeded its precomputed size")
 }
 
-func truncateProcessingAnnotation(body string) string {
-	if len(body) <= processingAnnotationBodyLimit {
-		return body
+func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int) string {
+	message := diagnostic.Message
+	row := renderProcessingDiagnostic(diagnostic)
+	for len(row) > limit && message != "" {
+		end := max(0, len(message)-(len(row)-limit))
+		for end > 0 && !utf8.ValidString(message[:end]) {
+			end--
+		}
+		diagnostic.Message = message[:end] + "…"
+		message = message[:end]
+		row = renderProcessingDiagnostic(diagnostic)
 	}
-	const notice = "\n\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
-	end := processingAnnotationBodyLimit - len(notice)
-	for !utf8.ValidString(body[:end]) {
-		end--
+	if len(row) > limit {
+		return ""
 	}
-	return body[:end] + notice
+	return row
+}
+
+func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic) string {
+	heading, details := annotationDiagnosticPresentation(diagnostic)
+	var out strings.Builder
+	out.WriteString("<div class=\"border-top border-gray py2\"><div><strong>")
+	out.WriteString(annotationHTML(heading))
+	out.WriteString("</strong></div>")
+	context := make([]string, 0, 4)
+	if diagnostic.Action != "" {
+		context = append(context, "Action "+annotationCode(diagnostic.Action))
+	}
+	if diagnostic.Location != nil {
+		context = append(context, annotationCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
+	}
+	if diagnostic.Job != "" {
+		context = append(context, "Job "+annotationCode(diagnostic.Job))
+	}
+	if diagnostic.Step != 0 {
+		context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
+	}
+	if len(context) != 0 {
+		out.WriteString("<div class=\"mt1\">")
+		out.WriteString(strings.Join(context, " · "))
+		out.WriteString("</div>")
+	}
+	if len(details) != 0 {
+		out.WriteString("<div class=\"mt1\">")
+		for i, sentence := range details {
+			if i != 0 {
+				out.WriteString("<br>\n")
+			}
+			out.WriteString(annotationHTML(sentence))
+		}
+		out.WriteString("</div>")
+	}
+	out.WriteString("</div>\n")
+	return out.String()
 }
 
 func annotationDiagnosticMessage(diagnostic compatibility.Diagnostic) string {
@@ -164,7 +206,7 @@ func annotationDiagnosticPresentation(diagnostic compatibility.Diagnostic) (head
 	if len(sentences) == 0 {
 		return "Compatibility diagnostic", nil
 	}
-	return markdownText(sentences[0]), sentences[1:]
+	return sentences[0], sentences[1:]
 }
 
 func annotationSentences(message string) []string {
@@ -183,32 +225,12 @@ func upperFirst(value string) string {
 	return string(unicode.ToUpper(first)) + value[size:]
 }
 
-func markdownCode(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
-	if strings.Contains(value, "`") {
-		longest, current := 0, 0
-		for _, r := range value {
-			if r == '`' {
-				current++
-				longest = max(longest, current)
-			} else {
-				current = 0
-			}
-		}
-		delimiter := strings.Repeat("`", longest+1)
-		return delimiter + " " + value + " " + delimiter
-	}
-	return "`" + value + "`"
+func annotationCode(value string) string {
+	return "<code>" + annotationHTML(value) + "</code>"
 }
 
-func markdownText(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
-	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
-	replacer := strings.NewReplacer(
-		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",
-	)
-	return replacer.Replace(value)
+func annotationHTML(value string) string {
+	return html.EscapeString(strings.Join(strings.Fields(value), " "))
 }
 
 // fail emits the report and the failure that ended the command.
