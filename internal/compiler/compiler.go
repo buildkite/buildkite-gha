@@ -383,7 +383,7 @@ instances:
 			}
 			actionRequiresGitHubToken := false
 			if lockActions && len(actionRefs) != 0 {
-				compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, actionRefs, actionInputs)
+				compiledActions, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), actionRefs, actionInputs)
 				if err != nil {
 					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 				}

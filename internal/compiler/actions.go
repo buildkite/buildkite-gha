@@ -105,7 +105,7 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				evidence.ActionResolutionComplete = false
 				continue
 			}
-			_, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, []string{step.Uses}, []map[string]string{step.With})
+			_, err := compileActionInvocations(ctx, instance.RepositoryRoot, actionSource, plan.EventServerURL(ir.Event.Provider), []string{step.Uses}, []map[string]string{step.With})
 			evaluation := ActionEvaluation{Instance: instance.Key, Job: instance.LogicalJobID, Reference: step.Uses, Step: i + 1, Passed: err == nil}
 			evidence.Actions = append(evidence.Actions, evaluation)
 			if err == nil {
@@ -189,14 +189,14 @@ func unsupportedMetadataFields(reason string) string {
 // compileActionLocks builds one shared action DAG for all roots. Selectors are
 // returned in the same order as refs.
 func compileActionLocks(ctx context.Context, workspace string, actionSource ActionSource, refs []string) ([]plan.ActionSelector, []plan.ActionLock, []string, bool, error) {
-	compiled, err := compileActionInvocations(ctx, workspace, actionSource, refs, nil)
+	compiled, err := compileActionInvocations(ctx, workspace, actionSource, plan.EventServerURL("github"), refs, nil)
 	if err != nil {
 		return nil, nil, nil, true, err
 	}
 	return compiled.selectors, compiled.locks, compiled.capabilities, compiled.requiresMise, nil
 }
 
-func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
+func compileActionInvocations(ctx context.Context, workspace string, actionSource ActionSource, serverURL string, refs []string, suppliedInputs []map[string]string) (actionCompilation, error) {
 	if workspace == "" {
 		return actionCompilation{}, fmt.Errorf("workflow path must identify a repository root")
 	}
@@ -233,7 +233,7 @@ func compileActionInvocations(ctx context.Context, workspace string, actionSourc
 	var githubTokenActions []string
 	if suppliedInputs != nil {
 		for i, root := range roots {
-			requirements, err := root.inspectInvocation(suppliedInputs[i], true)
+			requirements, err := root.inspectInvocation(suppliedInputs[i], true, serverURL)
 			if err != nil {
 				return actionCompilation{}, fmt.Errorf("compile action %q: %w", refs[i], err)
 			}
@@ -333,7 +333,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 	return n, nil
 }
 
-func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool) (actionRequirements, error) {
+func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAuthored bool, serverURL string) (actionRequirements, error) {
 	requirements := actionRequirements{requiredSecrets: map[string]bool{}}
 	for _, suppliedName := range sortedKeys(supplied) {
 		names, err := expression.SecretReferences(supplied[suppliedName])
@@ -362,7 +362,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 		if err := expression.ValidateActionInputDefault(*input.Default); err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
-		referencesToken, err := expression.ReferencesGitHubToken(*input.Default)
+		referencesToken, err := expression.ActionInputDefaultRequiresGitHubToken(*input.Default, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
@@ -385,7 +385,7 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 				return actionRequirements{}, fmt.Errorf("composite action step %d child %q: bounded upload-artifact adapter: %w", i+1, step.Uses, err)
 			}
 		}
-		childRequirements, err := child.inspectInvocation(step.With, false)
+		childRequirements, err := child.inspectInvocation(step.With, false, serverURL)
 		if err != nil {
 			return actionRequirements{}, fmt.Errorf("composite action step %d child %q: %w", i+1, step.Uses, err)
 		}

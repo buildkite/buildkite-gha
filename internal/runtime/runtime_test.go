@@ -2265,6 +2265,21 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 	}
 }
 
+func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
+	job := plan.Job{Event: plan.Event{Provider: "cursor-origin"}}
+	github := githubContext(job)
+	env := standardEnvironment(job, "/workspace", "/tmp", "/tool-cache")
+	if github["server_url"] != "https://origin.cursor.com" || env["GITHUB_SERVER_URL"] != "https://origin.cursor.com" {
+		t.Fatalf("Origin server URLs = context %#v, environment %q", github["server_url"], env["GITHUB_SERVER_URL"])
+	}
+	conditionalTokenDefault := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
+	action := metadata.Metadata{Inputs: map[string]metadata.Input{"token": {Default: &conditionalTokenDefault}}}
+	inputs, err := resolveActionInputs(action, nil, expression.Context{GitHub: github})
+	if err != nil || inputs["token"] != "" {
+		t.Fatalf("Origin conditional token input = %#v, %v, want empty token", inputs, err)
+	}
+}
+
 func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()

@@ -944,7 +944,7 @@ func githubContext(job plan.Job) map[string]any {
 		"sha":        job.Event.SHA,
 		"actor":      job.Event.Actor,
 		"event_name": job.Event.Name,
-		"server_url": "https://github.com",
+		"server_url": plan.EventServerURL(job.Event.Provider),
 	}
 }
 
@@ -958,7 +958,7 @@ func standardEnvironment(job plan.Job, workspace, runnerTemp, toolCache string) 
 		"GITHUB_JOB":        job.Workflow.LogicalJobID,
 		"GITHUB_REF":        job.Event.Ref,
 		"GITHUB_REPOSITORY": job.Event.Repository,
-		"GITHUB_SERVER_URL": "https://github.com",
+		"GITHUB_SERVER_URL": plan.EventServerURL(job.Event.Provider),
 		"GITHUB_SHA":        job.Event.SHA,
 		"GITHUB_WORKSPACE":  workspace,
 		"RUNNER_OS":         runner["os"],

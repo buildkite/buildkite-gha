@@ -104,6 +104,19 @@ type Event struct {
 	Actor         string `json:"actor,omitempty"`
 }
 
+// EventServerURL returns the repository provider URL exposed through the
+// GitHub-compatible expression context and environment.
+func EventServerURL(provider string) string {
+	switch provider {
+	case "github":
+		return "https://github.com"
+	case "cursor-origin":
+		return "https://origin.cursor.com"
+	default:
+		return ""
+	}
+}
+
 type Workflow struct {
 	Path         string `json:"path"`
 	Digest       string `json:"digest"`

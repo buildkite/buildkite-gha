@@ -202,6 +202,34 @@ func TestEvaluateActionInputDefaultSupportsConditionalValueExpressions(t *testin
 	}
 }
 
+func TestActionInputDefaultRequiresGitHubTokenUsesProviderServerURL(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		template  string
+		serverURL string
+		want      bool
+	}{
+		{name: "direct GitHub.com token", template: "${{ github.token }}", serverURL: "https://github.com", want: true},
+		{name: "direct Origin token", template: "${{ github.token }}", serverURL: "https://origin.cursor.com", want: true},
+		{name: "GitHub.com guarded token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://github.com", want: true},
+		{name: "Origin skips GitHub.com token", template: "${{ github.server_url == 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com"},
+		{name: "Origin reaches reverse guard", template: "${{ github.server_url != 'https://github.com' && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
+		{name: "literal false skips token", template: "${{ false && github.token || '' }}", serverURL: "https://origin.cursor.com"},
+		{name: "unknown guard fails closed", template: "${{ inputs.use_token && github.token || '' }}", serverURL: "https://origin.cursor.com", want: true},
+		{name: "no token reference", template: "${{ github.server_url }}", serverURL: "https://origin.cursor.com"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ActionInputDefaultRequiresGitHubToken(test.template, test.serverURL)
+			if err != nil || got != test.want {
+				t.Fatalf("ActionInputDefaultRequiresGitHubToken() = %v, %v, want %v", got, err, test.want)
+			}
+		})
+	}
+	if _, err := ActionInputDefaultRequiresGitHubToken("${{ github[env.NAME] }}", "https://origin.cursor.com"); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+		t.Fatalf("ActionInputDefaultRequiresGitHubToken() error = %v, want dynamic index rejection", err)
+	}
+}
+
 func TestEvaluateActionInputDefaultSupportsJobStatus(t *testing.T) {
 	references, err := ReferencesJobStatus("${{ job.status }}")
 	if err != nil || !references {
