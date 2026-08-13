@@ -293,6 +293,11 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 			Skip      string `yaml:"skip"`
 			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
+			Retry     struct {
+				Manual *struct {
+					Allowed bool `yaml:"allowed"`
+				} `yaml:"manual"`
+			} `yaml:"retry"`
 			Notify    []struct {
 				GitHubCheck struct {
 					Name   string `yaml:"name"`
@@ -315,7 +320,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `set -eu
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || step.Retry.Manual == nil || step.Retry.Manual.Allowed || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `set -eu
 failure_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-failure.XXXXXXXX")"
 trap 'rm -rf -- "$failure_dir"' EXIT
 buildkite-agent artifact download '.buildkite-gha/failures/messages/message.txt' "$failure_dir" --step 'importer'

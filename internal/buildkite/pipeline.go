@@ -257,6 +257,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
+		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
 		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
