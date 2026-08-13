@@ -67,6 +67,7 @@ type Workflow struct {
 // Failure replaces a failed aggregate workflow with one synthetic command step.
 type Failure struct {
 	Annotation string
+	Message    string
 	Summary    string
 }
 
@@ -174,6 +175,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Failure.Annotation == "" {
 				return nil, fmt.Errorf("workflow %d failure requires an annotation", i+1)
 			}
+			if workflow.Failure.Message == "" {
+				return nil, fmt.Errorf("workflow %d failure requires a message", i+1)
+			}
 			if workflow.Failure.Summary == "" {
 				return nil, fmt.Errorf("workflow %d failure requires a GitHub Check summary", i+1)
 			}
@@ -238,7 +242,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		command := `buildkite-agent annotate --scope=job --style=error ` + shellQuote(failure.Annotation) + ` && exit 1`
+		command := `buildkite-agent annotate --scope=job --style=error ` + shellQuote(failure.Annotation) + ` && printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")

@@ -1779,6 +1779,24 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	}
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
+	messages := make([]string, 0, len(report.Diagnostics))
+	for _, diagnostic := range report.Diagnostics {
+		message := diagnostic.Message
+		if diagnostic.Code != "" {
+			message = "[" + diagnostic.Code + "] " + message
+		}
+		var attribution []string
+		if diagnostic.Job != "" {
+			attribution = append(attribution, "job="+diagnostic.Job)
+		}
+		if diagnostic.Step != 0 {
+			attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
+		}
+		if len(attribution) != 0 {
+			message += " {" + strings.Join(attribution, ", ") + "}"
+		}
+		messages = append(messages, message)
+	}
 	_, annotation := processingAnnotation(report)
 	return buildkitepipeline.Workflow{
 		GroupLabel: label,
@@ -1787,6 +1805,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		Condition:  input.TriggerCondition,
 		Failure: &buildkitepipeline.Failure{
 			Annotation: annotation,
+			Message:    strings.Join(messages, "\n"),
 			Summary:    failureCheckSummary(input.CanonicalPath, report),
 		},
 	}
