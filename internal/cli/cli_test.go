@@ -264,6 +264,7 @@ func TestTelemetryOutcomePreservesCommandSemantics(t *testing.T) {
 		{name: "cancelled result", code: 1, conclusion: "cancelled", want: telemetry.OutcomeCancelled},
 		{name: "cancelled context", code: 1, contextErr: context.Canceled, want: telemetry.OutcomeCancelled},
 		{name: "skipped", conclusion: "skipped", want: telemetry.OutcomeSkipped},
+		{name: "skipped result publication failure", code: 1, conclusion: "skipped", want: telemetry.OutcomeFailure},
 		{name: "tolerated", code: buildkitepipeline.ContinueOnErrorExitStatus, conclusion: "success", want: telemetry.OutcomeToleratedFailure},
 		{name: "usage", code: 2, want: telemetry.OutcomeUsageError},
 	} {

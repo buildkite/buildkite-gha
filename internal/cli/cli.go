@@ -162,11 +162,17 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 	}
 }
 
-func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) (code int) {
+func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return pluginContext(ctx, args, stdout, stderr, version, runner)
+}
+
+func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, runner transport.Runner) (code int) {
 	started := time.Now()
 	details := &commandTelemetryDetails{}
 	defer func() {
-		outcome := telemetryOutcome(code, "", nil)
+		outcome := telemetryOutcome(code, "", ctx.Err())
 		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(outcome))
 	}()
 	if len(args) != 0 {
@@ -180,11 +186,11 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	if err != nil {
 		return usageError(stderr, "plugin: %v", err)
 	}
-	if err := normalizePluginCommit(context.Background(), os.Getenv, os.Setenv, runner); err != nil {
+	if err := normalizePluginCommit(ctx, os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
-	return uploadParsed(parsedUploadArgs{
+	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:      configuration.Workflows,
 		explicitWorkflowPaths: true,
 		runnerTargets:         configuration.runnerTargets,
@@ -602,14 +608,15 @@ func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.O
 	switch conclusion {
 	case "cancelled":
 		return telemetry.OutcomeCancelled
-	case "skipped":
-		return telemetry.OutcomeSkipped
 	}
 	if errors.Is(contextErr, context.Canceled) || errors.Is(contextErr, context.DeadlineExceeded) {
 		return telemetry.OutcomeCancelled
 	}
 	if code != 0 || conclusion == "failure" {
 		return telemetry.OutcomeFailure
+	}
+	if conclusion == "skipped" {
+		return telemetry.OutcomeSkipped
 	}
 	return telemetry.OutcomeSuccess
 }
@@ -1432,6 +1439,12 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 }
 
 func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return uploadParsedContext(ctx, uploadArguments, stdout, stderr, version, agent)
+}
+
+func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
 	workflowOperands, eventPath := uploadArguments.workflowOperands, uploadArguments.eventPath
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
@@ -1480,8 +1493,6 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	for _, input := range workflows {
 		if input.ReusableOnly {
 			continue
