@@ -1000,17 +1000,17 @@ func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
 	}
 }
 
-func TestOriginActionSkipsGitHubOnlyConditionalTokenDefault(t *testing.T) {
+func TestNonGitHubActionSkipsGitHubOnlyConditionalTokenDefault(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
-	workflowPath := filepath.Join(workspace, ".github", "workflows", "build.yml")
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "conditional-token.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	workflow := []byte("on: push\npermissions:\n  contents: read\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: oven-sh/setup-bun@v2\n        with:\n          bun-version: 1.3.11\n")
+	workflow := []byte("on: push\npermissions:\n  contents: read\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/action@v1\n")
 	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	writeAction(t, remote, "", `name: Setup Bun
+	writeAction(t, remote, "", `name: Conditional token
 inputs:
   token:
     default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
@@ -1032,7 +1032,7 @@ runs:
 		t.Fatal(err)
 	}
 	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || bundle.Plans[0].Job.HasCapability("provider-token-write") {
-		t.Fatalf("Origin setup-bun plan = %#v", bundle.Plans)
+		t.Fatalf("non-GitHub conditional-token plan = %#v", bundle.Plans)
 	}
 }
 
