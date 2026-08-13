@@ -243,16 +243,19 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
+		out.WriteString("    plugins:\n")
+		out.WriteString("      - artifacts#v1.9.4:\n")
+		_, _ = fmt.Fprintf(out, "          step: %s\n", yamlScalar(pipeline.CompilerStep))
+		out.WriteString("          download:\n")
+		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.MessagePath))
+		out.WriteString("              to: .buildkite-gha-failure-message.txt\n")
+		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.AnnotationPath))
+		out.WriteString("              to: .buildkite-gha-failure-annotation.html\n")
 		commands := []string{
-			"set -eu",
-			`failure_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-failure.XXXXXXXX")"`,
-			`trap 'rm -rf -- "$failure_dir"' EXIT`,
-			"buildkite-agent artifact download " + shellQuote(failure.MessagePath) + ` "$failure_dir" --step ` + shellQuote(pipeline.CompilerStep),
-			"buildkite-agent artifact download " + shellQuote(failure.AnnotationPath) + ` "$failure_dir" --step ` + shellQuote(pipeline.CompilerStep),
 			`printf '\033[31m'`,
-			`cat "$failure_dir"/` + shellQuote(failure.MessagePath),
+			"cat .buildkite-gha-failure-message.txt",
 			`printf '\033[0m\n'`,
-			`buildkite-agent annotate --scope=job --style=error < "$failure_dir"/` + shellQuote(failure.AnnotationPath),
+			"buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html",
 			"exit 1",
 		}
 		command := strings.Join(commands, "\n")
