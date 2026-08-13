@@ -3813,15 +3813,29 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := &cliActionSourceTokenProvider{token: "must-not-be-minted"}
-	redactor := &cliRedactor{}
-	var warnings bytes.Buffer
-	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-	if _, err := compileHosted(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
-		t.Fatal(err)
-	}
-	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
-		t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+	originEventSource := bytes.Replace(eventSource, []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"owner": "buildkite"`), []byte(`"owner": "acme_team"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "widgets"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"clone_url": "https://github.com/buildkite/buildkite-gha.git"`), []byte(`"clone_url": "https://origin.cursor.com/git/acme_team/widgets.git"`), 1)
+	for _, test := range []struct {
+		name  string
+		event []byte
+	}{
+		{name: "GitHub", event: eventSource},
+		{name: "Origin repository with GitHub-incompatible namespace", event: originEventSource},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &cliActionSourceTokenProvider{token: "must-not-be-minted"}
+			redactor := &cliRedactor{}
+			var warnings bytes.Buffer
+			authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
+			if _, err := compileHosted(context.Background(), workflowPath, workflowSource, test.event, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
+				t.Fatal(err)
+			}
+			if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
+				t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+			}
+		})
 	}
 }
 

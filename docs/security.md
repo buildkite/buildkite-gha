@@ -40,9 +40,9 @@ For other builds, a user with permission to create a build at an arbitrary commi
 
 ### Checkout and submodules
 
-Buildkite authorizes every managed GitHub repository requested through the Git credential protocol. A checked-in `.gitmodules` file may select another repository in the same GitHub account when the connected GitHub App installation includes it. Those tokens are repository-specific and read-only. External HTTPS submodules are anonymous. SSH and non-HTTPS transports are disabled.
+Buildkite authorizes managed GitHub and Origin repositories requested through the Git credential protocol. A checked-in `.gitmodules` file may select another repository from the same provider when Buildkite authorizes access to it. Those tokens are repository-specific and read-only. External HTTPS submodules are anonymous. SSH and non-HTTPS transports are disabled.
 
-The credential helper is offered only to `github.com`, uses HTTP-path matching, and is not persisted. The installed Git executable owns submodule parsing and recursion, so keep it current and preferably pin it in the job image.
+The credential helper is offered only to the event provider's host (`github.com` or `origin.cursor.com`), uses HTTP-path matching, and is not persisted. The installed Git executable owns submodule parsing and recursion, so keep it current and preferably pin it in the job image.
 
 Command scoping limits accidental spread. It does not stop a hostile concurrent process under the same job identity from reaching the agent or helper. That requires a separate UID, sandbox, or pre-job credential broker.
 
