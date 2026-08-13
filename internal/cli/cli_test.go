@@ -31,6 +31,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
@@ -136,6 +137,141 @@ func TestPluginIsHiddenAndZeroArgument(t *testing.T) {
 		if stdout.Len() != 0 || strings.Contains(stderr.String(), "buildkite-gha plugin") {
 			t.Fatalf("Run(%q) exposed plugin help: stdout=%q stderr=%q", args, stdout.String(), stderr.String())
 		}
+	}
+}
+
+func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
+	type event struct {
+		Event      string `json:"event"`
+		Properties struct {
+			Command       string `json:"command"`
+			Outcome       string `json:"outcome"`
+			ClientVersion string `json:"client_version"`
+			DurationMS    int64  `json:"duration_ms"`
+			FailurePhase  string `json:"failure_phase"`
+			FailureCode   string `json:"failure_code"`
+		} `json:"properties"`
+	}
+	events := make(chan event, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Token telemetry-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var received event
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode telemetry event: %v", err)
+		}
+		events <- received
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	for _, test := range []struct {
+		args        []string
+		wantCode    int
+		wantCommand string
+	}{
+		{args: []string{"plugin", "unexpected"}, wantCode: 2, wantCommand: "plugin_import"},
+		{args: []string{"run-job", "--unknown"}, wantCode: 2, wantCommand: "run_job"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(test.args, &stdout, &stderr, "test-version", &cliCaptureRunner{}); code != test.wantCode {
+			t.Fatalf("run(%q) code = %d, stderr = %q; want %d", test.args, code, stderr.String(), test.wantCode)
+		}
+		received := <-events
+		if received.Event != "pipelines:buildkite_gha:command_completed" || received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" || received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 || received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
+			t.Fatalf("run(%q) event = %#v", test.args, received)
+		}
+	}
+}
+
+func TestCommandCompletionTelemetryOptOut(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--unknown"}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 2 {
+		t.Fatalf("run() code = %d, stderr = %q; want 2", code, stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("telemetry requests = %d, want 0", requests)
+	}
+}
+
+func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private response", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--unknown"}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 2 {
+		t.Fatalf("run() code = %d, stderr = %q; want 2", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "private response") || strings.Contains(stderr.String(), "telemetry") {
+		t.Fatalf("telemetry failure leaked to stderr: %q", stderr.String())
+	}
+}
+
+func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
+		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
+	}})
+	got := details.telemetryDetails()
+	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
+		t.Fatalf("failure details = %#v", got)
+	}
+	want := []telemetry.Diagnostic{
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
+		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
+	}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestTelemetryOutcomePreservesCommandSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		code       int
+		conclusion string
+		contextErr error
+		want       telemetry.Outcome
+	}{
+		{name: "success", conclusion: "success", want: telemetry.OutcomeSuccess},
+		{name: "failure", code: 1, conclusion: "failure", want: telemetry.OutcomeFailure},
+		{name: "result publication failure", code: 1, conclusion: "success", want: telemetry.OutcomeFailure},
+		{name: "cancelled result", code: 1, conclusion: "cancelled", want: telemetry.OutcomeCancelled},
+		{name: "cancelled context", code: 1, contextErr: context.Canceled, want: telemetry.OutcomeCancelled},
+		{name: "skipped", conclusion: "skipped", want: telemetry.OutcomeSkipped},
+		{name: "tolerated", code: buildkitepipeline.ContinueOnErrorExitStatus, conclusion: "success", want: telemetry.OutcomeToleratedFailure},
+		{name: "usage", code: 2, want: telemetry.OutcomeUsageError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := telemetryOutcome(test.code, test.conclusion, test.contextErr); got != test.want {
+				t.Fatalf("telemetryOutcome() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

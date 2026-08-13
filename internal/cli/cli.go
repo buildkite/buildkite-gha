@@ -36,6 +36,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -161,7 +162,13 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 	}
 }
 
-func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) int {
+func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) (code int) {
+	started := time.Now()
+	details := &commandTelemetryDetails{}
+	defer func() {
+		outcome := telemetryOutcome(code, "", nil)
+		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(telemetry.CommandPluginImport, outcome))
+	}()
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
 	}
@@ -182,6 +189,7 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		explicitWorkflowPaths: true,
 		runnerTargets:         configuration.runnerTargets,
 		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
+		telemetry:             details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
@@ -339,7 +347,14 @@ func runJob(args []string, stdout, stderr io.Writer, version string, agent trans
 	return runJobContext(ctx, args, stdout, stderr, version, agent)
 }
 
-func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) (code int) {
+	started := time.Now()
+	var result gharuntime.JobResult
+	defer func() {
+		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
+		details := (&commandTelemetryDetails{}).forOutcome(telemetry.CommandRunJob, outcome)
+		emitCommandTelemetry(telemetry.CommandRunJob, outcome, version, time.Since(started), details)
+	}()
 	options, err := runJobArgs(args)
 	if err != nil {
 		return usageError(stderr, "run-job: %v", err)
@@ -516,7 +531,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			}
 		}()
 	}
-	var result gharuntime.JobResult
 	var runErr error
 	if len(job.NeedSources) != 0 {
 		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
@@ -562,6 +576,42 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+func emitCommandTelemetry(command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
+	client, err := telemetry.New(telemetry.Config{
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: version,
+		Disabled:      os.Getenv("BUILDKITE_GHA_TELEMETRY_DISABLED") == "true",
+	})
+	if err != nil || client == nil {
+		return
+	}
+	_ = client.Emit(command, outcome, duration, details)
+}
+
+func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.Outcome {
+	if code == 2 {
+		return telemetry.OutcomeUsageError
+	}
+	if code == buildkitepipeline.ContinueOnErrorExitStatus {
+		return telemetry.OutcomeToleratedFailure
+	}
+	switch conclusion {
+	case "cancelled":
+		return telemetry.OutcomeCancelled
+	case "skipped":
+		return telemetry.OutcomeSkipped
+	}
+	if errors.Is(contextErr, context.Canceled) || errors.Is(contextErr, context.DeadlineExceeded) {
+		return telemetry.OutcomeCancelled
+	}
+	if code != 0 || conclusion == "failure" {
+		return telemetry.OutcomeFailure
+	}
+	return telemetry.OutcomeSuccess
 }
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
@@ -1393,6 +1443,9 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	out := newProcessingOutput("upload", "text", stderr, stderr, agent)
+	if uploadArguments.telemetry != nil {
+		out.observe = uploadArguments.telemetry.observe
+	}
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
@@ -1581,6 +1634,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		processingReports[i].Admission.Result = "admitted"
 		processingReports[i].Result = "admitted"
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
+		if uploadArguments.telemetry != nil {
+			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
+		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep: importerStep,
@@ -1592,6 +1648,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for i, input := range workflows {
 		if input.Applicable {
+			if out.observe != nil {
+				out.observe(processingReports[i])
+			}
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 			out.annotate(processingReports[i])
 		}
@@ -2276,6 +2335,7 @@ type parsedUploadArgs struct {
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
 	pluginAcquisition        *pluginRuntimeAcquisition
+	telemetry                *commandTelemetryDetails
 }
 
 func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {

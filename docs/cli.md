@@ -180,4 +180,10 @@ supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 
+## Disable telemetry
+
+In Buildkite jobs, the plugin importer and `run-job` send best-effort completion telemetry through the job-authenticated Buildkite Agent API. Events contain the command, outcome, client version, duration, and bounded diagnostic codes and severities. They do not contain diagnostic messages, workflow content, repository details, paths, action references, expressions, environment variables, or command text.
+
+Set `BUILDKITE_GHA_TELEMETRY_DISABLED=true` to disable telemetry. Missing Agent endpoint, job ID, or job token also disables it. Telemetry failures do not change command results.
+
 `run-job` is internal. Users should not invoke it directly.

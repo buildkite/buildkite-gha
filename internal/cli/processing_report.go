@@ -28,6 +28,7 @@ type processingOutput struct {
 	format        string
 	reports       io.Writer
 	stderr        io.Writer
+	observe       func(compatibility.ProcessingReport)
 	annotationJob string
 	agent         transport.Agent
 }
@@ -43,6 +44,9 @@ func newProcessingOutput(command, format string, reports, stderr io.Writer, agen
 
 // write emits the report, reporting write failures on stderr.
 func (o processingOutput) write(report compatibility.ProcessingReport) error {
+	if o.observe != nil {
+		o.observe(report)
+	}
 	if err := compatibility.WriteProcessing(o.reports, o.format, report); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
 		return err
