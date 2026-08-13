@@ -3860,7 +3860,7 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 
 	workflow := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Failure == nil || !strings.Contains(workflow.Failure.Annotation, "### GitHub Actions workflow diagnostics") || !strings.Contains(workflow.Failure.Annotation, "runner is unsupported") || !strings.Contains(workflow.Failure.Annotation, "cancel-in-progress is ignored") || workflow.Failure.Summary != wantSummary {
+	if workflow.Failure == nil || !strings.Contains(workflow.Failure.Annotation, `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(workflow.Failure.Annotation, "<strong>runner is unsupported</strong>") || !strings.Contains(workflow.Failure.Annotation, "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
 	}
 }
@@ -4008,7 +4008,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		!strings.Contains(firstFailureCommand, `Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) {
 		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Command)
 	}
-	if actionFailureCommand := pipeline.Steps[1].Command; !strings.Contains(actionFailureCommand, `Resolve local action "missing-action"`) || !strings.Contains(actionFailureCommand, "no such file or directory") {
+	if actionFailureCommand := pipeline.Steps[1].Command; !strings.Contains(actionFailureCommand, `Resolve local action &#34;missing-action&#34;`) || !strings.Contains(actionFailureCommand, "no such file or directory") {
 		t.Fatalf("action failure command = %q", actionFailureCommand)
 	}
 	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
