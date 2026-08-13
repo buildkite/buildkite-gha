@@ -3842,10 +3842,10 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
 	plainIndex := strings.Index(string(output), "Runner label is not mapped")
-	collapsedGroupIndex := strings.Index(string(output), "--- Create annotation")
+	annotationHeaderIndex := strings.Index(string(output), "~~~ Annotating job")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
 	logPrefix := "+++ GitHub Actions workflow diagnostics\n\x1b[31m"
-	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || collapsedGroupIndex <= plainIndex || annotationIndex <= collapsedGroupIndex {
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationHeaderIndex <= plainIndex || annotationIndex <= annotationHeaderIndex {
 		t.Fatalf("compiler failure command output/error = %q / %v", output, err)
 	}
 	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) || strings.Contains(string(pipelineCommand.stdin), strings.ToLower(keySentinel)) || strings.Contains(string(pipelineCommand.stdin), jsonSentinel) {
