@@ -241,16 +241,17 @@ func validFailureCode(code FailureCode) bool {
 }
 
 func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
-	seen := make(map[Diagnostic]bool, min(len(in), maxDiagnostics))
+	seen := make(map[string]bool, min(len(in), maxDiagnostics))
 	out := make([]Diagnostic, 0, min(len(in), maxDiagnostics))
 	for _, diagnostic := range in {
-		if !validDiagnosticCode(diagnostic.Code) || diagnostic.Severity != SeverityError && diagnostic.Severity != SeverityWarning {
+		severity, ok := diagnosticSeverity(diagnostic.Code)
+		if !ok || diagnostic.Severity != severity {
 			return nil, fmt.Errorf("invalid telemetry diagnostic")
 		}
-		if seen[diagnostic] {
+		if seen[diagnostic.Code] {
 			continue
 		}
-		seen[diagnostic] = true
+		seen[diagnostic.Code] = true
 		out = append(out, diagnostic)
 		if len(out) == maxDiagnostics {
 			break
@@ -259,16 +260,17 @@ func boundedDiagnostics(in []Diagnostic) ([]Diagnostic, error) {
 	return out, nil
 }
 
-func validDiagnosticCode(code string) bool {
+func diagnosticSeverity(code string) (Severity, bool) {
 	switch code {
 	case string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile), "W_ACTION_RUNTIME_UNKNOWN",
-		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
-		return true
+		string(FailureCodeEnvironment), string(FailureCodeProfile):
+		return SeverityError, true
+	case "W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED":
+		return SeverityWarning, true
 	default:
-		return false
+		return "", false
 	}
 }
 

@@ -197,27 +197,42 @@ func TestPropertiesAreBounded(t *testing.T) {
 	}
 }
 
-func TestDiagnosticsAreAllowlistedDeduplicatedAndCapped(t *testing.T) {
-	allowed := []string{
+func TestDiagnosticsEnforceSeverityAndDeduplicateByCode(t *testing.T) {
+	errorCodes := []string{
 		string(FailureCodeWorkflowSyntax), string(FailureCodeEventInvalid), string(FailureCodeGraphInvalid),
 		string(FailureCodeMatrixInvalid), string(FailureCodeExpressionInvalid), string(FailureCodeActionDiscovery),
 		string(FailureCodeActionResolution), string(FailureCodePlanConstruction), string(FailureCodePipelineGeneration),
-		string(FailureCodeEnvironment), string(FailureCodeProfile), "W_ACTION_RUNTIME_UNKNOWN",
-		"W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED",
+		string(FailureCodeEnvironment), string(FailureCodeProfile),
 	}
-	input := make([]Diagnostic, 0, len(allowed)*2)
-	for _, code := range allowed {
-		input = append(input, Diagnostic{Code: code, Severity: SeverityError}, Diagnostic{Code: code, Severity: SeverityWarning})
+	warningCodes := []string{"W_ACTION_RUNTIME_UNKNOWN", "W_WORKFLOW_CONCURRENCY_CANCEL_IN_PROGRESS_IGNORED"}
+	input := make([]Diagnostic, 0, len(errorCodes)+len(warningCodes)+2)
+	for _, code := range errorCodes {
+		input = append(input, Diagnostic{Code: code, Severity: SeverityError})
 	}
+	for _, code := range warningCodes {
+		input = append(input, Diagnostic{Code: code, Severity: SeverityWarning})
+	}
+	input = append(input, input[0], input[len(errorCodes)])
 	bounded, err := boundedDiagnostics(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(bounded) != maxDiagnostics {
-		t.Fatalf("diagnostics = %d, want cap %d", len(bounded), maxDiagnostics)
+	if len(bounded) != len(errorCodes)+len(warningCodes) {
+		t.Fatalf("diagnostics = %d, want %d unique codes", len(bounded), len(errorCodes)+len(warningCodes))
 	}
 	if _, err := boundedDiagnostics([]Diagnostic{{Code: "CUSTOMER_VALUE", Severity: SeverityError}}); err == nil {
 		t.Fatal("boundedDiagnostics() accepted non-allowlisted code")
+	}
+}
+
+func TestDiagnosticsRejectMismatchedSeverity(t *testing.T) {
+	for _, diagnostic := range []Diagnostic{
+		{Code: string(FailureCodeWorkflowSyntax), Severity: SeverityWarning},
+		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: SeverityError},
+	} {
+		if _, err := boundedDiagnostics([]Diagnostic{diagnostic}); err == nil {
+			t.Fatalf("boundedDiagnostics(%#v) accepted mismatched severity", diagnostic)
+		}
 	}
 }
 
