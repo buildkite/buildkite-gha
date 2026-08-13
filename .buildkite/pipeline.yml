@@ -74,7 +74,13 @@ steps:
               mise-version: "2026.5.12"
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.5.12"
-        command: "mise run --jobs 1 check"
+        command: |
+          set -euo pipefail
+          # A golangci-lint cache shared across builds returns issues with the
+          # previous build's checkout paths, which breaks nolint filtering
+          # (golangci/golangci-lint#3502). Keep the cache local to this VM.
+          export GOLANGCI_LINT_CACHE=/tmp/golangci-lint
+          mise run --jobs 1 check
 
       - label: ":go: macOS arm64 build and tests"
         key: "macos-arm64"
