@@ -259,7 +259,7 @@ func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 		t.Fatalf("skipped aggregate steps = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || step.Label != "Buildkite / Pull request (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != ":" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
+	if step.Group != "" || step.Label != ":github: Buildkite / Pull request (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != ":" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
 		t.Fatalf("skipped aggregate step = %#v\n%s", step, output)
 	}
 }

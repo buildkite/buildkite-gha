@@ -244,7 +244,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		return nil
 	}
 	if workflow.SkipReason != "" && workflow.Aggregate {
-		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.CheckName))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))

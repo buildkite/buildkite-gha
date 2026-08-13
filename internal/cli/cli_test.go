@@ -3198,7 +3198,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		if group.Skip != "" {
-			if group.Group != "" || group.Label != want[i].checkName || group.Command != ":" || len(group.Steps) != 0 {
+			if group.Group != "" || group.Label != ":github: "+want[i].checkName || group.Command != ":" || len(group.Steps) != 0 {
 				t.Fatalf("aggregate skipped step %d = %#v", i, group)
 			}
 			continue
@@ -3682,7 +3682,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLabel := "Buildkite / " + filepath.ToSlash(filepath.Clean(workflowPath)) + " (push)"
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != wantLabel || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != ":" || len(pipeline.Steps[0].Steps) != 0 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != ":" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	for path := range runner.uploaded {
@@ -3964,7 +3964,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 				t.Fatalf("caller group = %#v", workflow)
 			}
 		case "":
-			if workflow.Label != "Buildkite / Pull request only (push)" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
+			if workflow.Label != ":github: Buildkite / Pull request only (push)" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
 				t.Fatalf("inactive workflow step = %#v", workflow)
 			}
 		default:
