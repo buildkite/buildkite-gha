@@ -2207,7 +2207,11 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		if len(annotation.args) != 9 || annotation.args[0] != "annotate" || annotation.args[2] != "job" || annotation.args[4] != cliTestJobID || !strings.HasPrefix(annotation.args[6], processingAnnotationContext+"-") || annotation.args[8] != "error" {
 			t.Fatalf("annotation args = %#v", annotation.args)
 		}
-		for _, want := range []string{"GitHub Actions workflow diagnostics", `#### Runner label "windows-latest" uses an unsupported operating system`, "Job `test`"} {
+		for _, want := range []string{
+			`<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`,
+			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; uses an unsupported operating system`,
+			"Job <code>test</code>",
+		} {
 			if !strings.Contains(string(annotation.stdin), want) {
 				t.Fatalf("annotation = %q, want %q", annotation.stdin, want)
 			}
@@ -2243,7 +2247,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	})
 }
 
-func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
+func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 	report := compatibility.NewProcessingReport("<workflow>|name", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "error", Code: "E_TEST", Message: `line one
@@ -2253,10 +2257,13 @@ func TestProcessingAnnotationIsBoundedAndEscapesMarkdown(t *testing.T) {
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
-	for _, want := range []string{"&lt;workflow&gt;\\|name", `&lt;script&gt;\*unsafe\*&lt;/script&gt; "quoted"`, "Additional diagnostics omitted"} {
+	for _, want := range []string{"&lt;workflow&gt;|name", "&lt;script&gt;*unsafe*&lt;/script&gt; &#34;quoted&#34;", "Additional diagnostics omitted"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation lacks %q", want)
 		}
+	}
+	if strings.Count(body, "<div") != strings.Count(body, "</div>") {
+		t.Fatalf("annotation contains unbalanced styling markup")
 	}
 }
 
@@ -2275,9 +2282,9 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	}
 }
 
-func TestMarkdownCodeContainsWorkflowBackticks(t *testing.T) {
-	if got, want := markdownCode("action` **not bold** & <tag> ``tail"), "``` action` **not bold** & <tag> ``tail ```"; got != want {
-		t.Fatalf("markdownCode() = %q, want %q", got, want)
+func TestAnnotationCodeEscapesHTML(t *testing.T) {
+	if got, want := annotationCode("action` **not bold** & <tag> ``tail"), "<code>action` **not bold** &amp; &lt;tag&gt; ``tail</code>"; got != want {
+		t.Fatalf("annotationCode() = %q, want %q", got, want)
 	}
 }
 
@@ -2291,8 +2298,8 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 
 	_, body := processingAnnotation(report)
 	for _, want := range []string{
-		`#### Action metadata uses unsupported field "deprecationMessage"`,
-		"Action `actions/setup-java@v4` · Job `test` · Step 2",
+		`<div class="border-top border-gray py2"><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
+		"Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
@@ -2324,7 +2331,7 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 			name: "token configuration",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
 				Message: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`},
-			want: `Job "test" needs GITHUB\_TOKEN, but job-level permissions are unsupported.`,
+			want: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`,
 		},
 		{
 			name: "hosted container",
@@ -2377,7 +2384,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	}
 	_, annotation := processingAnnotation(report)
 	if strings.Count(textOutput.String(), message) != 1 ||
-		strings.Count(annotation, `Job "test" needs GITHUB\_TOKEN, but job-level permissions are unsupported.`) != 1 ||
+		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
 		strings.Count(annotation, `Effective permissions: contents: read.`) != 1 {
 		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
 	}
@@ -5647,7 +5654,8 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 				return
 			}
 			wantArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", "buildkite-gha-job-summary", "--style", "info"}
-			if len(annotations) != 1 || !slices.Equal(annotations[0].args, wantArgs) || string(annotations[0].stdin) != "### Job summary\n\nPassed.\n" {
+			wantBody := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\n### Job summary\n\nPassed.\n"
+			if len(annotations) != 1 || !slices.Equal(annotations[0].args, wantArgs) || string(annotations[0].stdin) != wantBody {
 				t.Fatalf("annotations = %#v", annotations)
 			}
 			if last := runner.commands[len(runner.commands)-1]; len(last.args) == 0 || last.args[0] != "annotate" {
@@ -5821,7 +5829,11 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 	if err != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
 		t.Fatalf("publishTerminalResult() publication = %#v, error = %v", publication, err)
 	}
-	wantBodies := []string{"summary before cancellation\n", "warning before cancellation\n", "error before cancellation\n"}
+	wantBodies := []string{
+		"<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\nsummary before cancellation\n",
+		"warning before cancellation\n",
+		"error before cancellation\n",
+	}
 	commands := runner.commands[len(runner.commands)-len(wantBodies):]
 	for i, command := range commands {
 		if len(command.args) == 0 || command.args[0] != "annotate" || string(command.stdin) != wantBodies[i] {
@@ -5931,7 +5943,8 @@ func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 		t.Fatalf("published result = %#v, want bounded failure without outputs", manifest)
 	}
 	last := runner.commands[len(runner.commands)-1]
-	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != "summary from malformed result\n" {
+	wantSummary := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\nsummary from malformed result\n"
+	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != wantSummary {
 		t.Fatalf("last command = %#v, want summary annotation after bounded failure", last)
 	}
 }

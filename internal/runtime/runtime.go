@@ -35,8 +35,10 @@ const (
 	defaultTerminateGrace = 2500 * time.Millisecond
 	maxStreamLineBytes    = 1024 * 1024
 	// Match Buildkite's maximum annotation body size.
-	maxJobAnnotationBytes = 1024 * 1024
-	maxJobSummaryBytes    = maxJobAnnotationBytes
+	maxJobAnnotationBytes         = 1024 * 1024
+	jobSummaryAnnotationHeading   = "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n"
+	jobSummaryAnnotationSeparator = "<div class=\"border-top border-gray pt2\"></div>\n"
+	maxJobSummaryBytes            = maxJobAnnotationBytes - len(jobSummaryAnnotationHeading) - len(jobSummaryAnnotationSeparator)
 
 	jobSummaryTruncationNotice       = "\n\n---\n_Job summary truncated at the 1 MiB limit._\n"
 	workflowCommandTruncationNotice  = "\n\n---\n_Workflow command annotations truncated at the 1 MiB limit._\n"

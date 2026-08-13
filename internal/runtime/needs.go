@@ -105,7 +105,8 @@ func publishJobSummary(ctx context.Context, agent transport.Agent, jobID, summar
 	if summary == "" {
 		return
 	}
-	if err := agent.AnnotateJob(ctx, jobID, jobSummaryAnnotationContext, "info", summary); err != nil {
+	body := jobSummaryAnnotationHeading + jobSummaryAnnotationSeparator + summary
+	if err := agent.AnnotateJob(ctx, jobID, jobSummaryAnnotationContext, "info", body); err != nil {
 		publication.SummaryAnnotationError = fmt.Errorf("publish job summary: %w", err)
 	}
 }
