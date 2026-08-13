@@ -91,12 +91,24 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
 	out.WriteString(annotationCode(report.Workflow))
 	out.WriteString("</div>\n<div class=\"mb2\">\n")
-	for _, diagnostic := range diagnostics {
-		remaining := processingAnnotationBodyLimit - out.Len() - len(processingAnnotationEnd)
-		row := renderProcessingDiagnostic(diagnostic)
+	rows := make([]string, len(diagnostics))
+	bodyBytes := out.Len() + len(processingAnnotationEnd)
+	for i, diagnostic := range diagnostics {
+		rows[i] = renderProcessingDiagnostic(diagnostic)
+		bodyBytes += len(rows[i])
+	}
+	if bodyBytes <= processingAnnotationBodyLimit {
+		for _, row := range rows {
+			out.WriteString(row)
+		}
+		out.WriteString(processingAnnotationEnd)
+		return style, out.String()
+	}
+
+	remaining := processingAnnotationBodyLimit - out.Len() - len(processingAnnotationEnd) - len(processingAnnotationNotice)
+	for i, row := range rows {
 		if len(row) > remaining {
-			remaining -= len(processingAnnotationNotice)
-			if row = renderProcessingDiagnosticWithin(diagnostic, remaining); row != "" {
+			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining); row != "" {
 				out.WriteString(row)
 			}
 			out.WriteString(processingAnnotationEnd)
@@ -104,9 +116,9 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 			return style, out.String()
 		}
 		out.WriteString(row)
+		remaining -= len(row)
 	}
-	out.WriteString(processingAnnotationEnd)
-	return style, out.String()
+	panic("processing annotation exceeded its precomputed size")
 }
 
 func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int) string {

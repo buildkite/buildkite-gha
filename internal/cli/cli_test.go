@@ -2267,6 +2267,25 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "")
+	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
+	probeRow := renderProcessingDiagnostic(probe)
+	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
+		len("<div class=\"mb2\"><strong>Workflow:</strong> ") + len(annotationCode(report.Workflow)) +
+		len("</div>\n<div class=\"mb2\">\n")
+	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationEnd) - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))
+	report.Diagnostics = append(report.Diagnostics,
+		compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: strings.Repeat("a", messageBytes)},
+		compatibility.Diagnostic{Level: "warning", Code: "W_OMITTED", Message: "omitted diagnostic"},
+	)
+
+	_, body := processingAnnotation(report)
+	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, "Additional diagnostics omitted") {
+		t.Fatalf("annotation bytes = %d, notice present = %v", len(body), strings.Contains(body, "Additional diagnostics omitted"))
+	}
+}
+
 func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
@@ -5654,7 +5673,7 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 				return
 			}
 			wantArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", "buildkite-gha-job-summary", "--style", "info"}
-			wantBody := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\n### Job summary\n\nPassed.\n"
+			wantBody := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\n\n### Job summary\n\nPassed.\n"
 			if len(annotations) != 1 || !slices.Equal(annotations[0].args, wantArgs) || string(annotations[0].stdin) != wantBody {
 				t.Fatalf("annotations = %#v", annotations)
 			}
@@ -5830,7 +5849,7 @@ func TestPublishTerminalResultAnnotatesCancelledJobWithFreshContext(t *testing.T
 		t.Fatalf("publishTerminalResult() publication = %#v, error = %v", publication, err)
 	}
 	wantBodies := []string{
-		"<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\nsummary before cancellation\n",
+		"<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\n\nsummary before cancellation\n",
 		"warning before cancellation\n",
 		"error before cancellation\n",
 	}
@@ -5943,7 +5962,7 @@ func TestRunJobPublishesBoundedFailureForUnrepresentableOutputs(t *testing.T) {
 		t.Fatalf("published result = %#v, want bounded failure without outputs", manifest)
 	}
 	last := runner.commands[len(runner.commands)-1]
-	wantSummary := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\nsummary from malformed result\n"
+	wantSummary := "<h2 class=\"h4 mb2\">GitHub Actions job summary</h2>\n<div class=\"border-top border-gray pt2\"></div>\n\nsummary from malformed result\n"
 	if len(last.args) == 0 || last.args[0] != "annotate" || string(last.stdin) != wantSummary {
 		t.Fatalf("last command = %#v, want summary annotation after bounded failure", last)
 	}
