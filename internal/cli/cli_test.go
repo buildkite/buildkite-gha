@@ -3813,14 +3813,14 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	requireImporterHost(t)
 	directory := t.TempDir()
 	workflowPath := filepath.Join(directory, "invalid-push.yml")
-	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
+	workflow := "name: Invalid push\non:\n  push:\n    branches: [main]\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
 	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	const valueSentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
 	const keySentinel = "EVENT_SECRET_KEY"
 	const jsonSentinel = "@"
-	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{
+	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/chore_updates", map[string]any{
 		"runner":      valueSentinel,
 		"runner_json": jsonSentinel,
 		"runners": map[string]any{
@@ -3840,11 +3840,12 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group   string             `yaml:"group"`
-			Label   string             `yaml:"label"`
-			Command string             `yaml:"command"`
-			Plugins failureStepPlugins `yaml:"plugins"`
-			Notify  []struct {
+			Group     string             `yaml:"group"`
+			Label     string             `yaml:"label"`
+			Condition string             `yaml:"if"`
+			Command   string             `yaml:"command"`
+			Plugins   failureStepPlugins `yaml:"plugins"`
+			Notify    []struct {
 				GitHubCheck struct {
 					Output struct {
 						Title   string `yaml:"title"`
@@ -3872,7 +3873,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: Invalid push" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label is not mapped") || !strings.Contains(string(message), "Runner label is not mapped") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label is not mapped") || !strings.Contains(string(message), "Runner label is not mapped") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -3925,9 +3926,9 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 		compatibility.Diagnostic{Level: "error", Code: "E_RUNNER", Message: "runner is unsupported", Job: "test"},
 	)
 
-	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report)
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
+	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
 	}
 }
@@ -4258,7 +4259,7 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	}
 	failure := pipeline.Steps[0]
 	message := failureArtifactForStep(failure.Plugins, runner.uploaded, "messages")
-	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "true" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), "push path filters are unsupported") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), "push path filters are unsupported") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 		t.Fatalf("trigger failure step = %#v", failure)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
@@ -4362,7 +4363,7 @@ func TestRunEmitsUnclassifiablePushSnapshotAsFailingStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	message := failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages")
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Condition != "true" || !isGeneratedFailureCommand(pipeline.Steps[0].Command) || !strings.Contains(string(message), "refs/heads/") || strings.Contains(string(message), "null == null") {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Condition != "" || !isGeneratedFailureCommand(pipeline.Steps[0].Command) || !strings.Contains(string(message), "refs/heads/") || strings.Contains(string(message), "null == null") {
 		t.Fatalf("unclassifiable push failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 }

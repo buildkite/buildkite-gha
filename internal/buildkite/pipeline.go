@@ -158,7 +158,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.CheckName == "" {
 				return nil, fmt.Errorf("workflow %q requires a GitHub Check name", workflow.GroupKey)
 			}
-			if workflow.Condition == "" && workflow.SkipReason == "" {
+			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
 			}
 			if workflow.Failure == nil && workflow.Condition != "" && workflow.SkipReason != "" {
