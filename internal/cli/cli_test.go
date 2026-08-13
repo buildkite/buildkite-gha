@@ -3536,6 +3536,57 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 }
 
+func TestRunUploadEmitsUnsupportedJobCancellationAsFailingStep(t *testing.T) {
+	requireImporterHost(t)
+	directory := t.TempDir()
+	workflowPath := filepath.Join(directory, "rebase-needed.yml")
+	workflow := `name: Rebase needed
+on: push
+jobs:
+  label-rebase-needed:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rebase-needed
+      cancel-in-progress: true
+    steps: [{run: true}]
+`
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "job-cancellation-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group    string `yaml:"group"`
+			Label    string `yaml:"label"`
+			Command  string `yaml:"command"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 {
+		t.Fatalf("job cancellation pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	step := pipeline.Steps[0]
+	if step.Group != "" || step.Label != ":github: Buildkite / Rebase needed (push)" || !strings.Contains(step.Command, `[E_EXPRESSION_INVALID] job "label-rebase-needed": concurrency cancel-in-progress is unsupported {job=label-rebase-needed}`) || !strings.HasSuffix(step.Command, " && exit 1") || !step.Checkout.Skip {
+		t.Fatalf("job cancellation failure step = %#v", step)
+	}
+}
+
 func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
