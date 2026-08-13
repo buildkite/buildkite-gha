@@ -4116,6 +4116,42 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	}
 }
 
+func TestRunUploadDerivesCursorOriginEvent(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "origin-event-importer")
+	t.Setenv("BUILDKITE_REPO", "https://origin.cursor.com/git/acme/widgets.git")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Origin Author")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode Cursor Origin plan %q: %v", path, err)
+		}
+		planCount++
+		if job.Event.Provider != "cursor-origin" || job.Event.Repository != "acme/widgets" || job.Event.Ref != "refs/heads/main" || job.Event.SHA != sha {
+			t.Fatalf("Cursor Origin plan event = %#v", job.Event)
+		}
+	}
+	if planCount != 3 {
+		t.Fatalf("Cursor Origin plan count = %d, want 3", planCount)
+	}
+}
+
 func TestRunUploadUsesWebhookPayloadWithoutRetainingIt(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "webhook.yml")

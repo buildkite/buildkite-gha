@@ -37,7 +37,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
 | [Environments and snapshots](#job-configuration) | ➖ Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
 | [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
-| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and other providers are outside the initial release. |
+| [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
 ## How workflows run on Buildkite
@@ -638,10 +638,11 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 | --- | --- | --- |
 | Public GitHub event repository | ✅ Supported | No additional boundary. |
 | Private GitHub event repository | 🟡 Supported subset | Buildkite must authorize repository-provider Git credentials. |
+| Internal or private Cursor Origin event repository | 🟡 Supported subset | `BUILDKITE_REPO` must be the pipeline's exact `https://origin.cursor.com/git/<namespace>/<repository>.git` URL. Buildkite must authorize repository-provider Git credentials. |
 | Alternate repository in `actions/checkout` | ❌ Unsupported | Not available. |
 | Public GitHub action | 🟡 Supported subset | Subject to the action boundaries above. |
 | Private action or reusable workflow | ❌ Unsupported | Not available. |
-| GitHub Enterprise Server or another provider | ❌ Unsupported | Not available. |
+| GitHub Enterprise Server or an unlisted provider | ❌ Unsupported | Not available. |
 
 ### GitHub token
 
