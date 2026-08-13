@@ -3446,6 +3446,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		Steps []struct {
 			Group     string `yaml:"group"`
 			Label     string `yaml:"label"`
+			Type      string `yaml:"type"`
 			Condition string `yaml:"if"`
 			Skip      string `yaml:"skip"`
 			Command   string `yaml:"command"`
@@ -3480,7 +3481,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		if group.Skip != "" {
-			if group.Group != "" || group.Label != want[i].group || group.Command != ":" || len(group.Steps) != 0 {
+			if group.Group != "" || group.Label != want[i].group || group.Type != "command" || group.Command != "" || len(group.Steps) != 0 {
 				t.Fatalf("aggregate skipped step %d = %#v", i, group)
 			}
 			continue
@@ -4020,6 +4021,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		Steps []struct {
 			Group   string `yaml:"group"`
 			Label   string `yaml:"label"`
+			Type    string `yaml:"type"`
 			Skip    string `yaml:"skip"`
 			Command string `yaml:"command"`
 			Steps   []any  `yaml:"steps"`
@@ -4029,7 +4031,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLabel := filepath.ToSlash(filepath.Clean(workflowPath))
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != ":" || len(pipeline.Steps[0].Steps) != 0 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Type != "command" || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != "" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	for path := range runner.uploaded {
@@ -4283,6 +4285,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 		Steps []struct {
 			Group     string `yaml:"group"`
 			Label     string `yaml:"label"`
+			Type      string `yaml:"type"`
 			Skip      string `yaml:"skip"`
 			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
@@ -4311,7 +4314,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 				t.Fatalf("caller group = %#v", workflow)
 			}
 		case "":
-			if workflow.Label != ":github: Pull request only" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
+			if workflow.Label != ":github: Pull request only" || workflow.Type != "command" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != "" || len(workflow.Steps) != 0 {
 				t.Fatalf("inactive workflow step = %#v", workflow)
 			}
 		default:

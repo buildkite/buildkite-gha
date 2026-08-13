@@ -257,7 +257,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
-		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(":"))
+		out.WriteString("    type: command\n")
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
 		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
