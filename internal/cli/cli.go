@@ -1749,15 +1749,20 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport) str
 		if diagnostic.Level != "error" {
 			continue
 		}
+		diagnosticPath := failureCheckDiagnosticPath(path, report.Workflow, diagnostic.Location)
 		message := diagnostic.Message
-		for _, prefix := range []string{report.Workflow + ": ", path + ": "} {
+		prefixes := []string{report.Workflow + ": ", path + ": ", diagnosticPath + ": "}
+		if diagnostic.Location != nil {
+			prefixes = append(prefixes, diagnostic.Location.Path+": ")
+		}
+		for _, prefix := range prefixes {
 			message = strings.TrimPrefix(message, prefix)
 		}
 		if diagnostic.Job != "" {
 			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
 		}
 		summary.WriteString("\n- ")
-		summary.WriteString(markdownCode(path))
+		summary.WriteString(markdownCode(diagnosticPath))
 		if diagnostic.Job != "" {
 			summary.WriteString(", job ")
 			summary.WriteString(markdownCode(diagnostic.Job))
@@ -1769,6 +1774,28 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport) str
 		summary.WriteString(markdownText(message))
 	}
 	return truncateFailureCheckSummary(summary.String())
+}
+
+func failureCheckDiagnosticPath(rootPath, reportPath string, location *compatibility.SourceLocation) string {
+	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
+	if location == nil || location.Path == "" {
+		return rootPath
+	}
+	reportPath = filepath.ToSlash(filepath.Clean(reportPath))
+	diagnosticPath := filepath.ToSlash(filepath.Clean(location.Path))
+	if diagnosticPath == reportPath || diagnosticPath == rootPath {
+		return rootPath
+	}
+	if filepath.IsAbs(diagnosticPath) && filepath.IsAbs(reportPath) && !filepath.IsAbs(rootPath) {
+		rootSuffix := "/" + strings.TrimPrefix(rootPath, "./")
+		if strings.HasSuffix(reportPath, rootSuffix) {
+			repositoryRoot := strings.TrimSuffix(reportPath, rootSuffix)
+			if relative, ok := strings.CutPrefix(diagnosticPath, repositoryRoot+"/"); ok {
+				return relative
+			}
+		}
+	}
+	return strings.TrimPrefix(diagnosticPath, "./")
 }
 
 func truncateFailureCheckSummary(summary string) string {

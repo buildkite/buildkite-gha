@@ -3578,6 +3578,23 @@ func TestFailureCheckSummaryFitsGitHubLimit(t *testing.T) {
 	}
 }
 
+func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
+	report := compatibility.NewProcessingReport("/work/repo/.github/workflows/caller.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics,
+		compatibility.Diagnostic{Level: "error", Message: "caller failed", Job: "caller", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/caller.yml", Line: 5, Column: 3}},
+		compatibility.Diagnostic{Level: "error", Message: "reusable failed", Job: "called", Location: &compatibility.SourceLocation{Path: "./.github/workflows/reusable.yml", Line: 7, Column: 3}},
+		compatibility.Diagnostic{Level: "error", Message: "absolute reusable failed", Job: "absolute", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/absolute.yml", Line: 9, Column: 3}},
+	)
+
+	want := "The workflow could not be prepared:\n\n" +
+		"- `.github/workflows/caller.yml`, job `caller`: caller failed\n" +
+		"- `.github/workflows/reusable.yml`, job `called`: reusable failed\n" +
+		"- `.github/workflows/absolute.yml`, job `absolute`: absolute reusable failed"
+	if got := failureCheckSummary(".github/workflows/caller.yml", report); got != want {
+		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
+	}
+}
+
 func TestRunUploadEmitsUnsupportedJobCancellationAsFailingStep(t *testing.T) {
 	requireImporterHost(t)
 	directory := t.TempDir()
