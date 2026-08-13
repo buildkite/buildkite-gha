@@ -3523,7 +3523,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	step := pipeline.Steps[0]
 	wantMessage := strings.Join(wantReasons, "\n")
-	if step.Label != "Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
+	if step.Label != ":github: Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	command := exec.Command("sh", "-c", step.Command)
@@ -3584,7 +3584,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
 	}
 	for i, step := range pipeline.Steps[:2] {
-		if step.Group != "" || len(step.Steps) != 0 || !strings.HasPrefix(step.Label, "Buildkite / ") || !strings.HasSuffix(step.Command, " && exit 1") {
+		if step.Group != "" || len(step.Steps) != 0 || !strings.HasPrefix(step.Label, ":github: Buildkite / ") || !strings.HasSuffix(step.Command, " && exit 1") {
 			t.Fatalf("failed workflow step %d = %#v", i, step)
 		}
 	}
@@ -3737,7 +3737,7 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 		t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	failure := pipeline.Steps[0]
-	if failure.Group != "" || failure.Label != "Buildkite / Crowdin upload (push)" || failure.Condition != "true" || !strings.Contains(failure.Command, "[E_PIPELINE_GENERATION] .github/workflows/crowdin-upload.yml: translate workflow triggers: push path filters are unsupported: Buildkite if_changed is not equivalent") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+	if failure.Group != "" || failure.Label != ":github: Buildkite / Crowdin upload (push)" || failure.Condition != "true" || !strings.Contains(failure.Command, "[E_PIPELINE_GENERATION] .github/workflows/crowdin-upload.yml: translate workflow triggers: push path filters are unsupported: Buildkite if_changed is not equivalent") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 		t.Fatalf("trigger failure step = %#v", failure)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
@@ -3790,7 +3790,7 @@ func TestRunUploadEmitsIncompletePullRequestSnapshotsAsFailingSteps(t *testing.T
 			if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != "Buildkite / .github/workflows/pull-request.yml (pull_request)" || !strings.Contains(pipeline.Steps[0].Command, compiler.CodePipelineGeneration) || !strings.Contains(pipeline.Steps[0].Command, test.want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: Buildkite / .github/workflows/pull-request.yml (pull_request)" || !strings.Contains(pipeline.Steps[0].Command, compiler.CodePipelineGeneration) || !strings.Contains(pipeline.Steps[0].Command, test.want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
 				t.Fatalf("incomplete pull request failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 			}
 		})

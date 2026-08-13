@@ -306,7 +306,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != "Buildkite / CI (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Command != `printf '%s\n' 'runner isn'"'"'t admitted
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: Buildkite / CI (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Command != `printf '%s\n' 'runner isn'"'"'t admitted
 matrix could not be expanded' && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
 	}
