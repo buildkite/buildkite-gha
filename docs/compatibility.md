@@ -2,9 +2,10 @@
 
 This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted` profile used by `upload` and the Buildkite plugin.
 
-The released plugin path supports Linux x86-64 and native macOS arm64, including
-the matching `runner.os` and `runner.arch` values. Platform labels do not provide
-GitHub image or toolchain parity.
+The released plugin path supports Linux x86-64 and native macOS arm64 importers
+and generated jobs, including the matching `runner.os` and `runner.arch` values.
+Importer agent targeting is independent of generated-job runner mappings.
+Platform labels do not provide GitHub image or toolchain parity.
 
 GitHub Actions syntax changes over time. If a feature is not listed here, treat it as unsupported. GitHub's [workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax) describes the original syntax; this page describes the subset that runs on Buildkite.
 

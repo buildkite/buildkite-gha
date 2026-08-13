@@ -68,7 +68,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers must run on linux/amd64; the Linux runtime defaults to the importer executable when omitted, and macOS has no default. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -77,6 +77,7 @@ const (
 	legacyRuntimeQueue                          = "hosted"
 	pluginConfigurationEnvironment              = "BUILDKITE_PLUGIN_CONFIGURATION"
 	pluginDevDarwinRuntimeEnvironment           = "BUILDKITE_GHA_PLUGIN_DEV_DARWIN_RUNTIME"
+	pluginDevLinuxRuntimeEnvironment            = "BUILDKITE_GHA_PLUGIN_DEV_LINUX_RUNTIME"
 	legacyTargetQueueEnvironment                = "BUILDKITE_GHA_TARGET_QUEUE"
 	legacyRuntimeImageEnvironment               = "BUILDKITE_GHA_RUNTIME_IMAGE"
 	repositoryProviderGitCredentialsEnvironment = "BUILDKITE_USE_REPOSITORY_PROVIDER_GIT_CREDENTIALS"
@@ -165,7 +166,8 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
 	}
-	if err := validateImporterPlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+	importerPlatform, err := importerPlatform(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
@@ -182,14 +184,19 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 		explicitWorkflowPaths: true,
 		runnerTargets:         configuration.runnerTargets,
 		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
+		importerPlatform:      importerPlatform,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
-func validateImporterPlatform(goos, goarch string) error {
-	if goos != "linux" || goarch != "amd64" {
-		return fmt.Errorf("importer requires linux/amd64, running on %s/%s", goos, goarch)
+func importerPlatform(goos, goarch string) (compiler.Platform, error) {
+	switch {
+	case goos == "linux" && goarch == "amd64":
+		return compiler.PlatformLinuxAMD64, nil
+	case goos == "darwin" && goarch == "arm64":
+		return compiler.PlatformDarwinARM64, nil
+	default:
+		return compiler.Platform{}, fmt.Errorf("importer requires linux/amd64 or darwin/arm64, running on %s/%s", goos, goarch)
 	}
-	return nil
 }
 
 type pluginConfiguration struct {
@@ -1370,7 +1377,8 @@ func upload(args []string, stdout, stderr io.Writer, version string, agent trans
 }
 
 func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	if err := validateImporterPlatform(goos, goarch); err != nil {
+	platform, err := importerPlatform(goos, goarch)
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
@@ -1378,6 +1386,7 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 	if err != nil {
 		return usageError(stderr, "upload: %v", err)
 	}
+	uploadArguments.importerPlatform = platform
 	return uploadParsed(uploadArguments, stdout, stderr, version, agent)
 }
 
@@ -1500,39 +1509,61 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		return 1
 	}
-	runtimePaths := uploadArguments.runtimeDistributionPaths
-	if uploadArguments.pluginAcquisition != nil {
-		requiredPlatforms := make(map[compiler.Platform]bool, 2)
-		for _, input := range workflows {
-			if !input.Applicable {
-				continue
-			}
-			platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
-			if platformErr != nil {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
-				return 1
-			}
-			for platform := range platforms {
-				requiredPlatforms[platform] = true
-			}
+	importerDistribution := runtimeDistribution{contents: executableContents, digest: distributionDigest}
+	requiredPlatforms := make(map[compiler.Platform]bool, 2)
+	for _, input := range workflows {
+		if !input.Applicable {
+			continue
 		}
-		runtimeDistributions, acquireErr := uploadArguments.pluginAcquisition.acquire(ctx, requiredPlatforms, runtimeDistribution{contents: executableContents, digest: distributionDigest})
+		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
+		if platformErr != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", platformErr)
+			return 1
+		}
+		for platform := range platforms {
+			requiredPlatforms[platform] = true
+		}
+	}
+	if uploadArguments.pluginAcquisition != nil {
+		runtimeDistributions, acquireErr := uploadArguments.pluginAcquisition.acquire(ctx, requiredPlatforms, uploadArguments.importerPlatform, importerDistribution)
 		if acquireErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", acquireErr)
 			return 1
 		}
-		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+		return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
 	}
-	runtimeDistributions, err := loadRuntimeDistributions(runtimePaths)
+	requiredDistributionPaths := make(map[compiler.Platform]string, len(requiredPlatforms))
+	for platform := range requiredPlatforms {
+		if path, ok := uploadArguments.runtimeDistributionPaths[platform]; ok {
+			requiredDistributionPaths[platform] = path
+		}
+	}
+	configuredDistributions, err := loadRuntimeDistributions(requiredDistributionPaths)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, executableContents, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
+	runtimeDistributions := make(map[compiler.Platform]runtimeDistribution, len(requiredPlatforms))
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+		if !requiredPlatforms[platform] {
+			continue
+		}
+		if configured, ok := configuredDistributions[platform]; ok {
+			runtimeDistributions[platform] = configured
+			continue
+		}
+		if platform == uploadArguments.importerPlatform {
+			runtimeDistributions[platform] = importerDistribution
+			continue
+		}
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: runtime distribution for %s is required by the selected workflows\n", platform)
+		return 1
+	}
+	return finishUpload(ctx, uploadArguments, stdout, stderr, version, agent, workflows, effectiveEvent, executablePath, distributionDigest, importerStep, processingReports, out, runtimeDistributions)
 }
 
-func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath string, executableContents []byte, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
-	runtimeDigests := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
+func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent, workflows []workflowInput, effectiveEvent effectiveEventSelection, executablePath, distributionDigest, importerStep string, processingReports []compatibility.ProcessingReport, out processingOutput, runtimeDistributions map[compiler.Platform]runtimeDistribution) int {
+	runtimeDigests := make(map[compiler.Platform]string, len(runtimeDistributions))
 	for platform, runtimeDistribution := range runtimeDistributions {
 		runtimeDigests[platform] = runtimeDistribution.digest
 	}
@@ -1596,17 +1627,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			out.annotate(processingReports[i])
 		}
 	}
-	artifacts := make([]transport.Artifact, 0, 1+len(runtimeDistributions)+len(planArtifacts))
-	distributionPath, err := buildkitepipeline.DistributionPath(distributionDigest)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
-		return 1
-	}
-	artifacts = append(artifacts, transport.Artifact{Path: distributionPath, Digest: distributionDigest, Contents: executableContents})
-	artifactPaths := map[string]struct{}{distributionPath: {}}
+	artifacts := make([]transport.Artifact, 0, len(runtimeDistributions)+len(planArtifacts))
+	artifactPaths := make(map[string]struct{}, cap(artifacts))
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
-		if !ok || runtimeDistribution.digest == distributionDigest {
+		if !ok {
 			continue
 		}
 		path, pathErr := buildkitepipeline.DistributionPath(runtimeDistribution.digest)
@@ -1627,6 +1652,14 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		}
 		artifactPaths[jobPlan.Path] = struct{}{}
 		artifacts = append(artifacts, transport.Artifact{Path: jobPlan.Path, Digest: jobPlan.Digest, Contents: jobPlan.Contents})
+	}
+	if len(artifacts) == 0 {
+		if err := agent.UploadPipeline(ctx, aggregatePipeline); err != nil {
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
+			return 1
+		}
+		_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
+		return 0
 	}
 	root, err := os.MkdirTemp("", "buildkite-gha-upload-")
 	if err != nil {
@@ -2276,6 +2309,7 @@ type parsedUploadArgs struct {
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
 	pluginAcquisition        *pluginRuntimeAcquisition
+	importerPlatform         compiler.Platform
 }
 
 func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {
@@ -2460,7 +2494,10 @@ type pluginRuntimeAcquisition struct {
 	version string
 }
 
-const pluginDarwinAsset = "buildkite-gha_Darwin_arm64.tar.gz"
+const (
+	pluginLinuxAsset  = "buildkite-gha_Linux_x86_64.tar.gz"
+	pluginDarwinAsset = "buildkite-gha_Darwin_arm64.tar.gz"
+)
 
 func securePluginHTTPClient() *http.Client {
 	return &http.Client{
@@ -2477,66 +2514,92 @@ func securePluginHTTPClient() *http.Client {
 	}
 }
 
-func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, linux runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
-	distributions := map[compiler.Platform]runtimeDistribution{}
-	if required[compiler.PlatformLinuxAMD64] {
-		distributions[compiler.PlatformLinuxAMD64] = linux
+func (a *pluginRuntimeAcquisition) acquire(ctx context.Context, required map[compiler.Platform]bool, hostPlatform compiler.Platform, host runtimeDistribution) (map[compiler.Platform]runtimeDistribution, error) {
+	distributions := make(map[compiler.Platform]runtimeDistribution, len(required))
+	devPaths := map[compiler.Platform]string{
+		compiler.PlatformLinuxAMD64:  os.Getenv(pluginDevLinuxRuntimeEnvironment),
+		compiler.PlatformDarwinARM64: os.Getenv(pluginDevDarwinRuntimeEnvironment),
 	}
-	injected := os.Getenv(pluginDevDarwinRuntimeEnvironment)
-	if a.version != "dev" && injected != "" {
-		return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevDarwinRuntimeEnvironment)
-	}
-	if !required[compiler.PlatformDarwinARM64] {
-		return distributions, nil
-	}
-	if a.version == "dev" {
-		if injected == "" {
-			return nil, fmt.Errorf("%s is required for a dev build using darwin/arm64", pluginDevDarwinRuntimeEnvironment)
+	if a.version != "dev" {
+		for platform, path := range devPaths {
+			if path != "" {
+				return nil, fmt.Errorf("%s is test/dev-only and is rejected by release builds", pluginDevRuntimeEnvironment(platform))
+			}
 		}
-		loaded, err := loadRuntimeDistributions(map[compiler.Platform]string{compiler.PlatformDarwinARM64: injected})
+	}
+	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
+		if !required[platform] {
+			continue
+		}
+		if platform == hostPlatform {
+			distributions[platform] = host
+			continue
+		}
+		if a.version == "dev" {
+			path := devPaths[platform]
+			if path == "" {
+				return nil, fmt.Errorf("%s is required for a dev build using %s", pluginDevRuntimeEnvironment(platform), platform)
+			}
+			loaded, err := loadRuntimeDistributions(map[compiler.Platform]string{platform: path})
+			if err != nil {
+				return nil, err
+			}
+			distributions[platform] = loaded[platform]
+			continue
+		}
+		if !stableVersionPattern.MatchString(a.version) {
+			return nil, fmt.Errorf("running version %q is not a stable semantic version", a.version)
+		}
+		distribution, err := acquirePluginRuntime(ctx, a.version, platform, pluginHTTPClient, pluginReleaseBaseURL, pluginArchiveCachePath(a.version, pluginRuntimeAsset(platform)))
 		if err != nil {
 			return nil, err
 		}
-		distributions[compiler.PlatformDarwinARM64] = loaded[compiler.PlatformDarwinARM64]
-		return distributions, nil
+		distributions[platform] = distribution
 	}
-	if !stableVersionPattern.MatchString(a.version) {
-		return nil, fmt.Errorf("running version %q is not a stable semantic version", a.version)
-	}
-	darwin, err := acquirePluginDarwin(ctx, a.version, pluginHTTPClient, pluginReleaseBaseURL, pluginArchiveCachePath(a.version))
-	if err != nil {
-		return nil, err
-	}
-	distributions[compiler.PlatformDarwinARM64] = darwin
 	return distributions, nil
 }
 
-func acquirePluginDarwin(ctx context.Context, version string, client *http.Client, baseURL, cachePath string) (runtimeDistribution, error) {
+func pluginDevRuntimeEnvironment(platform compiler.Platform) string {
+	if platform == compiler.PlatformDarwinARM64 {
+		return pluginDevDarwinRuntimeEnvironment
+	}
+	return pluginDevLinuxRuntimeEnvironment
+}
+
+func pluginRuntimeAsset(platform compiler.Platform) string {
+	if platform == compiler.PlatformDarwinARM64 {
+		return pluginDarwinAsset
+	}
+	return pluginLinuxAsset
+}
+
+func acquirePluginRuntime(ctx context.Context, version string, platform compiler.Platform, client *http.Client, baseURL, cachePath string) (runtimeDistribution, error) {
+	asset := pluginRuntimeAsset(platform)
 	checksums, err := downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/checksums.txt", pluginChecksumLimit)
 	if err != nil {
 		return runtimeDistribution{}, fmt.Errorf("download release checksums: %w", err)
 	}
-	expected, err := pluginAssetChecksum(checksums, pluginDarwinAsset)
+	expected, err := pluginAssetChecksum(checksums, asset)
 	if err != nil {
 		return runtimeDistribution{}, err
 	}
 	archive := readVerifiedPluginArchiveCache(cachePath, expected)
 	if archive == nil {
-		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+pluginDarwinAsset, pluginArchiveLimit)
+		archive, err = downloadPluginReleaseFile(ctx, client, baseURL+"/v"+version+"/"+asset, pluginArchiveLimit)
 		if err != nil {
-			return runtimeDistribution{}, fmt.Errorf("download Darwin runtime: %w", err)
+			return runtimeDistribution{}, fmt.Errorf("download %s runtime: %w", platform, err)
 		}
 		if sha256.Sum256(archive) != expected {
-			return runtimeDistribution{}, fmt.Errorf("darwin archive checksum verification failed")
+			return runtimeDistribution{}, fmt.Errorf("%s archive checksum verification failed", platform)
 		}
 		writePluginArchiveCache(cachePath, archive)
 	}
-	contents, err := extractPluginDarwin(archive)
+	contents, err := extractPluginRuntime(archive, platform)
 	if err != nil {
 		return runtimeDistribution{}, err
 	}
-	if err := validateRuntimeDistributionBinary(compiler.PlatformDarwinARM64, contents); err != nil {
-		return runtimeDistribution{}, fmt.Errorf("validate Darwin runtime: %w", err)
+	if err := validateRuntimeDistributionBinary(platform, contents); err != nil {
+		return runtimeDistribution{}, fmt.Errorf("validate %s runtime: %w", platform, err)
 	}
 	digest := sha256.Sum256(contents)
 	return runtimeDistribution{contents: contents, digest: fmt.Sprintf("sha256:%x", digest)}, nil
@@ -2586,10 +2649,10 @@ func pluginAssetChecksum(contents []byte, asset string) ([sha256.Size]byte, erro
 	return result, nil
 }
 
-func extractPluginDarwin(archive []byte) ([]byte, error) {
+func extractPluginRuntime(archive []byte, platform compiler.Platform) ([]byte, error) {
 	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return nil, fmt.Errorf("open Darwin archive: %w", err)
+		return nil, fmt.Errorf("open %s archive: %w", platform, err)
 	}
 	defer func() { _ = gzipReader.Close() }()
 	tarReader := tar.NewReader(gzipReader)
@@ -2601,42 +2664,42 @@ func extractPluginDarwin(archive []byte) ([]byte, error) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read Darwin archive: %w", err)
+			return nil, fmt.Errorf("read %s archive: %w", platform, err)
 		}
 		if header.Typeflag != tar.TypeReg || header.Size < 0 || header.Size > runtimeDistributionLimit {
-			return nil, fmt.Errorf("darwin archive contains an unsafe member %q", header.Name)
+			return nil, fmt.Errorf("%s archive contains an unsafe member %q", platform, header.Name)
 		}
 		switch header.Name {
 		case "buildkite-gha":
 			if seenBinary || header.Mode&0o111 == 0 {
-				return nil, fmt.Errorf("darwin archive has an invalid executable member")
+				return nil, fmt.Errorf("%s archive has an invalid executable member", platform)
 			}
 			seenBinary = true
 			executable, err = io.ReadAll(io.LimitReader(tarReader, runtimeDistributionLimit+1))
 			if err != nil || int64(len(executable)) != header.Size {
-				return nil, fmt.Errorf("read Darwin executable")
+				return nil, fmt.Errorf("read %s executable", platform)
 			}
 		case "LICENSE":
 			if seenLicense {
-				return nil, fmt.Errorf("darwin archive contains duplicate LICENSE")
+				return nil, fmt.Errorf("%s archive contains duplicate LICENSE", platform)
 			}
 			seenLicense = true
 		default:
-			return nil, fmt.Errorf("darwin archive contains unexpected member %q", header.Name)
+			return nil, fmt.Errorf("%s archive contains unexpected member %q", platform, header.Name)
 		}
 	}
 	if !seenBinary || !seenLicense {
-		return nil, fmt.Errorf("darwin archive must contain exactly buildkite-gha and LICENSE")
+		return nil, fmt.Errorf("%s archive must contain exactly buildkite-gha and LICENSE", platform)
 	}
 	return executable, nil
 }
 
-func pluginArchiveCachePath(version string) string {
+func pluginArchiveCachePath(version, asset string) string {
 	root := os.Getenv("MISE_DATA_DIR")
 	if !filepath.IsAbs(root) {
 		return ""
 	}
-	return filepath.Join(root, "buildkite-gha", "releases", version, pluginDarwinAsset)
+	return filepath.Join(root, "buildkite-gha", "releases", version, asset)
 }
 
 func readVerifiedPluginArchiveCache(path string, expected [sha256.Size]byte) []byte {
