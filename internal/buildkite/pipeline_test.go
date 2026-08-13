@@ -219,7 +219,7 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	}
 }
 
-func TestEmitAggregateSkippedWorkflowGroup(t *testing.T) {
+func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep: "importer",
 		Workflows: []Workflow{{
@@ -235,33 +235,32 @@ func TestEmitAggregateSkippedWorkflowGroup(t *testing.T) {
 	var document struct {
 		Steps []struct {
 			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
 			Skip      string `yaml:"skip"`
+			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
 					Name string `yaml:"name"`
 				} `yaml:"github_check"`
 			} `yaml:"notify"`
-			Steps []struct {
-				Label    string `yaml:"label"`
-				Command  string `yaml:"command"`
-				Checkout struct {
-					Skip bool `yaml:"skip"`
-				} `yaml:"checkout"`
-			} `yaml:"steps"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			Steps []any `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
 	if len(document.Steps) != 1 {
-		t.Fatalf("skipped aggregate groups = %#v\n%s", document.Steps, output)
+		t.Fatalf("skipped aggregate steps = %#v\n%s", document.Steps, output)
 	}
-	group := document.Steps[0]
-	if group.Group != ":github: Pull request" || group.Key != "gha-workflow-1111111111111111" || group.Condition != "" || group.Skip != "This workflow is not triggered by a `push` event" || group.DependsOn != "importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != "Buildkite / Pull request (push)" || len(group.Steps) != 1 || group.Steps[0].Label != "Ignored workflow" || group.Steps[0].Command != ":" || !group.Steps[0].Checkout.Skip {
-		t.Fatalf("skipped aggregate group = %#v\n%s", group, output)
+	step := document.Steps[0]
+	if step.Group != "" || step.Label != "Buildkite / Pull request (push)" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != ":" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
+		t.Fatalf("skipped aggregate step = %#v\n%s", step, output)
 	}
 }
 

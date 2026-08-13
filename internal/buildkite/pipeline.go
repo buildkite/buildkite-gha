@@ -243,6 +243,21 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
 	}
+	if workflow.SkipReason != "" && workflow.Aggregate {
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
+		if workflow.Condition != "" {
+			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
+		}
+		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
+		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(":"))
+		out.WriteString("    notify:\n")
+		out.WriteString("      - github_check:\n")
+		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
+		out.WriteString("    checkout:\n      skip: true\n")
+		return nil
+	}
 	stepIndent := "  "
 	if workflow.Grouped {
 		groupLabel := workflow.GroupLabel
@@ -271,12 +286,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		stepIndent = "      "
 	}
 	attributeIndent := stepIndent + "  "
-	if workflow.SkipReason != "" && len(workflow.Jobs) == 0 {
-		_, _ = fmt.Fprintf(out, "%s- label: %s\n", stepIndent, yamlScalar("Ignored workflow"))
-		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(":"))
-		_, _ = fmt.Fprintf(out, "%scheckout:\n%s  skip: true\n", attributeIndent, attributeIndent)
-		return nil
-	}
 	if workflow.ConcurrencyGate != nil {
 		dependencies := []dependency{{Step: pipeline.CompilerStep}}
 		if workflow.Aggregate {

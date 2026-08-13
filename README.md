@@ -70,9 +70,9 @@ Configured Linux profiles use the matching Noble or Jammy hosted-toolchains
 image. A macOS label selects native Darwin/arm64, not a GitHub image or Xcode
 inventory.
 
-The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per explicitly listed, directly runnable workflow in a single transaction. Workflows that do not declare the selected event become skipped groups. Each `:github: <workflow>` group depends on the importer; its GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
+The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer; each GitHub check is named `Buildkite / <workflow> (<event>)`. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 
-Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, manual/API, and scheduled builds to `push`, `pull_request`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, and pull request activity filters. Cross-event workflows are excluded before event-dependent compilation and retained as skipped groups.
+Buildkite owns build creation and schedule configuration. Within that build, `buildkite-gha` maps push, pull request, manual/API, and scheduled builds to `push`, `pull_request`, `workflow_dispatch`, and `schedule`, then applies the matching `on:` branch, tag, base-branch, and pull request activity filters. Cross-event workflows are excluded before event-dependent compilation and retained as top-level skipped steps.
 
 ## Check workflow compatibility
 
