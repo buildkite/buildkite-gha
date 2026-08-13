@@ -28,6 +28,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
@@ -95,6 +96,7 @@ const (
 	pluginChecksumLimit                         = 4 << 20
 	pluginArchiveLimit                          = 256 << 20
 	maxWebhookMetadataBytes                     = 25 << 20
+	githubCheckSummaryLimit                     = 65535
 	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
 	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
 )
@@ -1803,8 +1805,82 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		GroupKey:   "gha-workflow-" + input.Identity,
 		CheckName:  "Buildkite / " + label + " (" + event + ")",
 		Condition:  input.TriggerCondition,
-		Failure:    &buildkitepipeline.Failure{Message: strings.Join(messages, "\n")},
+		Failure: &buildkitepipeline.Failure{
+			Message: strings.Join(messages, "\n"),
+			Summary: failureCheckSummary(input.CanonicalPath, report),
+		},
 	}
+}
+
+func failureCheckSummary(path string, report compatibility.ProcessingReport) string {
+	if path == "" {
+		path = report.Workflow
+	}
+	var summary strings.Builder
+	summary.WriteString("The workflow could not be prepared:\n")
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level != "error" {
+			continue
+		}
+		diagnosticPath := failureCheckDiagnosticPath(path, report.Workflow, diagnostic.Location)
+		message := diagnostic.Message
+		prefixes := []string{report.Workflow + ": ", path + ": ", diagnosticPath + ": "}
+		if diagnostic.Location != nil {
+			prefixes = append(prefixes, diagnostic.Location.Path+": ")
+		}
+		for _, prefix := range prefixes {
+			message = strings.TrimPrefix(message, prefix)
+		}
+		if diagnostic.Job != "" {
+			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
+		}
+		summary.WriteString("\n- ")
+		summary.WriteString(markdownCode(diagnosticPath))
+		if diagnostic.Job != "" {
+			summary.WriteString(", job ")
+			summary.WriteString(markdownCode(diagnostic.Job))
+		}
+		if diagnostic.Step != 0 {
+			_, _ = fmt.Fprintf(&summary, ", step %d", diagnostic.Step)
+		}
+		summary.WriteString(": ")
+		summary.WriteString(markdownText(message))
+	}
+	return truncateFailureCheckSummary(summary.String())
+}
+
+func failureCheckDiagnosticPath(rootPath, reportPath string, location *compatibility.SourceLocation) string {
+	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
+	if location == nil || location.Path == "" {
+		return rootPath
+	}
+	reportPath = filepath.ToSlash(filepath.Clean(reportPath))
+	diagnosticPath := filepath.ToSlash(filepath.Clean(location.Path))
+	if diagnosticPath == reportPath || diagnosticPath == rootPath {
+		return rootPath
+	}
+	if filepath.IsAbs(diagnosticPath) && filepath.IsAbs(reportPath) && !filepath.IsAbs(rootPath) {
+		rootSuffix := "/" + strings.TrimPrefix(rootPath, "./")
+		if strings.HasSuffix(reportPath, rootSuffix) {
+			repositoryRoot := strings.TrimSuffix(reportPath, rootSuffix)
+			if relative, ok := strings.CutPrefix(diagnosticPath, repositoryRoot+"/"); ok {
+				return relative
+			}
+		}
+	}
+	return strings.TrimPrefix(diagnosticPath, "./")
+}
+
+func truncateFailureCheckSummary(summary string) string {
+	if len(summary) <= githubCheckSummaryLimit {
+		return summary
+	}
+	const notice = "\n\n_Additional error details omitted at the GitHub check summary size limit._"
+	end := githubCheckSummaryLimit - len(notice)
+	for !utf8.ValidString(summary[:end]) {
+		end--
+	}
+	return summary[:end] + notice
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {

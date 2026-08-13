@@ -67,6 +67,7 @@ type Workflow struct {
 // Failure replaces a failed aggregate workflow with one synthetic command step.
 type Failure struct {
 	Message string
+	Summary string
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -173,6 +174,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if workflow.Failure.Message == "" {
 				return nil, fmt.Errorf("workflow %d failure requires a message", i+1)
 			}
+			if workflow.Failure.Summary == "" {
+				return nil, fmt.Errorf("workflow %d failure requires a GitHub Check summary", i+1)
+			}
 			if len(workflow.Jobs) != 0 || workflow.ConcurrencyGate != nil {
 				return nil, fmt.Errorf("workflow %d failure cannot include jobs or a concurrency gate", i+1)
 			}
@@ -239,6 +243,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
 		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+		out.WriteString("          output:\n")
+		_, _ = fmt.Fprintf(out, "            title: %s\n", yamlScalar("Workflow could not be run"))
+		_, _ = fmt.Fprintf(out, "            summary: %s\n", yamlScalar(failure.Summary))
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil

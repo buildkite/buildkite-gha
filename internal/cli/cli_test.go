@@ -1063,6 +1063,7 @@ func setCLIPluginBuildkiteEnvironment(t *testing.T, stepKey string) {
 	t.Setenv("BUILDKITE_BRANCH", "main")
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
 }
 
 func TestRunValidateAndCompile(t *testing.T) {
@@ -3754,9 +3755,17 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group    string `yaml:"group"`
-			Label    string `yaml:"label"`
-			Command  string `yaml:"command"`
+			Group   string `yaml:"group"`
+			Label   string `yaml:"label"`
+			Command string `yaml:"command"`
+			Notify  []struct {
+				GitHubCheck struct {
+					Output struct {
+						Title   string `yaml:"title"`
+						Summary string `yaml:"summary"`
+					} `yaml:"output"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
 			Checkout struct {
 				Skip bool `yaml:"skip"`
 			} `yaml:"checkout"`
@@ -3777,8 +3786,15 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	step := pipeline.Steps[0]
 	wantMessage := strings.Join(wantReasons, "\n")
-	if step.Label != ":github: Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
+	wantSummary := "The workflow could not be prepared:\n\n" +
+		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest\n" +
+		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
+		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
+	if step.Label != ":github: Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
+	}
+	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
+		t.Fatalf("compiler failure check summary contains diagnostic code: %q", step.Notify[0].GitHubCheck.Output.Summary)
 	}
 	command := exec.Command("sh", "-c", step.Command)
 	printed, err := command.CombinedOutput()
@@ -3797,10 +3813,40 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 		compatibility.Diagnostic{Level: "error", Code: "E_RUNNER", Message: "runner is unsupported", Job: "test"},
 	)
 
-	workflow := failedGeneratedWorkflow(workflowInput{Name: "CI", Identity: "ci"}, "push", report)
+	workflow := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
 	want := "[E_RUNNER] runner is unsupported {job=test}\n[W_CONCURRENCY] cancel-in-progress is ignored"
-	if workflow.Failure == nil || workflow.Failure.Message != want {
+	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
+	if workflow.Failure == nil || workflow.Failure.Message != want || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v, want message %q", workflow.Failure, want)
+	}
+}
+
+func TestFailureCheckSummaryFitsGitHubLimit(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: strings.Repeat("x", githubCheckSummaryLimit) + "🙂", Job: "test",
+	})
+
+	summary := failureCheckSummary("ci.yml", report)
+	if len(summary) > githubCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, "_Additional error details omitted at the GitHub check summary size limit._") {
+		t.Fatalf("truncated GitHub check summary is invalid: bytes=%d, valid UTF-8=%t, suffix=%q", len(summary), utf8.ValidString(summary), summary[len(summary)-100:])
+	}
+}
+
+func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
+	report := compatibility.NewProcessingReport("/work/repo/.github/workflows/caller.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics,
+		compatibility.Diagnostic{Level: "error", Message: "caller failed", Job: "caller", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/caller.yml", Line: 5, Column: 3}},
+		compatibility.Diagnostic{Level: "error", Message: "reusable failed", Job: "called", Location: &compatibility.SourceLocation{Path: "./.github/workflows/reusable.yml", Line: 7, Column: 3}},
+		compatibility.Diagnostic{Level: "error", Message: "absolute reusable failed", Job: "absolute", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/absolute.yml", Line: 9, Column: 3}},
+	)
+
+	want := "The workflow could not be prepared:\n\n" +
+		"- `.github/workflows/caller.yml`, job `caller`: caller failed\n" +
+		"- `.github/workflows/reusable.yml`, job `called`: reusable failed\n" +
+		"- `.github/workflows/absolute.yml`, job `absolute`: absolute reusable failed"
+	if got := failureCheckSummary(".github/workflows/caller.yml", report); got != want {
+		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
 	}
 }
 
@@ -4742,6 +4788,7 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	t.Setenv("BUILDKITE_BRANCH", "main")
 	t.Setenv("BUILDKITE_TAG", "")
 	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
 	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Unverified Author")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
