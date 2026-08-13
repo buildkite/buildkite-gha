@@ -183,12 +183,12 @@ func TestCompileActionInvocationsValidatesNestedUploadArtifact(t *testing.T) {
 	}
 
 	writeAction(t, workspace, "parent", "name: parent\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: payload\n        overwrite: true\n")
-	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
+	if _, err := compileActionInvocations(context.Background(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{}}); err == nil || !strings.Contains(err.Error(), "bounded upload-artifact adapter") || !strings.Contains(err.Error(), "overwrite") {
 		t.Fatalf("nested literal validation error = %v", err)
 	}
 
 	writeAction(t, workspace, "parent", "name: parent\ninputs:\n  path:\n    required: true\nruns:\n  using: composite\n  steps:\n    - uses: actions/upload-artifact@v4\n      with:\n        path: ${{ inputs.path }}\n")
-	if _, err := compileActionInvocations(context.Background(), workspace, source, []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
+	if _, err := compileActionInvocations(context.Background(), workspace, source, "https://github.com", []string{"./parent"}, []map[string]string{{"path": "payload"}}); err != nil {
 		t.Fatalf("nested expression was not deferred to runtime: %v", err)
 	}
 }
@@ -267,7 +267,7 @@ runs:
 		{name: "token before dynamic GitHub index", ref: "./mixed", wantErr: "index must be a string literal"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			compiled, err := compileActionInvocations(context.Background(), w, nil, []string{test.ref}, []map[string]string{test.supplied})
+			compiled, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{test.supplied})
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 					t.Fatalf("compileActionInvocations() error = %v, want %q", err, test.wantErr)
@@ -297,7 +297,7 @@ runs:
   main: index.js
 `)
 	compiled, err := compileActionInvocations(
-		context.Background(), workspace, nil, []string{"./secrets"},
+		context.Background(), workspace, nil, "https://github.com", []string{"./secrets"},
 		[]map[string]string{{"optional": "${{ secrets.OPTIONAL_TOKEN }}", "required": "${{ secrets.REQUIRED_TOKEN }}-${{ secrets.GITHUB_TOKEN }}"}},
 	)
 	if err != nil {
@@ -327,7 +327,7 @@ runs:
         token: ${{ secrets.DEPLOY_KEY }}
 `)
 
-	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./parent"}, []map[string]string{nil})
+	_, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./parent"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "composite action metadata cannot grant secret authority") {
 		t.Fatalf("composite metadata secret error = %v", err)
 	}
@@ -343,13 +343,13 @@ runs:
   using: node24
   main: index.js
 `)
-	_, err := compileActionInvocations(context.Background(), workspace, nil, []string{"./secrets"}, []map[string]string{nil})
+	_, err := compileActionInvocations(context.Background(), workspace, nil, "https://github.com", []string{"./secrets"}, []map[string]string{nil})
 	if err == nil || !strings.Contains(err.Error(), "action input defaults cannot grant secret authority") {
 		t.Fatalf("metadata secret default error = %v", err)
 	}
 }
 
-func TestCompileActionInvocationsAcceptsResolvedRemoteConditionalDefaults(t *testing.T) {
+func TestCompileActionInvocationsEvaluatesRemoteTokenDefaultForProvider(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", `name: complex remote default
 inputs:
@@ -360,15 +360,22 @@ runs:
   main: index.js
 `)
 	actionSource := &fakeActionSource{root: remote, calls: map[string]int{}}
-	compiled, err := compileActionInvocations(context.Background(), workspace, actionSource, []string{"owner/action@v1"}, []map[string]string{nil})
+	compiled, err := compileActionInvocations(context.Background(), workspace, actionSource, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !compiled.requiresGitHubToken {
 		t.Fatal("conditional remote action default did not require a GitHub token")
 	}
-	if actionSource.calls["owner/action@v1"] != 1 {
-		t.Fatalf("remote action resolutions = %#v, want one", actionSource.calls)
+	compiled, err = compileActionInvocations(context.Background(), workspace, actionSource, "https://origin.cursor.com", []string{"owner/action@v1"}, []map[string]string{nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.requiresGitHubToken {
+		t.Fatal("GitHub.com-only action default required a token for Origin")
+	}
+	if actionSource.calls["owner/action@v1"] != 2 {
+		t.Fatalf("remote action resolutions = %#v, want two", actionSource.calls)
 	}
 }
 
@@ -419,7 +426,7 @@ runs:
 		{ref: "./parent", want: true},
 		{ref: "./overridden"},
 	} {
-		compiled, err := compileActionInvocations(context.Background(), w, nil, []string{test.ref}, []map[string]string{nil})
+		compiled, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{test.ref}, []map[string]string{nil})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -427,7 +434,7 @@ runs:
 			t.Fatalf("%s requires GitHub token = %t, want %t", test.ref, compiled.requiresGitHubToken, test.want)
 		}
 	}
-	if _, err := compileActionInvocations(context.Background(), w, nil, []string{"./mixed-parent"}, []map[string]string{nil}); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
+	if _, err := compileActionInvocations(context.Background(), w, nil, "https://github.com", []string{"./mixed-parent"}, []map[string]string{nil}); err == nil || !strings.Contains(err.Error(), "index must be a string literal") {
 		t.Fatalf("mixed child traversal error = %v, want dynamic index rejection", err)
 	}
 }
@@ -990,6 +997,42 @@ func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
 	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Event.Provider != "cursor-origin" || bundle.Plans[0].Job.GitHubToken != nil ||
 		!reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
 		t.Fatalf("Origin checkout plan = %#v", bundle.Plans)
+	}
+}
+
+func TestNonGitHubActionSkipsGitHubOnlyConditionalTokenDefault(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "conditional-token.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte("on: push\npermissions:\n  contents: read\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: owner/action@v1\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", `name: Conditional token
+inputs:
+  token:
+    default: ${{ github.server_url == 'https://github.com' && github.token || '' }}
+runs:
+  using: node24
+  main: index.js
+`)
+	event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
+	bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.GitHubToken != nil || bundle.Plans[0].Job.HasCapability("provider-token-write") {
+		t.Fatalf("non-GitHub conditional-token plan = %#v", bundle.Plans)
 	}
 }
 

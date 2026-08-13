@@ -173,7 +173,7 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an action input default references `github.token`.
+**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an effective action input default can reach `github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 
@@ -486,7 +486,7 @@ A runtime interpolation can read a verified upstream output directly:
 run: echo "${{ needs.build.outputs.image }}"
 ```
 
-At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repository`, and `github.sha` are retained. `github.event` is unavailable.
+At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.server_url`, and `github.sha` are retained. `github.server_url` identifies the event repository provider. `github.event` is unavailable.
 
 `hashFiles()` evaluates when its step field is consumed. A step condition and normal step execution observe earlier steps such as checkout. A JavaScript action's `with` and `env` values can also be evaluated for its `pre` phase, then reevaluated for `main`. Patterns apply in argument order. `!` excludes matches, and a later positive pattern can include them again. Directory matches include descendants, hidden files match normally, overlapping patterns hash each path once, and matching is case-insensitive on Windows only. An empty match returns an empty string.
 
@@ -647,7 +647,7 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default references `github.token`. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
 Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps or reusable-workflow jobs. The workflow-token endpoint must interpret omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 

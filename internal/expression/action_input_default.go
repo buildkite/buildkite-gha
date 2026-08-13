@@ -82,6 +82,58 @@ func EvaluateActionInputDefault(template string, context Context) (string, error
 	return evaluateRuntimeTemplate(template, context, evaluateActionInputDefaultNode)
 }
 
+// ActionInputDefaultRequiresGitHubToken reports whether a metadata default can
+// reach github.token for the event provider. Defaults involving any other
+// runtime value fail closed because those values are not known during
+// compilation.
+func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, error) {
+	referencesToken, err := ReferencesGitHubToken(template)
+	if err != nil || !referencesToken {
+		return referencesToken, err
+	}
+	onlyKnownReferences := true
+	err = visitTemplateExpressions(template, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+			if !entering || !onlyKnownReferences {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, path, referenceErr := referencePath(node)
+			if referenceErr != nil {
+				onlyKnownReferences = false
+				return
+			}
+			if len(path) == 0 {
+				switch parent := parent.(type) {
+				case *actionlint.ObjectDerefNode:
+					if parent.Receiver == node {
+						return
+					}
+				case *actionlint.IndexAccessNode:
+					if parent.Operand == node {
+						return
+					}
+				}
+			}
+			onlyKnownReferences = strings.EqualFold(root, "github") && len(path) == 1 &&
+				(strings.EqualFold(path[0], "server_url") || strings.EqualFold(path[0], "token"))
+		})
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if !onlyKnownReferences {
+		return true, nil
+	}
+	_, err = EvaluateActionInputDefault(template, Context{GitHub: map[string]any{"server_url": serverURL}})
+	return err != nil, nil
+}
+
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
 	switch node := node.(type) {
 	case *actionlint.NullNode:
