@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -656,6 +657,29 @@ jobs:
 `)
 	if _, err := Validate("concurrency.yml", source); err != nil {
 		t.Fatalf("Validate() rejected event-backed concurrency: %v", err)
+	}
+}
+
+func TestValidateClassifiesJobCancellationAsCompatibilityFailure(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  label-rebase-needed:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rebase-needed
+      cancel-in-progress: true
+    steps: [{run: true}]
+`)
+	report, err := Validate("rebase-needed.yml", source)
+	if err == nil || !strings.Contains(err.Error(), `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) {
+		t.Fatalf("Validate() error = %v, want unsupported job cancellation", err)
+	}
+	var finding *ProcessingFinding
+	if !errors.As(err, &finding) || finding.Stage != StageExpressions || finding.Code != CodeExpressionInvalid || finding.Job != "label-rebase-needed" {
+		t.Fatalf("Validate() finding = %#v", finding)
+	}
+	if report.LogicalJobs != 1 || report.Instances != 1 || len(report.Jobs) != 1 {
+		t.Fatalf("Validate() report = %#v", report)
 	}
 }
 

@@ -79,8 +79,8 @@ type DispatchInput struct {
 }
 
 // Concurrency is the supported subset of a GitHub Actions concurrency group.
-// Workflow cancellation is retained for a compatibility warning; generated
-// Buildkite concurrency groups still provide queue semantics only.
+// Cancellation is retained for workflow warnings and job compatibility
+// diagnostics; generated Buildkite concurrency groups provide queue semantics only.
 type Concurrency struct {
 	Group                      string                 `json:"group"`
 	CancelInProgress           bool                   `json:"cancel_in_progress,omitempty"`

@@ -114,7 +114,7 @@ func TestUploadHelpFormsMatch(t *testing.T) {
 		}
 		outputs = append(outputs, stdout.String())
 	}
-	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "explicit .yml or .yaml path") || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
+	if outputs[0] != outputs[1] || !strings.Contains(outputs[0], "explicit .yml or .yaml path") || !strings.Contains(outputs[0], "failed or skipped workflows become top-level replacement steps") || !strings.Contains(outputs[0], "--runner-image") || !strings.Contains(outputs[0], "every scheduled workflow group is eligible") {
 		t.Fatalf("upload help outputs differ or omit runner profile or aggregate workflow options:\nhelp command: %q\nhelp flag: %q", outputs[0], outputs[1])
 	}
 }
@@ -2440,7 +2440,7 @@ jobs:
 		}
 	})
 
-	t.Run("upload annotates before artifact or pipeline calls", func(t *testing.T) {
+	t.Run("upload annotates and generates a failing step", func(t *testing.T) {
 		requireImporterHost(t)
 		t.Setenv("BUILDKITE", "true")
 		t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
@@ -2448,11 +2448,25 @@ jobs:
 		runner := &cliCaptureRunner{}
 		var stdout, stderr bytes.Buffer
 		args := []string{"upload", "--event-path", eventPath, "--runtime-queue", "hosted", workflowPath}
-		if code := run(args, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), want) {
+		if code := run(args, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 		}
-		if len(runner.commands) != 1 || runner.commands[0].args[0] != "annotate" || runner.commands[0].args[8] != "error" {
-			t.Fatalf("unsupported condition commands = %#v, want one error annotation", runner.commands)
+		if len(runner.commands) < 2 || runner.commands[0].args[0] != "annotate" || runner.commands[0].args[8] != "error" {
+			t.Fatalf("unsupported condition commands = %#v, want an error annotation before pipeline upload", runner.commands)
+		}
+		var pipeline struct {
+			Steps []struct {
+				Group   string `yaml:"group"`
+				Label   string `yaml:"label"`
+				Command string `yaml:"command"`
+				Steps   []any  `yaml:"steps"`
+			} `yaml:"steps"`
+		}
+		if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+			t.Fatal(err)
+		}
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || !strings.HasPrefix(pipeline.Steps[0].Label, ":github: Buildkite / ") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
 }
@@ -3149,8 +3163,10 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	var pipeline struct {
 		Steps []struct {
 			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Condition string `yaml:"if"`
 			Skip      string `yaml:"skip"`
+			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
@@ -3178,11 +3194,17 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
 	}
 	for i, group := range pipeline.Steps {
-		if group.Group != want[i].group || !strings.Contains(group.Condition, want[i].condition) || group.Skip != want[i].skip || strings.Contains(group.Condition, "build.") || group.DependsOn != "checks-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName || len(group.Steps) != 1 {
+		if !strings.Contains(group.Condition, want[i].condition) || group.Skip != want[i].skip || strings.Contains(group.Condition, "build.") || group.DependsOn != "checks-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != want[i].checkName {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
-		if (group.Skip != "") != (group.Steps[0].Label == "Ignored workflow") {
-			t.Fatalf("aggregate group %d skipped child = %#v", i, group.Steps[0])
+		if group.Skip != "" {
+			if group.Group != "" || group.Label != ":github: "+want[i].checkName || group.Command != ":" || len(group.Steps) != 0 {
+				t.Fatalf("aggregate skipped step %d = %#v", i, group)
+			}
+			continue
+		}
+		if group.Group != want[i].group || group.Label != "" || len(group.Steps) != 1 {
+			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		for _, step := range group.Steps {
 			if step.Notify != nil || step.DependsOn != nil {
@@ -3447,27 +3469,191 @@ func TestRunUploadAlignsBuildkiteFallbackWithEffectiveEvent(t *testing.T) {
 	}
 }
 
-func TestRunUploadKeepsApplicableCompilationFailuresFatal(t *testing.T) {
+func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T) {
 	requireImporterHost(t)
-	workflowPath := filepath.Join(t.TempDir(), "invalid-push.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  test:\n    runs-on: ${{ github.event.missing_runner }}\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	directory := t.TempDir()
+	workflowPath := filepath.Join(directory, "invalid-push.yml")
+	workflow := "name: Invalid push\non: push\njobs:\n  alpha:\n    runs-on: ${{ github.event.runner }}\n    steps: [{run: true}]\n  beta:\n    runs-on: ${{ github.event.runners.event_secret_key }}\n    steps: [{run: true}]\n  gamma:\n    runs-on: ${{ fromJSON(github.event.runner_json) }}\n    steps: [{run: true}]\n"
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	const valueSentinel = "EVENT-DERIVED-RUNNER-SENTINEL"
+	const keySentinel = "EVENT_SECRET_KEY"
+	const jsonSentinel = "@"
+	eventPath := writeUploadEvent(t, directory, "push", "refs/heads/main", map[string]any{
+		"runner":      valueSentinel,
+		"runner_json": jsonSentinel,
+		"runners": map[string]any{
+			keySentinel:                  "one",
+			strings.ToLower(keySentinel): "two",
+		},
+	})
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "fatal-applicable-importer")
+	t.Setenv("BUILDKITE_STEP_KEY", "failing-applicable-importer")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "missing_runner") {
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	if len(runner.uploaded) != 0 {
-		t.Fatalf("applicable compile failure uploaded artifacts: %#v", runner.uploaded)
+	if strings.Contains(stdout.String(), valueSentinel) || strings.Contains(stderr.String(), valueSentinel) || strings.Contains(stdout.String(), keySentinel) || strings.Contains(stderr.String(), keySentinel) || strings.Contains(stdout.String(), strings.ToLower(keySentinel)) || strings.Contains(stderr.String(), strings.ToLower(keySentinel)) || strings.Contains(stdout.String(), jsonSentinel) || strings.Contains(stderr.String(), jsonSentinel) {
+		t.Fatalf("event-derived runner leaked to output: stdout %q, stderr %q", stdout.String(), stderr.String())
 	}
+	var pipeline struct {
+		Steps []struct {
+			Group    string `yaml:"group"`
+			Label    string `yaml:"label"`
+			Command  string `yaml:"command"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			Steps []any `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 {
+		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	wantReasons := []string{
+		"[E_EXPRESSION_INVALID] Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest {job=alpha}",
+		`[E_EXPRESSION_INVALID] job "beta": runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties {job=beta}`,
+		`[E_EXPRESSION_INVALID] job "gamma": runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON {job=gamma}`,
+	}
+	step := pipeline.Steps[0]
+	wantMessage := strings.Join(wantReasons, "\n")
+	if step.Label != ":github: Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || !step.Checkout.Skip {
+		t.Fatalf("compiler failure step = %#v", step)
+	}
+	command := exec.Command("sh", "-c", step.Command)
+	printed, err := command.CombinedOutput()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || string(printed) != wantMessage+"\n" {
+		t.Fatalf("compiler failure command output/error = %q / %v", printed, err)
+	}
+	if strings.Contains(string(pipelineCommand.stdin), valueSentinel) || strings.Contains(string(pipelineCommand.stdin), keySentinel) || strings.Contains(string(pipelineCommand.stdin), strings.ToLower(keySentinel)) || strings.Contains(string(pipelineCommand.stdin), jsonSentinel) {
+		t.Fatalf("event-derived runner leaked to aggregate pipeline: %s", pipelineCommand.stdin)
+	}
+}
+
+func TestRunUploadEmitsUnsupportedJobCancellationAsFailingStep(t *testing.T) {
+	requireImporterHost(t)
+	directory := t.TempDir()
+	workflowPath := filepath.Join(directory, "rebase-needed.yml")
+	workflow := `name: Rebase needed
+on: push
+jobs:
+  label-rebase-needed:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rebase-needed
+      cancel-in-progress: true
+    steps: [{run: true}]
+`
+	if err := os.WriteFile(workflowPath, []byte(workflow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "job-cancellation-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group    string `yaml:"group"`
+			Label    string `yaml:"label"`
+			Command  string `yaml:"command"`
+			Checkout struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 {
+		t.Fatalf("job cancellation pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	step := pipeline.Steps[0]
+	if step.Group != "" || step.Label != ":github: Buildkite / Rebase needed (push)" || !strings.Contains(step.Command, `[E_EXPRESSION_INVALID] job "label-rebase-needed": concurrency cancel-in-progress is unsupported {job=label-rebase-needed}`) || !strings.HasSuffix(step.Command, " && exit 1") || !step.Checkout.Skip {
+		t.Fatalf("job cancellation failure step = %#v", step)
+	}
+}
+
+func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"a-invalid.yml": "name: Invalid\non: push\njobs:\n  first:\n    runs-on: windows-latest\n    steps: [{run: true}]\n  second:\n    runs-on: macos-15\n    steps: [{run: true}]\n",
+		"b-action.yml":  "name: Missing action\non: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./missing-action\n",
+		"c-success.yml": "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"upload", "--event-path", eventPath,
+		".github/workflows/a-invalid.yml",
+		".github/workflows/b-action.yml",
+		".github/workflows/c-success.yml",
+	}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var annotationBodies []string
 	for _, command := range runner.commands {
-		if len(command.args) >= 2 && command.args[0] == "pipeline" && command.args[1] == "upload" {
-			t.Fatalf("applicable compile failure uploaded a pipeline: %#v", command)
+		if len(command.args) != 0 && command.args[0] == "annotate" {
+			annotationBodies = append(annotationBodies, string(command.stdin))
 		}
+	}
+	if len(annotationBodies) != 2 || !strings.Contains(annotationBodies[0], "unsupported operating system") || !strings.Contains(annotationBodies[1], `Resolve local action "missing-action"`) {
+		t.Fatalf("mixed failure annotations = %#v", annotationBodies)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group   string `yaml:"group"`
+			Label   string `yaml:"label"`
+			Command string `yaml:"command"`
+			Steps   []struct {
+				Label   string `yaml:"label"`
+				Key     string `yaml:"key"`
+				Command string `yaml:"command"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 3 {
+		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
+	}
+	for i, step := range pipeline.Steps[:2] {
+		if step.Group != "" || len(step.Steps) != 0 || !strings.HasPrefix(step.Label, ":github: Buildkite / ") || !strings.HasSuffix(step.Command, " && exit 1") {
+			t.Fatalf("failed workflow step %d = %#v", i, step)
+		}
+	}
+	firstFailureCommand := pipeline.Steps[0].Command
+	if !strings.Contains(firstFailureCommand, `[E_EXPRESSION_INVALID] Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest {job=first}`) ||
+		!strings.Contains(firstFailureCommand, `[E_EXPRESSION_INVALID] Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest {job=second}`) {
+		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Command)
+	}
+	if actionFailureCommand := pipeline.Steps[1].Command; !strings.Contains(actionFailureCommand, `[E_ACTION_RESOLUTION] Action "./missing-action" is unsupported: resolve local action "missing-action": lstat `) || !strings.Contains(actionFailureCommand, "no such file or directory {job=action, step=1}") {
+		t.Fatalf("action failure command = %q", actionFailureCommand)
+	}
+	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
+		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
 	}
 }
 
@@ -3490,15 +3676,18 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	}
 	var pipeline struct {
 		Steps []struct {
-			Group string `yaml:"group"`
-			Skip  string `yaml:"skip"`
+			Group   string `yaml:"group"`
+			Label   string `yaml:"label"`
+			Skip    string `yaml:"skip"`
+			Command string `yaml:"command"`
+			Steps   []any  `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	wantGroup := ":github: " + filepath.ToSlash(filepath.Clean(workflowPath))
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != wantGroup || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" {
+	wantLabel := "Buildkite / " + filepath.ToSlash(filepath.Clean(workflowPath)) + " (push)"
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != ":" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	for path := range runner.uploaded {
@@ -3552,29 +3741,70 @@ func writeUploadEvent(t *testing.T, directory, event, ref string, payload map[st
 	return path
 }
 
-func TestRunUploadRejectsUnsupportedTriggerBeforeAnyUpload(t *testing.T) {
+func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	requireImporterHost(t)
-	workflowPath := filepath.Join(t.TempDir(), "issues.yml")
-	if err := os.WriteFile(workflowPath, []byte("on: issues\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"crowdin-upload.yml": "name: Crowdin upload\non:\n  push:\n    paths: [\"crowdin/**\"]\njobs:\n  upload:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"success.yml":        "name: Success\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Chdir(repository)
 	t.Setenv("BUILDKITE", "true")
-	t.Setenv("BUILDKITE_STEP_KEY", "unsupported-trigger-importer")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "trigger-failure-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), `unsupported GitHub trigger event "issues"`) {
+	if code := run([]string{
+		"upload", "--event-path", eventPath,
+		".github/workflows/crowdin-upload.yml",
+		".github/workflows/success.yml",
+	}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "Pipeline generation: failed") || !strings.Contains(stderr.String(), compiler.CodePipelineGeneration) {
-		t.Fatalf("trigger failure omitted processing report: %q", stderr.String())
+	var annotationBodies []string
+	for _, command := range runner.commands {
+		if len(command.args) != 0 && command.args[0] == "annotate" {
+			annotationBodies = append(annotationBodies, string(command.stdin))
+		}
 	}
-	if len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-		t.Fatalf("unsupported trigger reached Buildkite: commands %#v, uploads %#v", runner.commands, runner.uploaded)
+	if len(annotationBodies) != 1 || !strings.Contains(annotationBodies[0], "push path filters are unsupported") {
+		t.Fatalf("trigger failure annotations = %#v", annotationBodies)
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
+			Condition string `yaml:"if"`
+			Command   string `yaml:"command"`
+			Checkout  struct {
+				Skip bool `yaml:"skip"`
+			} `yaml:"checkout"`
+			Steps []any `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 {
+		t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	failure := pipeline.Steps[0]
+	if failure.Group != "" || failure.Label != ":github: Buildkite / Crowdin upload (push)" || failure.Condition != "true" || !strings.Contains(failure.Command, "[E_PIPELINE_GENERATION] .github/workflows/crowdin-upload.yml: translate workflow triggers: push path filters are unsupported: Buildkite if_changed is not equivalent") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+		t.Fatalf("trigger failure step = %#v", failure)
+	}
+	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
+		t.Fatalf("successful workflow after trigger failure = %#v", success)
+	}
+	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) {
+		t.Fatalf("trigger failure omitted processing report: %q", stdout.String())
 	}
 }
 
-func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
+func TestRunUploadEmitsIncompletePullRequestSnapshotsAsFailingSteps(t *testing.T) {
 	requireImporterHost(t)
 	for _, test := range []struct {
 		name, workflow, want string
@@ -3601,17 +3831,29 @@ func TestRunUploadRejectsIncompletePullRequestSnapshots(t *testing.T) {
 			t.Setenv("BUILDKITE_STEP_KEY", "incomplete-pull-request-importer")
 			runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 			var stdout, stderr bytes.Buffer
-			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/pull-request.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), test.want) {
+			if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/pull-request.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 				t.Fatalf("run() code/stderr = %d / %q, want %q", code, stderr.String(), test.want)
 			}
-			if len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-				t.Fatalf("incomplete pull request reached Buildkite: commands %#v, uploads %#v", runner.commands, runner.uploaded)
+			var pipeline struct {
+				Steps []struct {
+					Group   string `yaml:"group"`
+					Label   string `yaml:"label"`
+					Command string `yaml:"command"`
+					Steps   []any  `yaml:"steps"`
+				} `yaml:"steps"`
+			}
+			pipelineCommand := runner.commands[len(runner.commands)-1]
+			if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+				t.Fatal(err)
+			}
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: Buildkite / .github/workflows/pull-request.yml (pull_request)" || !strings.Contains(pipeline.Steps[0].Command, compiler.CodePipelineGeneration) || !strings.Contains(pipeline.Steps[0].Command, test.want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
+				t.Fatalf("incomplete pull request failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 			}
 		})
 	}
 }
 
-func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
+func TestRunEmitsUnclassifiablePushSnapshotAsFailingStep(t *testing.T) {
 	requireImporterHost(t)
 	workflow := "on:\n  push:\n    branches: [main]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{"push.yml": workflow})
@@ -3636,11 +3878,22 @@ func TestRunRejectsUnclassifiablePushSnapshot(t *testing.T) {
 	runner := &cliCaptureRunner{}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/push.yml"}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "refs/heads/") {
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/push.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("upload code/stderr = %d / %q", code, stderr.String())
 	}
-	if strings.Contains(stderr.String(), "null == null") || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-		t.Fatalf("malformed push emitted a condition or reached Buildkite: stderr %q, commands %#v, uploads %#v", stderr.String(), runner.commands, runner.uploaded)
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Condition string `yaml:"if"`
+			Command   string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Condition != "true" || !strings.Contains(pipeline.Steps[0].Command, "refs/heads/") || strings.Contains(pipeline.Steps[0].Command, "null == null") || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+		t.Fatalf("unclassifiable push failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 }
 
@@ -3687,7 +3940,9 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	var pipeline struct {
 		Steps []struct {
 			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Skip      string `yaml:"skip"`
+			Command   string `yaml:"command"`
 			DependsOn string `yaml:"depends_on"`
 			Notify    []struct {
 				GitHubCheck struct {
@@ -3707,18 +3962,18 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	if len(pipeline.Steps) != 2 {
 		t.Fatalf("aggregate reusable pipeline = %#v", pipeline)
 	}
-	for _, group := range pipeline.Steps {
-		switch group.Group {
+	for _, workflow := range pipeline.Steps {
+		switch workflow.Group {
 		case ":github: Caller":
-			if group.Skip != "" || group.DependsOn != "reusable-importer" || len(group.Notify) != 1 || group.Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" || len(group.Steps) != 1 || !strings.HasPrefix(group.Steps[0].Key, "gha-") || group.Steps[0].Notify != nil {
-				t.Fatalf("caller group = %#v", group)
+			if workflow.Skip != "" || workflow.DependsOn != "reusable-importer" || len(workflow.Notify) != 1 || workflow.Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" || len(workflow.Steps) != 1 || !strings.HasPrefix(workflow.Steps[0].Key, "gha-") || workflow.Steps[0].Notify != nil {
+				t.Fatalf("caller group = %#v", workflow)
 			}
-		case ":github: Pull request only":
-			if group.Skip != "This workflow is not triggered by a `push` event" || len(group.Steps) != 1 || group.Steps[0].Label != "Ignored workflow" {
-				t.Fatalf("inactive workflow group = %#v", group)
+		case "":
+			if workflow.Label != ":github: Buildkite / Pull request only (push)" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
+				t.Fatalf("inactive workflow step = %#v", workflow)
 			}
 		default:
-			t.Fatalf("reusable-only workflow became an aggregate group: %#v", group)
+			t.Fatalf("reusable-only workflow became an aggregate group: %#v", workflow)
 		}
 	}
 	compiledReusable := false

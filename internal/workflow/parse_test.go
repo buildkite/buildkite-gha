@@ -261,30 +261,36 @@ func TestParseOwnsAliasedConcurrency(t *testing.T) {
 	}
 }
 
-func TestParseRejectsConcurrencyCancellationWithLocation(t *testing.T) {
+func TestParseRetainsJobConcurrencyCancellationWithLocation(t *testing.T) {
 	for _, test := range []struct {
-		name, source, want string
+		name, source string
+		expression   bool
 	}{
 		{
-			name:   "job",
+			name:   "literal",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: true}\n    steps: [{run: true}]\n",
-			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "job-title-case",
+			name:   "title-case literal",
 			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency: {group: deploy, cancel-in-progress: True}\n    steps: [{run: true}]\n",
-			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
 		},
 		{
-			name:   "job-expression",
-			source: "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
-			want:   "job \"test\": concurrency cancel-in-progress is unsupported",
+			name:       "expression",
+			source:     "on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    concurrency:\n      group: deploy\n      cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}\n    steps: [{run: true}]\n",
+			expression: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := Parse("concurrency.yml", []byte(test.source))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			parsed, err := Parse("concurrency.yml", []byte(test.source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(parsed.Jobs) != 1 || parsed.Jobs[0].Concurrency == nil {
+				t.Fatalf("jobs = %#v, want retained concurrency", parsed.Jobs)
+			}
+			concurrency := parsed.Jobs[0].Concurrency
+			if concurrency.CancelInProgress != !test.expression || (concurrency.CancelInProgressExpression != nil) != test.expression || concurrency.CancelInProgressPosition.Line == 0 || concurrency.CancelInProgressPosition.Column == 0 {
+				t.Fatalf("job cancellation = %#v", concurrency)
 			}
 		})
 	}

@@ -68,7 +68,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline with one group per directly runnable workflow; reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -1469,6 +1469,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		return 1
 	}
+	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
 			continue
@@ -1476,26 +1477,28 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
 			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
-			_ = out.write(triggerFailureProcessingReport(workflows[i], triggerErr))
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
-			return 1
+			workflows[i].Applicable = true
+			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
+			out.annotate(processingReports[i])
+			continue
 		}
 		workflows[i].Applicable = selection.Applicable
 		workflows[i].TriggerCondition = selection.Condition
 		workflows[i].SkipReason = selection.SkipReason
 	}
-	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
-		if !input.Applicable {
+		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
 		validationOptions.StepKeyNamespace = input.StepKeyNamespace
-		processingReport, ok := validatedProcessingReportWithOptions(out, input.Path, hostedProfile, input.Source, effectiveEvent.Source, true, &validationOptions)
-		if !ok {
-			return 1
+		validation, validationErr := compiler.ValidateEventWithOptions(input.Path, input.Source, effectiveEvent.Source, validationOptions)
+		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
+		if validationErr != nil {
+			processingReports[i].Result = "incompatible"
+			out.annotate(processingReports[i])
 		}
-		processingReports[i] = processingReport
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
 	if err != nil {
@@ -1511,8 +1514,8 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 	}
 	importerDistribution := runtimeDistribution{contents: executableContents, digest: distributionDigest}
 	requiredPlatforms := make(map[compiler.Platform]bool, 2)
-	for _, input := range workflows {
-		if !input.Applicable {
+	for i, input := range workflows {
+		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		platforms, platformErr := requiredRuntimePlatforms(input.Path, input.Source, effectiveEvent.Source, "", uploadArguments.runnerTargets)
@@ -1588,10 +1591,20 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			})
 			continue
 		}
+		if processingReportHasErrors(processingReports[i]) {
+			generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
+			continue
+		}
 		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
 		applyHostedPreflight(&processingReports[i], preflight)
 		if err != nil {
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
+			var failure *hostedFailure
+			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
+				out.annotate(processingReports[i])
+				generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
+				continue
+			}
 			_ = out.write(processingReports[i])
 			return 1
 		}
@@ -1624,7 +1637,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	for i, input := range workflows {
 		if input.Applicable {
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
-			out.annotate(processingReports[i])
+			if !processingReportHasErrors(processingReports[i]) {
+				out.annotate(processingReports[i])
+			}
 		}
 	}
 	artifacts := make([]transport.Artifact, 0, len(runtimeDistributions)+len(planArtifacts))
@@ -1674,6 +1689,51 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
+}
+
+func processingReportHasErrors(report compatibility.ProcessingReport) bool {
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			return true
+		}
+	}
+	return false
+}
+
+func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) buildkitepipeline.Workflow {
+	label := input.Name
+	if label == "" {
+		label = input.CanonicalPath
+	}
+	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
+	report.Finalize()
+	messages := make([]string, 0, len(report.Diagnostics))
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" {
+			message := diagnostic.Message
+			if diagnostic.Code != "" {
+				message = "[" + diagnostic.Code + "] " + message
+			}
+			var attribution []string
+			if diagnostic.Job != "" {
+				attribution = append(attribution, "job="+diagnostic.Job)
+			}
+			if diagnostic.Step != 0 {
+				attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
+			}
+			if len(attribution) != 0 {
+				message += " {" + strings.Join(attribution, ", ") + "}"
+			}
+			messages = append(messages, message)
+		}
+	}
+	return buildkitepipeline.Workflow{
+		GroupLabel: label,
+		GroupKey:   "gha-workflow-" + input.Identity,
+		CheckName:  "Buildkite / " + label + " (" + event + ")",
+		Condition:  input.TriggerCondition,
+		Failure:    &buildkitepipeline.Failure{Message: strings.Join(messages, "\n")},
+	}
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {
