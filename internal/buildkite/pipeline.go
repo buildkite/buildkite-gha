@@ -233,7 +233,7 @@ type preparedWorkflow struct {
 
 func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflow) error {
 	if failure := workflow.Failure; failure != nil {
-		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.GroupLabel))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
@@ -251,7 +251,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		return nil
 	}
 	if workflow.SkipReason != "" && workflow.Aggregate {
-		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.CheckName))
+		_, _ = fmt.Fprintf(out, "  - label: %s\n", yamlScalar(":github: "+workflow.GroupLabel))
 		_, _ = fmt.Fprintf(out, "    key: %s\n", yamlScalar(workflow.GroupKey))
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))

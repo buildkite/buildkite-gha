@@ -2720,7 +2720,8 @@ jobs:
 		if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 			t.Fatal(err)
 		}
-		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || !strings.HasPrefix(pipeline.Steps[0].Label, ":github: Buildkite / ") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+		wantLabel := ":github: " + filepath.ToSlash(filepath.Clean(workflowPath))
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || pipeline.Steps[0].Label != wantLabel || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
 			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
@@ -3453,7 +3454,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 			t.Fatalf("aggregate group %d = %#v, want %#v", i, group, want[i])
 		}
 		if group.Skip != "" {
-			if group.Group != "" || group.Label != ":github: "+want[i].checkName || group.Command != ":" || len(group.Steps) != 0 {
+			if group.Group != "" || group.Label != want[i].group || group.Command != ":" || len(group.Steps) != 0 {
 				t.Fatalf("aggregate skipped step %d = %#v", i, group)
 			}
 			continue
@@ -3790,7 +3791,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
-	if step.Label != ":github: Buildkite / Invalid push (push)" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Command != `printf '%s\n' '`+wantMessage+`' && exit 1` || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -3896,7 +3897,7 @@ jobs:
 		t.Fatalf("job cancellation pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	step := pipeline.Steps[0]
-	if step.Group != "" || step.Label != ":github: Buildkite / Rebase needed (push)" || !strings.Contains(step.Command, `[E_EXPRESSION_INVALID] job "label-rebase-needed": concurrency cancel-in-progress is unsupported {job=label-rebase-needed}`) || !strings.HasSuffix(step.Command, " && exit 1") || !step.Checkout.Skip {
+	if step.Group != "" || step.Label != ":github: Rebase needed" || !strings.Contains(step.Command, `[E_EXPRESSION_INVALID] job "label-rebase-needed": concurrency cancel-in-progress is unsupported {job=label-rebase-needed}`) || !strings.HasSuffix(step.Command, " && exit 1") || !step.Checkout.Skip {
 		t.Fatalf("job cancellation failure step = %#v", step)
 	}
 }
@@ -3953,8 +3954,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	if len(pipeline.Steps) != 3 {
 		t.Fatalf("aggregate pipeline groups = %#v", pipeline.Steps)
 	}
+	wantFailureLabels := []string{":github: Invalid", ":github: Missing action"}
 	for i, step := range pipeline.Steps[:2] {
-		if step.Group != "" || len(step.Steps) != 0 || !strings.HasPrefix(step.Label, ":github: Buildkite / ") || !strings.HasSuffix(step.Command, " && exit 1") {
+		if step.Group != "" || len(step.Steps) != 0 || step.Label != wantFailureLabels[i] || !strings.HasSuffix(step.Command, " && exit 1") {
 			t.Fatalf("failed workflow step %d = %#v", i, step)
 		}
 	}
@@ -4000,7 +4002,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	wantLabel := "Buildkite / " + filepath.ToSlash(filepath.Clean(workflowPath)) + " (push)"
+	wantLabel := filepath.ToSlash(filepath.Clean(workflowPath))
 	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != ":" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
@@ -4107,7 +4109,7 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 		t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	failure := pipeline.Steps[0]
-	if failure.Group != "" || failure.Label != ":github: Buildkite / Crowdin upload (push)" || failure.Condition != "true" || !strings.Contains(failure.Command, "[E_PIPELINE_GENERATION] .github/workflows/crowdin-upload.yml: translate workflow triggers: push path filters are unsupported: Buildkite if_changed is not equivalent") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "true" || !strings.Contains(failure.Command, "[E_PIPELINE_GENERATION] .github/workflows/crowdin-upload.yml: translate workflow triggers: push path filters are unsupported: Buildkite if_changed is not equivalent") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 		t.Fatalf("trigger failure step = %#v", failure)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
@@ -4160,7 +4162,7 @@ func TestRunUploadEmitsIncompletePullRequestSnapshotsAsFailingSteps(t *testing.T
 			if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: Buildkite / .github/workflows/pull-request.yml (pull_request)" || !strings.Contains(pipeline.Steps[0].Command, compiler.CodePipelineGeneration) || !strings.Contains(pipeline.Steps[0].Command, test.want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: .github/workflows/pull-request.yml" || !strings.Contains(pipeline.Steps[0].Command, compiler.CodePipelineGeneration) || !strings.Contains(pipeline.Steps[0].Command, test.want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
 				t.Fatalf("incomplete pull request failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 			}
 		})
@@ -4283,7 +4285,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 				t.Fatalf("caller group = %#v", workflow)
 			}
 		case "":
-			if workflow.Label != ":github: Buildkite / Pull request only (push)" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
+			if workflow.Label != ":github: Pull request only" || workflow.Skip != "This workflow is not triggered by a `push` event" || workflow.Command != ":" || len(workflow.Steps) != 0 {
 				t.Fatalf("inactive workflow step = %#v", workflow)
 			}
 		default:
