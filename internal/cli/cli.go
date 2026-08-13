@@ -167,7 +167,7 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	details := &commandTelemetryDetails{}
 	defer func() {
 		outcome := telemetryOutcome(code, "", nil)
-		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(telemetry.CommandPluginImport, outcome))
+		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(outcome))
 	}()
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
@@ -352,7 +352,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var result gharuntime.JobResult
 	defer func() {
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
-		details := (&commandTelemetryDetails{}).forOutcome(telemetry.CommandRunJob, outcome)
+		details := (&commandTelemetryDetails{}).forOutcome(outcome)
 		emitCommandTelemetry(telemetry.CommandRunJob, outcome, version, time.Since(started), details)
 	}()
 	options, err := runJobArgs(args)

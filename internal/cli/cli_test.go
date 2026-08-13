@@ -275,6 +275,13 @@ func TestTelemetryOutcomePreservesCommandSemantics(t *testing.T) {
 	}
 }
 
+func TestRunJobUntypedFailurePhaseIsUnknown(t *testing.T) {
+	details := (&commandTelemetryDetails{}).forOutcome(telemetry.OutcomeFailure)
+	if details.FailurePhase != telemetry.FailurePhaseUnknown || details.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("run-job fallback details = %#v", details)
+	}
+}
+
 func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 	requireImporterHost(t)
 	t.Setenv(pluginConfigurationEnvironment, "")

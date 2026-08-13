@@ -56,18 +56,15 @@ func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.
 	d.diagnostics = append(d.diagnostics, telemetry.Diagnostic{Code: code, Severity: severity})
 }
 
-func (d *commandTelemetryDetails) forOutcome(command telemetry.Command, outcome telemetry.Outcome) telemetry.Details {
+func (d *commandTelemetryDetails) forOutcome(outcome telemetry.Outcome) telemetry.Details {
 	if outcome == telemetry.OutcomeSuccess || outcome == telemetry.OutcomeSkipped {
 		return telemetry.Details{Diagnostics: slices.Clone(d.diagnostics)}
 	}
 	phase, code := d.failurePhase, d.failureCode
 	if phase == "" {
-		switch {
-		case outcome == telemetry.OutcomeUsageError:
+		if outcome == telemetry.OutcomeUsageError {
 			phase = telemetry.FailurePhaseConfiguration
-		case command == telemetry.CommandRunJob:
-			phase = telemetry.FailurePhaseExecution
-		default:
+		} else {
 			phase = telemetry.FailurePhaseUnknown
 		}
 	}
