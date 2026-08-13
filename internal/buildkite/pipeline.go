@@ -242,7 +242,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		command := `buildkite-agent annotate --scope=job --style=error ` + shellQuote(failure.Annotation) + ` && printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
+		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && printf '%s' ` + shellQuote(failure.Annotation) + ` | buildkite-agent annotate --scope=job --style=error && exit 1`
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
