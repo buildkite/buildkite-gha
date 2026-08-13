@@ -2465,7 +2465,7 @@ jobs:
 		if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 			t.Fatal(err)
 		}
-		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || !strings.HasPrefix(pipeline.Steps[0].Label, "Buildkite / ") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || !strings.HasPrefix(pipeline.Steps[0].Label, ":github: Buildkite / ") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
 			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
