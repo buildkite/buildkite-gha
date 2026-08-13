@@ -316,7 +316,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	}
 	step := document.Steps[0]
 	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `printf '%s\n' '+++ GitHub Actions workflow diagnostics' && printf '\033[31m%s\033[0m\n' 'runner isn'"'"'t admitted
-matrix could not be expanded' && printf '%s\n' '~~~ Annotating job' && printf '%s' '#### Diagnostics
+matrix could not be expanded' && printf '%s' '#### Diagnostics
 
 **runner isn'"'"'t admitted**' | buildkite-agent annotate --scope=job --style=error && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
