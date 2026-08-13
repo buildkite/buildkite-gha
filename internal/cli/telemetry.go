@@ -17,14 +17,25 @@ type commandTelemetryDetails struct {
 	seen         map[string]int
 }
 
-func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport) {
+// addReportDiagnostics records a report's diagnostics. Errors a command
+// handles, such as workflows emitted as failing pipeline steps, belong here so
+// they never attribute an unrelated later failure.
+func (d *commandTelemetryDetails) addReportDiagnostics(report compatibility.ProcessingReport) {
 	for _, diagnostic := range report.Diagnostics {
 		severity, ok := telemetrySeverity(diagnostic.Level)
 		if !ok || !allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			continue
 		}
 		d.addDiagnostic(diagnostic.Code, severity)
-		if diagnostic.Level == "error" && d.failureCode == "" {
+	}
+}
+
+// observe records a report that ends the command, so its first error also
+// attributes the failure.
+func (d *commandTelemetryDetails) observe(report compatibility.ProcessingReport) {
+	d.addReportDiagnostics(report)
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Level == "error" && d.failureCode == "" && allowlistedTelemetryDiagnosticCode(diagnostic.Code) {
 			d.failurePhase = telemetryPhase(diagnostic.Stage)
 			d.failureCode = telemetry.FailureCode(diagnostic.Code)
 		}

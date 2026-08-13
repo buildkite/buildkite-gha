@@ -251,6 +251,21 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "emitted as a failing step"},
+	}})
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if got.FailurePhase != telemetry.FailurePhaseUnknown || got.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("handled error attributed a later failure: %#v", got)
+	}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError}}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
 func TestTelemetryOutcomePreservesCommandSemantics(t *testing.T) {
 	for _, test := range []struct {
 		name       string

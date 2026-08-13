@@ -1691,7 +1691,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
 		if uploadArguments.telemetry != nil {
 			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
-			if preflight.HasActions {
+			if bundleUsesActions(bundle) {
 				uploadArguments.telemetry.addActionRuntimeUnknown()
 			}
 		}
@@ -1706,8 +1706,8 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for i, input := range workflows {
 		if input.Applicable {
-			if out.observe != nil {
-				out.observe(processingReports[i])
+			if uploadArguments.telemetry != nil {
+				uploadArguments.telemetry.addReportDiagnostics(processingReports[i])
 			}
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 			if !processingReportHasErrors(processingReports[i]) {
