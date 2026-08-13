@@ -245,7 +245,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		commands := []string{
 			"set -eu",
-			`printf '%s\n' '+++ GitHub Actions workflow diagnostics'`,
 			`failure_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-failure.XXXXXXXX")"`,
 			`trap 'rm -rf -- "$failure_dir"' EXIT`,
 			"buildkite-agent artifact download " + shellQuote(failure.MessagePath) + ` "$failure_dir" --step ` + shellQuote(pipeline.CompilerStep),

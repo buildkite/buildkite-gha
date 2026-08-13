@@ -2687,7 +2687,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 
 func isGeneratedFailureCommand(command string) bool {
 	return len(command) < 128*1024 &&
-		strings.HasPrefix(command, "set -eu\nprintf '%s\\n' '+++ GitHub Actions workflow diagnostics'\n") &&
+		strings.HasPrefix(command, "set -eu\nfailure_dir=") &&
 		strings.Contains(command, "artifact download '.buildkite-gha/failures/messages/") &&
 		strings.Contains(command, "artifact download '.buildkite-gha/failures/annotations/") &&
 		strings.Contains(command, `buildkite-agent annotate --scope=job --style=error < "$failure_dir"/`) &&
@@ -3890,7 +3890,7 @@ fi
 	output, err := command.CombinedOutput()
 	plainIndex := strings.Index(string(output), "Runner label is not mapped")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
-	logPrefix := "+++ GitHub Actions workflow diagnostics\n\x1b[31m"
+	logPrefix := "\x1b[31m"
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationIndex <= plainIndex {
 		t.Fatalf("compiler failure command output/error = %q / %v", output, err)
 	}

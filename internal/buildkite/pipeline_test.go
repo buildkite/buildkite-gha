@@ -316,7 +316,6 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	}
 	step := document.Steps[0]
 	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `set -eu
-printf '%s\n' '+++ GitHub Actions workflow diagnostics'
 failure_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-failure.XXXXXXXX")"
 trap 'rm -rf -- "$failure_dir"' EXIT
 buildkite-agent artifact download '.buildkite-gha/failures/messages/message.txt' "$failure_dir" --step 'importer'
