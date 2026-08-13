@@ -32,6 +32,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"go.yaml.in/yaml/v4"
 )
@@ -136,6 +137,259 @@ func TestPluginIsHiddenAndZeroArgument(t *testing.T) {
 		}
 		if stdout.Len() != 0 || strings.Contains(stderr.String(), "buildkite-gha plugin") {
 			t.Fatalf("Run(%q) exposed plugin help: stdout=%q stderr=%q", args, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestCommandCompletionTelemetryPlacementAndExitSemantics(t *testing.T) {
+	type event struct {
+		Event      string `json:"event"`
+		Properties struct {
+			Command       string `json:"command"`
+			Outcome       string `json:"outcome"`
+			ClientVersion string `json:"client_version"`
+			DurationMS    int64  `json:"duration_ms"`
+			FailurePhase  string `json:"failure_phase"`
+			FailureCode   string `json:"failure_code"`
+		} `json:"properties"`
+	}
+	events := make(chan event, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Token telemetry-token" {
+			t.Errorf("Authorization = %q", got)
+		}
+		var received event
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode telemetry event: %v", err)
+		}
+		events <- received
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	for _, test := range []struct {
+		args        []string
+		wantCode    int
+		wantCommand string
+	}{
+		{args: []string{"plugin", "unexpected"}, wantCode: 2, wantCommand: "plugin_import"},
+		{args: []string{"run-job", "--unknown"}, wantCode: 2, wantCommand: "run_job"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(test.args, &stdout, &stderr, "test-version", &cliCaptureRunner{}); code != test.wantCode {
+			t.Fatalf("run(%q) code = %d, stderr = %q; want %d", test.args, code, stderr.String(), test.wantCode)
+		}
+		received := <-events
+		if received.Event != "pipelines:buildkite_gha:command_completed" || received.Properties.Command != test.wantCommand || received.Properties.Outcome != "usage_error" || received.Properties.ClientVersion != "test-version" || received.Properties.DurationMS < 0 || received.Properties.FailurePhase != "configuration" || received.Properties.FailureCode != "unknown" {
+			t.Fatalf("run(%q) event = %#v", test.args, received)
+		}
+	}
+}
+
+func TestCommandCompletionTelemetryOptOut(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "true")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--unknown"}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 2 {
+		t.Fatalf("run() code = %d, stderr = %q; want 2", code, stderr.String())
+	}
+	if requests != 0 {
+		t.Fatalf("telemetry requests = %d, want 0", requests)
+	}
+}
+
+func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private response", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--unknown"}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 2 {
+		t.Fatalf("run() code = %d, stderr = %q; want 2", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "private response") || strings.Contains(stderr.String(), "telemetry") {
+		t.Fatalf("telemetry failure leaked to stderr: %q", stderr.String())
+	}
+}
+
+func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "must not be uploaded"},
+		{Level: "error", Code: compiler.CodeWorkflowSyntax, Stage: string(compiler.StageWorkflowParsing), Message: "different sensitive text"},
+		{Level: "warning", Code: "W_ACTION_RUNTIME_UNKNOWN", Stage: string(compiler.StageAdmission), Message: "must not be uploaded"},
+		{Level: "error", Code: "E_FUTURE_UNALLOWLISTED", Stage: string(compiler.StageGraph), Message: "must not be uploaded"},
+	}})
+	got := details.telemetryDetails()
+	if got.FailurePhase != "parsing" || got.FailureCode != "E_WORKFLOW_SYNTAX" {
+		t.Fatalf("failure details = %#v", got)
+	}
+	want := []telemetry.Diagnostic{
+		{Code: compiler.CodeWorkflowSyntax, Severity: telemetry.SeverityError},
+		{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning},
+	}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
+	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
+		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Actions: locks,
+			Steps:   []plan.Step{{Kind: "uses", Uses: "actions/checkout@v4"}},
+		}}}}
+	}
+	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout"}
+	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}
+	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}
+	setupGo := plan.ActionLock{Source: "github", Repository: "actions/setup-go"}
+	local := plan.ActionLock{Source: "workspace", Path: "actions/build"}
+
+	for _, test := range []struct {
+		name  string
+		locks []plan.ActionLock
+		want  bool
+	}{
+		{name: "no actions"},
+		{name: "native adapters only", locks: []plan.ActionLock{checkout, upload, download}},
+		{name: "public action", locks: []plan.ActionLock{setupGo}, want: true},
+		{name: "local action", locks: []plan.ActionLock{local}, want: true},
+		{name: "native adapter alongside public action", locks: []plan.ActionLock{checkout, setupGo}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := bundleRunsUnprovenActions(bundleWith(test.locks...)); got != test.want {
+				t.Fatalf("bundleRunsUnprovenActions() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
+		{Level: "error", Code: compiler.CodeExpressionInvalid, Stage: string(compiler.StageExpressions), Message: "emitted as a failing step"},
+	}})
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if got.FailurePhase != telemetry.FailurePhaseUnknown || got.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("handled error attributed a later failure: %#v", got)
+	}
+	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError}}
+	if !reflect.DeepEqual(got.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestTelemetryOutcomePreservesCommandSemantics(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		code       int
+		conclusion string
+		contextErr error
+		want       telemetry.Outcome
+	}{
+		{name: "success", conclusion: "success", want: telemetry.OutcomeSuccess},
+		{name: "failure", code: 1, conclusion: "failure", want: telemetry.OutcomeFailure},
+		{name: "result publication failure", code: 1, conclusion: "success", want: telemetry.OutcomeFailure},
+		{name: "cancelled result", code: 1, conclusion: "cancelled", want: telemetry.OutcomeCancelled},
+		{name: "cancelled context", code: 1, contextErr: context.Canceled, want: telemetry.OutcomeCancelled},
+		{name: "skipped", conclusion: "skipped", want: telemetry.OutcomeSkipped},
+		{name: "skipped result publication failure", code: 1, conclusion: "skipped", want: telemetry.OutcomeFailure},
+		{name: "tolerated", code: buildkitepipeline.ContinueOnErrorExitStatus, conclusion: "success", want: telemetry.OutcomeToleratedFailure},
+		{name: "usage", code: 2, want: telemetry.OutcomeUsageError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := telemetryOutcome(test.code, test.conclusion, test.contextErr); got != test.want {
+				t.Fatalf("telemetryOutcome() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRunJobUntypedFailurePhaseIsUnknown(t *testing.T) {
+	details := (&commandTelemetryDetails{}).forOutcome(telemetry.OutcomeFailure)
+	if details.FailurePhase != telemetry.FailurePhaseUnknown || details.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("run-job fallback details = %#v", details)
+	}
+}
+
+func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"action.yml": "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n",
+	})
+	actionPath := filepath.Join(repository, ".github", "actions", "local")
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "main.js"), []byte("console.log('local action')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, repository, 20))
+	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, repository, 24))
+
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var received struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode telemetry event: %v", err)
+		}
+		events <- received.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	configuration, err := json.Marshal(map[string]any{"workflow": filepath.Join(".github", "workflows", "action.yml")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "telemetry-action-importer")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	properties := <-events
+	if properties.Command != telemetry.CommandPluginImport || properties.Outcome != telemetry.OutcomeSuccess {
+		t.Fatalf("event = %#v", properties)
+	}
+	want := []telemetry.Diagnostic{{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning}}
+	if !reflect.DeepEqual(properties.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", properties.Diagnostics, want)
+	}
+	for _, command := range runner.commands {
+		if len(command.args) != 0 && command.args[0] == "annotate" {
+			t.Fatalf("unproven action runtime annotated the build: %#v", command.args)
 		}
 	}
 }

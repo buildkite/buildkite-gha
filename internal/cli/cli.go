@@ -36,6 +36,7 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	gharuntime "github.com/buildkite/buildkite-gha/internal/runtime"
+	"github.com/buildkite/buildkite-gha/internal/telemetry"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
@@ -163,6 +164,18 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 }
 
 func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return pluginContext(ctx, args, stdout, stderr, version, runner)
+}
+
+func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, runner transport.Runner) (code int) {
+	started := time.Now()
+	details := &commandTelemetryDetails{}
+	defer func() {
+		outcome := telemetryOutcome(code, "", ctx.Err())
+		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(outcome))
+	}()
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
 	}
@@ -175,16 +188,17 @@ func plugin(args []string, stdout, stderr io.Writer, version string, runner tran
 	if err != nil {
 		return usageError(stderr, "plugin: %v", err)
 	}
-	if err := normalizePluginCommit(context.Background(), os.Getenv, os.Setenv, runner); err != nil {
+	if err := normalizePluginCommit(ctx, os.Getenv, os.Setenv, runner); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: plugin: %v\n", err)
 		return 1
 	}
-	return uploadParsed(parsedUploadArgs{
+	return uploadParsedContext(ctx, parsedUploadArgs{
 		workflowOperands:      configuration.Workflows,
 		explicitWorkflowPaths: true,
 		runnerTargets:         configuration.runnerTargets,
 		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
 		importerPlatform:      importerPlatform,
+		telemetry:             details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
@@ -346,7 +360,14 @@ func runJob(args []string, stdout, stderr io.Writer, version string, agent trans
 	return runJobContext(ctx, args, stdout, stderr, version, agent)
 }
 
-func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) (code int) {
+	started := time.Now()
+	var result gharuntime.JobResult
+	defer func() {
+		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
+		details := (&commandTelemetryDetails{}).forOutcome(outcome)
+		emitCommandTelemetry(telemetry.CommandRunJob, outcome, version, time.Since(started), details)
+	}()
 	options, err := runJobArgs(args)
 	if err != nil {
 		return usageError(stderr, "run-job: %v", err)
@@ -523,7 +544,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			}
 		}()
 	}
-	var result gharuntime.JobResult
 	var runErr error
 	if len(job.NeedSources) != 0 {
 		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
@@ -569,6 +589,43 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return 0
+}
+
+func emitCommandTelemetry(command telemetry.Command, outcome telemetry.Outcome, version string, duration time.Duration, details telemetry.Details) {
+	client, err := telemetry.New(telemetry.Config{
+		Endpoint:      os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+		JobID:         os.Getenv("BUILDKITE_JOB_ID"),
+		JobToken:      os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+		ClientVersion: version,
+		Disabled:      os.Getenv("BUILDKITE_GHA_TELEMETRY_DISABLED") == "true",
+	})
+	if err != nil || client == nil {
+		return
+	}
+	_ = client.Emit(command, outcome, duration, details)
+}
+
+func telemetryOutcome(code int, conclusion string, contextErr error) telemetry.Outcome {
+	if code == 2 {
+		return telemetry.OutcomeUsageError
+	}
+	if code == buildkitepipeline.ContinueOnErrorExitStatus {
+		return telemetry.OutcomeToleratedFailure
+	}
+	switch conclusion {
+	case "cancelled":
+		return telemetry.OutcomeCancelled
+	}
+	if errors.Is(contextErr, context.Canceled) || errors.Is(contextErr, context.DeadlineExceeded) {
+		return telemetry.OutcomeCancelled
+	}
+	if code != 0 || conclusion == "failure" {
+		return telemetry.OutcomeFailure
+	}
+	if conclusion == "skipped" {
+		return telemetry.OutcomeSkipped
+	}
+	return telemetry.OutcomeSuccess
 }
 
 func resolveRuntimeMise(ctx context.Context, configured, dataDir, privateRuntime string, stderr io.Writer) (string, error) {
@@ -1391,6 +1448,12 @@ func uploadFromPlatform(goos, goarch string, args []string, stdout, stderr io.Wr
 }
 
 func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return uploadParsedContext(ctx, uploadArguments, stdout, stderr, version, agent)
+}
+
+func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, stdout, stderr io.Writer, version string, agent transport.Agent) int {
 	workflowOperands, eventPath := uploadArguments.workflowOperands, uploadArguments.eventPath
 	importerStep := os.Getenv("BUILDKITE_STEP_KEY")
 	if os.Getenv("BUILDKITE") != "true" || strings.TrimSpace(importerStep) == "" {
@@ -1402,6 +1465,9 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 	}
 	out := newProcessingOutput("upload", "text", stderr, stderr, agent)
+	if uploadArguments.telemetry != nil {
+		out.observe = uploadArguments.telemetry.observe
+	}
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
@@ -1436,8 +1502,6 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		_, _ = fmt.Fprintln(stderr, "buildkite-gha: upload: workflow paths matched only reusable workflow_call workflows; there is nothing to upload")
 		return 1
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	for _, input := range workflows {
 		if input.ReusableOnly {
 			continue
@@ -1625,6 +1689,12 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		processingReports[i].Admission.Result = "admitted"
 		processingReports[i].Result = "admitted"
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
+		if uploadArguments.telemetry != nil {
+			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
+			if bundleRunsUnprovenActions(bundle) {
+				uploadArguments.telemetry.addActionRuntimeUnknown()
+			}
+		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
 		CompilerStep: importerStep,
@@ -1636,6 +1706,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	for i, input := range workflows {
 		if input.Applicable {
+			if uploadArguments.telemetry != nil {
+				uploadArguments.telemetry.addReportDiagnostics(processingReports[i])
+			}
 			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
 			if !processingReportHasErrors(processingReports[i]) {
 				out.annotate(processingReports[i])
@@ -2346,6 +2419,22 @@ func irUsesActions(ir compiler.IR) bool {
 	return false
 }
 
+// bundleRunsUnprovenActions reports whether a compiled bundle executes action
+// code the compiler never ran. Actions a native adapter replaces keep both
+// their locks and their `uses` steps in the plan, so the adapter decision is
+// the only thing separating them from actions that really run.
+func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
+	for _, artifact := range bundle.Plans {
+		for _, lock := range artifact.Job.Actions {
+			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+			if !actionintegration.UsesNativeAdapter(identity) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func bundleUsesActions(bundle compiler.Bundle) bool {
 	for _, artifact := range bundle.Plans {
 		if len(artifact.Job.Actions) != 0 {
@@ -2368,6 +2457,7 @@ type parsedUploadArgs struct {
 	runnerTargets            map[string]compiler.RunnerTarget
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
+	telemetry                *commandTelemetryDetails
 }
 
 func uploadArgs(args []string) (workflowOperands []string, eventPath string, err error) {
