@@ -1469,6 +1469,7 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		}
 		return 1
 	}
+	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
 			continue
@@ -1476,17 +1477,18 @@ func uploadParsed(uploadArguments parsedUploadArgs, stdout, stderr io.Writer, ve
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
 			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
-			_ = out.write(triggerFailureProcessingReport(workflows[i], triggerErr))
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", triggerErr)
-			return 1
+			workflows[i].Applicable = true
+			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
+			out.annotate(processingReports[i])
+			continue
 		}
 		workflows[i].Applicable = selection.Applicable
 		workflows[i].TriggerCondition = selection.Condition
 		workflows[i].SkipReason = selection.SkipReason
 	}
-	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i, input := range workflows {
-		if !input.Applicable {
+		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
 			continue
 		}
 		validationOptions := hostedOptions("", uploadArguments.runnerTargets, nil)
