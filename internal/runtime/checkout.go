@@ -75,7 +75,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
 	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
 	if !validProvider || !checkoutSHAPattern.MatchString(job.Event.SHA) {
-		return result, fmt.Errorf("%s requires a valid GitHub or Cursor Origin event repository and exact SHA; other event sources are unsupported", adapter)
+		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)

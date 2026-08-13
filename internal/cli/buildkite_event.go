@@ -265,7 +265,7 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 	} else {
 		u, parseErr := url.Parse(raw)
 		if parseErr != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-			return "", "", "", "", fmt.Errorf("must be a github.com or Cursor Origin repository URL")
+			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
 		}
 		switch u.Hostname() {
 		case "github.com":
@@ -285,13 +285,13 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		case "origin.cursor.com":
 			provider = "cursor-origin"
 			if u.Scheme != "https" {
-				return "", "", "", "", fmt.Errorf("repository URL for Cursor Origin must use HTTPS")
+				return "", "", "", "", fmt.Errorf("repository URL for Origin must use HTTPS")
 			}
 			if u.User != nil {
 				return "", "", "", "", fmt.Errorf("must not contain credentials")
 			}
 		default:
-			return "", "", "", "", fmt.Errorf("must be a github.com or Cursor Origin repository URL")
+			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
 		}
 		path = strings.TrimPrefix(u.EscapedPath(), "/")
 		if decodedPath, decodeErr := url.PathUnescape(path); decodeErr == nil {
@@ -303,14 +303,14 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 	if provider == "cursor-origin" {
 		parts := strings.Split(path, "/")
 		if len(parts) != 3 || parts[0] != "git" || parts[1] == "" || !strings.HasSuffix(parts[2], ".git") {
-			return "", "", "", "", fmt.Errorf("repository URL for Cursor Origin must be https://origin.cursor.com/git/<namespace>/<repository>.git")
+			return "", "", "", "", fmt.Errorf("repository URL for Origin must be https://origin.cursor.com/git/<namespace>/<repository>.git")
 		}
 		owner, name = parts[1], strings.TrimSuffix(parts[2], ".git")
 		if owner == "." || owner == ".." || name == "" || name == "." || name == ".." || !validGitHubPathPart(owner, true) || !validGitHubPathPart(name, true) {
 			return "", "", "", "", fmt.Errorf("has a malformed namespace or repository name")
 		}
 		if raw != "https://origin.cursor.com/git/"+owner+"/"+name+".git" {
-			return "", "", "", "", fmt.Errorf("repository URL for Cursor Origin must use its canonical form")
+			return "", "", "", "", fmt.Errorf("repository URL for Origin must use its canonical form")
 		}
 		return provider, owner, name, raw, nil
 	}

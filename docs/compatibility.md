@@ -638,7 +638,7 @@ JavaScript and Docker actions with compatible bundled cache clients, such as `ac
 | --- | --- | --- |
 | Public GitHub event repository | ✅ Supported | No additional boundary. |
 | Private GitHub event repository | 🟡 Supported subset | Buildkite must authorize repository-provider Git credentials. |
-| Internal or private Cursor Origin event repository | 🟡 Supported subset | `BUILDKITE_REPO` must be the pipeline's exact `https://origin.cursor.com/git/<namespace>/<repository>.git` URL. Buildkite must authorize repository-provider Git credentials. |
+| Internal or private Origin event repository | 🟡 Supported subset | `BUILDKITE_REPO` must be the pipeline's exact `https://origin.cursor.com/git/<namespace>/<repository>.git` URL. Buildkite must authorize repository-provider Git credentials. |
 | Alternate repository in `actions/checkout` | ❌ Unsupported | Not available. |
 | Public GitHub action | 🟡 Supported subset | Subject to the action boundaries above. |
 | Private action or reusable workflow | ❌ Unsupported | Not available. |

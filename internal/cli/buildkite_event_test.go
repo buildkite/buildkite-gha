@@ -19,7 +19,7 @@ func TestParseBuildkiteRepository(t *testing.T) {
 			}
 		})
 	}
-	t.Run("Cursor Origin", func(t *testing.T) {
+	t.Run("Origin", func(t *testing.T) {
 		raw := "https://origin.cursor.com/git/acme/widgets.git"
 		provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw)
 		if err != nil || provider != "cursor-origin" || owner != "acme" || name != "widgets" || cloneURL != raw {
@@ -45,7 +45,7 @@ func TestParseBuildkiteRepository(t *testing.T) {
 		"https://origin.cursor.com/git/acme/widgets%2Egit",
 		"https://user:pass@origin.cursor.com/git/acme/widgets.git",
 	} {
-		t.Run("reject Cursor Origin "+raw, func(t *testing.T) {
+		t.Run("reject Origin "+raw, func(t *testing.T) {
 			if _, _, _, _, err := parseBuildkiteRepository(raw); err == nil {
 				t.Fatalf("parseBuildkiteRepository(%q) unexpectedly succeeded", raw)
 			}
@@ -53,7 +53,7 @@ func TestParseBuildkiteRepository(t *testing.T) {
 	}
 }
 
-func TestBuildkiteEventSourceCursorOriginIdentity(t *testing.T) {
+func TestBuildkiteEventSourceOriginIdentity(t *testing.T) {
 	raw := "https://origin.cursor.com/git/acme/widgets.git"
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
@@ -71,11 +71,11 @@ func TestBuildkiteEventSourceCursorOriginIdentity(t *testing.T) {
 	repository := snapshot["repository"].(map[string]any)
 	if snapshot["provider"] != "cursor-origin" || snapshot["event"] != "push" ||
 		repository["owner"] != "acme" || repository["name"] != "widgets" || repository["clone_url"] != raw {
-		t.Fatalf("Cursor Origin snapshot = %#v", snapshot)
+		t.Fatalf("Origin snapshot = %#v", snapshot)
 	}
 }
 
-func TestBuildkiteWebhookEventSourceCursorOriginGitHubCompatibleMetadata(t *testing.T) {
+func TestBuildkiteWebhookEventSourceOriginGitHubCompatibleMetadata(t *testing.T) {
 	env := map[string]string{
 		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
 		"BUILDKITE_REPO":         "https://origin.cursor.com/git/acme/widgets.git",
@@ -97,7 +97,7 @@ func TestBuildkiteWebhookEventSourceCursorOriginGitHubCompatibleMetadata(t *test
 	payload := snapshot["payload"].(map[string]any)
 	if snapshot["provider"] != "cursor-origin" || snapshot["event"] != "pull_request" || snapshot["actor"] != "origin-user" ||
 		repository["owner"] != "acme" || repository["name"] != "widgets" || payload["action"] != "opened" {
-		t.Fatalf("Cursor Origin webhook snapshot = %#v", snapshot)
+		t.Fatalf("Origin webhook snapshot = %#v", snapshot)
 	}
 }
 

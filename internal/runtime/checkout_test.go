@@ -198,11 +198,11 @@ func TestRepositoryProviderCheckoutCredentialArgsUseProviderHost(t *testing.T) {
 	args := strings.Join(repositoryProviderCheckoutCredentialArgs([]string{"git"}, "/usr/bin/buildkite-agent", "origin.cursor.com"), "\n")
 	if !strings.Contains(args, "credential.https://origin.cursor.com.useHttpPath=true") ||
 		!strings.Contains(args, "credential.https://origin.cursor.com.helper=") || strings.Contains(args, "credential.https://github.com") {
-		t.Fatalf("Cursor Origin credential arguments = %q", args)
+		t.Fatalf("Origin credential arguments = %q", args)
 	}
 }
 
-func TestCursorOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
+func TestOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
 	workspace := t.TempDir()
 	sha := strings.Repeat("a", 40)
 	gitLog := filepath.Join(t.TempDir(), "git.log")
@@ -276,14 +276,14 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	if !strings.Contains(string(gitCommands), "remote add origin https://origin.cursor.com/git/acme/widgets.git") ||
 		!strings.Contains(string(gitCommands), "credential.https://origin.cursor.com.useHttpPath=true") ||
 		strings.Contains(string(gitCommands), "credential.https://github.com") {
-		t.Fatalf("Cursor Origin Git commands = %q", gitCommands)
+		t.Fatalf("Origin Git commands = %q", gitCommands)
 	}
 	input, err := os.ReadFile(helperInput)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(input) != "protocol=https\nhost=origin.cursor.com\npath=git/acme/widgets.git\n\n" {
-		t.Fatalf("Cursor Origin credential input = %q", input)
+		t.Fatalf("Origin credential input = %q", input)
 	}
 }
 
@@ -302,7 +302,7 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 		t.Fatalf("nonempty workspace error = %v", err)
 	}
 	job.Event.Provider = "other"
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Cursor Origin event") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
 		t.Fatalf("invalid event error = %v", err)
 	}
 }
@@ -797,7 +797,7 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	}
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Cursor Origin event repository") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
 		t.Fatalf("checkout repository validation error = %v", err)
 	}
 }

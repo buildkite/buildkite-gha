@@ -4116,7 +4116,7 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 	}
 }
 
-func TestRunUploadDerivesCursorOriginEvent(t *testing.T) {
+func TestRunUploadDerivesOriginEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	sha := "0123456789abcdef0123456789abcdef01234567"
@@ -4140,15 +4140,15 @@ func TestRunUploadDerivesCursorOriginEvent(t *testing.T) {
 		}
 		job, err := plan.Decode(contents)
 		if err != nil {
-			t.Fatalf("decode Cursor Origin plan %q: %v", path, err)
+			t.Fatalf("decode Origin plan %q: %v", path, err)
 		}
 		planCount++
 		if job.Event.Provider != "cursor-origin" || job.Event.Repository != "acme/widgets" || job.Event.Ref != "refs/heads/main" || job.Event.SHA != sha {
-			t.Fatalf("Cursor Origin plan event = %#v", job.Event)
+			t.Fatalf("Origin plan event = %#v", job.Event)
 		}
 	}
 	if planCount != 3 {
-		t.Fatalf("Cursor Origin plan count = %d, want 3", planCount)
+		t.Fatalf("Origin plan count = %d, want 3", planCount)
 	}
 }
 
