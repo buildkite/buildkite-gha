@@ -39,6 +39,13 @@ func (d *commandTelemetryDetails) addWarnings(warnings []compiler.Warning) {
 	}
 }
 
+// addActionRuntimeUnknown records admitted actions whose runtime behavior was
+// never proven. Upload keeps this in telemetry rather than the processing
+// report, where it would annotate every import that uses actions.
+func (d *commandTelemetryDetails) addActionRuntimeUnknown() {
+	d.addDiagnostic("W_ACTION_RUNTIME_UNKNOWN", telemetry.SeverityWarning)
+}
+
 func (d *commandTelemetryDetails) addDiagnostic(code string, severity telemetry.Severity) {
 	if d.seen == nil {
 		d.seen = make(map[string]int)

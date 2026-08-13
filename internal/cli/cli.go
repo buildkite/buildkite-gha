@@ -1647,6 +1647,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
 		if uploadArguments.telemetry != nil {
 			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
+			if preflight.HasActions {
+				uploadArguments.telemetry.addActionRuntimeUnknown()
+			}
 		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
