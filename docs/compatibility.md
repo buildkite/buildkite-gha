@@ -457,7 +457,7 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
-| `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.server_url`, `github.sha` | ✅ Yes | ✅ Yes |
+| `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
 | `github.head_ref`, `github.ref_name` | ❌ No | ❌ No |
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
