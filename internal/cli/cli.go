@@ -1810,7 +1810,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		messages = append(messages, message)
 	}
 	_, annotation := processingAnnotation(report)
-	messageArtifact := generatedFailureArtifact("messages", ".txt", strings.Join(messages, "\n"))
+	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
 		GroupLabel: label,

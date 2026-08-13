@@ -2698,9 +2698,7 @@ type failureArtifactPlugin struct {
 type failureStepPlugins []map[string]failureArtifactPlugin
 
 func isGeneratedFailureCommand(command string) bool {
-	return command == `printf '\033[31m'
-cat .buildkite-gha-failure-message.txt
-printf '\033[0m\n'
+	return command == `cat .buildkite-gha-failure-message.txt
 buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html
 exit 1`
 }
@@ -3929,7 +3927,7 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
+	if workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
 	}
 }

@@ -252,9 +252,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.AnnotationPath))
 		out.WriteString("              to: .buildkite-gha-failure-annotation.html\n")
 		commands := []string{
-			`printf '\033[31m'`,
 			"cat .buildkite-gha-failure-message.txt",
-			`printf '\033[0m\n'`,
 			"buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html",
 			"exit 1",
 		}
