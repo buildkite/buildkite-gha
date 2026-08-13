@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -93,7 +94,7 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 	var out strings.Builder
 	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
 	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
-	out.WriteString(annotationCode(report.Workflow))
+	out.WriteString(annotationCode(processingAnnotationWorkflowPath(report.Workflow)))
 	out.WriteString("</div>\n<div class=\"mb2\">\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len() + len(processingAnnotationEnd)
@@ -123,6 +124,21 @@ func processingAnnotation(report compatibility.ProcessingReport) (style, body st
 		remaining -= len(row)
 	}
 	panic("processing annotation exceeded its precomputed size")
+}
+
+func processingAnnotationWorkflowPath(path string) string {
+	if !filepath.IsAbs(path) {
+		return filepath.ToSlash(filepath.Clean(path))
+	}
+	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
+	if root == "" {
+		root, _ = os.Getwd()
+	}
+	relative, err := filepath.Rel(root, path)
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(relative)
+	}
+	return filepath.ToSlash(filepath.Clean(path))
 }
 
 func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int) string {

@@ -2541,6 +2541,19 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "test-image-build.yml")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport(workflowPath, "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Message: "invalid workflow"})
+
+	_, body := processingAnnotation(report)
+	if want := "<strong>Workflow:</strong> <code>.github/workflows/test-image-build.yml</code>"; !strings.Contains(body, want) || strings.Contains(body, repository) {
+		t.Fatalf("annotation = %q, want %q without checkout path", body, want)
+	}
+}
+
 func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
