@@ -283,6 +283,69 @@ func TestRunJobUntypedFailurePhaseIsUnknown(t *testing.T) {
 	}
 }
 
+func TestPluginTelemetryReportsUnprovenActionRuntime(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"action.yml": "on: push\njobs:\n  action:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./.github/actions/local\n",
+	})
+	actionPath := filepath.Join(repository, ".github", "actions", "local")
+	if err := os.MkdirAll(actionPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "action.yml"), []byte("runs:\n  using: node24\n  main: main.js\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actionPath, "main.js"), []byte("console.log('local action')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE_GHA_NODE20", writeFakeNode(t, repository, 20))
+	t.Setenv("BUILDKITE_GHA_NODE24", writeFakeNode(t, repository, 24))
+
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var received struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode telemetry event: %v", err)
+		}
+		events <- received.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL+"/v3")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+
+	configuration, err := json.Marshal(map[string]any{"workflow": filepath.Join(".github", "workflows", "action.yml")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "telemetry-action-importer")
+
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	properties := <-events
+	if properties.Command != telemetry.CommandPluginImport || properties.Outcome != telemetry.OutcomeSuccess {
+		t.Fatalf("event = %#v", properties)
+	}
+	want := []telemetry.Diagnostic{{Code: "W_ACTION_RUNTIME_UNKNOWN", Severity: telemetry.SeverityWarning}}
+	if !reflect.DeepEqual(properties.Diagnostics, want) {
+		t.Fatalf("diagnostics = %#v, want %#v", properties.Diagnostics, want)
+	}
+	for _, command := range runner.commands {
+		if len(command.args) != 0 && command.args[0] == "annotate" {
+			t.Fatalf("unproven action runtime annotated the build: %#v", command.args)
+		}
+	}
+}
+
 func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 	requireImporterHost(t)
 	t.Setenv(pluginConfigurationEnvironment, "")
