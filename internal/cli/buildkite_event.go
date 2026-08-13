@@ -309,6 +309,9 @@ func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL strin
 		if owner == "." || owner == ".." || name == "" || name == "." || name == ".." || !validGitHubPathPart(owner, true) || !validGitHubPathPart(name, true) {
 			return "", "", "", "", fmt.Errorf("has a malformed namespace or repository name")
 		}
+		if raw != "https://origin.cursor.com/git/"+owner+"/"+name+".git" {
+			return "", "", "", "", fmt.Errorf("repository URL for Cursor Origin must use its canonical form")
+		}
 		return provider, owner, name, raw, nil
 	}
 	parts := strings.Split(path, "/")

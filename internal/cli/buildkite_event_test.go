@@ -40,6 +40,9 @@ func TestParseBuildkiteRepository(t *testing.T) {
 		"https://origin.cursor.com/git/acme/widgets",
 		"https://origin.cursor.com/git/acme/widgets.git/extra",
 		"https://origin.cursor.com/git/acme/widgets.git?ref=main",
+		"https://origin.cursor.com/git/acme/widgets.git?",
+		"https://origin.cursor.com/git/acme/widgets.git#",
+		"https://origin.cursor.com/git/acme/widgets%2Egit",
 		"https://user:pass@origin.cursor.com/git/acme/widgets.git",
 	} {
 		t.Run("reject Cursor Origin "+raw, func(t *testing.T) {

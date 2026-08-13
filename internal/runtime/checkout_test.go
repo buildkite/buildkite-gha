@@ -202,6 +202,91 @@ func TestRepositoryProviderCheckoutCredentialArgsUseProviderHost(t *testing.T) {
 	}
 }
 
+func TestCursorOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
+	workspace := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	helperInput := filepath.Join(t.TempDir(), "helper-input")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	agentScript := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+cat > ` + shellTestQuote(helperInput) + `
+printf 'username=token\npassword=origin-repository-token\n'
+`
+	if err := os.WriteFile(agent, []byte(agentScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git := filepath.Join(t.TempDir(), "git")
+	gitScript := `#!/bin/sh
+set -eu
+operation=
+for argument in "$@"; do
+  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  fetch)
+    helper=
+    for argument in "$@"; do
+      case "$argument" in
+        credential.https://origin.cursor.com.helper=!*) helper="${argument#credential.https://origin.cursor.com.helper=!}" ;;
+        credential.https://github.com.*) exit 42 ;;
+      esac
+    done
+    test -n "$helper"
+    credentials="$(printf 'protocol=https\nhost=origin.cursor.com\npath=git/acme/widgets.git\n\n' | sh -c "$helper get")"
+    case "$credentials" in
+      *"username=token"*"password=origin-repository-token"*) ;;
+      *) exit 43 ;;
+    esac
+    ;;
+  checkout) printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD ;;
+esac
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+`
+	if err := os.WriteFile(git, []byte(gitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(&AgentRepositoryCredentials{
+		Agent: agent, JobID: testCacheJobID, JobToken: "job-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{
+		Event:                plan.Event{Provider: "cursor-origin", Repository: "acme/widgets", Ref: "refs/heads/main", SHA: sha},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(
+		context.Background(), newCommandProcessor(&logs, &logs), workspace, job, nil,
+	)
+	if err != nil {
+		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
+	}
+	if result.Outputs["commit"] != sha {
+		t.Fatalf("checkout outputs = %#v", result.Outputs)
+	}
+	gitCommands, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gitCommands), "remote add origin https://origin.cursor.com/git/acme/widgets.git") ||
+		!strings.Contains(string(gitCommands), "credential.https://origin.cursor.com.useHttpPath=true") ||
+		strings.Contains(string(gitCommands), "credential.https://github.com") {
+		t.Fatalf("Cursor Origin Git commands = %q", gitCommands)
+	}
+	input, err := os.ReadFile(helperInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(input) != "protocol=https\nhost=origin.cursor.com\npath=git/acme/widgets.git\n\n" {
+		t.Fatalf("Cursor Origin credential input = %q", input)
+	}
+}
+
 func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
