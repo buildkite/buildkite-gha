@@ -3536,6 +3536,20 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 }
 
+func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics,
+		compatibility.Diagnostic{Level: "warning", Code: "W_CONCURRENCY", Message: "cancel-in-progress is ignored"},
+		compatibility.Diagnostic{Level: "error", Code: "E_RUNNER", Message: "runner is unsupported", Job: "test"},
+	)
+
+	workflow := failedGeneratedWorkflow(workflowInput{Name: "CI", Identity: "ci"}, "push", report)
+	want := "[E_RUNNER] runner is unsupported {job=test}\n[W_CONCURRENCY] cancel-in-progress is ignored"
+	if workflow.Failure == nil || workflow.Failure.Message != want {
+		t.Fatalf("failure = %#v, want message %q", workflow.Failure, want)
+	}
+}
+
 func TestRunUploadEmitsUnsupportedJobCancellationAsFailingStep(t *testing.T) {
 	requireImporterHost(t)
 	directory := t.TempDir()
