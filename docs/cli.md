@@ -12,7 +12,7 @@ mise use -g --minimum-release-age 0s github:buildkite/buildkite-gha
 
 The `--minimum-release-age 0s` override prevents mise's default 24-hour delay from selecting an older release without an artifact for your platform.
 
-Append `@<version>` to install an exact release. A custom importer that runs macOS jobs must also download and verify the same release's Darwin/arm64 distribution.
+Append `@<version>` to install an exact release. A custom importer that generates jobs for the other supported platform must also download and verify that platform's distribution from the same release.
 
 Jobs with JavaScript actions require `mise`. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
 
@@ -103,7 +103,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
 `workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
@@ -111,9 +111,11 @@ to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields. The Linux/amd64 importer fetches the same release's
-Darwin runtime only when a workflow requires it. Custom importers can use the
-public flags below.
+`minimum-release-age` fields. The importer uses its verified executable for jobs
+on the same platform and fetches the other platform's distribution from the
+same release only when a workflow requires it. Custom importers can use the
+public flags below. Runner queue mappings affect generated jobs, not the
+importer step.
 
 ### Select workflows
 
@@ -173,8 +175,9 @@ Configured `ubuntu-latest` and `ubuntu-24.04` profiles default to the Noble
 hosted-toolchains image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image`
 with an immutable digest to override the default. Unmapped Linux labels keep
 default targeting without an image. Every macOS label requires a queue and
-rejects images. Runtime distribution paths must be absolute executables; Linux
-defaults to the importer and Darwin has no direct-upload default.
+rejects images. Runtime distribution paths must be absolute executables. The
+importer's platform defaults to its running executable; the other platform has
+no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
 

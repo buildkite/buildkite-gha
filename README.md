@@ -42,6 +42,10 @@ steps:
 
 The plugin is a thin wrapper around the hidden `buildkite-gha plugin` entrypoint. It uses mise to install and verify the selected CLI release, and defaults to the latest stable release. During the preview, leaving `version` unset means there is no CLI version to update as new stable releases ship. Set `workflow` to one explicit path or `workflows` to an explicit path list; plugin configuration does not accept directories or glob patterns.
 
+The importer can run on Linux x86-64 or native macOS arm64. Its agent targeting
+is independent of `runners`: each runner mapping selects the queue for generated
+workflow jobs, not the importer step.
+
 To hold the CLI at a specific release instead, set `version` to an exact stable release from `0.9.0` onward:
 
 ```yaml

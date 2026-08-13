@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -248,7 +249,25 @@ func TestConfiguredLinuxRunnerTargetsDefaultHostedToolchainImages(t *testing.T) 
 	}
 }
 
-func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
+func TestImporterPlatform(t *testing.T) {
+	for _, test := range []struct {
+		goos, goarch string
+		want         compiler.Platform
+	}{
+		{goos: "linux", goarch: "amd64", want: compiler.PlatformLinuxAMD64},
+		{goos: "darwin", goarch: "arm64", want: compiler.PlatformDarwinARM64},
+	} {
+		got, err := importerPlatform(test.goos, test.goarch)
+		if err != nil || got != test.want {
+			t.Fatalf("importerPlatform(%q, %q) = %s, %v", test.goos, test.goarch, got, err)
+		}
+	}
+	if _, err := importerPlatform("linux", "arm64"); err == nil || !strings.Contains(err.Error(), "linux/amd64 or darwin/arm64") {
+		t.Fatalf("unsupported importer error = %v", err)
+	}
+}
+
+func TestUploadRejectsUnsupportedImporterBeforeProcessing(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "linux.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -269,16 +288,35 @@ func TestUploadRejectsDarwinImporterBeforeProcessing(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &cliCaptureRunner{}
 			var stdout, stderr bytes.Buffer
-			if code := uploadFromPlatform("darwin", "arm64", test.args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
+			if code := uploadFromPlatform("linux", "arm64", test.args, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != 1 {
 				t.Fatalf("uploadFromPlatform() code = %d, want 1", code)
 			}
-			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64, running on darwin/arm64\n" {
+			if got := stderr.String(); got != "buildkite-gha: upload: importer requires linux/amd64 or darwin/arm64, running on linux/arm64\n" {
 				t.Fatalf("stderr = %q", got)
 			}
 			if stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
-				t.Fatalf("Darwin importer performed work: stdout = %q, commands = %d, uploads = %d", stdout.String(), len(runner.commands), len(runner.uploaded))
+				t.Fatalf("unsupported importer performed work: stdout = %q, commands = %d, uploads = %d", stdout.String(), len(runner.commands), len(runner.uploaded))
 			}
 		})
+	}
+}
+
+func TestDarwinUploadRequiresLinuxDistributionForLinuxWorkflow(t *testing.T) {
+	workflowPath := filepath.Join(t.TempDir(), "linux.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  linux:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo linux\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "darwin-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	code := uploadFromPlatform("darwin", "arm64", []string{"--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner})
+	if code != 1 || !strings.Contains(stderr.String(), "runtime distribution for linux/amd64 is required by the selected workflows") {
+		t.Fatalf("uploadFromPlatform() = %d, stderr = %q", code, stderr.String())
+	}
+	if len(runner.uploaded) != 0 {
+		t.Fatalf("missing runtime reached artifact upload: %#v", runner.uploaded)
 	}
 }
 
@@ -521,23 +559,107 @@ func TestPluginPublishesMixedRuntimeDistributions(t *testing.T) {
 	}
 }
 
-func TestPluginDevDarwinInjectionIsRequiredAndReleaseRejectsIt(t *testing.T) {
+func TestPluginRunsNativelyOnDarwinARM64(t *testing.T) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("native Darwin/arm64 importer test")
+	}
+	const fullCommit = "0123456789abcdef0123456789abcdef01234567"
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"macos.yml": "on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n",
+	})
+	t.Chdir(repository)
+	configuration, err := json.Marshal(map[string]any{
+		"workflow": filepath.Join(".github", "workflows", "macos.yml"),
+		"runners":  []map[string]string{{"runs-on": "macos-15", "queue": "macos"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(pluginConfigurationEnvironment, string(configuration))
+	setCLIPluginBuildkiteEnvironment(t, "plugin-darwin-importer")
+	t.Setenv("BUILDKITE_COMMIT", "HEAD")
+	runner := &cliCaptureRunner{gitOutput: []byte(fullCommit + "\n")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Uploaded 1 jobs") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job.RuntimeDistributionDigest() != cliTestRuntimeDigest() {
+			t.Fatalf("Darwin job runtime = %q, want importer %q", job.RuntimeDistributionDigest(), cliTestRuntimeDigest())
+		}
+		return
+	}
+	t.Fatal("Darwin importer did not upload a job plan")
+}
+
+func TestPluginDevCounterpartInjectionIsRequiredAndReleaseRejectsIt(t *testing.T) {
 	linux := runtimeDistribution{contents: []byte("linux"), digest: "sha256:linux"}
 	required := map[compiler.Platform]bool{compiler.PlatformDarwinARM64: true}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
-	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), required, linux); err == nil || !strings.Contains(err.Error(), "required") {
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), required, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("dev acquisition error = %v", err)
 	}
+	darwin := runtimeDistribution{contents: []byte("darwin"), digest: "sha256:darwin"}
+	if _, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformDarwinARM64, darwin); err == nil || !strings.Contains(err.Error(), pluginDevLinuxRuntimeEnvironment) {
+		t.Fatalf("Darwin-hosted dev acquisition error = %v", err)
+	}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, filepath.Join(t.TempDir(), "injected"))
-	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(context.Background(), map[compiler.Platform]bool{}, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
+	if _, err := (&pluginRuntimeAcquisition{version: "1.2.3"}).acquire(context.Background(), map[compiler.Platform]bool{}, compiler.PlatformLinuxAMD64, linux); err == nil || !strings.Contains(err.Error(), "rejected") {
 		t.Fatalf("release injection error = %v", err)
 	}
+}
+
+func TestPluginAcquiresVerifiedLinuxRuntimeForDarwinHost(t *testing.T) {
+	linux := pluginTestLinuxExecutable()
+	archive := pluginTestArchive(t, linux, false)
+	archiveDigest := sha256.Sum256(archive)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch filepath.Base(request.URL.Path) {
+		case "checksums.txt":
+			_, _ = fmt.Fprintf(response, "%x  %s\n", archiveDigest, pluginLinuxAsset)
+		case pluginLinuxAsset:
+			_, _ = response.Write(archive)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	distribution, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformLinuxAMD64, server.Client(), server.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if distribution.digest != transport.Digest(linux) || !bytes.Equal(distribution.contents, linux) {
+		t.Fatalf("Linux distribution = %q, %d bytes", distribution.digest, len(distribution.contents))
+	}
+}
+
+func pluginTestLinuxExecutable() []byte {
+	contents := make([]byte, 64)
+	copy(contents, []byte("\x7fELF"))
+	contents[4] = 2                                    // ELFCLASS64
+	contents[5] = 1                                    // ELFDATA2LSB
+	contents[6] = 1                                    // EV_CURRENT
+	binary.LittleEndian.PutUint16(contents[16:18], 2)  // ET_EXEC
+	binary.LittleEndian.PutUint16(contents[18:20], 62) // EM_X86_64
+	binary.LittleEndian.PutUint32(contents[20:24], 1)  // EV_CURRENT
+	binary.LittleEndian.PutUint16(contents[52:54], 64) // ELF header size
+	return contents
 }
 
 func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	linux := runtimeDistribution{contents: []byte("running executable"), digest: "sha256:running"}
 	t.Setenv(pluginDevDarwinRuntimeEnvironment, "")
-	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, linux)
+	got, err := (&pluginRuntimeAcquisition{version: "dev"}).acquire(context.Background(), map[compiler.Platform]bool{compiler.PlatformLinuxAMD64: true}, compiler.PlatformLinuxAMD64, linux)
 	if err != nil || got[compiler.PlatformLinuxAMD64].digest != linux.digest {
 		t.Fatalf("Linux-only acquisition = %#v, %v", got, err)
 	}
@@ -559,7 +681,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	}))
 	defer server.Close()
 	cache := filepath.Join(canonicalTempDir(t), pluginDarwinAsset)
-	distribution, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache)
+	distribution, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +689,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	if distribution.digest != wantDigest || !bytes.Equal(distribution.contents, darwin) {
 		t.Fatalf("Darwin distribution = %q, %x", distribution.digest, distribution.contents)
 	}
-	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
 		t.Fatal(err)
 	}
 	if requests["/v1.2.3/checksums.txt"] != 2 || requests["/v1.2.3/"+pluginDarwinAsset] != 1 {
@@ -576,7 +698,7 @@ func TestPluginAcquisitionIsLazyAndBindsVerifiedDarwinContents(t *testing.T) {
 	if err := os.WriteFile(cache, []byte("untrusted cache"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, cache); err != nil {
+	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, cache); err != nil {
 		t.Fatal(err)
 	}
 	if requests["/v1.2.3/checksums.txt"] != 3 || requests["/v1.2.3/"+pluginDarwinAsset] != 2 {
@@ -591,7 +713,7 @@ func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
 	if _, err := pluginAssetChecksum([]byte(fmt.Sprintf("%x  %s\n%x  %s\n", digest, pluginDarwinAsset, digest, pluginDarwinAsset)), pluginDarwinAsset); err == nil || !strings.Contains(err.Error(), "exactly one") {
 		t.Fatalf("duplicate checksum error = %v", err)
 	}
-	if _, err := extractPluginDarwin(pluginTestArchive(t, validBinary, true)); err == nil || !strings.Contains(err.Error(), "unexpected member") {
+	if _, err := extractPluginRuntime(pluginTestArchive(t, validBinary, true), compiler.PlatformDarwinARM64); err == nil || !strings.Contains(err.Error(), "unexpected member") {
 		t.Fatalf("unsafe archive error = %v", err)
 	}
 	wrong := pluginTestArchive(t, []byte("not Mach-O"), false)
@@ -604,7 +726,7 @@ func TestPluginDarwinRejectsChecksumArchiveAndBinaryFailures(t *testing.T) {
 		_, _ = response.Write(wrong)
 	}))
 	defer server.Close()
-	if _, err := acquirePluginDarwin(context.Background(), "1.2.3", server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
+	if _, err := acquirePluginRuntime(context.Background(), "1.2.3", compiler.PlatformDarwinARM64, server.Client(), server.URL, ""); err == nil || !strings.Contains(err.Error(), "Mach-O") {
 		t.Fatalf("wrong binary error = %v", err)
 	}
 }
@@ -2564,7 +2686,7 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
-	_, importerContents, importerDigest, err := executable()
+	_, importerContents, _, err := executable()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2605,7 +2727,7 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 
-	wantDistributionDigests := []string{importerDigest, linuxDigest, darwinDigest}
+	wantDistributionDigests := []string{linuxDigest, darwinDigest}
 	for _, digest := range wantDistributionDigests {
 		path, err := buildkitepipeline.DistributionPath(digest)
 		if err != nil {
@@ -2621,8 +2743,8 @@ func TestRunUploadPublishesMixedRuntimeDistributions(t *testing.T) {
 			artifactUploads[command.args[2]]++
 		}
 	}
-	if len(runner.uploaded) != 5 {
-		t.Fatalf("uploaded artifacts = %#v, want importer, two runtimes, and two plans", runner.uploaded)
+	if len(runner.uploaded) != 4 {
+		t.Fatalf("uploaded artifact count = %d, want two runtimes and two plans", len(runner.uploaded))
 	}
 	for path, count := range artifactUploads {
 		if count != 1 {
