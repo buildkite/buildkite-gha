@@ -12,7 +12,7 @@ mise use -g --minimum-release-age 0s github:buildkite/buildkite-gha
 
 The `--minimum-release-age 0s` override prevents mise's default 24-hour delay from selecting an older release without an artifact for your platform.
 
-Append `@<version>` to install an exact release. A custom importer that runs macOS jobs must also download and verify the same release's Darwin/arm64 distribution.
+Append `@<version>` to install an exact release. A custom importer that generates jobs for the other supported platform must also download and verify that platform's distribution from the same release.
 
 Jobs with JavaScript actions require `mise`. `run-job` checks `BUILDKITE_GHA_MISE`, then `PATH`, and then downloads a verified managed copy. Shell-only, native-adapter, and Docker-only jobs do not require `mise`.
 
@@ -43,7 +43,7 @@ Reports cover workflow parsing, event validation, graph construction, matrix exp
 
 When `validate`, `compile`, or `upload` runs in a Buildkite job, it also publishes report warnings and errors as job-scoped Buildkite annotations. Annotation failures produce a warning but do not change the command result.
 
-Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a skipped group during upload. Unsupported triggers and malformed data are incompatible.
+Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a top-level skipped step during upload. Unsupported triggers and malformed data are incompatible.
 
 Validation may use the public network to resolve actions. Apart from annotation publication when it runs in a Buildkite job, it does not call Buildkite, install Node, or execute workflow code.
 
@@ -103,7 +103,7 @@ buildkite-gha compile \
 buildkite-gha upload .github/workflows/ci.yml
 ```
 
-The importer must run on Linux/amd64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
+The importer must run on Linux/amd64 or Darwin/arm64 with `BUILDKITE=true` and `BUILDKITE_STEP_KEY`.
 
 The hidden zero-argument `buildkite-gha plugin` entry point reads `workflow`,
 `workflows`, and `runners` from `BUILDKITE_PLUGIN_CONFIGURATION`. Set `workflow`
@@ -111,9 +111,11 @@ to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields. The Linux/amd64 importer fetches the same release's
-Darwin runtime only when a workflow requires it. Custom importers can use the
-public flags below.
+`minimum-release-age` fields. The importer uses its verified executable for jobs
+on the same platform and fetches the other platform's distribution from the
+same release only when a workflow requires it. Custom importers can use the
+public flags below. Runner queue mappings affect generated jobs, not the
+importer step.
 
 ### Select workflows
 
@@ -129,9 +131,9 @@ Every operand must name one regular `.yml` or `.yaml` file. When uploading more 
 
 `--` ends option parsing and is required when a path operand begins with `-`; options must appear before it. Without `--`, a leading-dash operand is an unknown option. The CLI does not split shell strings or decode a JSON or YAML list from one argument: custom wrappers should pass each path as a separate argument and use `--` before externally supplied operands.
 
-All selected directly runnable workflows are represented in one atomic pipeline upload. Each becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. One group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
+All selected directly runnable workflows are represented in one atomic pipeline upload. Each successfully compiled workflow becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. A skipped workflow becomes one top-level skipped command step. One GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
 
-Any input, trigger translation, event validation, compilation, admission, artifact, or upload failure aborts the aggregate transaction. No partially compiled pipeline is uploaded.
+Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step instead of a group. The step prefixes the workflow check name with `:github:` for its label, prints all redacted diagnostics, then exits with status 1. A compiler failure takes precedence if the workflow also has a skip reason. Compilation continues for later workflows, and successfully compiled workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
 
 ### Select the effective event
 
@@ -147,11 +149,11 @@ Raw webhook data is not retained in generated plans or pipeline YAML and cannot 
 
 The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, and event-qualified check names; group labels remain static across events. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
 
-Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as skipped groups with an ignored placeholder and no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with an ignored-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
-Unsupported trigger events, path filters, inexact filters, malformed event data, and failures in any applicable workflow remain fatal. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+Unsupported trigger events, path filters, and inexact filters replace the affected workflow with one failing top-level command step rather than being approximated. Malformed event data remains fatal to the importer. Safe compilation errors in an applicable workflow also produce a failing replacement step. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
 
-After all applicable workflows pass, the command uploads the exact executable and content-addressed plans before running one:
+After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
 
 ```sh
 buildkite-agent pipeline upload --no-interpolation --reject-secrets
@@ -173,8 +175,9 @@ Configured `ubuntu-latest` and `ubuntu-24.04` profiles default to the Noble
 hosted-toolchains image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image`
 with an immutable digest to override the default. Unmapped Linux labels keep
 default targeting without an image. Every macOS label requires a queue and
-rejects images. Runtime distribution paths must be absolute executables; Linux
-defaults to the importer and Darwin has no direct-upload default.
+rejects images. Runtime distribution paths must be absolute executables. The
+importer's platform defaults to its running executable; the other platform has
+no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
 

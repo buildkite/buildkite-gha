@@ -2,9 +2,10 @@
 
 This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted` profile used by `upload` and the Buildkite plugin.
 
-The released plugin path supports Linux x86-64 and native macOS arm64, including
-the matching `runner.os` and `runner.arch` values. Platform labels do not provide
-GitHub image or toolchain parity.
+The released plugin path supports Linux x86-64 and native macOS arm64 importers
+and generated jobs, including the matching `runner.os` and `runner.arch` values.
+Importer agent targeting is independent of generated-job runner mappings.
+Platform labels do not provide GitHub image or toolchain parity.
 
 GitHub Actions syntax changes over time. If a feature is not listed here, treat it as unsupported. GitHub's [workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax) describes the original syntax; this page describes the subset that runs on Buildkite.
 
@@ -61,9 +62,9 @@ Steps remain inside one job because they share a workspace, environment files, a
 
 The plugin accepts one explicit `workflow` path or a non-empty `workflows` path array. Plugin paths and aggregate `upload` operands must identify regular, tracked `.yml` or `.yaml` files inside the repository; directories, missing or untracked files, outside paths, symlinks, and globs fail. A custom importer may upload one explicit regular workflow outside the repository. Inputs are canonicalized, sorted, and deduplicated before workflow identities and job-key namespaces are assigned.
 
-All directly runnable workflows are represented in one artifact and pipeline transaction. Each becomes one aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. A workflow that does not declare it becomes a skipped group with an ignored placeholder and no plan artifacts. The label is static across events. The group-level GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Each group depends on the importer, while its child jobs omit that redundant dependency and their own check notifications.
+All directly runnable workflows are represented in one artifact and pipeline transaction. Each successfully compiled workflow becomes an aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. A workflow that does not declare it becomes one top-level skipped command step with no plan artifacts. The label is static across events. The GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Groups and replacement steps depend on the importer, while group child jobs omit that redundant dependency and their own check notifications.
 
-Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. A parse, trigger, event, compilation, admission, artifact, or upload failure aborts the whole transaction; no partial pipeline is uploaded.
+Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step; the step prefixes the workflow check name with `:github:` for its label, prints all redacted diagnostics, and exits with status 1. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
 
 ## Workflow syntax
 
@@ -107,9 +108,9 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
-`paths` and `paths-ignore` are unsupported because Buildkite `if_changed` has different semantics. Unsupported trigger events, path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are fatal rather than approximated. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
+`paths` and `paths-ignore` are unsupported because Buildkite `if_changed` has different semantics. Unsupported trigger events, path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are not approximated; they replace the affected workflow with a failing step. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
 
-A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by a skipped group. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with an ignored-only pipeline.
+A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
 ### Reusable workflows
 

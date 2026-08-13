@@ -192,7 +192,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties %q and %q", matchedKey, candidate)
+					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -208,7 +208,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties %q and %q", matchedKey, candidate)
+					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -225,7 +225,7 @@ func decodeJSONValue(source string) (any, error) {
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
-		return nil, fmt.Errorf("fromJSON argument is invalid JSON: %w", err)
+		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")

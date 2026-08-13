@@ -1031,6 +1031,11 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, concurrencyErr))
 				valid = false
 			}
+			if cancellationErr := rejectJobCancellation(jobPath, job); cancellationErr != nil {
+				position := job.Concurrency.CancelInProgressPosition
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, position.Line, position.Column, job.ID, key, "", 0, cancellationErr))
+				valid = false
+			}
 			if concurrencyGroup != "" {
 				concurrencyGroups[canonicalConcurrencyGroup(concurrencyGroup)] = struct{}{}
 			}
@@ -1145,6 +1150,14 @@ func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, c
 		return "", locatedJobError(path, workflow.Job{ID: jobID}, concurrency.Span.Start.Line, concurrency.Span.Start.Column, "concurrency group resolved to an empty string")
 	}
 	return group, nil
+}
+
+func rejectJobCancellation(path string, job workflow.Job) error {
+	if job.Concurrency == nil || (!job.Concurrency.CancelInProgress && job.Concurrency.CancelInProgressExpression == nil) {
+		return nil
+	}
+	position := job.Concurrency.CancelInProgressPosition
+	return locatedJobError(path, job, position.Line, position.Column, "concurrency cancel-in-progress is unsupported")
 }
 
 func resolveWorkflowCancellation(path string, concurrency *workflow.Concurrency, context expression.CompileContext) (bool, error) {
