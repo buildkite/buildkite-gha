@@ -275,8 +275,8 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 			Condition:  "true",
 			SkipReason: "This workflow is not triggered by a `push` event",
 			Failure: &Failure{
-				Message: "runner isn't admitted\nmatrix could not be expanded",
-				Summary: "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded",
+				Annotation: "runner isn't admitted\nmatrix could not be expanded",
+				Summary:    "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded",
 			},
 		}},
 	})
@@ -314,7 +314,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `printf '%s\n' 'runner isn'"'"'t admitted
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `buildkite-agent annotate --scope=job --style=error 'runner isn'"'"'t admitted
 matrix could not be expanded' && exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
 	}

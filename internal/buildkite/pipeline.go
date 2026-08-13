@@ -66,8 +66,8 @@ type Workflow struct {
 
 // Failure replaces a failed aggregate workflow with one synthetic command step.
 type Failure struct {
-	Message string
-	Summary string
+	Annotation string
+	Summary    string
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -171,8 +171,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			usedKeys[workflow.GroupKey] = "workflow group"
 		}
 		if workflow.Failure != nil {
-			if workflow.Failure.Message == "" {
-				return nil, fmt.Errorf("workflow %d failure requires a message", i+1)
+			if workflow.Failure.Annotation == "" {
+				return nil, fmt.Errorf("workflow %d failure requires an annotation", i+1)
 			}
 			if workflow.Failure.Summary == "" {
 				return nil, fmt.Errorf("workflow %d failure requires a GitHub Check summary", i+1)
@@ -238,7 +238,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
+		command := `buildkite-agent annotate --scope=job --style=error ` + shellQuote(failure.Annotation) + ` && exit 1`
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")

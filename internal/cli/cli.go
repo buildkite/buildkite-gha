@@ -1546,7 +1546,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
-			out.annotate(processingReports[i])
 			continue
 		}
 		workflows[i].Applicable = selection.Applicable
@@ -1563,7 +1562,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
 		if validationErr != nil {
 			processingReports[i].Result = "incompatible"
-			out.annotate(processingReports[i])
 		}
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
@@ -1667,7 +1665,6 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
-				out.annotate(processingReports[i])
 				generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
 				continue
 			}
@@ -1782,32 +1779,15 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	}
 	report.Diagnostics = append([]compatibility.Diagnostic(nil), report.Diagnostics...)
 	report.Finalize()
-	messages := make([]string, 0, len(report.Diagnostics))
-	for _, diagnostic := range report.Diagnostics {
-		message := diagnostic.Message
-		if diagnostic.Code != "" {
-			message = "[" + diagnostic.Code + "] " + message
-		}
-		var attribution []string
-		if diagnostic.Job != "" {
-			attribution = append(attribution, "job="+diagnostic.Job)
-		}
-		if diagnostic.Step != 0 {
-			attribution = append(attribution, fmt.Sprintf("step=%d", diagnostic.Step))
-		}
-		if len(attribution) != 0 {
-			message += " {" + strings.Join(attribution, ", ") + "}"
-		}
-		messages = append(messages, message)
-	}
+	_, annotation := processingAnnotation(report)
 	return buildkitepipeline.Workflow{
 		GroupLabel: label,
 		GroupKey:   "gha-workflow-" + input.Identity,
 		CheckName:  "Buildkite / " + label + " (" + event + ")",
 		Condition:  input.TriggerCondition,
 		Failure: &buildkitepipeline.Failure{
-			Message: strings.Join(messages, "\n"),
-			Summary: failureCheckSummary(input.CanonicalPath, report),
+			Annotation: annotation,
+			Summary:    failureCheckSummary(input.CanonicalPath, report),
 		},
 	}
 }
