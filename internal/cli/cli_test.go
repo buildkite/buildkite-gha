@@ -251,6 +251,38 @@ func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestUnprovenActionRuntimeIgnoresNativeAdapters(t *testing.T) {
+	bundleWith := func(locks ...plan.ActionLock) compiler.Bundle {
+		return compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+			Actions: locks,
+			Steps:   []plan.Step{{Kind: "uses", Uses: "actions/checkout@v4"}},
+		}}}}
+	}
+	checkout := plan.ActionLock{Source: "github", Repository: "actions/checkout"}
+	upload := plan.ActionLock{Source: "github", Repository: "actions/upload-artifact"}
+	download := plan.ActionLock{Source: "github", Repository: "actions/download-artifact"}
+	setupGo := plan.ActionLock{Source: "github", Repository: "actions/setup-go"}
+	local := plan.ActionLock{Source: "workspace", Path: "actions/build"}
+
+	for _, test := range []struct {
+		name  string
+		locks []plan.ActionLock
+		want  bool
+	}{
+		{name: "no actions"},
+		{name: "native adapters only", locks: []plan.ActionLock{checkout, upload, download}},
+		{name: "public action", locks: []plan.ActionLock{setupGo}, want: true},
+		{name: "local action", locks: []plan.ActionLock{local}, want: true},
+		{name: "native adapter alongside public action", locks: []plan.ActionLock{checkout, setupGo}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := bundleRunsUnprovenActions(bundleWith(test.locks...)); got != test.want {
+				t.Fatalf("bundleRunsUnprovenActions() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.addReportDiagnostics(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{

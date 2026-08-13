@@ -1691,7 +1691,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		writeCompilerWarnings(stderr, "upload", input.CanonicalPath, bundle.IR.Warnings)
 		if uploadArguments.telemetry != nil {
 			uploadArguments.telemetry.addWarnings(bundle.IR.Warnings)
-			if bundleUsesActions(bundle) {
+			if bundleRunsUnprovenActions(bundle) {
 				uploadArguments.telemetry.addActionRuntimeUnknown()
 			}
 		}
@@ -2412,6 +2412,22 @@ func irUsesActions(ir compiler.IR) bool {
 	for _, job := range ir.Jobs {
 		for _, step := range job.Steps {
 			if step.Uses != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// bundleRunsUnprovenActions reports whether a compiled bundle executes action
+// code the compiler never ran. Actions a native adapter replaces keep both
+// their locks and their `uses` steps in the plan, so the adapter decision is
+// the only thing separating them from actions that really run.
+func bundleRunsUnprovenActions(bundle compiler.Bundle) bool {
+	for _, artifact := range bundle.Plans {
+		for _, lock := range artifact.Job.Actions {
+			identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+			if !actionintegration.UsesNativeAdapter(identity) {
 				return true
 			}
 		}
