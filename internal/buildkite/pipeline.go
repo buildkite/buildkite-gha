@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -66,8 +67,9 @@ type Workflow struct {
 
 // Failure replaces a failed aggregate workflow with one synthetic command step.
 type Failure struct {
-	Message string
-	Summary string
+	AnnotationPath string
+	MessagePath    string
+	Summary        string
 }
 
 // ConcurrencyGate serializes an entire generated workflow while allowing the
@@ -171,8 +173,11 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			usedKeys[workflow.GroupKey] = "workflow group"
 		}
 		if workflow.Failure != nil {
-			if workflow.Failure.Message == "" {
-				return nil, fmt.Errorf("workflow %d failure requires a message", i+1)
+			if !validArtifactPath(workflow.Failure.AnnotationPath) {
+				return nil, fmt.Errorf("workflow %d failure requires a valid annotation artifact path", i+1)
+			}
+			if !validArtifactPath(workflow.Failure.MessagePath) {
+				return nil, fmt.Errorf("workflow %d failure requires a valid message artifact path", i+1)
 			}
 			if workflow.Failure.Summary == "" {
 				return nil, fmt.Errorf("workflow %d failure requires a GitHub Check summary", i+1)
@@ -238,8 +243,22 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if workflow.Condition != "" {
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
-		command := `printf '%s\n' ` + shellQuote(failure.Message) + ` && exit 1`
+		out.WriteString("    plugins:\n")
+		out.WriteString("      - artifacts#v1.9.4:\n")
+		_, _ = fmt.Fprintf(out, "          step: %s\n", yamlScalar(pipeline.CompilerStep))
+		out.WriteString("          download:\n")
+		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.MessagePath))
+		out.WriteString("              to: .buildkite-gha-failure-message.txt\n")
+		_, _ = fmt.Fprintf(out, "            - from: %s\n", yamlScalar(failure.AnnotationPath))
+		out.WriteString("              to: .buildkite-gha-failure-annotation.html\n")
+		commands := []string{
+			"cat .buildkite-gha-failure-message.txt",
+			"buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html",
+			"exit 1",
+		}
+		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
+		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
 		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
@@ -257,7 +276,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "    if: %s\n", yamlScalar(workflow.Condition))
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
-		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(":"))
+		out.WriteString("    type: command\n")
 		out.WriteString("    notify:\n")
 		out.WriteString("      - github_check:\n")
 		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
@@ -571,6 +590,11 @@ func validateJob(compilerStep string, job Job) error {
 
 func validStepKey(key string) bool {
 	return identifierPattern.MatchString(key) && !uuidPattern.MatchString(key)
+}
+
+func validArtifactPath(path string) bool {
+	native := filepath.FromSlash(path)
+	return path != "" && filepath.IsLocal(native) && filepath.ToSlash(filepath.Clean(native)) == path
 }
 
 func yamlScalar(value string) string {

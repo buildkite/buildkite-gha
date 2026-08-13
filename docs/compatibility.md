@@ -64,7 +64,7 @@ The plugin accepts one explicit `workflow` path or a non-empty `workflows` path 
 
 All directly runnable workflows are represented in one artifact and pipeline transaction. Each successfully compiled workflow becomes an aggregate group labeled `:github: <workflow-name>`, with its canonical path as the fallback for an unnamed workflow. A workflow that declares the effective event compiles into child jobs. A workflow that does not declare it becomes one top-level skipped command step with no plan artifacts. The label is static across events. The GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. Groups and replacement steps depend on the importer, while group child jobs omit that redundant dependency and their own check notifications.
 
-Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. It prints all redacted diagnostics and exits with status 1. The GitHub check title is `Workflow could not be run`, and its summary lists redacted errors with workflow, job, and step context. Step logs retain the complete diagnostics. Summaries are truncated at 65,535 bytes. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
+Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation and exits with status 1. The GitHub check title is `Workflow could not be run`, and its summary lists redacted errors with workflow, job, and step context. Summaries are truncated at 65,535 bytes. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
 
 ## Workflow syntax
 
@@ -438,7 +438,7 @@ Outputs, environment changes, and failures become visible at the covering wait. 
 | Debug and matcher commands | ➖ Accepted, no effect | Consumed without presentation behavior. |
 | `notice`, command echo control, other legacy commands | ❌ Unsupported | Not implemented. |
 
-Step summaries become job-scoped Buildkite annotations and require Buildkite agent v3.112 or newer. The total job summary is limited to 1 MiB.
+Job-scoped annotations, including step summaries and generated workflow failure diagnostics, require Buildkite agent v3.112 or newer. The total job summary is limited to 1 MiB.
 
 ## Expressions and contexts
 

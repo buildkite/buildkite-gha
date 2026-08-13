@@ -41,7 +41,7 @@ Use `--format json` for a `buildkite-gha/processing-report/v1` report.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 
-When `validate`, `compile`, or `upload` runs in a Buildkite job, it also publishes report warnings and errors as job-scoped Buildkite annotations. Annotation failures produce a warning but do not change the command result.
+Report warnings and errors become job-scoped Buildkite annotations. `validate`, `compile`, and upload failures that abort the transaction attach them to the current job. Generated failure steps attach their diagnostics to themselves. CLI-side annotation failures produce a warning but do not change the command result.
 
 Profile validation applies the upload trigger policy before compilation. A `not-applicable` result means the workflow does not declare the selected event and would become a top-level skipped step during upload. Unsupported triggers and malformed data are incompatible.
 
@@ -133,7 +133,7 @@ Every operand must name one regular `.yml` or `.yaml` file. When uploading more 
 
 All selected directly runnable workflows are represented in one atomic pipeline upload. Each successfully compiled workflow becomes an aggregate group whose label is `:github: <workflow-name>` or, for an unnamed workflow, its canonical path. The group depends on the importer; child jobs do not repeat that dependency. A skipped workflow becomes one top-level skipped command step. One GitHub check is named `Buildkite / <workflow-name-or-path> (<effective-event>)`. A reusable-only `workflow_call` file may be selected so local callers can resolve it, but it does not create a group. An input set containing only reusable workflows is an error.
 
-Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. It prints all redacted diagnostics, then exits with status 1. Its GitHub check presents the failure reasons as described in [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload). A compiler failure takes precedence if the workflow also has a skip reason. Compilation continues for later workflows, and successfully compiled workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
+Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation, then exits with status 1. Its GitHub check presents the failure reasons as described in [Aggregate workflow upload](compatibility.md#aggregate-workflow-upload). A compiler failure takes precedence if the workflow also has a skip reason. Compilation continues for later workflows, and successfully compiled workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the aggregate transaction. No partially compiled pipeline is uploaded.
 
 ### Select the effective event
 

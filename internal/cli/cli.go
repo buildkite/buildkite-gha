@@ -1546,7 +1546,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
-			out.annotate(processingReports[i])
 			continue
 		}
 		workflows[i].Applicable = selection.Applicable
@@ -1563,7 +1562,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		processingReports[i] = compatibility.InitialProcessingReport(input.Path, hostedProfile, true, validation, validationErr)
 		if validationErr != nil {
 			processingReports[i].Result = "incompatible"
-			out.annotate(processingReports[i])
 		}
 	}
 	executablePath, executableContents, distributionDigest, err := executable()
@@ -1639,6 +1637,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	authentication := importerJobActionSourceAuthentication(stderr)
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
 	planArtifacts := make([]compiler.PlanArtifact, 0)
+	failureArtifacts := make([]transport.Artifact, 0)
 	jobCount := 0
 	for i, input := range workflows {
 		if input.ReusableOnly {
@@ -1658,7 +1657,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
-			generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
+			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+			generatedWorkflows = append(generatedWorkflows, failed)
+			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
 		}
 		preflight, err := compileHostedNamespaced(ctx, input.Path, input.Source, effectiveEvent.Source, version, distributionDigest, importerStep, "", uploadArguments.runnerTargets, runtimeDigests, input.StepKeyNamespace, authentication)
@@ -1667,8 +1668,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
-				out.annotate(processingReports[i])
-				generatedWorkflows = append(generatedWorkflows, failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i]))
+				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+				generatedWorkflows = append(generatedWorkflows, failed)
+				failureArtifacts = append(failureArtifacts, artifacts...)
 				continue
 			}
 			_ = out.write(processingReports[i])
@@ -1717,8 +1719,15 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			}
 		}
 	}
-	artifacts := make([]transport.Artifact, 0, len(runtimeDistributions)+len(planArtifacts))
+	artifacts := make([]transport.Artifact, 0, len(runtimeDistributions)+len(planArtifacts)+len(failureArtifacts))
 	artifactPaths := make(map[string]struct{}, cap(artifacts))
+	for _, artifact := range failureArtifacts {
+		if _, exists := artifactPaths[artifact.Path]; exists {
+			continue
+		}
+		artifactPaths[artifact.Path] = struct{}{}
+		artifacts = append(artifacts, artifact)
+	}
 	for _, platform := range []compiler.Platform{compiler.PlatformLinuxAMD64, compiler.PlatformDarwinARM64} {
 		runtimeDistribution, ok := runtimeDistributions[platform]
 		if !ok {
@@ -1775,7 +1784,7 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 	return false
 }
 
-func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) buildkitepipeline.Workflow {
+func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) (buildkitepipeline.Workflow, []transport.Artifact) {
 	label := input.Name
 	if label == "" {
 		label = input.CanonicalPath
@@ -1800,16 +1809,28 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		}
 		messages = append(messages, message)
 	}
-	return buildkitepipeline.Workflow{
+	_, annotation := processingAnnotation(report)
+	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
+	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
+	workflow := buildkitepipeline.Workflow{
 		GroupLabel: label,
 		GroupKey:   "gha-workflow-" + input.Identity,
 		CheckName:  "Buildkite / " + label + " (" + event + ")",
 		Condition:  input.TriggerCondition,
 		Failure: &buildkitepipeline.Failure{
-			Message: strings.Join(messages, "\n"),
-			Summary: failureCheckSummary(input.CanonicalPath, report),
+			AnnotationPath: annotationArtifact.Path,
+			MessagePath:    messageArtifact.Path,
+			Summary:        failureCheckSummary(input.CanonicalPath, report),
 		},
 	}
+	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
+}
+
+func generatedFailureArtifact(kind, extension, contents string) transport.Artifact {
+	encoded := []byte(contents)
+	digest := transport.Digest(encoded)
+	path := ".buildkite-gha/failures/" + kind + "/" + strings.TrimPrefix(digest, "sha256:") + extension
+	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
 func failureCheckSummary(path string, report compatibility.ProcessingReport) string {
@@ -1847,6 +1868,34 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport) str
 		summary.WriteString(markdownText(message))
 	}
 	return truncateFailureCheckSummary(summary.String())
+}
+
+func markdownCode(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if strings.Contains(value, "`") {
+		longest, current := 0, 0
+		for _, r := range value {
+			if r == '`' {
+				current++
+				longest = max(longest, current)
+			} else {
+				current = 0
+			}
+		}
+		delimiter := strings.Repeat("`", longest+1)
+		return delimiter + " " + value + " " + delimiter
+	}
+	return "`" + value + "`"
+}
+
+func markdownText(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
+	replacer := strings.NewReplacer(
+		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
+		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",
+	)
+	return replacer.Replace(value)
 }
 
 func failureCheckDiagnosticPath(rootPath, reportPath string, location *compatibility.SourceLocation) string {
