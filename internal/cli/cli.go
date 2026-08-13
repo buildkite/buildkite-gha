@@ -2228,9 +2228,11 @@ func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowS
 		}
 		defer func() { _ = os.RemoveAll(actionRoot) }()
 		var sourceOptions []actionsource.Option
-		authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
-		if authenticationOption != nil {
-			sourceOptions = append(sourceOptions, authenticationOption)
+		if ir.Event.Provider == "github" {
+			authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
+			if authenticationOption != nil {
+				sourceOptions = append(sourceOptions, authenticationOption)
+			}
 		}
 		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
 		if err != nil {

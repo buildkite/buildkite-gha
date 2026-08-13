@@ -6,25 +6,98 @@ import (
 	"testing"
 )
 
-func TestParsePublicGitHubRepository(t *testing.T) {
+func TestParseBuildkiteRepository(t *testing.T) {
 	for _, raw := range []string{
 		"https://github.com/acme/widgets", "https://github.com/acme/widgets.git",
 		"git://github.com/acme/widgets.git", "ssh://git@github.com/acme/widgets.git",
 		"git@github.com:acme/widgets.git",
 	} {
 		t.Run(raw, func(t *testing.T) {
-			owner, name, cloneURL, err := parsePublicGitHubRepository(raw)
-			if err != nil || owner != "acme" || name != "widgets" || cloneURL != "https://github.com/acme/widgets.git" {
-				t.Fatalf("parsePublicGitHubRepository() = %q, %q, %q, %v", owner, name, cloneURL, err)
+			provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw)
+			if err != nil || provider != "github" || owner != "acme" || name != "widgets" || cloneURL != "https://github.com/acme/widgets.git" {
+				t.Fatalf("parseBuildkiteRepository() = %q, %q, %q, %q, %v", provider, owner, name, cloneURL, err)
 			}
 		})
 	}
+	t.Run("Origin", func(t *testing.T) {
+		raw := "https://origin.cursor.com/git/acme/widgets.git"
+		provider, owner, name, cloneURL, err := parseBuildkiteRepository(raw)
+		if err != nil || provider != "cursor-origin" || owner != "acme" || name != "widgets" || cloneURL != raw {
+			t.Fatalf("parseBuildkiteRepository() = %q, %q, %q, %q, %v", provider, owner, name, cloneURL, err)
+		}
+	})
 	for _, raw := range []string{"", "http://github.com/a/b", "https://user:pass@github.com/a/b", "https://github.example/a/b", "https://github.com/a", "https://github.com/a/b/extra", "https://github.com/a/..", "git@evil.example:a/b", "ssh://user@github.com/a/b"} {
 		t.Run("reject "+raw, func(t *testing.T) {
-			if _, _, _, err := parsePublicGitHubRepository(raw); err == nil {
-				t.Fatalf("parsePublicGitHubRepository(%q) unexpectedly succeeded", raw)
+			if _, _, _, _, err := parseBuildkiteRepository(raw); err == nil {
+				t.Fatalf("parseBuildkiteRepository(%q) unexpectedly succeeded", raw)
 			}
 		})
+	}
+	for _, raw := range []string{
+		"http://origin.cursor.com/git/acme/widgets.git",
+		"ssh://git@origin.cursor.com/git/acme/widgets.git",
+		"https://origin.cursor.com/acme/widgets.git",
+		"https://origin.cursor.com/git/acme/widgets",
+		"https://origin.cursor.com/git/acme/widgets.git/extra",
+		"https://origin.cursor.com/git/acme/widgets.git?ref=main",
+		"https://origin.cursor.com/git/acme/widgets.git?",
+		"https://origin.cursor.com/git/acme/widgets.git#",
+		"https://origin.cursor.com/git/acme/widgets%2Egit",
+		"https://user:pass@origin.cursor.com/git/acme/widgets.git",
+	} {
+		t.Run("reject Origin "+raw, func(t *testing.T) {
+			if _, _, _, _, err := parseBuildkiteRepository(raw); err == nil {
+				t.Fatalf("parseBuildkiteRepository(%q) unexpectedly succeeded", raw)
+			}
+		})
+	}
+}
+
+func TestBuildkiteEventSourceOriginIdentity(t *testing.T) {
+	raw := "https://origin.cursor.com/git/acme/widgets.git"
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
+		"BUILDKITE_REPO": raw, "BUILDKITE_COMMIT": strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH": "main", "BUILDKITE_BUILD_AUTHOR": "Origin Author",
+	}
+	source, err := buildkiteEventSource(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	repository := snapshot["repository"].(map[string]any)
+	if snapshot["provider"] != "cursor-origin" || snapshot["event"] != "push" ||
+		repository["owner"] != "acme" || repository["name"] != "widgets" || repository["clone_url"] != raw {
+		t.Fatalf("Origin snapshot = %#v", snapshot)
+	}
+}
+
+func TestBuildkiteWebhookEventSourceOriginGitHubCompatibleMetadata(t *testing.T) {
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "importer",
+		"BUILDKITE_REPO":         "https://origin.cursor.com/git/acme/widgets.git",
+		"BUILDKITE_COMMIT":       strings.Repeat("a", 40),
+		"BUILDKITE_BRANCH":       "feature",
+		"BUILDKITE_GITHUB_EVENT": "pull_request",
+		"BUILDKITE_BUILD_AUTHOR": "Origin Author",
+	}
+	webhook := []byte(`{"action":"opened","repository":{"full_name":"untrusted/other"},"sender":{"login":"origin-user"}}`)
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, webhook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	repository := snapshot["repository"].(map[string]any)
+	payload := snapshot["payload"].(map[string]any)
+	if snapshot["provider"] != "cursor-origin" || snapshot["event"] != "pull_request" || snapshot["actor"] != "origin-user" ||
+		repository["owner"] != "acme" || repository["name"] != "widgets" || payload["action"] != "opened" {
+		t.Fatalf("Origin webhook snapshot = %#v", snapshot)
 	}
 }
 

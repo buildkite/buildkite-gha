@@ -4458,15 +4458,29 @@ func TestHostedLocalActionDoesNotProvisionSourceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider := &cliActionSourceTokenProvider{token: "must-not-be-minted"}
-	redactor := &cliRedactor{}
-	var warnings bytes.Buffer
-	authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
-	if _, err := compileHosted(context.Background(), workflowPath, workflowSource, eventSource, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
-		t.Fatal(err)
-	}
-	if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
-		t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+	originEventSource := bytes.Replace(eventSource, []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"owner": "buildkite"`), []byte(`"owner": "acme_team"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"name": "buildkite-gha"`), []byte(`"name": "widgets"`), 1)
+	originEventSource = bytes.Replace(originEventSource, []byte(`"clone_url": "https://github.com/buildkite/buildkite-gha.git"`), []byte(`"clone_url": "https://origin.cursor.com/git/acme_team/widgets.git"`), 1)
+	for _, test := range []struct {
+		name  string
+		event []byte
+	}{
+		{name: "GitHub", event: eventSource},
+		{name: "Origin repository with GitHub-incompatible namespace", event: originEventSource},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &cliActionSourceTokenProvider{token: "must-not-be-minted"}
+			redactor := &cliRedactor{}
+			var warnings bytes.Buffer
+			authentication := &actionSourceAuthentication{provider: provider, redactor: redactor, warnings: &warnings}
+			if _, err := compileHosted(context.Background(), workflowPath, workflowSource, test.event, "dev", "sha256:"+strings.Repeat("0", 64), "importer", "", nil, nil, authentication); err != nil {
+				t.Fatal(err)
+			}
+			if provider.calls != 0 || len(redactor.values) != 0 || warnings.Len() != 0 {
+				t.Fatalf("local action provisioned source credential: calls %d, redactions %#v, warnings %q", provider.calls, redactor.values, warnings.String())
+			}
+		})
 	}
 }
 
@@ -4758,6 +4772,42 @@ func TestRunUploadDerivesUnattestedBuildkiteEvent(t *testing.T) {
 		if slices.Equal(command.args, []string{"meta-data", "get", "buildkite:webhook"}) {
 			t.Fatalf("webhook metadata read more than once: %#v", runner.commands)
 		}
+	}
+}
+
+func TestRunUploadDerivesOriginEvent(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "origin-event-importer")
+	t.Setenv("BUILDKITE_REPO", "https://origin.cursor.com/git/acme/widgets.git")
+	t.Setenv("BUILDKITE_COMMIT", sha)
+	t.Setenv("BUILDKITE_BRANCH", "main")
+	t.Setenv("BUILDKITE_TAG", "")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "false")
+	t.Setenv("BUILDKITE_BUILD_AUTHOR", "Origin Author")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--runtime-queue", "hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	planCount := 0
+	for path, contents := range runner.uploaded {
+		if !strings.HasSuffix(path, ".json") {
+			continue
+		}
+		job, err := plan.Decode(contents)
+		if err != nil {
+			t.Fatalf("decode Origin plan %q: %v", path, err)
+		}
+		planCount++
+		if job.Event.Provider != "cursor-origin" || job.Event.Repository != "acme/widgets" || job.Event.Ref != "refs/heads/main" || job.Event.SHA != sha {
+			t.Fatalf("Origin plan event = %#v", job.Event)
+		}
+	}
+	if planCount != 3 {
+		t.Fatalf("Origin plan count = %d, want 3", planCount)
 	}
 }
 

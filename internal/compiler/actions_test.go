@@ -963,6 +963,36 @@ func TestCheckoutCapabilityRequiresVerifiedRootAdapter(t *testing.T) {
 	}
 }
 
+func TestNativeCheckoutIgnoresUpstreamTokenDefaultForOrigin(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "checkout.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n")
+	if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAction(t, remote, "", "name: checkout\ninputs:\n  token:\n    default: ${{ github.token }}\nruns:\n  using: node24\n  main: index.js\n")
+	event := bytes.Replace(pushEvent(t), []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
+	bundle, err := CompileBundleWithOptions(workflowPath, workflow, event, "0.0.0-test", testDistributionDigest, "importer", Options{
+		EventTrust: EventUntrusted,
+		Runners: RunnerPolicy{
+			Labels:          map[string]string{"ubuntu-latest": "hosted"},
+			UntrustedQueues: []string{"hosted"},
+		},
+		ResolveActions: true,
+		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || bundle.Plans[0].Job.Event.Provider != "cursor-origin" || bundle.Plans[0].Job.GitHubToken != nil ||
+		!reflect.DeepEqual(bundle.Plans[0].Job.RequiredCapabilities, []string{"network", "provider-token-read"}) {
+		t.Fatalf("Origin checkout plan = %#v", bundle.Plans)
+	}
+}
+
 func TestUploadArtifactAdapterInputAndCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	workflowPath := filepath.Join(workspace, ".github", "workflows", "artifact.yml")

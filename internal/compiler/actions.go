@@ -351,6 +351,9 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			requirements.requiredSecrets[name] = true
 		}
 	}
+	if n.native {
+		return requirements, nil
+	}
 	for _, name := range sortedKeys(n.metadata.Inputs) {
 		input := n.metadata.Inputs[name]
 		if input.Default == nil || hasActionInput(supplied, name) {
@@ -364,9 +367,6 @@ func (n *actionNode) inspectInvocation(supplied map[string]string, workflowAutho
 			return actionRequirements{}, fmt.Errorf("action input %q default: %w", name, err)
 		}
 		requirements.githubToken = requirements.githubToken || referencesToken
-	}
-	if n.native {
-		return requirements, nil
 	}
 	if n.runtime != metadata.RuntimeComposite {
 		return requirements, nil

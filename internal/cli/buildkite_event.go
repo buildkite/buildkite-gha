@@ -25,7 +25,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 	if strings.TrimSpace(getenv("BUILDKITE_STEP_KEY")) == "" {
 		return nil, fmt.Errorf("BUILDKITE_STEP_KEY is required")
 	}
-	owner, name, cloneURL, err := parsePublicGitHubRepository(getenv("BUILDKITE_REPO"))
+	provider, owner, name, cloneURL, err := parseBuildkiteRepository(getenv("BUILDKITE_REPO"))
 	if err != nil {
 		return nil, fmt.Errorf("BUILDKITE_REPO: %w", err)
 	}
@@ -64,7 +64,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		event, ref = "pull_request", fmt.Sprintf("refs/pull/%d/head", number)
 		headOwner, headName, headCloneURL := owner, name, cloneURL
 		if pullRequestRepo := strings.TrimSpace(getenv("BUILDKITE_PULL_REQUEST_REPO")); pullRequestRepo != "" {
-			headOwner, headName, headCloneURL, err = parsePublicGitHubRepository(pullRequestRepo)
+			_, headOwner, headName, headCloneURL, err = parseBuildkiteRepository(pullRequestRepo)
 			if err != nil {
 				return nil, fmt.Errorf("BUILDKITE_PULL_REQUEST_REPO: %w", err)
 			}
@@ -112,7 +112,7 @@ func buildkiteEventSource(getenv func(string) string) ([]byte, error) {
 		SHA      string         `json:"sha"`
 		Actor    string         `json:"actor"`
 		Payload  map[string]any `json:"payload"`
-	}{"github", event, repository, ref, sha, actor, payload}
+	}{provider, event, repository, ref, sha, actor, payload}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite compatibility snapshot: %w", err)
@@ -254,46 +254,75 @@ func safeGitHubLogin(login string) bool {
 	return true
 }
 
-func parsePublicGitHubRepository(raw string) (owner, name, cloneURL string, err error) {
+func parseBuildkiteRepository(raw string) (provider, owner, name, cloneURL string, err error) {
 	if raw == "" {
-		return "", "", "", fmt.Errorf("is required")
+		return "", "", "", "", fmt.Errorf("is required")
 	}
 	path := ""
 	if strings.HasPrefix(raw, "git@github.com:") {
 		path = strings.TrimPrefix(raw, "git@github.com:")
+		provider = "github"
 	} else {
 		u, parseErr := url.Parse(raw)
-		if parseErr != nil || u.Hostname() != "github.com" || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
-			return "", "", "", fmt.Errorf("must be a public github.com repository URL")
+		if parseErr != nil || u.Port() != "" || u.RawQuery != "" || u.Fragment != "" {
+			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
 		}
-		switch u.Scheme {
-		case "https", "git":
-			if u.User != nil {
-				return "", "", "", fmt.Errorf("must not contain credentials")
+		switch u.Hostname() {
+		case "github.com":
+			provider = "github"
+			switch u.Scheme {
+			case "https", "git":
+				if u.User != nil {
+					return "", "", "", "", fmt.Errorf("must not contain credentials")
+				}
+			case "ssh":
+				if u.User == nil || u.User.String() != "git" {
+					return "", "", "", "", fmt.Errorf("SSH repository URL must use the git user")
+				}
+			default:
+				return "", "", "", "", fmt.Errorf("must use https, git, or SSH")
 			}
-		case "ssh":
-			if u.User == nil || u.User.String() != "git" {
-				return "", "", "", fmt.Errorf("SSH repository URL must use the git user")
+		case "origin.cursor.com":
+			provider = "cursor-origin"
+			if u.Scheme != "https" {
+				return "", "", "", "", fmt.Errorf("repository URL for Origin must use HTTPS")
+			}
+			if u.User != nil {
+				return "", "", "", "", fmt.Errorf("must not contain credentials")
 			}
 		default:
-			return "", "", "", fmt.Errorf("must use https, git, or SSH")
+			return "", "", "", "", fmt.Errorf("must be a github.com or Origin repository URL")
 		}
 		path = strings.TrimPrefix(u.EscapedPath(), "/")
 		if decodedPath, decodeErr := url.PathUnescape(path); decodeErr == nil {
 			path = decodedPath
 		} else {
-			return "", "", "", fmt.Errorf("has a malformed path")
+			return "", "", "", "", fmt.Errorf("has a malformed path")
 		}
+	}
+	if provider == "cursor-origin" {
+		parts := strings.Split(path, "/")
+		if len(parts) != 3 || parts[0] != "git" || parts[1] == "" || !strings.HasSuffix(parts[2], ".git") {
+			return "", "", "", "", fmt.Errorf("repository URL for Origin must be https://origin.cursor.com/git/<namespace>/<repository>.git")
+		}
+		owner, name = parts[1], strings.TrimSuffix(parts[2], ".git")
+		if owner == "." || owner == ".." || name == "" || name == "." || name == ".." || !validGitHubPathPart(owner, true) || !validGitHubPathPart(name, true) {
+			return "", "", "", "", fmt.Errorf("has a malformed namespace or repository name")
+		}
+		if raw != "https://origin.cursor.com/git/"+owner+"/"+name+".git" {
+			return "", "", "", "", fmt.Errorf("repository URL for Origin must use its canonical form")
+		}
+		return provider, owner, name, raw, nil
 	}
 	parts := strings.Split(path, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", "", fmt.Errorf("must contain exactly an owner and repository name")
+		return "", "", "", "", fmt.Errorf("must contain exactly an owner and repository name")
 	}
 	owner, name = parts[0], strings.TrimSuffix(parts[1], ".git")
 	if name == "" || name == "." || name == ".." || !validGitHubPathPart(owner, false) || !validGitHubPathPart(name, true) {
-		return "", "", "", fmt.Errorf("has a malformed owner or repository name")
+		return "", "", "", "", fmt.Errorf("has a malformed owner or repository name")
 	}
-	return owner, name, "https://github.com/" + owner + "/" + name + ".git", nil
+	return provider, owner, name, "https://github.com/" + owner + "/" + name + ".git", nil
 }
 
 func validGitHubPathPart(value string, allowDotUnderscore bool) bool {

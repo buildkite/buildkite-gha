@@ -175,6 +175,118 @@ esac
 	}
 }
 
+func TestCheckoutRepositoryURL(t *testing.T) {
+	for _, test := range []struct {
+		provider, repository, wantURL, wantHost string
+		wantOK                                  bool
+	}{
+		{provider: "github", repository: "acme/widgets", wantURL: "https://github.com/acme/widgets.git", wantHost: "github.com", wantOK: true},
+		{provider: "cursor-origin", repository: "acme/widgets", wantURL: "https://origin.cursor.com/git/acme/widgets.git", wantHost: "origin.cursor.com", wantOK: true},
+		{provider: "other", repository: "acme/widgets"},
+		{provider: "cursor-origin", repository: "acme/widgets/extra"},
+	} {
+		t.Run(test.provider+"/"+test.repository, func(t *testing.T) {
+			url, host, ok := checkoutRepositoryURL(test.provider, test.repository)
+			if url != test.wantURL || host != test.wantHost || ok != test.wantOK {
+				t.Fatalf("checkoutRepositoryURL() = %q, %q, %t", url, host, ok)
+			}
+		})
+	}
+}
+
+func TestRepositoryProviderCheckoutCredentialArgsUseProviderHost(t *testing.T) {
+	args := strings.Join(repositoryProviderCheckoutCredentialArgs([]string{"git"}, "/usr/bin/buildkite-agent", "origin.cursor.com"), "\n")
+	if !strings.Contains(args, "credential.https://origin.cursor.com.useHttpPath=true") ||
+		!strings.Contains(args, "credential.https://origin.cursor.com.helper=") || strings.Contains(args, "credential.https://github.com") {
+		t.Fatalf("Origin credential arguments = %q", args)
+	}
+}
+
+func TestOriginCheckoutUsesExactRemoteAndCredentialHost(t *testing.T) {
+	workspace := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	gitLog := filepath.Join(t.TempDir(), "git.log")
+	helperInput := filepath.Join(t.TempDir(), "helper-input")
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	agentScript := `#!/bin/sh
+set -eu
+test "$1" = git-credentials-helper
+test "$2" = get
+cat > ` + shellTestQuote(helperInput) + `
+printf 'username=token\npassword=origin-repository-token\n'
+`
+	if err := os.WriteFile(agent, []byte(agentScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git := filepath.Join(t.TempDir(), "git")
+	gitScript := `#!/bin/sh
+set -eu
+operation=
+for argument in "$@"; do
+  case "$argument" in init|remote|fetch|checkout) operation="$argument"; break ;; esac
+done
+case "$operation" in
+  init) mkdir -p .git ;;
+  fetch)
+    helper=
+    for argument in "$@"; do
+      case "$argument" in
+        credential.https://origin.cursor.com.helper=!*) helper="${argument#credential.https://origin.cursor.com.helper=!}" ;;
+        credential.https://github.com.*) exit 42 ;;
+      esac
+    done
+    test -n "$helper"
+    credentials="$(printf 'protocol=https\nhost=origin.cursor.com\npath=git/acme/widgets.git\n\n' | sh -c "$helper get")"
+    case "$credentials" in
+      *"username=token"*"password=origin-repository-token"*) ;;
+      *) exit 43 ;;
+    esac
+    ;;
+  checkout) printf '%s\n' ` + shellTestQuote(sha) + ` > .git/HEAD ;;
+esac
+printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
+`
+	if err := os.WriteFile(git, []byte(gitScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := resolveAgentRepositoryCredentialsBeforeWorkflow(&AgentRepositoryCredentials{
+		Agent: agent, JobID: testCacheJobID, JobToken: "job-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := plan.Job{
+		Event:                plan.Event{Provider: "cursor-origin", Repository: "acme/widgets", Ref: "refs/heads/main", SHA: sha},
+		RequiredCapabilities: []string{"network", "provider-token-read"},
+	}
+	var logs bytes.Buffer
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(
+		context.Background(), newCommandProcessor(&logs, &logs), workspace, job, nil,
+	)
+	if err != nil {
+		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
+	}
+	if result.Outputs["commit"] != sha {
+		t.Fatalf("checkout outputs = %#v", result.Outputs)
+	}
+	gitCommands, err := os.ReadFile(gitLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gitCommands), "remote add origin https://origin.cursor.com/git/acme/widgets.git") ||
+		!strings.Contains(string(gitCommands), "credential.https://origin.cursor.com.useHttpPath=true") ||
+		strings.Contains(string(gitCommands), "credential.https://github.com") {
+		t.Fatalf("Origin Git commands = %q", gitCommands)
+	}
+	input, err := os.ReadFile(helperInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(input) != "protocol=https\nhost=origin.cursor.com\npath=git/acme/widgets.git\n\n" {
+		t.Fatalf("Origin credential input = %q", input)
+	}
+}
+
 func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
@@ -190,7 +302,7 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 		t.Fatalf("nonempty workspace error = %v", err)
 	}
 	job.Event.Provider = "other"
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid github.com event") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
 		t.Fatalf("invalid event error = %v", err)
 	}
 }
@@ -268,7 +380,7 @@ func TestCheckoutSubmoduleNativeCommandSequenceAndFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false); err != nil {
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), true, true, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(logPath)
@@ -307,7 +419,7 @@ exit 0
 			if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false)
+			err := (Runner{Stdout: io.Discard, Stderr: io.Discard}).runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, "")
 			if err == nil || !strings.Contains(err.Error(), "invalid state") {
 				t.Fatalf("status prefix %q error = %v", prefix, err)
 			}
@@ -335,7 +447,7 @@ func TestCheckoutSubmodulesUsesNativePorcelain(t *testing.T) {
 			runTestGit(t, workspace, "checkout", "--detach", parentOID)
 			base := append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always")
 			runner := Runner{Stdout: io.Discard, Stderr: io.Discard}
-			if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false); err != nil {
+			if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), workspace, "git", map[string]string{"HOME": filepath.Join(workspace, ".no-home"), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.DevNull}, base, test.depthOne, test.recursive, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(workspace, "deps", "child")
@@ -400,7 +512,7 @@ func TestSubmoduleResolvedCredentialsWithoutCapabilityDoNotInvokeHelper(t *testi
 		t.Fatal(err)
 	}
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "secret"}, Stdout: io.Discard, Stderr: io.Discard}
-	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false); err != nil {
+	if err := runner.runCheckoutSubmodules(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, false, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -441,7 +553,7 @@ echo job-secret
 	}
 	var logs bytes.Buffer
 	runner := Runner{RepositoryCredentials: &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}, Stdout: &logs, Stderr: &logs}
-	if err := runner.runRepositoryProviderCheckoutFetch(context.Background(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}); err != nil {
+	if err := runner.runRepositoryProviderCheckoutFetch(context.Background(), newCommandProcessor(&logs, &logs), workspace, map[string]string{}, git, checkoutGitBaseArgs(), []string{"submodule", "update"}, "github.com"); err != nil {
 		t.Fatal(err)
 	}
 	input, err := os.ReadFile(inputLog)
@@ -606,7 +718,7 @@ exec ` + shellTestQuote(realGit) + ` "$@"
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), true, false, false)
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, wrapper, map[string]string{}, append(checkoutGitBaseArgs(), "-c", "protocol.file.allow=always"), true, false, false, "")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -654,7 +766,7 @@ exit 0
 	runner := Runner{Stdout: io.Discard, Stderr: io.Discard, InterruptGrace: 20 * time.Millisecond, TerminateGrace: 20 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, true, false)
+		done <- runner.runCheckoutSubmodules(ctx, newCommandProcessor(io.Discard, io.Discard), t.TempDir(), git, map[string]string{}, checkoutGitBaseArgs(), false, true, false, "")
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -685,7 +797,7 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	}
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid github.com event repository") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
 		t.Fatalf("checkout repository validation error = %v", err)
 	}
 }
@@ -914,7 +1026,7 @@ printf 'username=token\npassword=secret\n'
 	if err := os.WriteFile(agent, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(), agent)
+	args := repositoryProviderCheckoutCredentialArgs(checkoutGitBaseArgs(), agent, "github.com")
 	fill := func(host, path string) error {
 		cmd := exec.Command("git", append(args, "credential", "fill")...)
 		cmd.Env = processEnv(map[string]string{"GIT_TERMINAL_PROMPT": "0"})
