@@ -96,7 +96,7 @@ const (
 	pluginChecksumLimit                         = 4 << 20
 	pluginArchiveLimit                          = 256 << 20
 	maxWebhookMetadataBytes                     = 25 << 20
-	githubCheckSummaryLimit                     = 65535
+	workflowCheckSummaryLimit                   = 65535
 	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
 	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
 )
@@ -1701,8 +1701,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
-		CompilerStep: importerStep,
-		Workflows:    generatedWorkflows,
+		CompilerStep:  importerStep,
+		EventProvider: effectiveEvent.Event.Provider,
+		Workflows:     generatedWorkflows,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
@@ -1921,11 +1922,11 @@ func failureCheckDiagnosticPath(rootPath, reportPath string, location *compatibi
 }
 
 func truncateFailureCheckSummary(summary string) string {
-	if len(summary) <= githubCheckSummaryLimit {
+	if len(summary) <= workflowCheckSummaryLimit {
 		return summary
 	}
-	const notice = "\n\n_Additional error details omitted at the GitHub check summary size limit._"
-	end := githubCheckSummaryLimit - len(notice)
+	const notice = "\n\n_Additional error details omitted at the provider check summary size limit._"
+	end := workflowCheckSummaryLimit - len(notice)
 	for !utf8.ValidString(summary[:end]) {
 		end--
 	}

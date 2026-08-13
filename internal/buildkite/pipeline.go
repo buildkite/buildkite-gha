@@ -46,14 +46,14 @@ type Pipeline struct {
 	DistributionDigest string
 	RuntimeImage       string
 	GroupLabel         string
+	EventProvider      string
 	ConcurrencyGate    *ConcurrencyGate
 	Jobs               []Job
 	Workflows          []Workflow
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
-// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate
-// emission.
+// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate emission.
 type Workflow struct {
 	GroupLabel      string
 	GroupKey        string
@@ -133,6 +133,9 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if len(pipeline.Jobs) != 0 || pipeline.GroupLabel != "" || pipeline.ConcurrencyGate != nil {
 			return nil, fmt.Errorf("aggregate pipeline cannot mix legacy workflow fields")
 		}
+		if pipeline.EventProvider != "github" && pipeline.EventProvider != "cursor-origin" {
+			return nil, fmt.Errorf("aggregate pipeline has unsupported event provider %q", pipeline.EventProvider)
+		}
 	} else {
 		workflows = []Workflow{{
 			GroupLabel:      pipeline.GroupLabel,
@@ -156,7 +159,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
 			}
 			if workflow.CheckName == "" {
-				return nil, fmt.Errorf("workflow %q requires a GitHub Check name", workflow.GroupKey)
+				return nil, fmt.Errorf("workflow %q requires a provider check name", workflow.GroupKey)
 			}
 			if workflow.Condition == "" && workflow.SkipReason == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
@@ -180,7 +183,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("workflow %d failure requires a valid message artifact path", i+1)
 			}
 			if workflow.Failure.Summary == "" {
-				return nil, fmt.Errorf("workflow %d failure requires a GitHub Check summary", i+1)
+				return nil, fmt.Errorf("workflow %d failure requires a provider check summary", i+1)
 			}
 			if len(workflow.Jobs) != 0 || workflow.ConcurrencyGate != nil {
 				return nil, fmt.Errorf("workflow %d failure cannot include jobs or a concurrency gate", i+1)
@@ -259,12 +262,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
-		out.WriteString("    notify:\n")
-		out.WriteString("      - github_check:\n")
-		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
-		out.WriteString("          output:\n")
-		_, _ = fmt.Fprintf(out, "            title: %s\n", yamlScalar("Workflow could not be run"))
-		_, _ = fmt.Fprintf(out, "            summary: %s\n", yamlScalar(failure.Summary))
+		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "Workflow could not be run", failure.Summary)
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -277,9 +275,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
-		out.WriteString("    notify:\n")
-		out.WriteString("      - github_check:\n")
-		_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -301,9 +297,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		}
 		if workflow.CheckName != "" {
-			out.WriteString("    notify:\n")
-			out.WriteString("      - github_check:\n")
-			_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+			emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
 		}
 		if workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -413,6 +407,23 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		emitConcurrencyGateStep(out, stepIndent, attributeIndent, ":github: Finish workflow concurrency", workflow.GateCloseKey, workflow.ConcurrencyGate, dependencies)
 	}
 	return nil
+}
+
+func emitWorkflowCheck(out *bytes.Buffer, provider string, workflow preparedWorkflow, title, summary string) {
+	out.WriteString("    notify:\n")
+	switch provider {
+	case "github":
+		out.WriteString("      - github_check:\n")
+	case "cursor-origin":
+		out.WriteString("      - origin_check:\n")
+		_, _ = fmt.Fprintf(out, "          key: %s\n", yamlScalar(workflow.GroupKey))
+	}
+	_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+	if title != "" {
+		out.WriteString("          output:\n")
+		_, _ = fmt.Fprintf(out, "            title: %s\n", yamlScalar(title))
+		_, _ = fmt.Fprintf(out, "            summary: %s\n", yamlScalar(summary))
+	}
 }
 
 func platformCacheKey(platform string) string {

@@ -162,6 +162,7 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
 		Workflows: []Workflow{
 			{
 				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", CheckName: "Buildkite / CI (push)", Condition: `build.source_event == "push"`,
@@ -219,9 +220,71 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	}
 }
 
+func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "cursor-origin",
+		Workflows: []Workflow{
+			{
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", CheckName: "Buildkite / CI (push)", Condition: "true",
+				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("plan")}},
+			},
+			{
+				GroupLabel: "Pull request", GroupKey: "gha-workflow-2222222222222222", CheckName: "Buildkite / Pull request (push)",
+				SkipReason: "This workflow is not triggered by a `push` event",
+			},
+			{
+				GroupLabel: "Invalid", GroupKey: "gha-workflow-3333333333333333", CheckName: "Buildkite / Invalid (push)", Condition: "true",
+				Failure: &Failure{
+					AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
+					MessagePath:    ".buildkite-gha/failures/messages/message.txt",
+					Summary:        "The workflow could not be prepared.",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Key    string `yaml:"key"`
+			Notify []struct {
+				GitHubCheck any `yaml:"github_check"`
+				OriginCheck struct {
+					Key    string `yaml:"key"`
+					Name   string `yaml:"name"`
+					Output struct {
+						Title   string `yaml:"title"`
+						Summary string `yaml:"summary"`
+					} `yaml:"output"`
+				} `yaml:"origin_check"`
+			} `yaml:"notify"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 3 {
+		t.Fatalf("Origin workflow steps = %#v\n%s", document.Steps, output)
+	}
+	wantNames := []string{"Buildkite / CI (push)", "Buildkite / Pull request (push)", "Buildkite / Invalid (push)"}
+	for i, step := range document.Steps {
+		if len(step.Notify) != 1 || step.Notify[0].GitHubCheck != nil || step.Notify[0].OriginCheck.Key != step.Key || step.Notify[0].OriginCheck.Name != wantNames[i] {
+			t.Fatalf("Origin workflow check %d = %#v", i, step)
+		}
+	}
+	failure := document.Steps[2].Notify[0].OriginCheck.Output
+	if failure.Title != "Workflow could not be run" || failure.Summary != "The workflow could not be prepared." {
+		t.Fatalf("Origin failure output = %#v", failure)
+	}
+}
+
 func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 	output, err := Emit(Pipeline{
-		CompilerStep: "importer",
+		CompilerStep:  "importer",
+		EventProvider: "github",
 		Workflows: []Workflow{{
 			GroupLabel: "Pull request",
 			GroupKey:   "gha-workflow-1111111111111111",
@@ -267,7 +330,8 @@ func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 
 func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	output, err := Emit(Pipeline{
-		CompilerStep: "importer",
+		CompilerStep:  "importer",
+		EventProvider: "github",
 		Workflows: []Workflow{{
 			GroupLabel: "CI",
 			GroupKey:   "gha-workflow-1111111111111111",
@@ -345,6 +409,7 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 	pipeline := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
 		Workflows: []Workflow{{
 			GroupLabel:      "CI",
 			GroupKey:        "workflow-ci",
@@ -404,17 +469,18 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 	}
 }
 
-func TestEmitAggregateRequiresGitHubCheckName(t *testing.T) {
+func TestEmitAggregateRequiresProviderCheckName(t *testing.T) {
 	_, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
 		Workflows: []Workflow{{
 			GroupLabel: "CI", GroupKey: "workflow-ci", Condition: "true",
 			Jobs: []Job{{Key: "test", Label: "Test", PlanDigest: testDigest("plan")}},
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), `workflow "workflow-ci" requires a GitHub Check name`) {
-		t.Fatalf("missing GitHub Check name error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), `workflow "workflow-ci" requires a provider check name`) {
+		t.Fatalf("missing provider check name error = %v", err)
 	}
 }
 
@@ -422,6 +488,7 @@ func TestEmitAggregateRejectsCrossWorkflowCollisions(t *testing.T) {
 	base := Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
 		Workflows: []Workflow{
 			{GroupLabel: "One", GroupKey: "workflow-one", CheckName: "Buildkite / One", Condition: "true", Jobs: []Job{{Key: "shared", Label: "One", PlanDigest: testDigest("one")}}},
 			{GroupLabel: "Two", GroupKey: "workflow-two", CheckName: "Buildkite / Two", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Two", PlanDigest: testDigest("two")}}},
@@ -691,6 +758,7 @@ func TestEmitRejectsInvalidGraphsAndIdentifiers(t *testing.T) {
 		want string
 	}{
 		{name: "empty", in: Pipeline{CompilerStep: "compiler", DistributionDigest: digest}, want: "at least one generated job"},
+		{name: "unknown event provider", in: Pipeline{CompilerStep: "compiler", EventProvider: "gitlab", Workflows: []Workflow{{}}}, want: "unsupported event provider"},
 		{name: "bad distribution digest", in: Pipeline{CompilerStep: "compiler", DistributionDigest: "sha256:nope", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest}}}, want: "invalid distribution digest"},
 		{name: "unknown dependency", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: digest, Dependencies: []string{"missing"}}}}, want: "unknown dependency"},
 		{name: "cycle", in: Pipeline{CompilerStep: "compiler", Jobs: []Job{{Key: "one", Label: "One", Queue: "queue", PlanDigest: testDigest("one"), Dependencies: []string{"two"}}, {Key: "two", Label: "Two", Queue: "queue", PlanDigest: testDigest("two"), Dependencies: []string{"one"}}}}, want: "contains a cycle"},
