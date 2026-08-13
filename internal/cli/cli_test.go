@@ -2546,11 +2546,16 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	workflowPath := filepath.Join(repository, ".github", "workflows", "test-image-build.yml")
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport(workflowPath, "")
-	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Message: "invalid workflow"})
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: workflowPath, Line: 4, Column: 2},
+	})
 
 	_, body := processingAnnotation(report)
-	if want := "<strong>Workflow:</strong> <code>.github/workflows/test-image-build.yml</code>"; !strings.Contains(body, want) || strings.Contains(body, repository) {
-		t.Fatalf("annotation = %q, want %q without checkout path", body, want)
+	wantWorkflow := "<strong>Workflow:</strong> <code>.github/workflows/test-image-build.yml</code>"
+	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
+	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
+		t.Fatalf("annotation = %q, want %q and %q without checkout path", body, wantWorkflow, wantLocation)
 	}
 }
 
@@ -2680,6 +2685,25 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	}
 }
 
+func isGeneratedFailureCommand(command string) bool {
+	return len(command) < 128*1024 &&
+		strings.HasPrefix(command, "set -eu\nprintf '%s\\n' '+++ GitHub Actions workflow diagnostics'\n") &&
+		strings.Contains(command, "artifact download '.buildkite-gha/failures/messages/") &&
+		strings.Contains(command, "artifact download '.buildkite-gha/failures/annotations/") &&
+		strings.Contains(command, `buildkite-agent annotate --scope=job --style=error < "$failure_dir"/`) &&
+		strings.HasSuffix(command, "\nexit 1")
+}
+
+func failureArtifactForCommand(command string, uploaded map[string][]byte, kind string) []byte {
+	prefix := ".buildkite-gha/failures/" + kind + "/"
+	for path, contents := range uploaded {
+		if strings.HasPrefix(path, prefix) && strings.Contains(command, path) {
+			return contents
+		}
+	}
+	return nil
+}
+
 func TestUnsupportedConditionPreflightAppliesToEveryCompilerEntryPoint(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "conditions.yml")
 	if err := os.WriteFile(workflowPath, []byte(`on: push
@@ -2762,7 +2786,8 @@ jobs:
 			t.Fatal(err)
 		}
 		wantLabel := ":github: " + filepath.ToSlash(filepath.Clean(workflowPath))
-		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || pipeline.Steps[0].Label != wantLabel || !strings.HasPrefix(pipeline.Steps[0].Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(pipeline.Steps[0].Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(pipeline.Steps[0].Command, want) || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+		message := failureArtifactForCommand(pipeline.Steps[0].Command, runner.uploaded, "messages")
+		if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || len(pipeline.Steps[0].Steps) != 0 || pipeline.Steps[0].Label != wantLabel || !isGeneratedFailureCommand(pipeline.Steps[0].Command) || !strings.Contains(string(message), want) {
 			t.Fatalf("unsupported condition pipeline = %#v", pipeline.Steps)
 		}
 	})
@@ -3827,19 +3852,41 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
-	if step.Label != ":github: Invalid push" || !strings.HasPrefix(step.Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(step.Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(step.Command, `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(step.Command, "Job <code>alpha</code>") || !strings.Contains(step.Command, "Job <code>beta</code>") || !strings.Contains(step.Command, "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	message := failureArtifactForCommand(step.Command, runner.uploaded, "messages")
+	annotation := failureArtifactForCommand(step.Command, runner.uploaded, "annotations")
+	if step.Label != ":github: Invalid push" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label is not mapped") || !strings.Contains(string(message), "Runner label is not mapped") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
 		t.Fatalf("compiler failure check summary contains diagnostic code: %q", step.Notify[0].GitHubCheck.Output.Summary)
 	}
+	artifactRoot := t.TempDir()
+	for path, contents := range runner.uploaded {
+		artifactPath := filepath.Join(artifactRoot, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(artifactPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(artifactPath, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	agentDirectory := t.TempDir()
 	agentPath := filepath.Join(agentDirectory, "buildkite-agent")
-	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\ncat\n"), 0o700); err != nil {
+	agentScript := `#!/bin/sh
+if [ "$1" = artifact ] && [ "$2" = download ]; then
+  mkdir -p "$4/$(dirname "$3")"
+  cp "$FAILURE_ARTIFACT_ROOT/$3" "$4/$3"
+elif [ "$1" = annotate ]; then
+  cat
+else
+  exit 2
+fi
+`
+	if err := os.WriteFile(agentPath, []byte(agentScript), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command("sh", "-c", step.Command)
-	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"), "FAILURE_ARTIFACT_ROOT="+artifactRoot)
 	output, err := command.CombinedOutput()
 	plainIndex := strings.Index(string(output), "Runner label is not mapped")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
@@ -3859,10 +3906,40 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 		compatibility.Diagnostic{Level: "error", Code: "E_RUNNER", Message: "runner is unsupported", Job: "test"},
 	)
 
-	workflow := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci"}, "push", report)
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Failure == nil || !strings.Contains(workflow.Failure.Annotation, `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(workflow.Failure.Annotation, "<strong>runner is unsupported</strong>") || !strings.Contains(workflow.Failure.Annotation, "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
+	if workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
+	}
+}
+
+func TestFailedGeneratedWorkflowKeepsLargeDiagnosticsOutOfCommand(t *testing.T) {
+	message := strings.Repeat("large diagnostic ", 16*1024)
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Message: message})
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report)
+
+	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", Workflows: []buildkitepipeline.Workflow{workflow}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(pipeline, &document); err != nil {
+		t.Fatal(err)
+	}
+	uploaded := make(map[string][]byte, len(artifacts))
+	for _, artifact := range artifacts {
+		uploaded[artifact.Path] = artifact.Contents
+	}
+	command := document.Steps[0].Command
+	plain := failureArtifactForCommand(command, uploaded, "messages")
+	annotation := failureArtifactForCommand(command, uploaded, "annotations")
+	if !isGeneratedFailureCommand(command) || strings.Contains(command, message[:1024]) || len(plain) < 128*1024 || len(annotation) < 128*1024 {
+		t.Fatalf("command bytes = %d, message artifact bytes = %d, annotation artifact bytes = %d", len(command), len(plain), len(annotation))
 	}
 }
 
@@ -3941,7 +4018,8 @@ jobs:
 		t.Fatalf("job cancellation pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	step := pipeline.Steps[0]
-	if step.Group != "" || step.Label != ":github: Rebase needed" || !strings.HasPrefix(step.Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(step.Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(step.Command, `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) || !strings.HasSuffix(step.Command, " && exit 1") || !step.Checkout.Skip {
+	message := failureArtifactForCommand(step.Command, runner.uploaded, "messages")
+	if step.Group != "" || step.Label != ":github: Rebase needed" || !isGeneratedFailureCommand(step.Command) || !strings.Contains(string(message), `job "label-rebase-needed": concurrency cancel-in-progress is unsupported`) || !step.Checkout.Skip {
 		t.Fatalf("job cancellation failure step = %#v", step)
 	}
 }
@@ -4000,17 +4078,18 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	}
 	wantFailureLabels := []string{":github: Invalid", ":github: Missing action"}
 	for i, step := range pipeline.Steps[:2] {
-		if step.Group != "" || len(step.Steps) != 0 || step.Label != wantFailureLabels[i] || !strings.HasPrefix(step.Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(step.Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.HasSuffix(step.Command, " && exit 1") {
+		if step.Group != "" || len(step.Steps) != 0 || step.Label != wantFailureLabels[i] || !isGeneratedFailureCommand(step.Command) {
 			t.Fatalf("failed workflow step %d = %#v", i, step)
 		}
 	}
-	firstFailureCommand := pipeline.Steps[0].Command
-	if !strings.Contains(firstFailureCommand, `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) ||
-		!strings.Contains(firstFailureCommand, `Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) {
-		t.Fatalf("multi-diagnostic failure command = %q", pipeline.Steps[0].Command)
+	firstFailureMessage := string(failureArtifactForCommand(pipeline.Steps[0].Command, runner.uploaded, "messages"))
+	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) ||
+		!strings.Contains(firstFailureMessage, `Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) {
+		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
-	if actionFailureCommand := pipeline.Steps[1].Command; !strings.Contains(actionFailureCommand, `Resolve local action &#34;missing-action&#34;`) || !strings.Contains(actionFailureCommand, "no such file or directory") {
-		t.Fatalf("action failure command = %q", actionFailureCommand)
+	actionFailureAnnotation := string(failureArtifactForCommand(pipeline.Steps[1].Command, runner.uploaded, "annotations"))
+	if !strings.Contains(actionFailureAnnotation, `Resolve local action &#34;missing-action&#34;`) || !strings.Contains(actionFailureAnnotation, "no such file or directory") {
+		t.Fatalf("action failure annotation = %q", actionFailureAnnotation)
 	}
 	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
 		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
@@ -4154,7 +4233,8 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 		t.Fatalf("trigger failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	failure := pipeline.Steps[0]
-	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "true" || !strings.HasPrefix(failure.Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(failure.Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(failure.Command, "push path filters are unsupported") || !strings.HasSuffix(failure.Command, " && exit 1") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+	message := failureArtifactForCommand(failure.Command, runner.uploaded, "messages")
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "true" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), "push path filters are unsupported") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
 		t.Fatalf("trigger failure step = %#v", failure)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
@@ -4207,8 +4287,9 @@ func TestRunUploadEmitsIncompletePullRequestSnapshotsAsFailingSteps(t *testing.T
 			if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
-			command := strings.ReplaceAll(pipeline.Steps[0].Command, `\_`, "_")
-			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: .github/workflows/pull-request.yml" || !strings.HasPrefix(command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(command, test.want) || !strings.HasSuffix(command, " && exit 1") || len(pipeline.Steps[0].Steps) != 0 {
+			command := pipeline.Steps[0].Command
+			message := strings.ReplaceAll(string(failureArtifactForCommand(command, runner.uploaded, "messages")), `\_`, "_")
+			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: .github/workflows/pull-request.yml" || !isGeneratedFailureCommand(command) || !strings.Contains(message, test.want) || len(pipeline.Steps[0].Steps) != 0 {
 				t.Fatalf("incomplete pull request failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 			}
 		})
@@ -4254,7 +4335,8 @@ func TestRunEmitsUnclassifiablePushSnapshotAsFailingStep(t *testing.T) {
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Condition != "true" || !strings.HasPrefix(pipeline.Steps[0].Command, "printf '%s\\n' '+++ GitHub Actions workflow diagnostics' ") || !strings.Contains(pipeline.Steps[0].Command, " | buildkite-agent annotate --scope=job --style=error") || !strings.Contains(pipeline.Steps[0].Command, "refs/heads/") || strings.Contains(pipeline.Steps[0].Command, "null == null") || !strings.HasSuffix(pipeline.Steps[0].Command, " && exit 1") {
+	message := failureArtifactForCommand(pipeline.Steps[0].Command, runner.uploaded, "messages")
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Condition != "true" || !isGeneratedFailureCommand(pipeline.Steps[0].Command) || !strings.Contains(string(message), "refs/heads/") || strings.Contains(string(message), "null == null") {
 		t.Fatalf("unclassifiable push failure step = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 }

@@ -275,9 +275,9 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 			Condition:  "true",
 			SkipReason: "This workflow is not triggered by a `push` event",
 			Failure: &Failure{
-				Annotation: "#### Diagnostics\n\n**runner isn't admitted**",
-				Message:    "runner isn't admitted\nmatrix could not be expanded",
-				Summary:    "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded",
+				AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
+				MessagePath:    ".buildkite-gha/failures/messages/message.txt",
+				Summary:        "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded",
 			},
 		}},
 	})
@@ -315,10 +315,17 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 		t.Fatalf("failure workflow = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `printf '%s\n' '+++ GitHub Actions workflow diagnostics' && printf '\033[31m%s\033[0m\n' 'runner isn'"'"'t admitted
-matrix could not be expanded' && printf '%s' '#### Diagnostics
-
-**runner isn'"'"'t admitted**' | buildkite-agent annotate --scope=job --style=error && exit 1` || !step.Checkout.Skip {
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "true" || step.Skip != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `set -eu
+printf '%s\n' '+++ GitHub Actions workflow diagnostics'
+failure_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-failure.XXXXXXXX")"
+trap 'rm -rf -- "$failure_dir"' EXIT
+buildkite-agent artifact download '.buildkite-gha/failures/messages/message.txt' "$failure_dir" --step 'importer'
+buildkite-agent artifact download '.buildkite-gha/failures/annotations/annotation.html' "$failure_dir" --step 'importer'
+printf '\033[31m'
+cat "$failure_dir"/'.buildkite-gha/failures/messages/message.txt'
+printf '\033[0m\n'
+buildkite-agent annotate --scope=job --style=error < "$failure_dir"/'.buildkite-gha/failures/annotations/annotation.html'
+exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
 	}
 }

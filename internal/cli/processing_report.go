@@ -170,7 +170,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic) string {
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
 	}
 	if diagnostic.Location != nil {
-		context = append(context, annotationCode(fmt.Sprintf("%s:%d:%d", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)))
+		context = append(context, annotationCode(fmt.Sprintf("%s:%d:%d", processingAnnotationWorkflowPath(diagnostic.Location.Path), diagnostic.Location.Line, diagnostic.Location.Column)))
 	}
 	if diagnostic.Job != "" {
 		context = append(context, "Job "+annotationCode(diagnostic.Job))
