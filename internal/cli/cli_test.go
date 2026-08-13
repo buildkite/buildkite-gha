@@ -3604,7 +3604,12 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "mixed-failure-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/*.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{
+		"upload", "--event-path", eventPath,
+		".github/workflows/a-invalid.yml",
+		".github/workflows/b-action.yml",
+		".github/workflows/c-success.yml",
+	}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 	var annotationBodies []string
