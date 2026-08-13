@@ -123,6 +123,30 @@ func TestTranslateEventTriggerConditionUsesSnapshotExpressions(t *testing.T) {
 	}
 }
 
+func TestTranslateEventTriggerConditionDistinguishesPullRequestBaseFromPushBranch(t *testing.T) {
+	triggers := []workflow.Trigger{
+		{Event: "push", Branches: []string{"main"}},
+		{Event: "pull_request", Branches: []string{"main"}},
+	}
+	context := TriggerConditionContext{
+		EventPredicate:        `build.source == "webhook"`,
+		Branch:                `"chore_updates"`,
+		Tag:                   "null",
+		PullRequestBaseBranch: `"main"`,
+		PullRequestAction:     `"opened"`,
+	}
+
+	push, applicable, err := TranslateEventTriggerCondition(triggers, "push", context)
+	if err != nil || !applicable || !strings.Contains(push, `"chore_updates" =~ /^main$/`) {
+		t.Fatalf("snapshot push condition = %q, %t, %v, want build branch", push, applicable, err)
+	}
+
+	pullRequest, applicable, err := TranslateEventTriggerCondition(triggers, "pull_request", context)
+	if err != nil || !applicable || !strings.Contains(pullRequest, `"main" =~ /^main$/`) || strings.Contains(pullRequest, "chore_updates") {
+		t.Fatalf("snapshot pull request condition = %q, %t, %v, want base branch", pullRequest, applicable, err)
+	}
+}
+
 func TestTranslateEventTriggerConditionRejectsIncompletePullRequestSnapshot(t *testing.T) {
 	context := TriggerConditionContext{
 		EventPredicate:        "true",
