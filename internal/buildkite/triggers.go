@@ -123,7 +123,7 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, cont
 					return "", fmt.Errorf("push branches: %w", err)
 				}
 				if !matches {
-					return fmt.Sprintf("Branch %q does not match this workflow's push branch filters.", *context.BranchValue), nil
+					return fmt.Sprintf("Doesn’t run on the `%s` branch.", *context.BranchValue), nil
 				}
 			}
 			if context.TagValue != nil {

@@ -215,7 +215,7 @@ func TestTriggerFilterMismatchReason(t *testing.T) {
 			trigger: workflow.Trigger{Event: "push", Branches: []string{"main", "development"}},
 			event:   "push",
 			context: TriggerConditionContext{BranchValue: value("feature")},
-			want:    `Branch "feature" does not match this workflow's push branch filters.`,
+			want:    "Doesn’t run on the `feature` branch.",
 		},
 		{
 			name:    "ordered push branch match",

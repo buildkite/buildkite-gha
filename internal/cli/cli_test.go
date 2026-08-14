@@ -4577,7 +4577,7 @@ func TestRunUploadExplainsWhenWorkflowTriggerFiltersDoNotMatch(t *testing.T) {
 	for _, command := range runner.commands {
 		if slices.Equal(command.args, []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}) {
 			body := string(command.stdin)
-			if !strings.Contains(body, "#### 1 workflow was skipped") || !strings.Contains(body, ":github: CI") || !strings.Contains(body, "Branch &#34;feature&#34; does not match this workflow&#39;s push branch filters.") {
+			if !strings.Contains(body, "#### 1 workflow was skipped") || !strings.Contains(body, ":github: CI") || !strings.Contains(body, "Doesn’t run on the `feature` branch.") {
 				t.Fatalf("skipped workflow annotation = %q", body)
 			}
 			return
@@ -4602,12 +4602,12 @@ func TestSkippedWorkflowsAnnotation(t *testing.T) {
 		{
 			name: "plural",
 			workflows: []skippedWorkflow{
-				{label: "CI", key: "gha-workflow-ci", reason: `Branch "feature" does not match this workflow's push branch filters.`},
+				{label: "CI", key: "gha-workflow-ci", reason: "Doesn’t run on the `feature` branch."},
 				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event"},
 			},
 			want: "#### 2 workflows were skipped\n\n" +
 				"The current <code>push</code> event does not match these workflows:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — Branch &#34;feature&#34; does not match this workflow&#39;s push branch filters.\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — Doesn’t run on the `feature` branch.\n" +
 				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is not triggered by a `push` event\n",
 		},
 	} {
