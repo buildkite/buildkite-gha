@@ -1816,7 +1816,6 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		GroupLabel: label,
 		GroupKey:   "gha-workflow-" + input.Identity,
 		CheckName:  "Buildkite / " + label + " (" + event + ")",
-		Condition:  input.TriggerCondition,
 		Failure: &buildkitepipeline.Failure{
 			AnnotationPath: annotationArtifact.Path,
 			MessagePath:    messageArtifact.Path,
