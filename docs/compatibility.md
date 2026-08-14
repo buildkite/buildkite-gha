@@ -319,8 +319,10 @@ A job with `continue-on-error: true` stops ordinary steps after a failure, runs 
 Runner labels do not select GitHub images. Linux labels default to the
 corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
 image overrides it for a configured profile. Unmapped Linux labels use default
-Buildkite agent targeting with that image. macOS labels require a runner
-profile with a native queue and reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
+Buildkite agent targeting with that image. Through the upload path,
+unmapped `macos-latest` targets the hosted `macos-medium` queue; `macos-14`
+and `macos-15` require a runner profile with a native queue. macOS labels
+reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
 
 ### Matrix strategies
 

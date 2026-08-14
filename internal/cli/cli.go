@@ -70,7 +70,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The experimental --experimental-runner-user option provisions and uses a non-root Linux runner identity; it does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, unmapped macos-latest targets the hosted macos-medium queue, and every other macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The experimental --experimental-runner-user option provisions and uses a non-root Linux runner identity; it does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -99,6 +99,7 @@ const (
 	workflowCheckSummaryLimit                   = 65535
 	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
 	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
+	defaultMacOSRunnerQueue                     = "macos-medium"
 )
 
 var runnerQueuePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
@@ -1301,7 +1302,14 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 			}
 		}
 	}
-	processingReport, ok := validatedProcessingReport(out, workflowPath, profile, source, event, eventPath != "")
+	// Profile validation applies the hosted runner policy so validate and
+	// upload agree on supported labels, including the default macOS queue.
+	var validationOptions *compiler.Options
+	if profile != "" {
+		hosted := hostedOptions("", nil, nil)
+		validationOptions = &hosted
+	}
+	processingReport, ok := validatedProcessingReportWithOptions(out, workflowPath, profile, source, event, eventPath != "", validationOptions)
 	if !ok {
 		return 1
 	}
@@ -1315,7 +1323,12 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		runtimeDistributions := map[compiler.Platform]string{compiler.PlatformLinuxAMD64: distributionDigest}
+		// Profile validation never executes generated plans, so the importer
+		// digest stands in for every platform's runtime distribution.
+		runtimeDistributions := map[compiler.Platform]string{
+			compiler.PlatformLinuxAMD64:  distributionDigest,
+			compiler.PlatformDarwinARM64: distributionDigest,
+		}
 		preflight, profileErr := compileHosted(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
@@ -2346,10 +2359,14 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 	// Unmapped Linux labels keep Buildkite default agent targeting but still
 	// select the matching hosted-toolchains image, so ubuntu-latest jobs get
 	// GitHub-comparable tooling without an explicit runners mapping.
+	// Unmapped macos-latest routes to the hosted macOS queue provisioned at
+	// signup; versioned macOS labels still require an explicit queue because
+	// no default queue can guarantee a specific macOS or Xcode version.
 	targets := map[string]compiler.RunnerTarget{
 		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
 		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
 		"ubuntu-22.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultJammyRunnerImage},
+		"macos-latest":  {Platform: compiler.PlatformDarwinARM64, Queue: defaultMacOSRunnerQueue},
 	}
 	for label, target := range configuredTargets {
 		targets[label] = target
@@ -2363,8 +2380,8 @@ func hostedOptions(groupLabel string, configuredTargets map[string]compiler.Runn
 			AllowUntrustedDefaultQueue: true,
 		},
 	}
-	for _, target := range configuredTargets {
-		if !slices.Contains(options.Runners.UntrustedQueues, target.Queue) {
+	for _, target := range targets {
+		if target.Queue != "" && !slices.Contains(options.Runners.UntrustedQueues, target.Queue) {
 			options.Runners.UntrustedQueues = append(options.Runners.UntrustedQueues, target.Queue)
 		}
 	}
