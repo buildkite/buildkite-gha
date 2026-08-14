@@ -44,7 +44,11 @@ jobs:
           test "$(sudo -n id -u)" -eq 0
           if [[ -S /var/run/docker.sock ]]; then
             test -w /var/run/docker.sock
-            docker version >/dev/null
+            if command -v docker >/dev/null 2>&1; then
+              docker version >/dev/null
+            else
+              test "$(curl --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = OK
+            fi
             echo 'PB2731_DOCKER=available'
           else
             echo 'PB2731_DOCKER=unavailable'
