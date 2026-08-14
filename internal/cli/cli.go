@@ -195,12 +195,13 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
-		workflowOperands:      configuration.Workflows,
-		explicitWorkflowPaths: true,
-		runnerTargets:         configuration.runnerTargets,
-		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
-		importerPlatform:      importerPlatform,
-		telemetry:             details,
+		workflowOperands:       configuration.Workflows,
+		explicitWorkflowPaths:  true,
+		runnerTargets:          configuration.runnerTargets,
+		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
+		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
+		importerPlatform:       importerPlatform,
+		telemetry:              details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
@@ -216,8 +217,9 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 }
 
 type pluginConfiguration struct {
-	Workflows     []string
-	runnerTargets map[string]compiler.RunnerTarget
+	Workflows              []string
+	ExperimentalRunnerUser bool
+	runnerTargets          map[string]compiler.RunnerTarget
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -241,9 +243,17 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age":
+		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	experimentalRunnerUser := false
+	if value, configured := encoded["experimental-runner-user"]; configured {
+		var ok bool
+		experimentalRunnerUser, ok = value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("%s experimental-runner-user must be a boolean", pluginConfigurationEnvironment)
 		}
 	}
 	workflowValue, hasWorkflow := encoded["workflow"]
@@ -318,7 +328,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, runnerTargets: targets}, nil
+	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
