@@ -1866,7 +1866,7 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 	if path == "" {
 		path = report.Workflow
 	}
-	_, sourceLinks.workflowInCheckout = processingAnnotationWorkflowPath(report.Workflow, false)
+	sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	var summary strings.Builder
 	summary.WriteString("The workflow could not be prepared:\n")
 	for _, diagnostic := range report.Diagnostics {
@@ -1886,7 +1886,6 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
 		}
 		summary.WriteString("\n- ")
-		pathCode := markdownCode(diagnosticPath)
 		line := 0
 		sourcePath := report.Workflow
 		if diagnostic.Location != nil {
@@ -1895,8 +1894,16 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 				sourcePath = diagnostic.Location.Path
 			}
 		}
-		_, linkable := processingAnnotationWorkflowPath(sourcePath, sourceLinks.workflowInCheckout)
-		if link := sourceLinks.link(diagnosticPath, line); linkable && link != "" {
+		linkedPath, linkable := processingAnnotationWorkflowPath(sourcePath, sourceLinks.workflowSourceRoot)
+		link := ""
+		if linkable {
+			link = sourceLinks.link(linkedPath, line)
+		}
+		if link != "" {
+			diagnosticPath = linkedPath
+		}
+		pathCode := markdownCode(diagnosticPath)
+		if link != "" {
 			summary.WriteString("[")
 			summary.WriteString(pathCode)
 			summary.WriteString("](")

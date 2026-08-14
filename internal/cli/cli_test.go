@@ -2652,6 +2652,29 @@ func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testin
 	}
 }
 
+func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
+	repository := t.TempDir()
+	workingDirectory := filepath.Join(repository, "nested")
+	if err := os.MkdirAll(filepath.Join(workingDirectory, ".github", "workflows"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDirectory)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport("./.github/workflows/caller.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid reusable workflow",
+		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	wantLink := "https://github.com/owner/repo/blob/abc123/nested/.github/workflows/build-security.yml#L35"
+
+	_, annotation := processingAnnotation(report, sourceLinks)
+	summary := failureCheckSummary("./.github/workflows/caller.yml", report, sourceLinks)
+	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, "]("+wantLink+")") {
+		t.Fatalf("nested workflow location was not retained: annotation=%q summary=%q", annotation, summary)
+	}
+}
+
 func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 	repository := t.TempDir()
 	t.Chdir(repository)
