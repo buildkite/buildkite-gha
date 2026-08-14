@@ -100,10 +100,10 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 
 func TestActionResolutionMessageIdentifiesNestedChild(t *testing.T) {
 	err := &actionChildError{
-		child: "owner/composite@v1", parentSource: "workspace",
+		child: "owner/composite@v1",
 		err: &actionChildError{
-			child: "owner/missing@v2", parentSource: "github",
-			err: errors.New(`compile action "owner/missing@v2": resolve action reference: tag v2 was not found`),
+			child: "owner/missing@v2",
+			err:   errors.New(`compile action "owner/missing@v2": resolve action reference: tag v2 was not found`),
 		},
 	}
 	want := `Action "owner/missing@v2" could not be resolved: tag v2 was not found`
@@ -135,13 +135,12 @@ func TestActionResolutionMessageMakesUnsupportedRuntimeActionable(t *testing.T) 
 	}
 }
 
-func TestActionResolutionMessageTreatsPublicCompositeChildrenAsPublic(t *testing.T) {
+func TestActionResolutionMessageTreatsNestedWorkspaceChildrenAsLocal(t *testing.T) {
 	err := &actionChildError{
-		child:        "./child",
-		parentSource: "github",
-		err:          fmt.Errorf(`compile action "./child": %w`, &metadata.UnsupportedRuntimeError{Runtime: "node12"}),
+		child: "./child",
+		err:   fmt.Errorf(`compile action "./child": %w`, &metadata.UnsupportedRuntimeError{Runtime: "node12"}),
 	}
-	want := `Action "./child" uses Node.js 12, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.`
+	want := `Action "./child" uses Node.js 12, which is unsupported. Update runs.using to node16, node20, or node24.`
 	if got, detail, action := actionResolutionMessage("owner/composite@v1", err); got != want || detail != "" || action != "./child" {
 		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "./child")
 	}
