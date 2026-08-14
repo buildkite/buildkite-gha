@@ -954,13 +954,24 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 
 	f := newJobDocker(t, "")
 	b, w := startTestBackend(t, f)
+	t.Cleanup(func() { _ = b.cleanup() })
 	marker := filepath.Join(w, "alive")
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- b.exec(ctx, b.runner, newCommandProcessor(os.Stdout, os.Stderr), w, map[string]string{}, "sh", "-c", `trap '' TERM INT; sleep 30 & echo $! > alive; wait`)
 	}()
-	time.Sleep(100 * time.Millisecond)
+	var pidb []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for len(pidb) == 0 && time.Now().Before(deadline) {
+		pidb, _ = os.ReadFile(marker)
+		time.Sleep(time.Millisecond)
+	}
+	p, err := strconv.Atoi(strings.TrimSpace(string(pidb)))
+	if err != nil || p <= 0 {
+		t.Fatalf("child PID was not published: %q, %v", pidb, err)
+	}
 	cancel()
 	select {
 	case e := <-done:
@@ -970,11 +981,13 @@ func TestRunJobContainerCancellationTargetsProcessTree(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancellation hung")
 	}
-	pidb, _ := os.ReadFile(marker)
-	if p, _ := strconv.Atoi(strings.TrimSpace(string(pidb))); p > 0 && testProcessExists(p) {
-		t.Fatalf("child %d alive", p)
+	deadline = time.Now().Add(2 * time.Second)
+	for testProcessExists(p) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
 	}
-	_ = b.cleanup()
+	if testProcessExists(p) {
+		t.Fatalf("child %d survived cancellation", p)
+	}
 	calls := f.calls(t)
 	n := 0
 	for _, c := range calls {
