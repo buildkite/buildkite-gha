@@ -1498,6 +1498,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 	}
 	out := newProcessingOutput("upload", "text", stderr, stderr, agent)
+	out.plugin = uploadArguments.pluginAcquisition != nil
 	if uploadArguments.telemetry != nil {
 		out.observe = uploadArguments.telemetry.observe
 	}
@@ -1763,7 +1764,11 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			if uploadArguments.telemetry != nil {
 				uploadArguments.telemetry.addReportDiagnostics(processingReports[i])
 			}
-			_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
+			if out.plugin {
+				_ = writePluginProcessing(stdout, processingReports[i])
+			} else {
+				_ = compatibility.WriteProcessing(stdout, "text", processingReports[i])
+			}
 			if !processingReportHasErrors(processingReports[i]) {
 				out.annotate(processingReports[i])
 			}

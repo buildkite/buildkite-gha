@@ -34,6 +34,7 @@ type processingOutput struct {
 	format        string
 	reports       io.Writer
 	stderr        io.Writer
+	plugin        bool
 	observe       func(compatibility.ProcessingReport)
 	annotationJob string
 	buildURL      string
@@ -87,11 +88,64 @@ func (o processingOutput) write(report compatibility.ProcessingReport) error {
 	if o.observe != nil {
 		o.observe(report)
 	}
-	if err := compatibility.WriteProcessing(o.reports, o.format, report); err != nil {
+	var err error
+	if o.plugin {
+		err = writePluginProcessing(o.reports, report)
+	} else {
+		err = compatibility.WriteProcessing(o.reports, o.format, report)
+	}
+	if err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
 		return err
 	}
 	o.annotate(report)
+	return nil
+}
+
+func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) error {
+	report.Finalize()
+	workflow, _ := processingAnnotationWorkflowPath(report.Workflow, "")
+	failed := processingReportHasErrors(report)
+	if failed {
+		if _, err := fmt.Fprintln(w, "^^^ +++"); err != nil {
+			return err
+		}
+	}
+	for _, level := range []string{"error", "warning"} {
+		for _, diagnostic := range report.Diagnostics {
+			if diagnostic.Level != level {
+				continue
+			}
+			marker := "!"
+			if level == "error" {
+				marker = "x"
+			}
+			metadata := []string{"workflow=" + workflow}
+			if diagnostic.Stage != "" {
+				metadata = append(metadata, "stage="+diagnostic.Stage)
+			}
+			if diagnostic.Job != "" {
+				metadata = append(metadata, "job="+diagnostic.Job)
+			}
+			if diagnostic.Action != "" {
+				metadata = append(metadata, "action="+diagnostic.Action)
+			}
+			if diagnostic.Step != 0 {
+				metadata = append(metadata, fmt.Sprintf("step=%d", diagnostic.Step))
+			}
+			location := ""
+			if diagnostic.Location != nil {
+				location = fmt.Sprintf(" (%s:%d:%d)", diagnostic.Location.Path, diagnostic.Location.Line, diagnostic.Location.Column)
+			}
+			if _, err := fmt.Fprintf(w, "%s [%s] %s%s {%s}\n", marker, diagnostic.Code, diagnostic.Message, location, strings.Join(metadata, ", ")); err != nil {
+				return err
+			}
+		}
+	}
+	if failed {
+		_, err := fmt.Fprintf(w, "Compilation: %s. Admission: %s.\n", report.Compile.Result, report.Admission.Result)
+		return err
+	}
 	return nil
 }
 
