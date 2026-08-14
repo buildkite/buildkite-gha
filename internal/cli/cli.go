@@ -1379,6 +1379,9 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if !ok {
 		return 1
 	}
+	if parsedEvent, parseErr := compiler.ParseEvent(event); parseErr == nil {
+		out.sourceLinks = sourceLinksForEvent(parsedEvent)
+	}
 	processingReport, ok := validatedProcessingReport(out, workflowPath, "", source, event, true)
 	if !ok {
 		return 1
@@ -1535,6 +1538,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
@@ -1658,7 +1662,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
-			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 			generatedWorkflows = append(generatedWorkflows, failed)
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
@@ -1669,7 +1673,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
-				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
 				continue
@@ -1788,7 +1792,7 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 	return false
 }
 
-func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) (buildkitepipeline.Workflow, []transport.Artifact) {
+func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (buildkitepipeline.Workflow, []transport.Artifact) {
 	label := input.Name
 	if label == "" {
 		label = input.CanonicalPath
@@ -1816,7 +1820,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		}
 		messages = append(messages, message)
 	}
-	_, annotation := processingAnnotation(report)
+	_, annotation := processingAnnotation(report, sourceLinks)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
@@ -1826,7 +1830,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		Failure: &buildkitepipeline.Failure{
 			AnnotationPath: annotationArtifact.Path,
 			MessagePath:    messageArtifact.Path,
-			Summary:        failureCheckSummary(input.CanonicalPath, report),
+			Summary:        failureCheckSummary(input.CanonicalPath, report, sourceLinks),
 		},
 	}
 	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
@@ -1839,7 +1843,7 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func failureCheckSummary(path string, report compatibility.ProcessingReport) string {
+func failureCheckSummary(path string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) string {
 	if path == "" {
 		path = report.Workflow
 	}
@@ -1862,7 +1866,20 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport) str
 			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
 		}
 		summary.WriteString("\n- ")
-		summary.WriteString(markdownCode(diagnosticPath))
+		pathCode := markdownCode(diagnosticPath)
+		line := 0
+		if diagnostic.Location != nil {
+			line = diagnostic.Location.Line
+		}
+		if link := sourceLinks.link(diagnosticPath, line); link != "" {
+			summary.WriteString("[")
+			summary.WriteString(pathCode)
+			summary.WriteString("](")
+			summary.WriteString(link)
+			summary.WriteString(")")
+		} else {
+			summary.WriteString(pathCode)
+		}
 		if diagnostic.Job != "" {
 			summary.WriteString(", job ")
 			summary.WriteString(markdownCode(diagnostic.Job))

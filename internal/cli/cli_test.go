@@ -2510,7 +2510,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 		Level: "error", Code: "E_TEST", Message: `line one
 <script>*unsafe*</script> "quoted" ` + strings.Repeat("界", processingAnnotationBodyLimit),
 	})
-	style, body := processingAnnotation(report)
+	style, body := processingAnnotation(report, sourceLinkContext{})
 	if style != "error" || len(body) > processingAnnotationBodyLimit || !utf8.ValidString(body) {
 		t.Fatalf("style = %q, bytes = %d, valid UTF-8 = %v", style, len(body), utf8.ValidString(body))
 	}
@@ -2527,7 +2527,7 @@ func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
-	probeRow := renderProcessingDiagnostic(probe)
+	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
 	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
 		len("<div class=\"mb2\"><strong>Workflow:</strong> ") + len(annotationCode(report.Workflow)) +
 		len("</div>\n<div class=\"mb2\">\n")
@@ -2537,7 +2537,7 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 		compatibility.Diagnostic{Level: "warning", Code: "W_OMITTED", Message: "omitted diagnostic"},
 	)
 
-	_, body := processingAnnotation(report)
+	_, body := processingAnnotation(report, sourceLinkContext{})
 	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, "Additional diagnostics omitted") {
 		t.Fatalf("annotation bytes = %d, notice present = %v", len(body), strings.Contains(body, "Additional diagnostics omitted"))
 	}
@@ -2567,11 +2567,49 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 		Location: &compatibility.SourceLocation{Path: workflowPath, Line: 4, Column: 2},
 	})
 
-	_, body := processingAnnotation(report)
+	_, body := processingAnnotation(report, sourceLinkContext{})
 	wantWorkflow := "<strong>Workflow:</strong> <code>.github/workflows/test-image-build.yml</code>"
 	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
 	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
 		t.Fatalf("annotation = %q, want %q and %q without checkout path", body, wantWorkflow, wantLocation)
+	}
+}
+
+func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
+	report := compatibility.NewProcessingReport(".github/workflows/hello world.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello world.yml", Line: 100, Column: 3},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.example.com", repository: "owner/repo", sha: "abc123"}
+
+	_, body := processingAnnotation(report, sourceLinks)
+	for _, want := range []string{
+		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml"><code>.github/workflows/hello world.yml</code></a>`,
+		`<a href="https://github.example.com/owner/repo/blob/abc123/.github/workflows/hello%20world.yml#L100"><code>.github/workflows/hello world.yml:100:3</code></a>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("annotation = %q, want %q", body, want)
+		}
+	}
+}
+
+func TestSourceLinkRequiresRepositoryContextAndRelativePath(t *testing.T) {
+	configured := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	for _, test := range []struct {
+		name    string
+		context sourceLinkContext
+		path    string
+	}{
+		{name: "missing context", path: ".github/workflows/ci.yml"},
+		{name: "absolute path", context: configured, path: "/tmp/ci.yml"},
+		{name: "path traversal", context: configured, path: "../ci.yml"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.context.link(test.path, 1); got != "" {
+				t.Fatalf("link() = %q, want empty", got)
+			}
+		})
 	}
 }
 
@@ -2581,7 +2619,7 @@ func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 		Level: "warning", Code: "W_TEST", Message: "ci.yml:4:23: warning message",
 		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 23},
 	})
-	_, body := processingAnnotation(report)
+	_, body := processingAnnotation(report, sourceLinkContext{})
 	if count := strings.Count(body, "ci.yml:4:23"); count != 1 {
 		t.Fatalf("annotation location count = %d, want 1: %q", count, body)
 	}
@@ -2604,7 +2642,7 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 		Job:     "test", Instance: "gha-test-a1b2", Action: "actions/setup-java@v4", Step: 2,
 	})
 
-	_, body := processingAnnotation(report)
+	_, body := processingAnnotation(report, sourceLinkContext{})
 	for _, want := range []string{
 		`<div class="border-top border-gray py2"><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
 		"Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2",
@@ -2691,7 +2729,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	if err := compatibility.WriteProcessing(&textOutput, "text", report); err != nil {
 		t.Fatal(err)
 	}
-	_, annotation := processingAnnotation(report)
+	_, annotation := processingAnnotation(report, sourceLinkContext{})
 	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
 		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
 		strings.Count(annotation, `Move permissions to the workflow level.`) != 1 ||
@@ -3992,7 +4030,7 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 		compatibility.Diagnostic{Level: "error", Code: "E_RUNNER", Message: "runner is unsupported", Job: "test"},
 	)
 
-	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report)
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report, sourceLinkContext{})
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
 	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
@@ -4003,7 +4041,7 @@ func TestFailedGeneratedWorkflowKeepsLargeDiagnosticsOutOfCommand(t *testing.T) 
 	message := strings.Repeat("large diagnostic ", 16*1024)
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Message: message})
-	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report)
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report, sourceLinkContext{})
 
 	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", EventProvider: "github", Workflows: []buildkitepipeline.Workflow{workflow}})
 	if err != nil {
@@ -4037,7 +4075,7 @@ func TestFailureCheckSummaryFitsProviderLimit(t *testing.T) {
 		Level: "error", Message: strings.Repeat("x", workflowCheckSummaryLimit) + "🙂", Job: "test",
 	})
 
-	summary := failureCheckSummary("ci.yml", report)
+	summary := failureCheckSummary("ci.yml", report, sourceLinkContext{})
 	if len(summary) > workflowCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, "_Additional error details omitted at the provider check summary size limit._") {
 		t.Fatalf("truncated provider check summary is invalid: bytes=%d, valid UTF-8=%t, suffix=%q", len(summary), utf8.ValidString(summary), summary[len(summary)-100:])
 	}
@@ -4055,7 +4093,21 @@ func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
 		"- `.github/workflows/caller.yml`, job `caller`: caller failed\n" +
 		"- `.github/workflows/reusable.yml`, job `called`: reusable failed\n" +
 		"- `.github/workflows/absolute.yml`, job `absolute`: absolute reusable failed"
-	if got := failureCheckSummary(".github/workflows/caller.yml", report); got != want {
+	if got := failureCheckSummary(".github/workflows/caller.yml", report, sourceLinkContext{}); got != want {
+		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
+	}
+}
+
+func TestFailureCheckSummaryLinksDiagnosticWorkflowPath(t *testing.T) {
+	report := compatibility.NewProcessingReport(".github/workflows/hello.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "runner is unsupported", Job: "test",
+		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello.yml", Line: 100, Column: 3},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+	want := "The workflow could not be prepared:\n\n- [`.github/workflows/hello.yml`](https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100), job `test`: runner is unsupported"
+
+	if got := failureCheckSummary(".github/workflows/hello.yml", report, sourceLinks); got != want {
 		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
 	}
 }
