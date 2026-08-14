@@ -1598,6 +1598,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		workflows[i].Applicable = selection.Applicable
 		workflows[i].TriggerCondition = selection.Condition
 		workflows[i].SkipReason = selection.SkipReason
+		workflows[i].AnnotationReason = selection.AnnotationReason
 	}
 	for i, input := range workflows {
 		if !input.Applicable || processingReportHasErrors(processingReports[i]) {
@@ -1703,7 +1704,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 				Event:      effectiveEvent.Event.Event,
 				SkipReason: input.SkipReason,
 			})
-			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey})
+			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey, reason: input.AnnotationReason})
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
@@ -1737,6 +1738,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		generated.Event = effectiveEvent.Event.Event
 		generated.Condition = input.TriggerCondition
 		generatedWorkflows = append(generatedWorkflows, generated)
+		if input.AnnotationReason != "" {
+			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: generated.GroupKey, reason: input.AnnotationReason})
+		}
 		planArtifacts = append(planArtifacts, bundle.Plans...)
 		jobCount += len(bundle.Plans)
 		processingReports[i].SetStage(string(compiler.StageAdmission), compatibility.Passed)
@@ -1989,17 +1993,21 @@ func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.Tri
 	}
 	if branch, ok := strings.CutPrefix(event.Ref, "refs/heads/"); ok {
 		context.Branch = triggerConditionLiteral(branch)
+		context.BranchValue = &branch
 	}
 	if tag, ok := strings.CutPrefix(event.Ref, "refs/tags/"); ok {
 		context.Tag = triggerConditionLiteral(tag)
+		context.TagValue = &tag
 	}
 	if action, ok := event.Payload["action"].(string); ok && strings.TrimSpace(action) != "" {
 		context.PullRequestAction = triggerConditionLiteral(action)
+		context.PullRequestActionValue = &action
 	}
 	if pullRequest, ok := event.Payload["pull_request"].(map[string]any); ok {
 		if base, ok := pullRequest["base"].(map[string]any); ok {
 			if branch, ok := base["ref"].(string); ok && strings.TrimSpace(branch) != "" {
 				context.PullRequestBaseBranch = triggerConditionLiteral(branch)
+				context.PullRequestBaseValue = &branch
 			}
 		}
 	}
@@ -2007,8 +2015,8 @@ func snapshotTriggerConditionContext(event compiler.Event) buildkitepipeline.Tri
 }
 
 type workflowTriggerSelection struct {
-	Condition, SkipReason string
-	Applicable            bool
+	Condition, SkipReason, AnnotationReason string
+	Applicable                              bool
 }
 
 func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSelection) (workflowTriggerSelection, error) {
@@ -2016,10 +2024,18 @@ func selectWorkflowTrigger(triggers []workflow.Trigger, event effectiveEventSele
 	if err != nil {
 		return workflowTriggerSelection{}, err
 	}
+	annotationReason := buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event)
+	if applicable {
+		annotationReason, err = buildkitepipeline.TriggerFilterMismatchReason(triggers, event.Event.Event, event.TriggerContext)
+		if err != nil {
+			return workflowTriggerSelection{}, err
+		}
+	}
 	return workflowTriggerSelection{
-		Condition:  condition,
-		Applicable: applicable,
-		SkipReason: buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event),
+		Condition:        condition,
+		Applicable:       applicable,
+		SkipReason:       buildkitepipeline.TriggerEventSkipReason(triggers, event.Event.Event),
+		AnnotationReason: annotationReason,
 	}, nil
 }
 
@@ -2063,7 +2079,7 @@ type workflowInput struct {
 	Path, CanonicalPath, Identity, StepKeyNamespace, Name string
 	Source                                                []byte
 	Triggers                                              []workflow.Trigger
-	TriggerCondition, SkipReason                          string
+	TriggerCondition, SkipReason, AnnotationReason        string
 	ReusableOnly, Applicable                              bool
 }
 

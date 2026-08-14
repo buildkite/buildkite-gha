@@ -14,11 +14,15 @@ const maxSkipReasonLength = 70
 // TriggerConditionContext supplies the trusted Buildkite expressions used to
 // select one effective event and apply its supported trigger filters.
 type TriggerConditionContext struct {
-	EventPredicate        string
-	Branch                string
-	Tag                   string
-	PullRequestBaseBranch string
-	PullRequestAction     string
+	EventPredicate         string
+	Branch                 string
+	Tag                    string
+	PullRequestBaseBranch  string
+	PullRequestAction      string
+	BranchValue            *string
+	TagValue               *string
+	PullRequestBaseValue   *string
+	PullRequestActionValue *string
 }
 
 // UnsupportedPathFiltersError reports a trigger that cannot be translated
@@ -99,6 +103,68 @@ func TriggerEventSkipReason(triggers []workflow.Trigger, event string) string {
 		fmt.Sprintf("This workflow is not triggered by a `%s` event", event),
 		"This workflow is not triggered by the current event",
 	)
+}
+
+// TriggerFilterMismatchReason describes why a concrete effective event does
+// not satisfy the filters on its matching workflow trigger.
+func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, context TriggerConditionContext) (string, error) {
+	for _, trigger := range triggers {
+		if trigger.Event != event {
+			continue
+		}
+		switch event {
+		case "push":
+			if context.BranchValue != nil {
+				if trigger.Branches == nil && trigger.BranchesIgnore == nil && (trigger.Tags != nil || trigger.TagsIgnore != nil) {
+					return fmt.Sprintf("Branch push %q does not match this workflow's push tag filters.", *context.BranchValue), nil
+				}
+				matches, err := refFilterMatches(*context.BranchValue, trigger.Branches, trigger.BranchesIgnore)
+				if err != nil {
+					return "", fmt.Errorf("push branches: %w", err)
+				}
+				if !matches {
+					return fmt.Sprintf("Branch %q does not match this workflow's push branch filters.", *context.BranchValue), nil
+				}
+			}
+			if context.TagValue != nil {
+				if trigger.Tags == nil && trigger.TagsIgnore == nil && (trigger.Branches != nil || trigger.BranchesIgnore != nil) {
+					return fmt.Sprintf("Tag push %q does not match this workflow's push branch filters.", *context.TagValue), nil
+				}
+				matches, err := refFilterMatches(*context.TagValue, trigger.Tags, trigger.TagsIgnore)
+				if err != nil {
+					return "", fmt.Errorf("push tags: %w", err)
+				}
+				if !matches {
+					return fmt.Sprintf("Tag %q does not match this workflow's push tag filters.", *context.TagValue), nil
+				}
+			}
+		case "pull_request":
+			if context.PullRequestBaseValue != nil {
+				matches, err := refFilterMatches(*context.PullRequestBaseValue, trigger.Branches, trigger.BranchesIgnore)
+				if err != nil {
+					return "", fmt.Errorf("pull_request branches: %w", err)
+				}
+				if !matches {
+					return fmt.Sprintf("Base branch %q does not match this workflow's pull_request branch filters.", *context.PullRequestBaseValue), nil
+				}
+			}
+			if context.PullRequestActionValue != nil {
+				types := trigger.Types
+				if types == nil {
+					types = []string{"opened", "synchronize", "reopened"}
+				}
+				matched := false
+				for _, action := range types {
+					matched = matched || action == *context.PullRequestActionValue
+				}
+				if !matched {
+					return fmt.Sprintf("Pull request activity %q does not match this workflow's pull_request activity filters.", *context.PullRequestActionValue), nil
+				}
+			}
+		}
+		return "", nil
+	}
+	return "", nil
 }
 
 func skipReason(reason, fallback string) string {
@@ -296,6 +362,36 @@ func refFilters(field string, include, exclude []string) (string, bool, error) {
 		}
 	}
 	return state, true, nil
+}
+
+func refFilterMatches(value string, include, exclude []string) (bool, error) {
+	if _, configured, err := refFilters("ref", include, exclude); err != nil || !configured {
+		return !configured, err
+	}
+	matched := include == nil
+	patterns := include
+	if exclude != nil {
+		patterns = exclude
+	}
+	for _, pattern := range patterns {
+		positive := include != nil
+		if strings.HasPrefix(pattern, "!") {
+			positive = false
+			pattern = strings.TrimPrefix(pattern, "!")
+		}
+		expression, err := githubRefGlob(pattern)
+		if err != nil {
+			return false, err
+		}
+		compiled, err := regexp.Compile(expression)
+		if err != nil {
+			return false, fmt.Errorf("compile ref glob %q: %w", pattern, err)
+		}
+		if compiled.MatchString(value) {
+			matched = positive
+		}
+	}
+	return matched, nil
 }
 
 func githubRefGlob(glob string) (string, error) {

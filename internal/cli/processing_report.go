@@ -111,8 +111,9 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 }
 
 type skippedWorkflow struct {
-	label string
-	key   string
+	label  string
+	key    string
+	reason string
 }
 
 func (o processingOutput) annotateSkippedWorkflows(event string, workflows []skippedWorkflow) {
@@ -135,12 +136,12 @@ func skippedWorkflowsAnnotation(event string, workflows []skippedWorkflow, build
 	} else {
 		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(workflows))
 	}
-	_, _ = fmt.Fprintf(&out, "These workflows are not triggered by a <code>%s</code> event:\n\n", annotationHTML(event))
+	_, _ = fmt.Fprintf(&out, "The current <code>%s</code> event does not match these workflows:\n\n", annotationHTML(event))
 	for _, workflow := range workflows {
 		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
 		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
-		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s)\n", label, annotationURL)
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s) — %s\n", label, annotationURL, annotationHTML(workflow.reason))
 	}
 	return out.String()
 }
