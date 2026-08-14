@@ -532,7 +532,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-**🟡 Supported subset.** Resolved commits in the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
 
 | Release | Commit |
 | --- | --- |

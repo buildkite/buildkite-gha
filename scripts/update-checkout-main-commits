@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repository=https://github.com/actions/checkout.git
+v4_boundary_commit=f43a0e5ff2bd294095638e18286ca9a3d1956744
 requested_commit=${1:-}
 output=${2:-checkout_main_commits_generated.go}
 checkout=$(mktemp -d)
@@ -20,6 +21,10 @@ if ! git -C "$checkout" merge-base --is-ancestor "$snapshot_commit" "$main_commi
   echo "$snapshot_commit is not reachable from actions/checkout upstream main" >&2
   exit 1
 fi
+if ! git -C "$checkout" merge-base --is-ancestor "$v4_boundary_commit" "$snapshot_commit"; then
+  echo "$snapshot_commit predates the actions/checkout v4 development boundary" >&2
+  exit 1
+fi
 
 {
   cat <<EOF
@@ -31,7 +36,7 @@ const checkoutMainSnapshotCommit = "$snapshot_commit"
 
 var checkoutMainCommits = map[string]struct{}{
 EOF
-  git -C "$checkout" rev-list "$snapshot_commit" | LC_ALL=C sort | sed 's/^/\t"/; s/$/": {},/'
+  git -C "$checkout" rev-list "$snapshot_commit" "^$v4_boundary_commit" | LC_ALL=C sort | sed 's/^/\t"/; s/$/": {},/'
   echo '}'
 } >"$output"
 
