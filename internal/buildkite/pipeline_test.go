@@ -3,6 +3,7 @@ package buildkite
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,6 +76,7 @@ func TestEmitGolden(t *testing.T) {
 			}
 		}
 		if !strings.HasPrefix(step.Command, "set -euo pipefail\n") ||
+			!strings.Contains(step.Command, "echo '~~~ :package: Prepare GitHub Actions runtime'\n") ||
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `artifact download '.buildkite-gha/distributions/`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
@@ -96,6 +98,52 @@ func TestEmitGolden(t *testing.T) {
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
+	}
+}
+
+func TestEmitScopesBootstrapFailureExpansionBeforeRunJob(t *testing.T) {
+	output, err := Emit(Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		Jobs:               []Job{{Key: "job", Label: "Job", PlanDigest: testDigest("plan")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Command string `yaml:"command"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Steps) != 1 {
+		t.Fatalf("steps = %#v", document.Steps)
+	}
+	command := document.Steps[0].Command
+	group := "echo '~~~ :package: Prepare GitHub Actions runtime'"
+	setTrap := `trap 'bootstrap_status=$?; echo "^^^ +++"; exit "$bootstrap_status"' ERR`
+	clearTrap := "trap - ERR"
+	runJob := `"$distribution" run-job`
+	if strings.Count(command, group) != 1 || strings.Count(command, setTrap) != 1 || strings.Count(command, clearTrap) != 1 ||
+		strings.Index(command, group) > strings.Index(command, setTrap) ||
+		strings.Index(command, setTrap) > strings.Index(command, `artifact download `) ||
+		strings.Index(command, clearTrap) < strings.Index(command, `chmod 0500 "$distribution"`) ||
+		strings.Index(command, clearTrap) > strings.Index(command, runJob) {
+		t.Fatalf("bootstrap group or trap is incorrectly scoped:\n%s", command)
+	}
+
+	bootstrapFailure := strings.Join([]string{"set -e", group, setTrap, "false"}, "\n")
+	bootstrapOutput, bootstrapErr := exec.Command("bash", "-c", bootstrapFailure).CombinedOutput()
+	if bootstrapErr == nil || !strings.Contains(string(bootstrapOutput), "~~~ :package: Prepare GitHub Actions runtime\n") || !strings.Contains(string(bootstrapOutput), "^^^ +++\n") {
+		t.Fatalf("bootstrap failure did not expand its collapsed group: err=%v output=%q", bootstrapErr, bootstrapOutput)
+	}
+
+	runtimeFailure := strings.Join([]string{"set -e", group, setTrap, clearTrap, "echo '--- Run action'", "false"}, "\n")
+	runtimeOutput, runtimeErr := exec.Command("bash", "-c", runtimeFailure).CombinedOutput()
+	if runtimeErr == nil || strings.Contains(string(runtimeOutput), "^^^ +++") || !strings.Contains(string(runtimeOutput), "--- Run action\n") {
+		t.Fatalf("runtime failure was attributed to bootstrap: err=%v output=%q", runtimeErr, runtimeOutput)
 	}
 }
 

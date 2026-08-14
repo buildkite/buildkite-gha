@@ -356,6 +356,8 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		commands := []string{
 			"set -euo pipefail",
+			"echo '~~~ :package: Prepare GitHub Actions runtime'",
+			`trap 'bootstrap_status=$?; echo "^^^ +++"; exit "$bootstrap_status"' ERR`,
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
 			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
 			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
@@ -386,7 +388,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
 		}
-		commands = append(commands, runJob)
+		commands = append(commands, "trap - ERR", runJob)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if workflow.Aggregate {
