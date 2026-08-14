@@ -35,7 +35,7 @@ run = "echo '--- Lint Go'; golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
+run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/update-checkout-main-commits scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.lint]
 description = "Lint Go code and shell scripts"
