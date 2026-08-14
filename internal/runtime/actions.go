@@ -103,7 +103,7 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func actionProvidesCacheCredentials(lock *plan.ActionLock) bool {
+func providesCacheCredentials(lock *plan.ActionLock) bool {
 	if lock == nil {
 		return false
 	}

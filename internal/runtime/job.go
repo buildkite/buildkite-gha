@@ -1299,7 +1299,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if err != nil {
 			return result, err
 		}
-		provideCacheCredentials := actionProvidesCacheCredentials(&lock)
+		provideCacheCredentials := providesCacheCredentials(&lock)
 		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), ProvideCacheCredentials: provideCacheCredentials, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
@@ -1540,7 +1540,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := environment.process()
-		provideCacheCredentials := actionProvidesCacheCredentials(actionLock)
+		provideCacheCredentials := providesCacheCredentials(actionLock)
 		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), ProvideCacheCredentials: provideCacheCredentials, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
