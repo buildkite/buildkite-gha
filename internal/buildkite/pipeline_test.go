@@ -165,12 +165,12 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 		EventProvider:      "github",
 		Workflows: []Workflow{
 			{
-				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", CheckName: "Buildkite / CI (push)", Condition: `build.source_event == "push"`,
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: `build.source_event == "push"`,
 				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("first plan")}},
 			},
 			{
-				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", CheckName: "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)", Condition: `build.source == "ui"`,
-				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test", PlanDigest: testDigest("second plan")}},
+				GroupLabel: ".github/workflows/release.yml", GroupKey: "gha-workflow-2222222222222222", Event: "workflow_dispatch", Condition: `build.source == "ui"`,
+				Jobs: []Job{{Key: "gha-2222222222222222-test", Label: "Test \"quoted\"\nnext", PlanDigest: testDigest("second plan")}},
 			},
 		},
 	})
@@ -183,15 +183,15 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
 			DependsOn string `yaml:"depends_on"`
-			Notify    []struct {
-				GitHubCheck struct {
-					Name string `yaml:"name"`
-				} `yaml:"github_check"`
-			} `yaml:"notify"`
-			Steps []struct {
-				Key       string     `yaml:"key"`
-				Command   string     `yaml:"command"`
-				Notify    any        `yaml:"notify"`
+			Notify    any    `yaml:"notify"`
+			Steps     []struct {
+				Key     string `yaml:"key"`
+				Command string `yaml:"command"`
+				Notify  []struct {
+					GitHubCheck struct {
+						Name string `yaml:"name"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
 				DependsOn *yaml.Node `yaml:"depends_on"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
@@ -199,10 +199,10 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Notify) != 1 || document.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || document.Steps[0].Steps[0].Notify != nil {
+	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "CI / Test (push)" {
 		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
 	}
-	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || len(document.Steps[1].Notify) != 1 || document.Steps[1].Notify[0].GitHubCheck.Name != "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)" || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || document.Steps[1].Steps[0].Notify != nil {
+	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)" {
 		t.Fatalf("second aggregate group = %#v\n%s", document.Steps[1], output)
 	}
 	for _, group := range document.Steps {
@@ -215,7 +215,7 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(string(output), `name: "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)"`) {
+	if !strings.Contains(string(output), `name: ".github/workflows/release.yml / Test \"quoted\"\nnext (workflow_dispatch)"`) {
 		t.Fatalf("GitHub Check name did not use YAML scalar escaping:\n%s", output)
 	}
 }
@@ -227,15 +227,15 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 		EventProvider:      "cursor-origin",
 		Workflows: []Workflow{
 			{
-				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", CheckName: "Buildkite / CI (push)", Condition: "true",
+				GroupLabel: "CI", GroupKey: "gha-workflow-1111111111111111", Event: "push", Condition: "true",
 				Jobs: []Job{{Key: "gha-1111111111111111-test", Label: "Test", PlanDigest: testDigest("plan")}},
 			},
 			{
-				GroupLabel: "Pull request", GroupKey: "gha-workflow-2222222222222222", CheckName: "Buildkite / Pull request (push)",
+				GroupLabel: "Pull request", GroupKey: "gha-workflow-2222222222222222", Event: "push",
 				SkipReason: "This workflow is not triggered by a `push` event",
 			},
 			{
-				GroupLabel: "Invalid", GroupKey: "gha-workflow-3333333333333333", CheckName: "Buildkite / Invalid (push)", Condition: "true",
+				GroupLabel: "Invalid", GroupKey: "gha-workflow-3333333333333333", Event: "push", Condition: "true",
 				Failure: &Failure{
 					AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
 					MessagePath:    ".buildkite-gha/failures/messages/message.txt",
@@ -261,6 +261,16 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 					} `yaml:"output"`
 				} `yaml:"origin_check"`
 			} `yaml:"notify"`
+			Steps []struct {
+				Key    string `yaml:"key"`
+				Notify []struct {
+					GitHubCheck any `yaml:"github_check"`
+					OriginCheck struct {
+						Key  string `yaml:"key"`
+						Name string `yaml:"name"`
+					} `yaml:"origin_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
@@ -269,8 +279,12 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 	if len(document.Steps) != 3 {
 		t.Fatalf("Origin workflow steps = %#v\n%s", document.Steps, output)
 	}
-	wantNames := []string{"Buildkite / CI (push)", "Buildkite / Pull request (push)", "Buildkite / Invalid (push)"}
-	for i, step := range document.Steps {
+	runnable := document.Steps[0]
+	if runnable.Notify != nil || len(runnable.Steps) != 1 || len(runnable.Steps[0].Notify) != 1 || runnable.Steps[0].Notify[0].GitHubCheck != nil || runnable.Steps[0].Notify[0].OriginCheck.Key != runnable.Steps[0].Key || runnable.Steps[0].Notify[0].OriginCheck.Name != "CI / Test (push)" {
+		t.Fatalf("runnable Origin workflow check = %#v", runnable)
+	}
+	wantNames := []string{"Pull request (push)", "Invalid (push)"}
+	for i, step := range document.Steps[1:] {
 		if len(step.Notify) != 1 || step.Notify[0].GitHubCheck != nil || step.Notify[0].OriginCheck.Key != step.Key || step.Notify[0].OriginCheck.Name != wantNames[i] {
 			t.Fatalf("Origin workflow check %d = %#v", i, step)
 		}
@@ -281,6 +295,52 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 	}
 }
 
+func TestEmitAggregateWorkflowChecksRequireUniqueJobIdentities(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		Workflows: []Workflow{{
+			GroupLabel: "Bun",
+			GroupKey:   "gha-workflow-1111111111111111",
+			Event:      "push",
+			Condition:  "true",
+			Jobs: []Job{
+				{Key: "first", Label: "Test", CheckLabel: "first", PlanDigest: testDigest("first")},
+				{Key: "second", Label: "Test", CheckLabel: "second", PlanDigest: testDigest("second")},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Steps []struct {
+				Notify []struct {
+					GitHubCheck struct {
+						Name string `yaml:"name"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	steps := document.Steps[0].Steps
+	if len(steps) != 2 || steps[0].Notify[0].GitHubCheck.Name != "Bun / first (push)" || steps[1].Notify[0].GitHubCheck.Name != "Bun / second (push)" {
+		t.Fatalf("job check names = %#v\n%s", steps, output)
+	}
+
+	pipeline.Workflows[0].Jobs[0].CheckLabel = ""
+	pipeline.Workflows[0].Jobs[1].CheckLabel = ""
+	if _, err := Emit(pipeline); err == nil || !strings.Contains(err.Error(), `share provider check label "Test"`) {
+		t.Fatalf("duplicate provider check label error = %v", err)
+	}
+}
+
 func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:  "importer",
@@ -288,7 +348,7 @@ func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 		Workflows: []Workflow{{
 			GroupLabel: "Pull request",
 			GroupKey:   "gha-workflow-1111111111111111",
-			CheckName:  "Buildkite / Pull request (push)",
+			Event:      "push",
 			SkipReason: "This workflow is not triggered by a `push` event",
 		}},
 	})
@@ -323,7 +383,7 @@ func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 		t.Fatalf("skipped aggregate steps = %#v\n%s", document.Steps, output)
 	}
 	step := document.Steps[0]
-	if step.Group != "" || step.Label != ":github: Pull request" || step.Key != "gha-workflow-1111111111111111" || step.Type != "command" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
+	if step.Group != "" || step.Label != ":github: Pull request" || step.Key != "gha-workflow-1111111111111111" || step.Type != "command" || step.Condition != "" || step.Skip != "This workflow is not triggered by a `push` event" || step.Command != "" || step.DependsOn != "importer" || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Pull request (push)" || len(step.Steps) != 0 || !step.Checkout.Skip {
 		t.Fatalf("skipped aggregate step = %#v\n%s", step, output)
 	}
 }
@@ -335,7 +395,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 		Workflows: []Workflow{{
 			GroupLabel: "CI",
 			GroupKey:   "gha-workflow-1111111111111111",
-			CheckName:  "Buildkite / CI (push)",
+			Event:      "push",
 			Failure: &Failure{
 				AnnotationPath: ".buildkite-gha/failures/annotations/annotation.html",
 				MessagePath:    ".buildkite-gha/failures/messages/message.txt",
@@ -396,7 +456,7 @@ func TestEmitAggregateWorkflowFailures(t *testing.T) {
 	if !ok {
 		t.Fatalf("failure step plugins = %#v", step.Plugins)
 	}
-	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "" || plugin.Step != "importer" || len(plugin.Download) != 2 || plugin.Download[0].From != ".buildkite-gha/failures/messages/message.txt" || plugin.Download[0].To != ".buildkite-gha-failure-message.txt" || plugin.Download[1].From != ".buildkite-gha/failures/annotations/annotation.html" || plugin.Download[1].To != ".buildkite-gha-failure-annotation.html" || step.DependsOn != "importer" || step.Retry.Manual == nil || step.Retry.Manual.Allowed || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `cat .buildkite-gha-failure-message.txt
+	if step.Group != "" || len(step.Steps) != 0 || step.Label != ":github: CI" || step.Key != "gha-workflow-1111111111111111" || step.Condition != "" || step.Skip != "" || plugin.Step != "importer" || len(plugin.Download) != 2 || plugin.Download[0].From != ".buildkite-gha/failures/messages/message.txt" || plugin.Download[0].To != ".buildkite-gha-failure-message.txt" || plugin.Download[1].From != ".buildkite-gha/failures/annotations/annotation.html" || plugin.Download[1].To != ".buildkite-gha-failure-annotation.html" || step.DependsOn != "importer" || step.Retry.Manual == nil || step.Retry.Manual.Allowed || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != "CI (push)" || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != "The workflow could not be prepared:\n\n- `ci.yml`, job `test`: runner isn't admitted\n- `ci.yml`: matrix could not be expanded" || step.Command != `cat .buildkite-gha-failure-message.txt
 buildkite-agent annotate --scope=job --style=error < .buildkite-gha-failure-annotation.html
 exit 1` || !step.Checkout.Skip {
 		t.Fatalf("failure step = %#v", step)
@@ -411,7 +471,7 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 		Workflows: []Workflow{{
 			GroupLabel:      "CI",
 			GroupKey:        "workflow-ci",
-			CheckName:       "Buildkite / CI",
+			Event:           "push",
 			Condition:       "true",
 			ConcurrencyGate: &ConcurrencyGate{Group: "buildkite-gha/concurrency/ci"},
 			Jobs: []Job{
@@ -467,7 +527,7 @@ func TestEmitAggregateWorkflowConcurrencyDependencies(t *testing.T) {
 	}
 }
 
-func TestEmitAggregateRequiresProviderCheckName(t *testing.T) {
+func TestEmitAggregateRequiresEventName(t *testing.T) {
 	_, err := Emit(Pipeline{
 		CompilerStep:       "importer",
 		DistributionDigest: testDigest("distribution"),
@@ -477,8 +537,8 @@ func TestEmitAggregateRequiresProviderCheckName(t *testing.T) {
 			Jobs: []Job{{Key: "test", Label: "Test", PlanDigest: testDigest("plan")}},
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), `workflow "workflow-ci" requires a provider check name`) {
-		t.Fatalf("missing provider check name error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), `workflow "workflow-ci" requires an event name`) {
+		t.Fatalf("missing event name error = %v", err)
 	}
 }
 
@@ -488,8 +548,8 @@ func TestEmitAggregateRejectsCrossWorkflowCollisions(t *testing.T) {
 		DistributionDigest: testDigest("distribution"),
 		EventProvider:      "github",
 		Workflows: []Workflow{
-			{GroupLabel: "One", GroupKey: "workflow-one", CheckName: "Buildkite / One", Condition: "true", Jobs: []Job{{Key: "shared", Label: "One", PlanDigest: testDigest("one")}}},
-			{GroupLabel: "Two", GroupKey: "workflow-two", CheckName: "Buildkite / Two", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Two", PlanDigest: testDigest("two")}}},
+			{GroupLabel: "One", GroupKey: "workflow-one", Event: "push", Condition: "true", Jobs: []Job{{Key: "shared", Label: "One", PlanDigest: testDigest("one")}}},
+			{GroupLabel: "Two", GroupKey: "workflow-two", Event: "push", Condition: "true", Jobs: []Job{{Key: "shared", Label: "Two", PlanDigest: testDigest("two")}}},
 		},
 	}
 	if _, err := Emit(base); err == nil || !strings.Contains(err.Error(), `generated step key "shared" collides`) {

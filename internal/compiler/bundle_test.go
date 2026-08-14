@@ -383,6 +383,22 @@ func TestCompileBundleNamespacesMaxParallelConcurrency(t *testing.T) {
 	}
 }
 
+func TestCompileBundleUsesJobIDsForUniqueCheckLabels(t *testing.T) {
+	source := []byte("on: push\njobs:\n  alpha:\n    name: Test\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n  beta:\n    name: Test\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n  matrix:\n    name: Test\n    strategy:\n      matrix:\n        shard: [one, two, 1, '1']\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+	bundle, err := CompileBundleWithOptions("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer", defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(bundle.GeneratedWorkflow.Jobs))
+	for i, job := range bundle.GeneratedWorkflow.Jobs {
+		got[i] = job.CheckLabel
+	}
+	want := []string{"alpha", "beta", `matrix (shard="one")`, `matrix (shard="two")`, "matrix (shard=1)", `matrix (shard="1")`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("provider check labels = %#v, want %#v", got, want)
+	}
+}
+
 func TestCompileBundleCompilesSmokeCorpus(t *testing.T) {
 	workflows, err := filepath.Glob(smokePath(".github", "workflows", "*.yml"))
 	if err != nil {

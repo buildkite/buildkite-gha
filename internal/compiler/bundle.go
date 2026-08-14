@@ -133,6 +133,7 @@ func GenerateBundlePipeline(bundle Bundle, compilerDistributionDigest, compilerS
 		jobs[i] = buildkitepipeline.Job{
 			Key:                ir.Jobs[i].Key,
 			Label:              ir.Jobs[i].Label,
+			CheckLabel:         instanceCheckLabel(ir.Jobs[i]),
 			Queue:              ir.Jobs[i].Queue,
 			Platform:           ir.Jobs[i].Platform.String(),
 			DistributionDigest: job.RuntimeDistributionDigest(),

@@ -54,11 +54,11 @@ type Pipeline struct {
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
-// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate emission.
+// pipeline. GroupLabel, GroupKey, and Event are required for aggregate emission.
 type Workflow struct {
 	GroupLabel      string
 	GroupKey        string
-	CheckName       string
+	Event           string
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
@@ -103,6 +103,7 @@ func MiseDataDir(platforms ...string) string {
 type Job struct {
 	Key                string
 	Label              string
+	CheckLabel         string
 	Queue              string
 	Platform           string
 	DistributionDigest string
@@ -159,8 +160,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if !validStepKey(workflow.GroupKey) {
 				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
 			}
-			if workflow.CheckName == "" {
-				return nil, fmt.Errorf("workflow %q requires a provider check name", workflow.GroupKey)
+			if workflow.Event == "" {
+				return nil, fmt.Errorf("workflow %q requires an event name", workflow.GroupKey)
 			}
 			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
@@ -194,6 +195,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		checkLabels := make(map[string]string, len(jobs))
 		if err := validateConcurrencyGate(workflow.ConcurrencyGate); err != nil {
 			return nil, err
 		}
@@ -202,6 +204,16 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("generated step key %q collides with %s", job.Key, owner)
 			}
 			usedKeys[job.Key] = "generated job"
+			if aggregate {
+				checkLabel := job.CheckLabel
+				if checkLabel == "" {
+					checkLabel = job.Label
+				}
+				if owner, exists := checkLabels[checkLabel]; exists {
+					return nil, fmt.Errorf("workflow %q jobs %q and %q share provider check label %q", workflow.GroupKey, owner, job.Key, checkLabel)
+				}
+				checkLabels[checkLabel] = job.Key
+			}
 			if owner, exists := usedDigests[job.PlanDigest]; exists {
 				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
 			}
@@ -263,7 +275,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
-		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "Workflow could not be run", failure.Summary)
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -276,7 +288,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
-		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "", "")
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -296,9 +308,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		if workflow.SkipReason != "" {
 			_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
-		}
-		if workflow.CheckName != "" {
-			emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
 		}
 		if workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -380,6 +389,13 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		commands = append(commands, runJob)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		if workflow.Aggregate {
+			checkLabel := job.CheckLabel
+			if checkLabel == "" {
+				checkLabel = job.Label
+			}
+			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
+		}
 		if job.Queue != "" {
 			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
@@ -428,20 +444,25 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	return nil
 }
 
-func emitWorkflowCheck(out *bytes.Buffer, provider string, workflow preparedWorkflow, title, summary string) {
-	out.WriteString("    notify:\n")
+func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, checkKey, jobLabel, title, summary string) {
+	_, _ = fmt.Fprintf(out, "%snotify:\n", indent)
 	switch provider {
 	case "github":
-		out.WriteString("      - github_check:\n")
+		_, _ = fmt.Fprintf(out, "%s  - github_check:\n", indent)
 	case "cursor-origin":
-		out.WriteString("      - origin_check:\n")
-		_, _ = fmt.Fprintf(out, "          key: %s\n", yamlScalar(workflow.GroupKey))
+		_, _ = fmt.Fprintf(out, "%s  - origin_check:\n", indent)
+		_, _ = fmt.Fprintf(out, "%s      key: %s\n", indent, yamlScalar(checkKey))
 	}
-	_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+	checkName := workflow.GroupLabel
+	if jobLabel != "" {
+		checkName += " / " + jobLabel
+	}
+	checkName += " (" + workflow.Event + ")"
+	_, _ = fmt.Fprintf(out, "%s      name: %s\n", indent, yamlScalar(checkName))
 	if title != "" {
-		out.WriteString("          output:\n")
-		_, _ = fmt.Fprintf(out, "            title: %s\n", yamlScalar(title))
-		_, _ = fmt.Fprintf(out, "            summary: %s\n", yamlScalar(summary))
+		_, _ = fmt.Fprintf(out, "%s      output:\n", indent)
+		_, _ = fmt.Fprintf(out, "%s        title: %s\n", indent, yamlScalar(title))
+		_, _ = fmt.Fprintf(out, "%s        summary: %s\n", indent, yamlScalar(summary))
 	}
 }
 
