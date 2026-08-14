@@ -18,6 +18,10 @@ import (
 
 const githubTokenResponseLimit = 64 << 10
 
+// Rejection reasons come from an untrusted response body, so cap them well
+// short of anything a terminal or log line needs to display in full.
+const githubTokenRejectionReasonRuneLimit = 200
+
 var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 
@@ -129,8 +133,8 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
-		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose)
+		errorBody, _ := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit))
+		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, errorBody)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
 	if err != nil {
@@ -169,10 +173,13 @@ func agentGitHubTokenURL(endpoint, jobID, endpointName string) (string, error) {
 	return u.String(), nil
 }
 
-func githubTokenStatusError(status int, retryAfter, purpose string) error {
+func githubTokenStatusError(status int, retryAfter, purpose string, body []byte) error {
 	credential := "GitHub " + purpose + " token"
 	switch status {
 	case http.StatusBadRequest:
+		if reason := githubTokenRejectionReason(body); reason != "" {
+			return fmt.Errorf("%s request was rejected: %s", credential, reason)
+		}
 		return fmt.Errorf("%s request was rejected", credential)
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("%s request was denied", credential)
@@ -190,4 +197,31 @@ func githubTokenStatusError(status int, retryAfter, purpose string) error {
 	default:
 		return fmt.Errorf("%s service returned HTTP %d", credential, status)
 	}
+}
+
+var githubTokenControlCharPattern = regexp.MustCompile(`[\x00-\x1F\x7F]+`)
+
+// githubTokenRejectionReason turns a 400 response body into an operator-facing
+// reason: the JSON "message" field the Agent API renders for its errors, or
+// the raw body when it isn't that shape.
+func githubTokenRejectionReason(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	var decoded struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(trimmed, &decoded) == nil && decoded.Message != "" {
+		return sanitizeGithubTokenRejectionReason(decoded.Message)
+	}
+	return sanitizeGithubTokenRejectionReason(string(trimmed))
+}
+
+func sanitizeGithubTokenRejectionReason(reason string) string {
+	reason = strings.TrimSpace(githubTokenControlCharPattern.ReplaceAllString(reason, " "))
+	if runes := []rune(reason); len(runes) > githubTokenRejectionReasonRuneLimit {
+		reason = string(runes[:githubTokenRejectionReasonRuneLimit])
+	}
+	return reason
 }
