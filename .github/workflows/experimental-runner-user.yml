@@ -63,6 +63,18 @@ jobs:
             echo 'PB2731_DOCKER=unavailable'
           fi
 
+      - name: Prepare Dockerfile action client
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -S /var/run/docker.sock
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo -n apt-get update
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends docker.io docker-buildx
+          fi
+          docker version >/dev/null
+          docker buildx inspect default >/dev/null
+
       - name: Run Dockerfile action as runner
         id: dockerfile
         uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
