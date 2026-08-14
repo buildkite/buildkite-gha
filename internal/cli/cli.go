@@ -1253,7 +1253,11 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	out := newProcessingOutput("validate", format, stdout, stderr, agent)
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
-		loadEvent = func() ([]byte, error) { return os.ReadFile(eventPath) }
+		event, eventErr := os.ReadFile(eventPath)
+		if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+		loadEvent = func() ([]byte, error) { return event, eventErr }
 	}
 	source, event, ok := loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
 	if !ok {
@@ -1375,12 +1379,13 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 		return usageError(stderr, "compile: --event-path is required")
 	}
 	out := newProcessingOutput("compile", "text", stderr, stderr, agent)
-	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return os.ReadFile(eventPath) })
+	event, eventErr := os.ReadFile(eventPath)
+	if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
+		out.sourceLinks = sourceLinksForEvent(parsedEvent)
+	}
+	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return event, eventErr })
 	if !ok {
 		return 1
-	}
-	if parsedEvent, parseErr := compiler.ParseEvent(event); parseErr == nil {
-		out.sourceLinks = sourceLinksForEvent(parsedEvent)
 	}
 	processingReport, ok := validatedProcessingReport(out, workflowPath, "", source, event, true)
 	if !ok {
@@ -1473,6 +1478,19 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if uploadArguments.telemetry != nil {
 		out.observe = uploadArguments.telemetry.observe
 	}
+	var eventSource []byte
+	var eventOrigin effectiveEventOrigin
+	var eventLoadErr error
+	if eventPath != "" {
+		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+		if parsedEvent, parseErr := compiler.ParseEvent(eventSource); eventLoadErr == nil && parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+	} else if buildEvent, buildEventErr := buildkiteEventSource(os.Getenv); buildEventErr == nil {
+		if parsedEvent, parseErr := compiler.ParseEvent(buildEvent); parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+	}
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
@@ -1519,17 +1537,19 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			return 1
 		}
 	}
-	eventSource, eventOrigin, err := loadEffectiveEventSource(ctx, eventPath, agent)
-	if err != nil {
+	if eventPath == "" {
+		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+	}
+	if eventLoadErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), err)
+				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), eventLoadErr)
 			}
 		}
 		return 1
 	}
-	effectiveEvent, err := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
-	if err != nil {
+	effectiveEvent, eventParseErr := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
+	if eventParseErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
 				_, _ = validatedProcessingReport(out, input.Path, hostedProfile, input.Source, eventSource, true)
@@ -1538,7 +1558,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
-	out.sourceLinks = sourceLinksForEvent(effectiveEvent.Event)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {

@@ -2504,6 +2504,39 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	})
 }
 
+func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
+	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "broken.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\njobs: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventPath := writeUploadEvent(t, repository, "push", "refs/heads/main", map[string]any{})
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "importer")
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+
+	for _, command := range []string{"validate", "upload"} {
+		t.Run(command, func(t *testing.T) {
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{command, "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 1 {
+				t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+			}
+			if len(runner.commands) != 1 {
+				t.Fatalf("commands = %#v, want one annotation", runner.commands)
+			}
+			want := `href="https://github.com/buildkite/buildkite-gha/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/.github/workflows/broken.yml`
+			if !strings.Contains(string(runner.commands[0].stdin), want) {
+				t.Fatalf("annotation = %q, want linked workflow path %q", runner.commands[0].stdin, want)
+			}
+		})
+	}
+}
+
 func TestProcessingAnnotationIsBoundedAndEscapesHTML(t *testing.T) {
 	report := compatibility.NewProcessingReport("<workflow>|name", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
