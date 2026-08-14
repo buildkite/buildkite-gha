@@ -11,10 +11,10 @@ steps:
     steps:
       - label: ":pipeline: Load compatibility proof"
         key: "compatibility-proof-loader"
-        if: build.env("COMPATIBILITY_PROOF") != null && build.env("SMOKE_PROBE") != "hosted"
+        if: (build.env("COMPATIBILITY_PROOF") != null && build.env("SMOKE_PROBE") != "hosted") || build.branch == "fix/skipped-workflow-filter-annotations"
         command: |
           set -euo pipefail
-          proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
+          proof="$${COMPATIBILITY_PROOF:-skipped-workflow-annotation}"
           case "$$proof" in
             shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|upload-artifact|artifact-roundtrip|experimental-runner-user) ;;
             *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
