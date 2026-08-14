@@ -21,6 +21,16 @@ type TriggerConditionContext struct {
 	PullRequestAction     string
 }
 
+// UnsupportedPathFiltersError reports a trigger that cannot be translated
+// without changing its path-filter semantics.
+type UnsupportedPathFiltersError struct {
+	Event string
+}
+
+func (e *UnsupportedPathFiltersError) Error() string {
+	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
+}
+
 // LiveTriggerConditionContext uses fields from the Buildkite build that
 // supplied the effective event snapshot.
 func LiveTriggerConditionContext(eventPredicate string) TriggerConditionContext {
@@ -113,7 +123,7 @@ func liveTriggerContext(event string) TriggerConditionContext {
 
 func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (string, bool, error) {
 	if t.Paths != nil || t.PathsIgnore != nil {
-		return "", false, fmt.Errorf("%s path filters are unsupported: Buildkite if_changed is not equivalent", t.Event)
+		return "", false, &UnsupportedPathFiltersError{Event: t.Event}
 	}
 	switch t.Event {
 	case "workflow_call":

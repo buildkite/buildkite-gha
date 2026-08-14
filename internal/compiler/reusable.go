@@ -519,7 +519,17 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 			var err error
 			resolved, err = evaluateStaticCallValue(text, parentInputs, matrix, context)
 			if err != nil {
-				return nil, locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, fmt.Sprintf("reusable-workflow input %q is not statically resolvable: %v", name, err))
+				detail := fmt.Sprintf("Reusable-workflow input %q is not statically resolvable: %v", name, err)
+				message := fmt.Sprintf("Reusable workflow input %q uses a value that is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
+				if strings.Contains(err.Error(), `unsupported compile-time context "needs"`) {
+					message = fmt.Sprintf("Reusable workflow input %q uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.", name)
+				}
+				return nil, &ProcessingFinding{
+					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
+					Path: path, Line: value.Span.Start.Line, Column: value.Span.Start.Column, Job: job.ID,
+					Message: message, Detail: detail,
+					Err: locatedJobError(path, job, value.Span.Start.Line, value.Span.Start.Column, detail),
+				}
 			}
 		}
 		values[name] = resolved

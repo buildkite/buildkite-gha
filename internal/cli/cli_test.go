@@ -4312,14 +4312,63 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	}
 	failure := pipeline.Steps[0]
 	message := failureArtifactForStep(failure.Plugins, runner.uploaded, "messages")
-	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), "push path filters are unsupported") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
-		t.Fatalf("trigger failure step = %#v", failure)
+	annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
+	primary := "Push trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step."
+	detail := "push path filters are unsupported: Buildkite if_changed is not equivalent"
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), primary) || !strings.Contains(string(message), "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters cannot be translated safely.</strong>") || !strings.Contains(string(annotation), "Remove paths and paths-ignore") || !strings.Contains(string(annotation), detail) || strings.Contains(string(message), "translate workflow triggers") || strings.Contains(string(message), ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+		t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
 		t.Fatalf("successful workflow after trigger failure = %#v", success)
 	}
-	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) {
+	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) || !strings.Contains(stdout.String(), primary) || !strings.Contains(stdout.String(), "detail: "+detail) {
 		t.Fatalf("trigger failure omitted processing report: %q", stdout.String())
+	}
+}
+
+func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"caller.yml":   "name: Caller\non: push\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: ${{ needs.prepare.outputs.target }}\n",
+		"reusable.yml": "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "reusable-input-failure-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/caller.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Command string             `yaml:"command"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+			Notify  []struct {
+				GitHubCheck struct {
+					Output struct {
+						Summary string `yaml:"summary"`
+					} `yaml:"output"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || !isGeneratedFailureCommand(pipeline.Steps[0].Command) {
+		t.Fatalf("reusable input failure pipeline = %#v", pipeline.Steps)
+	}
+	primary := `Reusable workflow input "target" uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.`
+	detail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+	message := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
+	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
+	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses the needs context, which is unavailable before jobs run.</strong>") || !strings.Contains(annotation, "Replace it with a literal") || !strings.Contains(annotation, strings.ReplaceAll(detail, `"`, "&#34;")) || len(pipeline.Steps[0].Notify) != 1 || !strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, primary) || strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, detail) {
+		t.Fatalf("reusable input failure output = message %q, annotation %q, pipeline %#v", message, annotation, pipeline.Steps[0])
 	}
 }
 

@@ -1542,7 +1542,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
-			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
@@ -2075,6 +2074,15 @@ func triggerConditionLiteral(value string) string {
 
 func triggerFailureProcessingReport(input workflowInput, err error) compatibility.ProcessingReport {
 	report := triggerProcessingReport(input.Path, input.Source)
+	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
+	if errors.As(err, &pathFilters) {
+		err = &compiler.ProcessingFinding{
+			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
+			Path: input.Path, Line: 1, Column: 1,
+			Message: fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event)),
+			Detail:  pathFilters.Error(), Err: err,
+		}
+	}
 	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
 	report.Result = "incompatible"
 	return report
