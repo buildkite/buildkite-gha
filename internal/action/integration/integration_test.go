@@ -11,9 +11,9 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		want     Descriptor
 	}{
 		{Identity{Source: "github", Repository: "actions/checkout"}, Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
-		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache, ProvideCacheCredentials: true}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache, ProvideCacheCredentials: true}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache, ProvideCacheCredentials: true}},
+		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},

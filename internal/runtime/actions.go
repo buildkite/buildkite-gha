@@ -108,7 +108,7 @@ func actionProvidesCacheCredentials(lock *plan.ActionLock) bool {
 		return false
 	}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.ProvideCacheCredentials
+	return descriptor.Service == actionintegration.ServiceCache || descriptor.ProvideCacheCredentials
 }
 
 func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {

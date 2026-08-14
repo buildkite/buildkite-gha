@@ -93,10 +93,9 @@ const (
 type Descriptor struct {
 	Adapter Adapter
 	Service Service
-	// ProvideCacheCredentials opts an audited action into best-effort credentials
-	// and the synthetic GITHUB_SERVER_URL needed for cache-v2 selection. It is
-	// separate from ServiceCache because setup actions retain their ordinary
-	// environment rather than actions/cache isolation. Before enabling it,
+	// ProvideCacheCredentials opts an audited setup action into best-effort
+	// credentials and the synthetic GITHUB_SERVER_URL needed for cache-v2
+	// selection. ServiceCache implies the same behavior. Before enabling it,
 	// confirm the action and its bundled dependencies use GITHUB_SERVER_URL only
 	// for caching.
 	ProvideCacheCredentials bool
@@ -111,9 +110,9 @@ func UsesNativeAdapter(identity Identity) bool {
 
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, ProvideCacheCredentials: true},
-	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, ProvideCacheCredentials: true},
-	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, ProvideCacheCredentials: true},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
