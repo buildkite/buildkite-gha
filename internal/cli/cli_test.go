@@ -2611,7 +2611,11 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 	repository := t.TempDir()
 	workingDirectory := filepath.Join(repository, ".github")
-	if err := os.MkdirAll(workingDirectory, 0o755); err != nil {
+	workflowPath := filepath.Join(workingDirectory, "workflows", "hello.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(workingDirectory)
@@ -2633,8 +2637,14 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testing.T) {
 	repository := t.TempDir()
 	workingDirectory := filepath.Join(repository, ".github")
-	if err := os.MkdirAll(workingDirectory, 0o755); err != nil {
+	workflowDirectory := filepath.Join(workingDirectory, "workflows")
+	if err := os.MkdirAll(workflowDirectory, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	for _, name := range []string{"caller.yml", "build-security.yml"} {
+		if err := os.WriteFile(filepath.Join(workflowDirectory, name), []byte("on: workflow_call\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Chdir(workingDirectory)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
@@ -2658,6 +2668,11 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(workingDirectory, ".github", "workflows"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"caller.yml", "build-security.yml"} {
+		if err := os.WriteFile(filepath.Join(workingDirectory, ".github", "workflows", name), []byte("on: workflow_call\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Chdir(workingDirectory)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport("./.github/workflows/caller.yml", "")
@@ -2677,6 +2692,13 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 
 func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "hello world.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(repository)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport(".github/workflows/hello world.yml", "")
@@ -2735,6 +2757,32 @@ func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
 	summary := failureCheckSummary("ci.yml", report, sourceLinks)
 	if strings.Contains(annotation, "href=") || strings.Contains(summary, "](https://") {
 		t.Fatalf("outside path was linked: annotation=%q summary=%q", annotation, summary)
+	}
+}
+
+func TestProcessingDiagnosticsDoNotLinkSymlinksOutsideCheckout(t *testing.T) {
+	checkout := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "ci.yml")
+	if err := os.WriteFile(target, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflowPath := filepath.Join(checkout, "ci.yml")
+	if err := os.Symlink(target, workflowPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
+	report := compatibility.NewProcessingReport(workflowPath, "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: workflowPath, Line: 1, Column: 1},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+
+	_, annotation := processingAnnotation(report, sourceLinks)
+	summary := failureCheckSummary(workflowPath, report, sourceLinks)
+	if strings.Contains(annotation, "href=") || strings.Contains(summary, "](https://") {
+		t.Fatalf("outside symlink was linked: annotation=%q summary=%q", annotation, summary)
 	}
 }
 
@@ -4225,6 +4273,13 @@ func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
 
 func TestFailureCheckSummaryLinksDiagnosticWorkflowPath(t *testing.T) {
 	repository := t.TempDir()
+	workflowPath := filepath.Join(repository, ".github", "workflows", "hello.yml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Chdir(repository)
 	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport(".github/workflows/hello.yml", "hosted")

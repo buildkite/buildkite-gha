@@ -163,8 +163,10 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	var out strings.Builder
 	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
 	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
-	sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
+	if workflowLinkable {
+		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
+	}
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
 	out.WriteString("</div>\n<div class=\"mb2\">\n")
 	rows := make([]string, len(diagnostics))
@@ -223,11 +225,19 @@ func processingAnnotationWorkflowPath(path, workflowSourceRoot string) (display 
 			resolved = filepath.Join(workingDirectory, resolved)
 		}
 	}
-	relative, err := filepath.Rel(root, resolved)
+	display = filepath.ToSlash(filepath.Clean(path))
+	if relative, err := filepath.Rel(root, resolved); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		display = filepath.ToSlash(relative)
+	}
+	canonical, err := filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return display, false
+	}
+	relative, err := filepath.Rel(root, canonical)
 	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(relative), true
 	}
-	return filepath.ToSlash(filepath.Clean(path)), false
+	return display, false
 }
 
 func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
