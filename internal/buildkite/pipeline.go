@@ -54,11 +54,11 @@ type Pipeline struct {
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
-// pipeline. GroupLabel, GroupKey, and CheckName are required for aggregate emission.
+// pipeline. GroupLabel, GroupKey, and Event are required for aggregate emission.
 type Workflow struct {
 	GroupLabel      string
 	GroupKey        string
-	CheckName       string
+	Event           string
 	Condition       string
 	SkipReason      string
 	ConcurrencyGate *ConcurrencyGate
@@ -159,8 +159,8 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 			if !validStepKey(workflow.GroupKey) {
 				return nil, fmt.Errorf("workflow %d has invalid group key %q", i+1, workflow.GroupKey)
 			}
-			if workflow.CheckName == "" {
-				return nil, fmt.Errorf("workflow %q requires a provider check name", workflow.GroupKey)
+			if workflow.Event == "" {
+				return nil, fmt.Errorf("workflow %q requires an event name", workflow.GroupKey)
 			}
 			if workflow.Failure == nil && workflow.Condition == "" && workflow.SkipReason == "" {
 				return nil, fmt.Errorf("workflow %q requires a trigger condition or skip reason", workflow.GroupKey)
@@ -263,7 +263,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
-		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, "Workflow could not be run", failure.Summary)
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "Workflow could not be run", failure.Summary)
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -276,7 +276,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
-		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, "", "")
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, workflow.GroupKey, "", "", "")
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -378,7 +378,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if workflow.Aggregate {
-			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, "", "")
+			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, job.Label, "", "")
 		}
 		if job.Queue != "" {
 			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
@@ -428,16 +428,21 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	return nil
 }
 
-func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, title, summary string) {
+func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, checkKey, jobLabel, title, summary string) {
 	_, _ = fmt.Fprintf(out, "%snotify:\n", indent)
 	switch provider {
 	case "github":
 		_, _ = fmt.Fprintf(out, "%s  - github_check:\n", indent)
 	case "cursor-origin":
 		_, _ = fmt.Fprintf(out, "%s  - origin_check:\n", indent)
-		_, _ = fmt.Fprintf(out, "%s      key: %s\n", indent, yamlScalar(workflow.GroupKey))
+		_, _ = fmt.Fprintf(out, "%s      key: %s\n", indent, yamlScalar(checkKey))
 	}
-	_, _ = fmt.Fprintf(out, "%s      name: %s\n", indent, yamlScalar(workflow.CheckName))
+	checkName := workflow.GroupLabel
+	if jobLabel != "" {
+		checkName += " / " + jobLabel
+	}
+	checkName += " (" + workflow.Event + ")"
+	_, _ = fmt.Fprintf(out, "%s      name: %s\n", indent, yamlScalar(checkName))
 	if title != "" {
 		_, _ = fmt.Fprintf(out, "%s      output:\n", indent)
 		_, _ = fmt.Fprintf(out, "%s        title: %s\n", indent, yamlScalar(title))

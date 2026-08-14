@@ -3680,6 +3680,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 			Notify    any    `yaml:"notify"`
 			Steps     []struct {
 				Key    string `yaml:"key"`
+				Label  string `yaml:"label"`
 				Notify []struct {
 					GitHubCheck struct {
 						Name string `yaml:"name"`
@@ -3700,12 +3701,12 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 		if i >= len(inputs) {
 			t.Fatalf("unexpected aggregate group %d = %#v", i, group)
 		}
-		wantCheckName := "Buildkite / " + wantLabels[i] + " (push)"
 		if group.Group != ":github: "+wantLabels[i] || group.Key != "gha-workflow-"+inputs[i].Identity || group.Condition != `(true)` || group.DependsOn != "aggregate-importer" || group.Notify != nil {
 			t.Fatalf("aggregate group %d = %#v", i, group)
 		}
 		prefix := "gha-" + inputs[i].Identity + "-"
 		for _, step := range group.Steps {
+			wantCheckName := wantLabels[i] + " / " + step.Label + " (push)"
 			if !strings.HasPrefix(step.Key, prefix) || seenKeys[step.Key] || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != wantCheckName {
 				t.Fatalf("aggregate step key %q, prefix %q, seen %t", step.Key, prefix, seenKeys[step.Key])
 			}
@@ -3815,9 +3816,9 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 	want := []struct {
 		group, checkName, condition, skip string
 	}{
-		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`, condition: `(true)`},
-		{group: `:github: Shared "checks"`, checkName: `Buildkite / Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
-		{group: ":github: .github/workflows/unnamed.yml", checkName: "Buildkite / .github/workflows/unnamed.yml (push)", condition: `!("main" =~ /^main$/)`},
+		{group: `:github: Shared "checks"`, checkName: `Shared "checks" / test (push)`, condition: `(true)`},
+		{group: `:github: Shared "checks"`, checkName: `Shared "checks" (push)`, skip: "This workflow is not triggered by a `push` event"},
+		{group: ":github: .github/workflows/unnamed.yml", checkName: ".github/workflows/unnamed.yml / test (push)", condition: `!("main" =~ /^main$/)`},
 	}
 	if len(pipeline.Steps) != len(want) {
 		t.Fatalf("aggregate groups = %#v, want %d directly runnable workflows", pipeline.Steps, len(want))
@@ -3913,7 +3914,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 			if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
 				t.Fatal(err)
 			}
-			wantCheckName := "Buildkite / Active event (" + test.wantEvent + ")"
+			wantCheckName := "Active event / test (" + test.wantEvent + ")"
 			wantGroup := ":github: Active event"
 			if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != wantGroup || !strings.Contains(pipeline.Steps[0].Condition, test.wantCondition) || pipeline.Steps[0].Notify != nil || len(pipeline.Steps[0].Steps) != 1 || len(pipeline.Steps[0].Steps[0].Notify) != 1 || pipeline.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != wantCheckName {
 				t.Fatalf("aggregate event group = %#v, want group %q and check %q", pipeline.Steps, wantGroup, wantCheckName)
@@ -3951,6 +3952,7 @@ func TestRunUploadUsesOriginCheckForOriginEvent(t *testing.T) {
 			Key    string `yaml:"key"`
 			Notify any    `yaml:"notify"`
 			Steps  []struct {
+				Key    string `yaml:"key"`
 				Notify []struct {
 					GitHubCheck any `yaml:"github_check"`
 					OriginCheck *struct {
@@ -3968,8 +3970,8 @@ func TestRunUploadUsesOriginCheckForOriginEvent(t *testing.T) {
 		t.Fatalf("Origin workflow pipeline = %#v", pipeline.Steps)
 	}
 	check := pipeline.Steps[0].Steps[0].Notify[0].OriginCheck
-	if check.Key != pipeline.Steps[0].Key || check.Name != "Buildkite / Origin CI (push)" {
-		t.Fatalf("Origin workflow check = %#v, step key = %q", check, pipeline.Steps[0].Key)
+	if check.Key != pipeline.Steps[0].Steps[0].Key || check.Name != "Origin CI / test (push)" {
+		t.Fatalf("Origin workflow check = %#v, step key = %q", check, pipeline.Steps[0].Steps[0].Key)
 	}
 }
 
@@ -4034,7 +4036,7 @@ func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T)
 				t.Fatal(err)
 			}
 			wantGroup := ":github: " + test.workflow
-			wantCheck := "Buildkite / " + test.workflow + " (" + test.event + ")"
+			wantCheck := test.workflow + " / test (" + test.event + ")"
 			if len(pipeline.Steps) != 4 {
 				t.Fatalf("effective-event pipeline = %#v, want all workflow groups", pipeline.Steps)
 			}
@@ -4896,7 +4898,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	for _, workflow := range pipeline.Steps {
 		switch workflow.Group {
 		case ":github: Caller":
-			if workflow.Skip != "" || workflow.DependsOn != "reusable-importer" || workflow.Notify != nil || len(workflow.Steps) != 1 || !strings.HasPrefix(workflow.Steps[0].Key, "gha-") || len(workflow.Steps[0].Notify) != 1 || workflow.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / Caller (push)" {
+			if workflow.Skip != "" || workflow.DependsOn != "reusable-importer" || workflow.Notify != nil || len(workflow.Steps) != 1 || !strings.HasPrefix(workflow.Steps[0].Key, "gha-") || len(workflow.Steps[0].Notify) != 1 || workflow.Steps[0].Notify[0].GitHubCheck.Name != "Caller / imported / shared (push)" {
 				t.Fatalf("caller group = %#v", workflow)
 			}
 		case "":

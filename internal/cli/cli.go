@@ -1684,7 +1684,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
 				GroupLabel: label,
 				GroupKey:   "gha-workflow-" + input.Identity,
-				CheckName:  "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")",
+				Event:      effectiveEvent.Event.Event,
 				SkipReason: input.SkipReason,
 			})
 			skippedWorkflowLabels = append(skippedWorkflowLabels, label)
@@ -1718,7 +1718,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		generated := bundle.GeneratedWorkflow
 		generated.GroupLabel = label
 		generated.GroupKey = "gha-workflow-" + input.Identity
-		generated.CheckName = "Buildkite / " + label + " (" + effectiveEvent.Event.Event + ")"
+		generated.Event = effectiveEvent.Event.Event
 		generated.Condition = input.TriggerCondition
 		generatedWorkflows = append(generatedWorkflows, generated)
 		planArtifacts = append(planArtifacts, bundle.Plans...)
@@ -1857,7 +1857,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 	workflow := buildkitepipeline.Workflow{
 		GroupLabel: label,
 		GroupKey:   "gha-workflow-" + input.Identity,
-		CheckName:  "Buildkite / " + label + " (" + event + ")",
+		Event:      event,
 		Failure: &buildkitepipeline.Failure{
 			AnnotationPath: annotationArtifact.Path,
 			MessagePath:    messageArtifact.Path,
