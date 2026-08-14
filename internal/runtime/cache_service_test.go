@@ -623,7 +623,8 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	result := newResult()
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
-	processor := newCommandProcessor(io.Discard, io.Discard)
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
 	runner := Runner{Cache: provider, Redactor: &testRedactor{}}
 	if err := runner.runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
@@ -633,6 +634,18 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "executed" {
 		t.Fatalf("generic action marker = %q, %v", contents, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.runJavaScriptPhase(
+		context.Background(), processor, actionRoot, node,
+		javaScriptAction{Name: "setup-node", Path: actionRoot, Main: "main.js", reference: "actions/setup-node@v6"}, "main.js", nil, nil, &result,
+	); err != nil {
+		t.Fatalf("setup-node cache fallback error = %v", err)
+	}
+	if !strings.Contains(logs.String(), `Cache credentials unavailable for "actions/setup-node@v6" entry "main.js"; ACTIONS_RESULTS_URL will be omitted: cache unavailable`) {
+		t.Fatalf("setup-node cache diagnostic = %q", logs.String())
 	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
