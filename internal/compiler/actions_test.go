@@ -114,10 +114,24 @@ func TestActionResolutionMessageIdentifiesNestedChild(t *testing.T) {
 
 func TestActionResolutionMessageMakesUnsupportedRuntimeActionable(t *testing.T) {
 	err := fmt.Errorf(`compile action "owner/action@v1": %w`, &metadata.UnsupportedRuntimeError{Runtime: "node12"})
-	want := `Action "owner/action@v1" uses unsupported runtime "node12". Set runs.using to node16, node20, node24, composite, or docker.`
-	message, detail, action := actionResolutionMessage("owner/action@v1", err)
-	if message != want || detail != `unsupported runtime "node12"` || action != "owner/action@v1" {
-		t.Fatalf("actionResolutionMessage() = %q, %q, %q", message, detail, action)
+	tests := []struct {
+		reference string
+		want      string
+	}{
+		{
+			reference: "owner/action@v1",
+			want:      `Action "owner/action@v1" uses Node.js 12, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.`,
+		},
+		{
+			reference: "./local-action",
+			want:      `Action "./local-action" uses Node.js 12, which is unsupported. Update runs.using to node16, node20, or node24.`,
+		},
+	}
+	for _, test := range tests {
+		message, detail, action := actionResolutionMessage(test.reference, err)
+		if message != test.want || detail != "" || action != test.reference {
+			t.Fatalf("actionResolutionMessage(%q) = %q, %q, %q", test.reference, message, detail, action)
+		}
 	}
 }
 

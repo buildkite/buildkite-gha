@@ -140,7 +140,14 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 	}
 	var runtimeErr *metadata.UnsupportedRuntimeError
 	if errors.As(err, &runtimeErr) {
-		return fmt.Sprintf("Action %q uses unsupported runtime %q. Set runs.using to node16, node20, node24, composite, or docker.", action, runtimeErr.Runtime), runtimeErr.Error(), action
+		runtime := fmt.Sprintf("runtime %q", runtimeErr.Runtime)
+		if version := strings.TrimPrefix(runtimeErr.Runtime, "node"); version != runtimeErr.Runtime {
+			runtime = "Node.js " + version
+		}
+		if strings.HasPrefix(action, "./") {
+			return fmt.Sprintf("Action %q uses %s, which is unsupported. Update runs.using to node16, node20, or node24.", action, runtime), "", action
+		}
+		return fmt.Sprintf("Action %q uses %s, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.", action, runtime), "", action
 	}
 	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {

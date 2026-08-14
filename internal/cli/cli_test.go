@@ -5848,17 +5848,23 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-write", "privileged-container", "future-capability"} {
+	tests := []struct {
+		capability string
+		want       string
+	}{
+		{capability: "secrets", want: `Job "protected" uses GitHub Actions secrets, which hosted runs do not provide. Pass values through supported Buildkite secret handling or remove the dependency.`},
+		{capability: "privileged-container", want: `Job "protected" requires unsupported hosted runtime capability "privileged-container". Remove the requirement or use a runtime profile that supports it.`},
+		{capability: "future-capability", want: `Job "protected" requires unsupported hosted runtime capability "future-capability". Remove the requirement or use a runtime profile that supports it.`},
+	}
+	for _, test := range tests {
+		capability := test.capability
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
 		}}}}
 		err := validateUnprivilegedBundle(bundle)
-		want := capability
-		if capability == "provider-token-write" {
-			want = "GITHUB_TOKEN"
-		}
-		if err == nil || !strings.Contains(err.Error(), want) {
+		var finding *compiler.ProcessingFinding
+		if err == nil || !errors.As(err, &finding) || finding.Message != test.want || finding.Detail != "" {
 			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
 		}
 	}
@@ -5921,7 +5927,7 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	}
 }
 
-func TestGitHubTokenAdmissionDiagnosticExplainsCausePermissionsAndFix(t *testing.T) {
+func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
 	artifact := compiler.PlanArtifact{
 		Job: plan.Job{
 			Workflow:    plan.Workflow{LogicalJobID: "build"},
@@ -5929,20 +5935,24 @@ func TestGitHubTokenAdmissionDiagnosticExplainsCausePermissionsAndFix(t *testing
 		},
 		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
 	}
-	want := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write. Move the permissions map to the workflow top level.`
-	if got := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions"); got != want {
-		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, want %q", got, want)
+	wantMessage := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Move the permissions map to the workflow top level.`
+	wantDetail := `Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write.`
+	message, detail := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions")
+	if message != wantMessage || detail != wantDetail {
+		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, %q", message, detail)
 	}
 }
 
-func TestHostedContainerDiagnosticNamesServiceAndBoundary(t *testing.T) {
+func TestHostedContainerDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
 	job := plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "test"},
 		Services: map[string]plan.Container{"postgres": {Image: "postgres:11-alpine"}},
 	}
-	want := `Job "test" uses service container "postgres" (image "postgres:11-alpine"). The compiler supports this construct, but hosted production does not run job or service containers. Replace the container with ordinary steps or an externally reachable service; runner configuration cannot enable containers in the hosted profile.`
-	if got := hostedContainerDiagnostic(job); got != want {
-		t.Fatalf("hostedContainerDiagnostic() = %q, want %q", got, want)
+	wantMessage := `Job "test" uses service container "postgres" (image "postgres:11-alpine"), which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.`
+	wantDetail := `The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them.`
+	message, detail := hostedContainerDiagnostic(job)
+	if message != wantMessage || detail != wantDetail {
+		t.Fatalf("hostedContainerDiagnostic() = %q, %q", message, detail)
 	}
 }
 
@@ -5964,7 +5974,10 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 		Workflow:             plan.Workflow{LogicalJobID: "unproven-docker"},
 		RequiredCapabilities: []string{"docker"},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "unsupported Docker access") {
+	err := validateUnprivilegedBundle(bundle)
+	var finding *compiler.ProcessingFinding
+	want := `Job "unproven-docker" requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.`
+	if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
@@ -6002,7 +6015,9 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				Actions:  []plan.ActionLock{test.action},
 			}}}}
 			err := validateUnprivilegedBundle(bundle)
-			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+test.service+" service") || !strings.Contains(err.Error(), "unavailable") {
+			var finding *compiler.ProcessingFinding
+			want := `Action "actions/upload-artifact/merge" requires the GitHub Actions artifact service, which hosted runs do not provide. Replace the action or use a runtime profile that provides this service.`
+			if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})

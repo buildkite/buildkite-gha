@@ -350,7 +350,7 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	case reasonNoLabels:
 		return "runs-on resolves to no runner labels. Set runs-on to a mapped Linux or macOS runner label.", detail
 	case reasonDuplicateLabel:
-		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", detail
+		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", ""
 	case reasonUnsupportedOS:
 		return fmt.Sprintf("Runner label%s requires Windows, which is unsupported. Use a Linux or macOS runner label.", label), detail
 	case reasonUnmappedLabel:
@@ -358,14 +358,14 @@ func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []s
 	case reasonConflictingQueues, reasonConflictingTarget:
 		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
 	case reasonUntrustedDefault:
-		return "This untrusted event cannot use the default runner target. Map runs-on to a queue allowed for untrusted events.", detail
+		return "This untrusted event cannot use the default runner. Use a runner label allowed for untrusted events, or ask an administrator to configure one.", detail
 	case reasonUntrustedQueue:
 		queues := append([]string(nil), untrustedQueues...)
 		sort.Strings(queues)
 		if len(queues) != 0 {
 			detail = "Queues allowed for untrusted events: " + strings.Join(queues, ", ") + "."
 		}
-		return "This untrusted event targets a disallowed queue. Add the queue to the untrusted-event allowlist or use an allowed queue.", detail
+		return "This untrusted event uses a runner that is not allowed for untrusted events. Use an allowed runner label, or ask an administrator to allow its queue.", detail
 	default:
 		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	}
