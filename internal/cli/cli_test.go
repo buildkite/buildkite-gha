@@ -3630,6 +3630,54 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	}
 }
 
+func TestRunUploadUsesOriginCheckForOriginEvent(t *testing.T) {
+	requireImporterHost(t)
+	directory := t.TempDir()
+	workflowPath := filepath.Join(directory, "origin.yml")
+	workflowSource := "name: Origin CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventSource, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventSource = bytes.Replace(eventSource, []byte(`"provider": "github"`), []byte(`"provider": "cursor-origin"`), 1)
+	eventPath := filepath.Join(directory, "push.json")
+	if err := os.WriteFile(eventPath, eventSource, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "origin-check-importer")
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Key    string `yaml:"key"`
+			Notify []struct {
+				GitHubCheck any `yaml:"github_check"`
+				OriginCheck *struct {
+					Key  string `yaml:"key"`
+					Name string `yaml:"name"`
+				} `yaml:"origin_check"`
+			} `yaml:"notify"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck != nil || pipeline.Steps[0].Notify[0].OriginCheck == nil {
+		t.Fatalf("Origin workflow pipeline = %#v", pipeline.Steps)
+	}
+	check := pipeline.Steps[0].Notify[0].OriginCheck
+	if check.Key != pipeline.Steps[0].Key || check.Name != "Buildkite / Origin CI (push)" {
+		t.Fatalf("Origin workflow check = %#v, step key = %q", check, pipeline.Steps[0].Key)
+	}
+}
+
 func TestRunUploadIsolatesExplicitEffectiveEventsBeforeCompilation(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -3939,7 +3987,7 @@ func TestFailedGeneratedWorkflowKeepsLargeDiagnosticsOutOfCommand(t *testing.T) 
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "error", Message: message})
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: "ci.yml", Identity: "ci", TriggerCondition: "true"}, "push", report)
 
-	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", Workflows: []buildkitepipeline.Workflow{workflow}})
+	pipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{CompilerStep: "importer", EventProvider: "github", Workflows: []buildkitepipeline.Workflow{workflow}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3965,15 +4013,15 @@ func TestFailedGeneratedWorkflowKeepsLargeDiagnosticsOutOfCommand(t *testing.T) 
 	}
 }
 
-func TestFailureCheckSummaryFitsGitHubLimit(t *testing.T) {
+func TestFailureCheckSummaryFitsProviderLimit(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
-		Level: "error", Message: strings.Repeat("x", githubCheckSummaryLimit) + "🙂", Job: "test",
+		Level: "error", Message: strings.Repeat("x", workflowCheckSummaryLimit) + "🙂", Job: "test",
 	})
 
 	summary := failureCheckSummary("ci.yml", report)
-	if len(summary) > githubCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, "_Additional error details omitted at the GitHub check summary size limit._") {
-		t.Fatalf("truncated GitHub check summary is invalid: bytes=%d, valid UTF-8=%t, suffix=%q", len(summary), utf8.ValidString(summary), summary[len(summary)-100:])
+	if len(summary) > workflowCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, "_Additional error details omitted at the provider check summary size limit._") {
+		t.Fatalf("truncated provider check summary is invalid: bytes=%d, valid UTF-8=%t, suffix=%q", len(summary), utf8.ValidString(summary), summary[len(summary)-100:])
 	}
 }
 
