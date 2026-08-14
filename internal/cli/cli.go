@@ -1681,7 +1681,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	authentication := importerJobActionSourceAuthentication(stderr)
 	generatedWorkflows := make([]buildkitepipeline.Workflow, 0, len(workflows))
-	skippedWorkflowLabels := make([]string, 0)
+	skippedWorkflows := make([]skippedWorkflow, 0)
 	planArtifacts := make([]compiler.PlanArtifact, 0)
 	failureArtifacts := make([]transport.Artifact, 0)
 	jobCount := 0
@@ -1694,13 +1694,14 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			if label == "" {
 				label = input.CanonicalPath
 			}
+			groupKey := "gha-workflow-" + input.Identity
 			generatedWorkflows = append(generatedWorkflows, buildkitepipeline.Workflow{
 				GroupLabel: label,
-				GroupKey:   "gha-workflow-" + input.Identity,
+				GroupKey:   groupKey,
 				Event:      effectiveEvent.Event.Event,
 				SkipReason: input.SkipReason,
 			})
-			skippedWorkflowLabels = append(skippedWorkflowLabels, label)
+			skippedWorkflows = append(skippedWorkflows, skippedWorkflow{label: label, key: groupKey})
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
@@ -1806,7 +1807,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
-		out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflowLabels)
+		out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflows)
 		_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 		return 0
 	}
@@ -1821,7 +1822,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}
-	out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflowLabels)
+	out.annotateSkippedWorkflows(effectiveEvent.Event.Event, skippedWorkflows)
 	_, _ = fmt.Fprintf(stdout, "Uploaded %d jobs from %d workflows using %s with importer %s.\n", jobCount, len(generatedWorkflows), executablePath, importerStep)
 	return 0
 }
