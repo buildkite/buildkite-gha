@@ -20,6 +20,7 @@ const githubTokenResponseLimit = 64 << 10
 
 var githubInstallationTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 var retryAfterSecondsPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
+var buildkiteSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // WorkflowTokenProvider mints one repository-scoped credential with the exact
 // plan-declared permissions accepted by the Buildkite backend.
@@ -33,23 +34,26 @@ type ActionSourceTokenProvider interface {
 	ActionSourceToken(context.Context, string) (string, error)
 }
 
-// AgentGitHubTokenConfig carries the current Buildkite job's Agent connection
-// and authentication material. This client does not add it to Git or action
-// subprocess environments.
+// AgentGitHubTokenConfig carries the current Buildkite job's Agent connection,
+// authentication material, and immutable Buildkite pipeline slugs. This client
+// does not add them to Git or action subprocess environments.
 type AgentGitHubTokenConfig struct {
-	Endpoint string
-	JobID    string
-	JobToken string
-	Client   *http.Client
+	Endpoint         string
+	JobID            string
+	JobToken         string
+	OrganizationSlug string
+	PipelineSlug     string
+	Client           *http.Client
 }
 
 // AgentGitHubTokens mints repository-scoped tokens through Buildkite's
 // job-bound Agent API endpoint.
 type AgentGitHubTokens struct {
-	actionSourceURL string
-	workflowURL     string
-	jobToken        string
-	client          *http.Client
+	actionSourceURL    string
+	workflowURL        string
+	repositorySettings string
+	jobToken           string
+	client             *http.Client
 }
 
 func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, error) {
@@ -74,7 +78,13 @@ func NewAgentGitHubTokens(config AgentGitHubTokenConfig) (*AgentGitHubTokens, er
 	if bounded.Timeout == 0 {
 		bounded.Timeout = 15 * time.Second
 	}
-	return &AgentGitHubTokens{actionSourceURL: actionSourceURL, workflowURL: workflowURL, jobToken: config.JobToken, client: &bounded}, nil
+	return &AgentGitHubTokens{
+		actionSourceURL:    actionSourceURL,
+		workflowURL:        workflowURL,
+		repositorySettings: pipelineRepositorySettingsURL(config.OrganizationSlug, config.PipelineSlug),
+		jobToken:           config.JobToken,
+		client:             &bounded,
+	}, nil
 }
 
 func (c *AgentGitHubTokens) WorkflowToken(ctx context.Context, repository, workflow string, permissions map[string]string) (string, error) {
@@ -130,7 +140,7 @@ func (c *AgentGitHubTokens) mint(ctx context.Context, mintURL, repository, workf
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, githubTokenResponseLimit))
-		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose)
+		return "", githubTokenStatusError(response.StatusCode, response.Header.Get("Retry-After"), purpose, c.repositorySettings)
 	}
 	payload, err := io.ReadAll(io.LimitReader(response.Body, githubTokenResponseLimit+1))
 	if err != nil {
@@ -169,7 +179,14 @@ func agentGitHubTokenURL(endpoint, jobID, endpointName string) (string, error) {
 	return u.String(), nil
 }
 
-func githubTokenStatusError(status int, retryAfter, purpose string) error {
+func pipelineRepositorySettingsURL(organization, pipeline string) string {
+	if !buildkiteSlugPattern.MatchString(organization) || !buildkiteSlugPattern.MatchString(pipeline) {
+		return ""
+	}
+	return "https://buildkite.com/" + organization + "/" + pipeline + "/settings/repository"
+}
+
+func githubTokenStatusError(status int, retryAfter, purpose, repositorySettings string) error {
 	credential := "GitHub " + purpose + " token"
 	switch status {
 	case http.StatusBadRequest:
@@ -178,7 +195,11 @@ func githubTokenStatusError(status int, retryAfter, purpose string) error {
 		return fmt.Errorf("%s request was denied", credential)
 	case http.StatusNotFound:
 		if purpose == "workflow" {
-			return fmt.Errorf("GitHub workflow access tokens are not enabled for this organization or pipeline")
+			message := `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings`
+			if repositorySettings != "" {
+				message += ": " + repositorySettings
+			}
+			return errors.New(message)
 		}
 		return fmt.Errorf("GitHub action source access tokens are not enabled for this organization")
 	case http.StatusServiceUnavailable:
