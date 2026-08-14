@@ -121,10 +121,10 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
 	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
-	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-dotnet"}:                   {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
+	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
+	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
 }
 
 var checkoutCommits = map[string]string{
