@@ -1275,7 +1275,11 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	out := newProcessingOutput("validate", format, stdout, stderr, agent)
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
-		loadEvent = func() ([]byte, error) { return os.ReadFile(eventPath) }
+		event, eventErr := os.ReadFile(eventPath)
+		if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+		loadEvent = func() ([]byte, error) { return event, eventErr }
 	}
 	source, event, ok := loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
 	if !ok {
@@ -1397,7 +1401,11 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 		return usageError(stderr, "compile: --event-path is required")
 	}
 	out := newProcessingOutput("compile", "text", stderr, stderr, agent)
-	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return os.ReadFile(eventPath) })
+	event, eventErr := os.ReadFile(eventPath)
+	if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
+		out.sourceLinks = sourceLinksForEvent(parsedEvent)
+	}
+	source, event, ok := loadProcessingInputs(out, workflowPath, "", "event input could not be read", func() ([]byte, error) { return event, eventErr })
 	if !ok {
 		return 1
 	}
@@ -1492,6 +1500,19 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 	if uploadArguments.telemetry != nil {
 		out.observe = uploadArguments.telemetry.observe
 	}
+	var eventSource []byte
+	var eventOrigin effectiveEventOrigin
+	var eventLoadErr error
+	if eventPath != "" {
+		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+		if parsedEvent, parseErr := compiler.ParseEvent(eventSource); eventLoadErr == nil && parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+	} else if buildEvent, buildEventErr := buildkiteEventSource(os.Getenv); buildEventErr == nil {
+		if parsedEvent, parseErr := compiler.ParseEvent(buildEvent); parseErr == nil {
+			out.sourceLinks = sourceLinksForEvent(parsedEvent)
+		}
+	}
 	var workflows []workflowInput
 	var err error
 	if uploadArguments.explicitWorkflowPaths {
@@ -1538,17 +1559,19 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			return 1
 		}
 	}
-	eventSource, eventOrigin, err := loadEffectiveEventSource(ctx, eventPath, agent)
-	if err != nil {
+	if eventPath == "" {
+		eventSource, eventOrigin, eventLoadErr = loadEffectiveEventSource(ctx, eventPath, agent)
+	}
+	if eventLoadErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
-				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), err)
+				return out.fail(compatibility.EventInputProcessingReport(input.Path, hostedProfile, input.Source, "event input could not be acquired"), eventLoadErr)
 			}
 		}
 		return 1
 	}
-	effectiveEvent, err := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
-	if err != nil {
+	effectiveEvent, eventParseErr := newEffectiveEvent(eventSource, eventOrigin, os.Getenv)
+	if eventParseErr != nil {
 		for _, input := range workflows {
 			if !input.ReusableOnly {
 				_, _ = validatedProcessingReport(out, input.Path, hostedProfile, input.Source, eventSource, true)
@@ -1680,7 +1703,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			continue
 		}
 		if processingReportHasErrors(processingReports[i]) {
-			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+			failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 			generatedWorkflows = append(generatedWorkflows, failed)
 			failureArtifacts = append(failureArtifacts, artifacts...)
 			continue
@@ -1691,7 +1714,7 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 			processingReports[i].Result = classifyHostedFailure(&processingReports[i], input.Path, err)
 			var failure *hostedFailure
 			if errors.As(err, &failure) && failure.Kind == hostedEvaluationFailure {
-				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i])
+				failed, artifacts := failedGeneratedWorkflow(input, effectiveEvent.Event.Event, processingReports[i], out.sourceLinks)
 				generatedWorkflows = append(generatedWorkflows, failed)
 				failureArtifacts = append(failureArtifacts, artifacts...)
 				continue
@@ -1811,7 +1834,7 @@ func processingReportHasErrors(report compatibility.ProcessingReport) bool {
 	return false
 }
 
-func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport) (buildkitepipeline.Workflow, []transport.Artifact) {
+func failedGeneratedWorkflow(input workflowInput, event string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (buildkitepipeline.Workflow, []transport.Artifact) {
 	label := input.Name
 	if label == "" {
 		label = input.CanonicalPath
@@ -1839,7 +1862,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		}
 		messages = append(messages, message)
 	}
-	_, annotation := processingAnnotation(report)
+	_, annotation := processingAnnotation(report, sourceLinks)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
@@ -1849,7 +1872,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		Failure: &buildkitepipeline.Failure{
 			AnnotationPath: annotationArtifact.Path,
 			MessagePath:    messageArtifact.Path,
-			Summary:        failureCheckSummary(input.CanonicalPath, report),
+			Summary:        failureCheckSummary(input.CanonicalPath, report, sourceLinks),
 		},
 	}
 	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
@@ -1862,9 +1885,12 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
 }
 
-func failureCheckSummary(path string, report compatibility.ProcessingReport) string {
+func failureCheckSummary(path string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) string {
 	if path == "" {
 		path = report.Workflow
+	}
+	if _, linkable := processingAnnotationWorkflowPath(report.Workflow, ""); linkable {
+		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	var summary strings.Builder
 	summary.WriteString("The workflow could not be prepared:\n")
@@ -1885,7 +1911,32 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport) str
 			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
 		}
 		summary.WriteString("\n- ")
-		summary.WriteString(markdownCode(diagnosticPath))
+		line := 0
+		sourcePath := report.Workflow
+		if diagnostic.Location != nil {
+			line = diagnostic.Location.Line
+			if diagnostic.Location.Path != "" {
+				sourcePath = diagnostic.Location.Path
+			}
+		}
+		linkedPath, linkable := processingAnnotationWorkflowPath(sourcePath, sourceLinks.workflowSourceRoot)
+		link := ""
+		if linkable {
+			link = sourceLinks.link(linkedPath, line)
+		}
+		if link != "" {
+			diagnosticPath = linkedPath
+		}
+		pathCode := markdownCode(diagnosticPath)
+		if link != "" {
+			summary.WriteString("[")
+			summary.WriteString(pathCode)
+			summary.WriteString("](")
+			summary.WriteString(link)
+			summary.WriteString(")")
+		} else {
+			summary.WriteString(pathCode)
+		}
 		if diagnostic.Job != "" {
 			summary.WriteString(", job ")
 			summary.WriteString(markdownCode(diagnostic.Job))
