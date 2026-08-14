@@ -289,7 +289,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 	var out strings.Builder
 	out.WriteString("<p><strong>")
 	out.WriteString(annotationHTML(heading))
-	out.WriteString("</strong>")
+	out.WriteString("</strong></p>\n")
 	context := make([]string, 0, 4)
 	if diagnostic.Action != "" {
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
@@ -305,16 +305,17 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
 	}
 	if len(context) != 0 {
-		out.WriteString("<br />\n")
+		out.WriteString("<p>")
 		out.WriteString(strings.Join(context, " · "))
+		out.WriteString("</p>\n")
 	}
 	if len(details) != 0 {
 		for _, sentence := range details {
-			out.WriteString("<br />\n")
+			out.WriteString("<p>")
 			out.WriteString(annotationHTML(sentence))
+			out.WriteString("</p>\n")
 		}
 	}
-	out.WriteString("</p>\n")
 	if diagnostic.Detail != "" {
 		out.WriteString("<details><summary>Diagnostic detail</summary><p>")
 		out.WriteString(annotationHTML(diagnostic.Detail))

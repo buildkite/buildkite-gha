@@ -2891,8 +2891,8 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 
 	_, body := processingAnnotation(report, sourceLinkContext{})
 	for _, want := range []string{
-		`<p><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong>`,
-		"Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2",
+		`<p><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></p>`,
+		"<p>Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2</p>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("annotation = %q, want %q", body, want)
