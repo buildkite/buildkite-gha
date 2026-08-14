@@ -183,15 +183,15 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 			Key       string `yaml:"key"`
 			Condition string `yaml:"if"`
 			DependsOn string `yaml:"depends_on"`
-			Notify    []struct {
-				GitHubCheck struct {
-					Name string `yaml:"name"`
-				} `yaml:"github_check"`
-			} `yaml:"notify"`
-			Steps []struct {
-				Key       string     `yaml:"key"`
-				Command   string     `yaml:"command"`
-				Notify    any        `yaml:"notify"`
+			Notify    any    `yaml:"notify"`
+			Steps     []struct {
+				Key     string `yaml:"key"`
+				Command string `yaml:"command"`
+				Notify  []struct {
+					GitHubCheck struct {
+						Name string `yaml:"name"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
 				DependsOn *yaml.Node `yaml:"depends_on"`
 			} `yaml:"steps"`
 		} `yaml:"steps"`
@@ -199,10 +199,10 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 	if err := yaml.Unmarshal(output, &document); err != nil {
 		t.Fatal(err)
 	}
-	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || len(document.Steps[0].Notify) != 1 || document.Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || document.Steps[0].Steps[0].Notify != nil {
+	if len(document.Steps) != 2 || document.Steps[0].Group != ":github: CI" || document.Steps[0].Key != "gha-workflow-1111111111111111" || document.Steps[0].Condition != `build.source_event == "push"` || document.Steps[0].DependsOn != "importer" || document.Steps[0].Notify != nil || len(document.Steps[0].Steps) != 1 || document.Steps[0].Steps[0].Key != "gha-1111111111111111-test" || len(document.Steps[0].Steps[0].Notify) != 1 || document.Steps[0].Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / CI (push)" {
 		t.Fatalf("first aggregate group = %#v\n%s", document.Steps, output)
 	}
-	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || len(document.Steps[1].Notify) != 1 || document.Steps[1].Notify[0].GitHubCheck.Name != "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)" || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || document.Steps[1].Steps[0].Notify != nil {
+	if document.Steps[1].Group != ":github: .github/workflows/release.yml" || document.Steps[1].Key != "gha-workflow-2222222222222222" || document.Steps[1].DependsOn != "importer" || document.Steps[1].Notify != nil || len(document.Steps[1].Steps) != 1 || document.Steps[1].Steps[0].Key != "gha-2222222222222222-test" || len(document.Steps[1].Steps[0].Notify) != 1 || document.Steps[1].Steps[0].Notify[0].GitHubCheck.Name != "Buildkite / .github/workflows/release \"quoted\".yml\nnext (workflow_dispatch)" {
 		t.Fatalf("second aggregate group = %#v\n%s", document.Steps[1], output)
 	}
 	for _, group := range document.Steps {
@@ -261,6 +261,15 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 					} `yaml:"output"`
 				} `yaml:"origin_check"`
 			} `yaml:"notify"`
+			Steps []struct {
+				Notify []struct {
+					GitHubCheck any `yaml:"github_check"`
+					OriginCheck struct {
+						Key  string `yaml:"key"`
+						Name string `yaml:"name"`
+					} `yaml:"origin_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
 		} `yaml:"steps"`
 	}
 	if err := yaml.Unmarshal(output, &document); err != nil {
@@ -269,8 +278,12 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 	if len(document.Steps) != 3 {
 		t.Fatalf("Origin workflow steps = %#v\n%s", document.Steps, output)
 	}
-	wantNames := []string{"Buildkite / CI (push)", "Buildkite / Pull request (push)", "Buildkite / Invalid (push)"}
-	for i, step := range document.Steps {
+	runnable := document.Steps[0]
+	if runnable.Notify != nil || len(runnable.Steps) != 1 || len(runnable.Steps[0].Notify) != 1 || runnable.Steps[0].Notify[0].GitHubCheck != nil || runnable.Steps[0].Notify[0].OriginCheck.Key != runnable.Key || runnable.Steps[0].Notify[0].OriginCheck.Name != "Buildkite / CI (push)" {
+		t.Fatalf("runnable Origin workflow check = %#v", runnable)
+	}
+	wantNames := []string{"Buildkite / Pull request (push)", "Buildkite / Invalid (push)"}
+	for i, step := range document.Steps[1:] {
 		if len(step.Notify) != 1 || step.Notify[0].GitHubCheck != nil || step.Notify[0].OriginCheck.Key != step.Key || step.Notify[0].OriginCheck.Name != wantNames[i] {
 			t.Fatalf("Origin workflow check %d = %#v", i, step)
 		}

@@ -263,7 +263,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "    command: %s\n", yamlScalar(command))
 		out.WriteString("    retry:\n      manual:\n        allowed: false\n")
-		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "Workflow could not be run", failure.Summary)
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, "Workflow could not be run", failure.Summary)
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -276,7 +276,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
 		out.WriteString("    type: command\n")
-		emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
+		emitWorkflowCheck(out, "    ", pipeline.EventProvider, workflow, "", "")
 		_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
 		out.WriteString("    checkout:\n      skip: true\n")
 		return nil
@@ -296,9 +296,6 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		}
 		if workflow.SkipReason != "" {
 			_, _ = fmt.Fprintf(out, "    skip: %s\n", yamlScalar(workflow.SkipReason))
-		}
-		if workflow.CheckName != "" {
-			emitWorkflowCheck(out, pipeline.EventProvider, workflow, "", "")
 		}
 		if workflow.Aggregate {
 			_, _ = fmt.Fprintf(out, "    depends_on: %s\n", yamlScalar(pipeline.CompilerStep))
@@ -380,6 +377,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		commands = append(commands, runJob)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
+		if workflow.Aggregate {
+			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, "", "")
+		}
 		if job.Queue != "" {
 			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)
 			_, _ = fmt.Fprintf(out, "%s  queue: %s\n", attributeIndent, yamlScalar(job.Queue))
@@ -428,20 +428,20 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 	return nil
 }
 
-func emitWorkflowCheck(out *bytes.Buffer, provider string, workflow preparedWorkflow, title, summary string) {
-	out.WriteString("    notify:\n")
+func emitWorkflowCheck(out *bytes.Buffer, indent, provider string, workflow preparedWorkflow, title, summary string) {
+	_, _ = fmt.Fprintf(out, "%snotify:\n", indent)
 	switch provider {
 	case "github":
-		out.WriteString("      - github_check:\n")
+		_, _ = fmt.Fprintf(out, "%s  - github_check:\n", indent)
 	case "cursor-origin":
-		out.WriteString("      - origin_check:\n")
-		_, _ = fmt.Fprintf(out, "          key: %s\n", yamlScalar(workflow.GroupKey))
+		_, _ = fmt.Fprintf(out, "%s  - origin_check:\n", indent)
+		_, _ = fmt.Fprintf(out, "%s      key: %s\n", indent, yamlScalar(workflow.GroupKey))
 	}
-	_, _ = fmt.Fprintf(out, "          name: %s\n", yamlScalar(workflow.CheckName))
+	_, _ = fmt.Fprintf(out, "%s      name: %s\n", indent, yamlScalar(workflow.CheckName))
 	if title != "" {
-		out.WriteString("          output:\n")
-		_, _ = fmt.Fprintf(out, "            title: %s\n", yamlScalar(title))
-		_, _ = fmt.Fprintf(out, "            summary: %s\n", yamlScalar(summary))
+		_, _ = fmt.Fprintf(out, "%s      output:\n", indent)
+		_, _ = fmt.Fprintf(out, "%s        title: %s\n", indent, yamlScalar(title))
+		_, _ = fmt.Fprintf(out, "%s        summary: %s\n", indent, yamlScalar(summary))
 	}
 }
 
