@@ -476,7 +476,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		if err != nil {
-			cacheCredentials = nil
+			cacheCredentials = gharuntime.UnavailableCacheCredentials(err)
 		}
 	}
 	var workflowTokens gharuntime.WorkflowTokenProvider

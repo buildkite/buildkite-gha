@@ -17,11 +17,11 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
-		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{CacheRequirement: CacheByNode, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true}},
 	}
 	for _, test := range tests {
 		name := test.identity.Repository

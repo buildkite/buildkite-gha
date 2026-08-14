@@ -89,10 +89,22 @@ const (
 	ServiceCache    Service = "cache"
 )
 
+// CacheRequirement identifies how an audited setup action enables its bundled
+// cache client. It is separate from ServiceCache because setup actions must
+// retain their ordinary environment rather than actions/cache isolation.
+type CacheRequirement string
+
+const (
+	CacheBySelector CacheRequirement = "selector"
+	CacheByBoolean  CacheRequirement = "boolean"
+	CacheByNode     CacheRequirement = "node"
+)
+
 // Descriptor records Buildkite-specific handling for one exact action identity.
 type Descriptor struct {
-	Adapter Adapter
-	Service Service
+	Adapter          Adapter
+	Service          Service
+	CacheRequirement CacheRequirement
 	// Before enabling OverrideGitHubServerURL, audit the action source and its
 	// bundled dependencies. Confirm GITHUB_SERVER_URL affects only caching
 	// behavior and is not load-bearing for any request the action makes.
@@ -114,11 +126,11 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
-	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-dotnet"}:                   {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-node"}:                     {CacheRequirement: CacheByNode, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-java"}:                     {CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-python"}:                   {CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-go"}:                       {CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true},
 }
 
 var checkoutCommits = map[string]string{

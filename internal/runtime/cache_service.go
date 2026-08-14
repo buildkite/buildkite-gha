@@ -40,6 +40,22 @@ type CacheCredentialProvider interface {
 	Credentials(context.Context) (CacheCredentials, error)
 }
 
+type unavailableCacheCredentials struct{ err error }
+
+func (p unavailableCacheCredentials) Credentials(context.Context) (CacheCredentials, error) {
+	return CacheCredentials{}, p.err
+}
+
+// UnavailableCacheCredentials preserves an optional provider setup failure so
+// an action that enables caching can report the cause instead of running
+// uncached.
+func UnavailableCacheCredentials(err error) CacheCredentialProvider {
+	if err == nil {
+		err = errors.New("cache credential provider is unavailable")
+	}
+	return unavailableCacheCredentials{err: err}
+}
+
 // AgentCacheConfig identifies the exact current Buildkite job and cache-v2
 // service. Endpoint and JobToken are runtime connection and authentication
 // material; this provider does not add them to action subprocess environments.

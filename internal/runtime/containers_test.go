@@ -1400,6 +1400,49 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunJobContainerSetupActionReceivesRequiredCacheCredentials(t *testing.T) {
+	f := newJobDocker(t, "")
+	workspace := t.TempDir()
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", `name: setup node fixture
+inputs:
+  cache:
+    description: Package manager cache
+runs:
+  using: node24
+  main: main.js
+`)
+	writeFixtureFile(t, remote, "main.js", fmt.Sprintf(`
+for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"])
+  if (!process.env[name]) throw new Error("missing " + name);
+if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
+`, githubServerURLOverride))
+	digest := digestTree(t, remote)
+	lockID := remoteLifecycleLockID(1)
+	job := jobContainerPlan(t, workspace, []plan.Step{{
+		ID: "setup", Kind: "uses", Uses: "actions/setup-node@v6", With: map[string]string{"cache": "npm"},
+		Action: &plan.ActionSelector{Lock: lockID},
+	}})
+	job.Event.Provider = "cursor-origin"
+	job.Actions = []plan.ActionLock{{
+		ID: lockID, Source: "github", Repository: "actions/setup-node", RequestedRef: "v6",
+		Commit: strings.Repeat("a", 40), SourceDigest: digest,
+	}}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	provider := &sequenceCacheCredentials{tokens: []string{"header.container.signature"}}
+	redactor := &testRedactor{}
+	result, err := (Runner{
+		Docker: f.path, RuntimeExecutable: os.Args[0], Node24: requireNode24(t),
+		Actions: materializer, Cache: provider, Redactor: redactor,
+	}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("container setup result = %#v, error = %v", result, err)
+	}
+	if provider.calls != 1 || fmt.Sprint(redactor.values) != fmt.Sprint(provider.tokens) {
+		t.Fatalf("credential calls/redactions = %d / %#v", provider.calls, redactor.values)
+	}
+}
+
 func TestRunJobContainerCompositeAndNestedJavaScript(t *testing.T) {
 	t.Parallel()
 

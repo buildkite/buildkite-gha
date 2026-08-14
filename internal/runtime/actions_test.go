@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
+	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
@@ -78,6 +79,45 @@ func workflowJob(t *testing.T, workspace string) plan.Job {
 	}
 	h := sha256.Sum256(b)
 	return plan.Job{Workflow: plan.Workflow{Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(h[:])}}
+}
+
+func TestRequiresSetupCacheCredentials(t *testing.T) {
+	nodeAutomatic := metadata.Metadata{Inputs: map[string]metadata.Input{"package-manager-cache": {}}}
+	for _, test := range []struct {
+		name       string
+		source     string
+		repository string
+		path       string
+		action     metadata.Metadata
+		inputs     map[string]string
+		want       bool
+	}{
+		{name: "node explicit", repository: "actions/setup-node", inputs: map[string]string{"cache": " npm "}, want: true},
+		{name: "node automatic", repository: "actions/setup-node", action: nodeAutomatic, inputs: map[string]string{"package-manager-cache": "TRUE"}, want: true},
+		{name: "node automatic empty", repository: "actions/setup-node", action: nodeAutomatic, inputs: map[string]string{"package-manager-cache": ""}, want: true},
+		{name: "node automatic disabled", repository: "actions/setup-node", action: nodeAutomatic, inputs: map[string]string{"package-manager-cache": "false"}},
+		{name: "node action without automatic caching", repository: "actions/setup-node"},
+		{name: "java selector", repository: "actions/setup-java", inputs: map[string]string{"cache": "gradle"}, want: true},
+		{name: "java disabled", repository: "actions/setup-java", inputs: map[string]string{"cache": ""}},
+		{name: "python selector", repository: "actions/setup-python", inputs: map[string]string{"cache": "pip"}, want: true},
+		{name: "go enabled", repository: "actions/setup-go", inputs: map[string]string{"cache": " True "}, want: true},
+		{name: "go disabled", repository: "actions/setup-go", inputs: map[string]string{"cache": "false"}},
+		{name: "dotnet enabled", repository: "actions/setup-dotnet", inputs: map[string]string{"cache": "TRUE"}, want: true},
+		{name: "unknown action", repository: "owner/action", inputs: map[string]string{"cache": "true"}},
+		{name: "nested setup action", repository: "actions/setup-node", path: "nested", inputs: map[string]string{"cache": "npm"}},
+		{name: "workspace setup action", source: "workspace", repository: "actions/setup-go", inputs: map[string]string{"cache": "true"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := test.source
+			if source == "" {
+				source = "github"
+			}
+			lock := plan.ActionLock{Source: source, Repository: test.repository, Path: test.path}
+			if got := requiresSetupCacheCredentials(lock, test.action, test.inputs); got != test.want {
+				t.Fatalf("requiresSetupCacheCredentials() = %t, want %t", got, test.want)
+			}
+		})
+	}
 }
 
 func TestActionLockResolverGitHubExactSourceSingleFlightAndTampering(t *testing.T) {

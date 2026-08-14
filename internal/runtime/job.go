@@ -277,14 +277,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			if cacheRequired {
 				return JobResult{}, fmt.Errorf("actions/cache requires the Buildkite Agent redactor")
 			}
-			r.Cache = nil
+			r.Cache = UnavailableCacheCredentials(errors.New("cache credential provider requires the Buildkite Agent redactor"))
 		} else {
 			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
 			if err != nil {
 				if providerTokenRequired || cacheRequired {
 					return JobResult{}, err
 				}
-				r.Cache = nil
+				r.Cache = UnavailableCacheCredentials(err)
 			} else {
 				r.Redactor = resolved
 			}
@@ -1331,6 +1331,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
+			javascript.CacheCredentialsRequired = requiresSetupCacheCredentials(lock, action, inputs)
 			invocation.action = javascript
 			node, err := r.discoverNode(ctx, major, explicit)
 			if err != nil {
@@ -1549,7 +1550,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := environment.process()
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), OverrideGitHubServerURL: actionLock != nil && overridesGitHubServerURL(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheCredentialsRequired: actionLock != nil && requiresSetupCacheCredentials(*actionLock, action, inputs), OverrideGitHubServerURL: actionLock != nil && overridesGitHubServerURL(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1563,6 +1564,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// again with every main-visible effect committed.
 			javascript.Inputs = inputs
 			javascript.Env = environment.process()
+			javascript.CacheCredentialsRequired = actionLock != nil && requiresSetupCacheCredentials(*actionLock, action, inputs)
 			invocation.action = javascript
 		}
 		if !wasPrepared {
