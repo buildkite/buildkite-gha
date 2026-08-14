@@ -2527,6 +2527,9 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		if len(runner.commands) != 1 || runner.commands[0].args[8] != "warning" {
 			t.Fatalf("commands = %#v, want one warning annotation", runner.commands)
 		}
+		if body := string(runner.commands[0].stdin); !strings.Contains(body, `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || strings.Contains(body, "Workflow could not be run") {
+			t.Fatalf("warning annotation = %q", body)
+		}
 		if !strings.Contains(stderr.String(), "warning: processing annotation: annotation unavailable") {
 			t.Fatalf("stderr = %q", stderr.String())
 		}
@@ -2590,7 +2593,7 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
 	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
-	prefixBytes := len("<h2 class=\"h4 mb2\">Workflow could not be run</h2>\n") +
+	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
 		len("<div class=\"mb2\">") + len(annotationCode(report.Workflow)) +
 		len("</div>\n<div class=\"mb2\">\n")
 	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationEnd) - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))

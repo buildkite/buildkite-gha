@@ -164,8 +164,14 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		return "", ""
 	}
 
+	heading := "GitHub Actions workflow diagnostics"
+	if style == "error" {
+		heading = "Workflow could not be run"
+	}
 	var out strings.Builder
-	out.WriteString("<h2 class=\"h4 mb2\">Workflow could not be run</h2>\n")
+	out.WriteString("<h2 class=\"h4 mb2\">")
+	out.WriteString(heading)
+	out.WriteString("</h2>\n")
 	out.WriteString("<div class=\"mb2\">")
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
