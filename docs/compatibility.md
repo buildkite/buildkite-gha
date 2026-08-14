@@ -68,6 +68,10 @@ All directly runnable workflows are represented in one artifact and pipeline tra
 
 Reusable-only `workflow_call` files remain available to local callers but do not create groups. Selecting only reusable workflows is an error. Every directly runnable workflow is selected against the effective event. A workflow with safe compilation or trigger-translation errors is replaced by one failing top-level command step labeled `:github: <workflow-name-or-path>`. The replacement step publishes all redacted diagnostics as a job-scoped Buildkite annotation and exits with status 1. The provider check title is `Workflow could not be run`, and its summary lists redacted errors with workflow, job, and step context. Summaries are truncated at 65,535 bytes. A compiler failure takes precedence if the workflow also has a skip reason. Other workflows continue compiling and successful workflows retain their normal groups and jobs. Parse, event-input, admission, artifact, and upload failures still abort the whole transaction; no partial pipeline is uploaded.
 
+### Compatibility diagnostics
+
+Each diagnostic separates user guidance from implementation information. `message` names the user-visible cause and a corrective action. Optional `detail` contains lower-level context such as resolved commits, adapter or service boundaries, and supported-version or runner-policy allowlists. Text reports, JSON reports, Buildkite annotations, and generated workflow failure artifacts preserve this separation. GitHub check summaries show the concise message only.
+
 ## Workflow syntax
 
 ### Names and triggers

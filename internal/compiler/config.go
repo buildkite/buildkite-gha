@@ -332,29 +332,42 @@ func (policy RunnerPolicy) resolve(labels []string, trust EventTrust) (RunnerTar
 	return target, nil
 }
 
-// runnerRejectionMessage renders a rejected runs-on resolution. Callers pass
-// labels only when they came from workflow-authored static data.
-func runnerRejectionMessage(err error, labels, supported []string) string {
-	const message = "runner target is unsupported"
+// runnerRejectionDiagnostic renders a rejected runs-on resolution. Callers
+// pass labels only when they came from workflow-authored static data.
+func runnerRejectionDiagnostic(err error, labels, supported, untrustedQueues []string) (message, detail string) {
 	var rejection *runnerPolicyRejection
 	if !errors.As(err, &rejection) {
-		return message
+		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", ""
 	}
 	label := ""
 	if len(labels) == 1 {
 		label = fmt.Sprintf(" %q", labels[0])
 	}
-	supportedTargets := "a configured runner target"
 	if len(supported) != 0 {
-		supportedTargets = strings.Join(supported, ", ")
+		detail = "Supported runner labels: " + strings.Join(supported, ", ") + "."
 	}
 	switch rejection.reason {
+	case reasonNoLabels:
+		return "runs-on resolves to no runner labels. Set runs-on to a mapped Linux or macOS runner label.", detail
+	case reasonDuplicateLabel:
+		return "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on.", detail
 	case reasonUnsupportedOS:
-		return fmt.Sprintf("Runner label%s uses an unsupported operating system (Windows); supported runner labels: %s", label, supportedTargets)
+		return fmt.Sprintf("Runner label%s requires Windows, which is unsupported. Use a Linux or macOS runner label.", label), detail
 	case reasonUnmappedLabel:
-		return fmt.Sprintf("Runner label%s is not mapped to a runner target; configure a runner-target mapping for this label or use %s", label, supportedTargets)
+		return fmt.Sprintf("Runner label%s has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.", label), detail
+	case reasonConflictingQueues, reasonConflictingTarget:
+		return "runs-on labels map to conflicting runner targets. Use labels that map to one runner target.", detail
+	case reasonUntrustedDefault:
+		return "This untrusted event cannot use the default runner target. Map runs-on to a queue allowed for untrusted events.", detail
+	case reasonUntrustedQueue:
+		queues := append([]string(nil), untrustedQueues...)
+		sort.Strings(queues)
+		if len(queues) != 0 {
+			detail = "Queues allowed for untrusted events: " + strings.Join(queues, ", ") + "."
+		}
+		return "This untrusted event targets a disallowed queue. Add the queue to the untrusted-event allowlist or use an allowed queue.", detail
 	default:
-		return message + ": " + rejection.reason
+		return "Runner target is unsupported. Use a configured Linux or macOS runner target.", detail
 	}
 }
 

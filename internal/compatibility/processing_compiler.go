@@ -278,6 +278,7 @@ func processingErrorDetails(err error, fallbackStage, fallbackCode, fallbackCate
 
 func diagnosticFromError(defaultPath, stage, code, category string, err error) Diagnostic {
 	message := err.Error()
+	detail := ""
 	location := (*SourceLocation)(nil)
 	var finding *compiler.ProcessingFinding
 	if structured, ok := err.(*compiler.ProcessingFinding); ok {
@@ -285,6 +286,7 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 		if finding.Message != "" {
 			message = finding.Message
 		}
+		detail = finding.Detail
 		if finding.Path != "" {
 			location = sourceLocation(finding.Path, finding.Line, finding.Column)
 		}
@@ -301,7 +303,7 @@ func diagnosticFromError(defaultPath, stage, code, category string, err error) D
 	}
 	diagnostic := Diagnostic{
 		Level: "error", Code: code, Category: category, Stage: stage,
-		Message: message, Location: location,
+		Message: message, Detail: detail, Location: location,
 	}
 	if finding != nil {
 		diagnostic.Job = finding.Job
