@@ -371,6 +371,62 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 }
 
+func TestShouldOverrideGitHubServerURL(t *testing.T) {
+	cases := []struct {
+		name      string
+		serverURL string
+		want      bool
+	}{
+		{"github.com", "https://github.com", false},
+		{"ghe.com cloud", "https://x.ghe.com", false},
+		{"dot-localhost", "https://buildkite-gha.localhost", false},
+		{"cursor origin", "https://origin.cursor.com", true},
+		{"real GHES", "https://ghe.corp", true},
+		{"empty", "", false},
+		{"malformed", "://bad", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := shouldOverrideGitHubServerURL(c.serverURL); got != c.want {
+				t.Fatalf("shouldOverrideGitHubServerURL(%q) = %v, want %v", c.serverURL, got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsolateCacheActionEnvironmentOverridesGitHubServerURLWhenNeeded(t *testing.T) {
+	env := map[string]string{
+		"GITHUB_SERVER_URL":            "https://origin.cursor.com",
+		"ACTIONS_CACHE_SERVICE_V2":     "true",
+		"ACTIONS_RESULTS_URL":          "https://ghacs.buildkite.com/",
+		"ACTIONS_RUNTIME_TOKEN":        "a.b.c",
+		"BUILDKITE_AGENT_ACCESS_TOKEN": "secret",
+		"BUILDKITE_JOB_ID":             "job-id",
+	}
+	isolated := isolateCacheActionEnvironment(env)
+	if got := isolated["GITHUB_SERVER_URL"]; got != githubServerURLOverride {
+		t.Fatalf("GITHUB_SERVER_URL = %q, want %q", got, githubServerURLOverride)
+	}
+	if isolated["PATH"] != cacheActionToolPath {
+		t.Fatalf("PATH = %q, want %q", isolated["PATH"], cacheActionToolPath)
+	}
+	for _, name := range []string{"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID"} {
+		if _, ok := isolated[name]; ok {
+			t.Fatalf("%s should have been stripped from the isolated environment", name)
+		}
+	}
+}
+
+func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *testing.T) {
+	env := map[string]string{
+		"GITHUB_SERVER_URL": "https://github.com",
+	}
+	isolated := isolateCacheActionEnvironment(env)
+	if got := isolated["GITHUB_SERVER_URL"]; got != "https://github.com" {
+		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://github.com", got)
+	}
+}
+
 func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()

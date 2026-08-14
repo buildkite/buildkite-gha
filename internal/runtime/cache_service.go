@@ -18,6 +18,12 @@ const (
 	cacheCredentialResponseLimit = 64 << 10
 	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
 	defaultCacheResultsURL       = "https://ghacs.buildkite.com/"
+
+	// githubServerURLOverride is the synthetic, non-resolvable server URL
+	// substituted in when shouldOverrideGitHubServerURL reports true, so
+	// actions/cache's isGhes() check doesn't force the unsupported cache-v1
+	// path. Only its ".localhost" suffix is load-bearing.
+	githubServerURLOverride = "https://buildkite-gha.localhost"
 )
 
 var cacheRuntimeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
@@ -214,6 +220,23 @@ func removeCacheServiceEnvironment(env map[string]string) map[string]string {
 	return clean
 }
 
+// shouldOverrideGitHubServerURL reports whether serverURL needs to be
+// replaced with githubServerURLOverride before starting actions/cache: its
+// isGhes() forces the unsupported cache-v1 path for every host outside its
+// own allowlist (github.com, *.ghe.com, *.localhost). Malformed/empty values
+// are left untouched.
+func shouldOverrideGitHubServerURL(serverURL string) bool {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToUpper(strings.TrimRight(u.Hostname(), " "))
+	isGitHub := host == "GITHUB.COM"
+	isGheCloud := strings.HasSuffix(host, ".GHE.COM")
+	isLocal := strings.HasSuffix(host, ".LOCALHOST")
+	return !isGitHub && !isGheCloud && !isLocal
+}
+
 func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 	isolated := removeCacheServiceEnvironment(env)
 	for _, name := range []string{
@@ -224,6 +247,9 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 		"BUILDKITE_AGENT_ACCESS_TOKEN", "BUILDKITE_JOB_ID",
 	} {
 		delete(isolated, name)
+	}
+	if shouldOverrideGitHubServerURL(isolated["GITHUB_SERVER_URL"]) {
+		isolated["GITHUB_SERVER_URL"] = githubServerURLOverride
 	}
 	isolated["PATH"] = cacheActionToolPath
 	return isolated

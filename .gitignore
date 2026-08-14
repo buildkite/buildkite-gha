@@ -1,5 +1,6 @@
 dist/
 .release/
+.idea/
 
 # This repository intentionally tracks its reviewed DeepSec configuration.
 !/.deepsec/
