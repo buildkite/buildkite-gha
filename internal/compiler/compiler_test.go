@@ -365,10 +365,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''
     steps:
       - id: test
-        if: success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready
+        if: success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''
         run: true
       - if: failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]
         run: true
@@ -377,7 +377,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
+	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
 		t.Fatalf("runtime conditions were not retained: %#v", plans)
 	}
 }

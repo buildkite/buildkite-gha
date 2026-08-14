@@ -443,6 +443,8 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 			source: "${{ failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && env.LEVEL && job.services.redis.ports[6379] }}",
 			scope:  StepCondition,
 		},
+		{name: "github head ref in job", source: "github.head_ref != ''", scope: JobCondition},
+		{name: "github head ref in step", source: "github.head_ref != ''", scope: StepCondition},
 		{name: "compatible booleans", source: "success() == true", scope: JobCondition},
 		{name: "compatible strings", source: "vars.ENABLED == 'true'", scope: JobCondition},
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},

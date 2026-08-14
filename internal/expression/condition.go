@@ -306,11 +306,11 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 	case "github":
 		if len(path) == 1 {
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "ref", "repository", "sha":
+			case "actor", "event_name", "head_ref", "ref", "repository", "sha":
 				return nil
 			}
 		}
-		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, event_name, ref, repository, and sha", reference)
+		return fmt.Errorf("condition reference %q is unavailable at runtime; supported github properties are actor, event_name, head_ref, ref, repository, and sha", reference)
 	case "needs":
 		if len(path) == 2 && strings.EqualFold(path[1], "result") || len(path) == 3 && strings.EqualFold(path[1], "outputs") {
 			return nil
