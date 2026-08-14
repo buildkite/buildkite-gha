@@ -43,6 +43,8 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 		"useradd --create-home --home-dir '/home/runner'",
 		"runner ALL=(ALL) NOPASSWD: ALL",
 		"/var/run/docker.sock",
+		"BUILDKITE_AGENT_JOB_API_SOCKET",
+		`chmod g+rw "$job_api_socket"`,
 		`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR"`,
 		"chown -R runner:\"$runner_group\" '/opt/hostedtoolcache'",
 		"sudo -n --preserve-env --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner'",
@@ -52,7 +54,7 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 			t.Errorf("experimental Linux command does not contain %q:\n%s", required, linux)
 		}
 	}
-	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chown -R runner:\"$runner_group\" /"} {
+	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /"} {
 		if strings.Contains(linux, forbidden) {
 			t.Errorf("experimental Linux command contains broad permission change %q:\n%s", forbidden, linux)
 		}
