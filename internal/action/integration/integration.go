@@ -93,6 +93,10 @@ const (
 type Descriptor struct {
 	Adapter Adapter
 	Service Service
+	// Before enabling OverrideGitHubServerURL, audit the action source and its
+	// bundled dependencies. Confirm GITHUB_SERVER_URL affects only caching
+	// behavior and is not load-bearing for any request the action makes.
+	OverrideGitHubServerURL bool
 }
 
 // UsesNativeAdapter reports whether the resolved identity replaces the
@@ -104,12 +108,17 @@ func UsesNativeAdapter(identity Identity) bool {
 
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache},
-	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache},
-	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, OverrideGitHubServerURL: true},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
+	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {OverrideGitHubServerURL: true},
 }
 
 var checkoutCommits = map[string]string{

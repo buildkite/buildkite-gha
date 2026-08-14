@@ -11,12 +11,17 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		want     Descriptor
 	}{
 		{Identity{Source: "github", Repository: "actions/checkout"}, Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
-		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
+		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{OverrideGitHubServerURL: true}},
 	}
 	for _, test := range tests {
 		name := test.identity.Repository
@@ -267,6 +272,9 @@ func TestLookupDoesNotBroadenCanonicalIdentity(t *testing.T) {
 		{Source: "github", Repository: "actions/cache", Path: "nested"},
 		{Source: "github", Repository: "actions/upload-artifact", Path: "nested"},
 		{Source: "github", Repository: "actions/download-artifact", Path: "nested"},
+		{Source: "github", Repository: "actions/setup-node", Path: "nested"},
+		{Source: "github", Repository: "actions/setup-ruby"},
+		{Source: "workspace", Repository: "actions/setup-node"},
 		{Source: "github", Repository: "owner/action"},
 	} {
 		if descriptor, ok := Lookup(identity); ok {
