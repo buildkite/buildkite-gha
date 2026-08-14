@@ -4909,7 +4909,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	}
 }
 
-func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
+func TestRunUploadUsesExplicitTargetQueueAndRunnerUserExperiment(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -4917,7 +4917,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--experimental-runner-user", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 
@@ -4941,7 +4941,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 		if step.Agents["queue"] != "hosted" {
 			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
 		}
-		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("step %q image = %q, command = %q", step.Key, step.Image, step.Command)
 		}
 	}
@@ -7023,6 +7023,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
+	if _, err := parseUploadArgs([]string{"--experimental-runner-user", "--experimental-runner-user", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("parseUploadArgs() error = %v, want duplicate experimental runner user error", err)
+	}
 	workflows, event, err := uploadArgs([]string{"workflow.yml"})
 	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
 		t.Fatalf("uploadArgs() default = %q, %q, %v", workflows, event, err)
@@ -7067,6 +7070,7 @@ func TestUploadArgsAcceptsExplicitPathsAndEndOfOptions(t *testing.T) {
 func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	parsed, err := parseUploadArgs([]string{
+		"--experimental-runner-user",
 		"--runner-queue", "ubuntu-latest=hosted",
 		"--runner-image", "ubuntu-latest=" + image,
 		"--runner-queue", "macos-14=macos-sonoma-arm64",
@@ -7078,7 +7082,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" {
+	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" || !parsed.experimentalRunnerUser {
 		t.Fatalf("parseUploadArgs() = %#v", parsed)
 	}
 	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {

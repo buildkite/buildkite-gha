@@ -1,0 +1,32 @@
+name: Experimental runner identity composite action
+description: Proves composite shell identity and command-file access.
+
+outputs:
+  identity:
+    description: Observed operating-system user.
+    value: ${{ steps.identity.outputs.identity }}
+
+runs:
+  using: composite
+  steps:
+    - name: Verify composite identity
+      id: identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(id -un)" = runner
+        test "$(id -u)" -ne 0
+        test "$HOME" = /home/runner
+        test -w "$GITHUB_WORKSPACE"
+        test -w "$RUNNER_TEMP"
+        test -w "$RUNNER_TOOL_CACHE"
+        for name in GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH GITHUB_STATE GITHUB_STEP_SUMMARY; do
+          test -w "${!name}"
+        done
+        mkdir -p "$RUNNER_TEMP/pb2731-composite-bin"
+        echo "PB2731_COMPOSITE=true" >> "$GITHUB_ENV"
+        echo "identity=runner" >> "$GITHUB_OUTPUT"
+        echo "$RUNNER_TEMP/pb2731-composite-bin" >> "$GITHUB_PATH"
+        echo "phase=composite" >> "$GITHUB_STATE"
+        echo 'Composite action ran as `runner`.' >> "$GITHUB_STEP_SUMMARY"
+        echo 'PB2731_COMPOSITE=runner'

@@ -1,0 +1,49 @@
+package buildkite
+
+// This file contains the removable PB-2731 runner-user experiment. Production
+// pipeline emission does not call it unless ExperimentalRunnerUser is set.
+
+const experimentalRunnerHome = "/home/runner"
+const experimentalRunnerTemp = "/tmp/buildkite-gha-runner"
+
+func experimentalRunnerUserBootstrap(requiresMise, hostedToolCache bool) []string {
+	commands := []string{
+		`test "$(id -u)" -eq 0 || { echo 'buildkite-gha: experimental runner user requires root' >&2; exit 1; }`,
+		`for command in getent useradd usermod install sudo; do command -v "$command" >/dev/null 2>&1 || { echo "buildkite-gha: experimental runner user requires $command" >&2; exit 1; }; done`,
+		`if getent passwd runner >/dev/null; then test "$(id -u runner)" -ne 0 && test "$(getent passwd runner | cut -d: -f6)" = '/home/runner' || { echo 'buildkite-gha: existing runner user is incompatible' >&2; exit 1; }; else useradd --create-home --home-dir '/home/runner' --shell /bin/bash runner; fi`,
+		`runner_group="$(id -gn runner)"`,
+		`install -d -o runner -g "$runner_group" -m 0700 '/home/runner' '/tmp/buildkite-gha-runner'`,
+		`chown -R runner:"$runner_group" '/home/runner' '/tmp/buildkite-gha-runner'`,
+		`install -d -m 0755 /etc/sudoers.d`,
+		`printf '%s\n' 'runner ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/buildkite-gha-runner`,
+		`chmod 0440 /etc/sudoers.d/buildkite-gha-runner`,
+		`if command -v visudo >/dev/null 2>&1; then visudo -c -f /etc/sudoers.d/buildkite-gha-runner >/dev/null; fi`,
+		`if [ -S /var/run/docker.sock ]; then docker_gid="$(stat -c '%g' /var/run/docker.sock)"; docker_group="$(getent group "$docker_gid" | cut -d: -f1 || true)"; if [ -z "$docker_group" ]; then command -v groupadd >/dev/null 2>&1 || { echo 'buildkite-gha: experimental runner user requires groupadd for Docker access' >&2; exit 1; }; docker_group="buildkite-gha-docker-$docker_gid"; groupadd --gid "$docker_gid" "$docker_group"; fi; usermod --append --groups "$docker_group" runner; fi`,
+		`find "$bootstrap_dir" -type d -exec chmod a+rx {} +`,
+		`chown runner:"$runner_group" "$distribution"`,
+		`chmod 0500 "$distribution"`,
+	}
+	if requiresMise {
+		commands = append(commands,
+			`test -n "${BUILDKITE_GHA_MISE_DATA_DIR:-}" || { echo 'buildkite-gha: experimental runner user requires BUILDKITE_GHA_MISE_DATA_DIR' >&2; exit 1; }`,
+			`install -d -o runner -g "$runner_group" -m 0755 "$BUILDKITE_GHA_MISE_DATA_DIR"`,
+			`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR"`,
+			`chmod -R u+rwX "$BUILDKITE_GHA_MISE_DATA_DIR"`,
+		)
+	}
+	if hostedToolCache {
+		commands = append(commands,
+			`test -d '/opt/hostedtoolcache' || { echo 'buildkite-gha: experimental runner user requires /opt/hostedtoolcache' >&2; exit 1; }`,
+			`chown -R runner:"$runner_group" '/opt/hostedtoolcache'`,
+			`chmod -R u+rwX '/opt/hostedtoolcache'`,
+		)
+	}
+	return append(commands,
+		`sudo -n --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner' sh -c 'test "$(id -un)" = runner; test "$(id -u)" -ne 0; test "$HOME" = /home/runner; test -w "$TMPDIR"; sudo -n true'`,
+		`if [ -S /var/run/docker.sock ]; then sudo -n --user runner -- test -w /var/run/docker.sock || { echo 'buildkite-gha: runner cannot access the Docker socket' >&2; exit 1; }; fi`,
+	)
+}
+
+func experimentalRunnerUserCommand(runJob string) string {
+	return `sudo -n --preserve-env --user runner -- env HOME='` + experimentalRunnerHome + `' TMPDIR='` + experimentalRunnerTemp + `' ` + runJob
+}

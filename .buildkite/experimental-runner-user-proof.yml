@@ -1,0 +1,33 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":pipeline: Experimental runner user importer"
+    key: "experimental-runner-user-importer"
+    timeout_in_minutes: 20
+    retry:
+      automatic: false
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: |
+      set -euo pipefail
+      commit="$${COMPATIBILITY_PROOF_COMMIT:?COMPATIBILITY_PROOF_COMMIT is required}"
+      scripts/verify-source-checkout "$$commit"
+      test -z "$$(git status --porcelain --untracked-files=all)"
+      proof_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-runner-user.XXXXXXXX")"
+      trap 'rm -rf -- "$$proof_root"' EXIT
+      jq --arg sha "$$commit" '.sha = $$sha | .event = "workflow_dispatch"' testdata/smoke/events/push.json > "$$proof_root/event.json"
+      runtime_version="0.0.0-experimental-runner-user.$$commit"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.version=$$runtime_version" -o "$$proof_root/buildkite-gha" ./cmd/buildkite-gha
+      "$$proof_root/buildkite-gha" upload \
+        --experimental-runner-user \
+        --event-path "$$proof_root/event.json" \
+        --runner-queue ubuntu-latest=hosted \
+        .github/workflows/experimental-runner-user.yml
+
+  - label: ":pipeline: Experimental runner user continuation loader"
+    key: "experimental-runner-user-continuation-loader"
+    depends_on: "experimental-runner-user-importer"
+    allow_dependency_failure: true
+    command: "buildkite-agent pipeline upload .buildkite/experimental-runner-user-continuation.yml"

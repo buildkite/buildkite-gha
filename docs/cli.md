@@ -183,6 +183,15 @@ supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 
+### Experiment with a non-root runner user
+
+`upload --experimental-runner-user` enables the removable PB-2731 Linux
+experiment. Generated jobs must start as root. Their bootstrap creates a
+`runner` user, grants passwordless `sudo` and Docker socket access when the
+socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
+runs `buildkite-gha run-job` as `runner`. The option does not infer behavior
+from a queue name and does not affect macOS jobs.
+
 ## Disable telemetry
 
 In Buildkite jobs, the plugin importer and `run-job` send best-effort completion telemetry through the job-authenticated Buildkite Agent API. Events contain the command, outcome, client version, duration, and bounded diagnostic codes and severities. They do not contain diagnostic messages, workflow content, repository details, paths, action references, expressions, environment variables, or command text.

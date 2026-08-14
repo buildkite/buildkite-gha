@@ -1,0 +1,18 @@
+agents:
+  queue: "hosted"
+
+steps:
+  - label: ":white_check_mark: Experimental runner user settled"
+    key: "experimental-runner-user-complete"
+    depends_on:
+      - step: "gha-runner-user-producer"
+        allow_failure: true
+      - step: "gha-runner-user-consumer"
+        allow_failure: true
+    command: |
+      set -euo pipefail
+      for step in gha-runner-user-producer gha-runner-user-consumer; do
+        outcome="$$(buildkite-agent step get outcome --step "$$step")"
+        printf '%s: %s\n' "$$step" "$$outcome"
+        test "$$outcome" = passed
+      done
