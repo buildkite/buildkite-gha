@@ -2613,7 +2613,7 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
 	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
 	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
-		len(annotationCode(report.Workflow)) + len("<br />\n")
+		len(annotationCode(report.Workflow)) + len("<br /><br />\n")
 	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))
 	report.Diagnostics = append(report.Diagnostics,
 		compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: strings.Repeat("a", messageBytes)},
@@ -2651,7 +2651,7 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	})
 
 	_, body := processingAnnotation(report, sourceLinkContext{})
-	wantWorkflow := "<code>.github/workflows/test-image-build.yml</code><br />"
+	wantWorkflow := "<code>.github/workflows/test-image-build.yml</code><br /><br />"
 	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
 	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
 		t.Fatalf("annotation = %q, want %q and %q without checkout path", body, wantWorkflow, wantLocation)
