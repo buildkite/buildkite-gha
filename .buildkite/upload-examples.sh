@@ -101,7 +101,7 @@ steps:
         timeout_in_minutes: 20
         retry:
           automatic: false
-        cache: "/cache/bkcache/github-actions-buildkite-plugin"
+        cache: "/cache/bkcache/mise"
         plugins:
           - github-actions#v0.9.3:
               workflow: "$workflow"
