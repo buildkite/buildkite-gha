@@ -144,10 +144,10 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 }
 
 func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
-	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, true)
+	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, false)
 }
 
-func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
+func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, checkSummary bool) (style, body string) {
 	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
@@ -169,22 +169,30 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		heading = "Workflow could not be run"
 	}
 	var out strings.Builder
-	if includeHeading {
+	if !checkSummary {
 		out.WriteString("<h2 class=\"h4 mb2\">")
 		out.WriteString(heading)
 		out.WriteString("</h2>\n")
 	}
-	out.WriteString("<div>")
+	if checkSummary {
+		out.WriteString("<div>")
+	} else {
+		out.WriteString("<div class=\"mb2\">")
+	}
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
-	out.WriteString("</div>\n<br>\n<div>\n")
+	if checkSummary {
+		out.WriteString("</div>\n<br>\n<div>\n")
+	} else {
+		out.WriteString("</div>\n<div class=\"mb2\">\n")
+	}
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len() + len(processingAnnotationEnd)
 	for i, diagnostic := range diagnostics {
-		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
 		bodyBytes += len(rows[i])
 	}
 	if bodyBytes <= bodyLimit {
@@ -198,7 +206,7 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 	remaining := bodyLimit - out.Len() - len(processingAnnotationEnd) - len(truncationNotice)
 	for i, row := range rows {
 		if len(row) > remaining {
-			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks); row != "" {
+			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks, checkSummary); row != "" {
 				out.WriteString(row)
 			}
 			out.WriteString(processingAnnotationEnd)
@@ -256,10 +264,10 @@ func processingAnnotationWorkflowPath(path, workflowSourceRoot string) (display 
 	return display, false
 }
 
-func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
+func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext, checkSummary bool) string {
 	detail := diagnostic.Detail
 	message := diagnostic.Message
-	row := renderProcessingDiagnostic(diagnostic, sourceLinks)
+	row := renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
 	for len(row) > limit && detail != "" {
 		end := max(0, len(detail)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(detail[:end]) {
@@ -271,7 +279,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 			diagnostic.Detail = detail[:end] + "…"
 		}
 		detail = detail[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		row = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
 	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
@@ -280,7 +288,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 		}
 		diagnostic.Message = message[:end] + "…"
 		message = message[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
+		row = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
 	}
 	if len(row) > limit {
 		return ""
@@ -288,7 +296,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 	return row
 }
 
-func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
+func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext, checkSummary bool) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
 	out.WriteString("<div><div><strong>")
@@ -309,12 +317,20 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
 	}
 	if len(context) != 0 {
-		out.WriteString("<div><br>\n")
+		if checkSummary {
+			out.WriteString("<div><br>\n")
+		} else {
+			out.WriteString("<div class=\"mt1\">")
+		}
 		out.WriteString(strings.Join(context, " · "))
 		out.WriteString("</div>")
 	}
 	if len(details) != 0 {
-		out.WriteString("<div><br>\n")
+		if checkSummary {
+			out.WriteString("<div><br>\n")
+		} else {
+			out.WriteString("<div class=\"mt1\">")
+		}
 		for i, sentence := range details {
 			if i != 0 {
 				out.WriteString("<br>\n")
@@ -324,11 +340,19 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		out.WriteString("</div>")
 	}
 	if diagnostic.Detail != "" {
-		out.WriteString("<br>\n<details><summary>Diagnostic detail</summary><div><br>\n")
+		if checkSummary {
+			out.WriteString("<br>\n<details><summary>Diagnostic detail</summary><div><br>\n")
+		} else {
+			out.WriteString("<details class=\"mt1\"><summary>Diagnostic detail</summary><div class=\"mt1\">")
+		}
 		out.WriteString(annotationHTML(diagnostic.Detail))
 		out.WriteString("</div></details>")
 	}
-	out.WriteString("</div>\n<br>\n")
+	if checkSummary {
+		out.WriteString("</div>\n<br>\n")
+	} else {
+		out.WriteString("</div>\n")
+	}
 	return out.String()
 }
 
