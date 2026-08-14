@@ -1309,7 +1309,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if err != nil {
 			return result, err
 		}
-		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), OverrideGitHubServerURL: overridesGitHubServerURL(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		requirement := actionCacheRequirement(&lock)
+		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), CacheRequirement: requirement, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1331,7 +1332,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
-			javascript.CacheCredentialsRequired = requiresSetupCacheCredentials(lock, action, inputs)
+			javascript.CacheCredentialsRequired = requiresCacheCredentials(requirement, action, inputs)
 			invocation.action = javascript
 			node, err := r.discoverNode(ctx, major, explicit)
 			if err != nil {
@@ -1550,7 +1551,8 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := environment.process()
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheCredentialsRequired: actionLock != nil && requiresSetupCacheCredentials(*actionLock, action, inputs), OverrideGitHubServerURL: actionLock != nil && overridesGitHubServerURL(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		requirement := actionCacheRequirement(actionLock)
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheRequirement: requirement, CacheCredentialsRequired: requiresCacheCredentials(requirement, action, inputs), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1564,7 +1566,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// again with every main-visible effect committed.
 			javascript.Inputs = inputs
 			javascript.Env = environment.process()
-			javascript.CacheCredentialsRequired = actionLock != nil && requiresSetupCacheCredentials(*actionLock, action, inputs)
+			javascript.CacheCredentialsRequired = requiresCacheCredentials(javascript.CacheRequirement, action, inputs)
 			invocation.action = javascript
 		}
 		if !wasPrepared {

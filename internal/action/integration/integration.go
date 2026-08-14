@@ -89,12 +89,16 @@ const (
 	ServiceCache    Service = "cache"
 )
 
-// CacheRequirement identifies how an audited setup action enables its bundled
-// cache client. It is separate from ServiceCache because setup actions must
-// retain their ordinary environment rather than actions/cache isolation.
+// CacheRequirement identifies how an audited action enables its bundled cache
+// client. A requirement also opts the action into the synthetic
+// GITHUB_SERVER_URL needed for cache-v2 selection. It is separate from
+// ServiceCache because setup actions retain their ordinary environment rather
+// than actions/cache isolation. Before adding a requirement, confirm the
+// action and its bundled dependencies use GITHUB_SERVER_URL only for caching.
 type CacheRequirement string
 
 const (
+	CacheAlways     CacheRequirement = "always"
 	CacheBySelector CacheRequirement = "selector"
 	CacheByBoolean  CacheRequirement = "boolean"
 	CacheByNode     CacheRequirement = "node"
@@ -105,10 +109,6 @@ type Descriptor struct {
 	Adapter          Adapter
 	Service          Service
 	CacheRequirement CacheRequirement
-	// Before enabling OverrideGitHubServerURL, audit the action source and its
-	// bundled dependencies. Confirm GITHUB_SERVER_URL affects only caching
-	// behavior and is not load-bearing for any request the action makes.
-	OverrideGitHubServerURL bool
 }
 
 // UsesNativeAdapter reports whether the resolved identity replaces the
@@ -120,17 +120,17 @@ func UsesNativeAdapter(identity Identity) bool {
 
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, CacheRequirement: CacheAlways},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, CacheRequirement: CacheAlways},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, CacheRequirement: CacheAlways},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
-	{Source: "github", Repository: "actions/setup-node"}:                     {CacheRequirement: CacheByNode, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-java"}:                     {CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-python"}:                   {CacheRequirement: CacheBySelector, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-go"}:                       {CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheRequirement: CacheByBoolean, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-node"}:                     {CacheRequirement: CacheByNode},
+	{Source: "github", Repository: "actions/setup-java"}:                     {CacheRequirement: CacheBySelector},
+	{Source: "github", Repository: "actions/setup-python"}:                   {CacheRequirement: CacheBySelector},
+	{Source: "github", Repository: "actions/setup-go"}:                       {CacheRequirement: CacheByBoolean},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheRequirement: CacheByBoolean},
 }
 
 var checkoutCommits = map[string]string{

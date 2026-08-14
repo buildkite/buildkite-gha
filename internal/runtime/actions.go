@@ -103,10 +103,19 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func requiresSetupCacheCredentials(lock plan.ActionLock, action metadata.Metadata, inputs map[string]string) bool {
+func actionCacheRequirement(lock *plan.ActionLock) actionintegration.CacheRequirement {
+	if lock == nil {
+		return ""
+	}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+	return descriptor.CacheRequirement
+}
+
+func requiresCacheCredentials(requirement actionintegration.CacheRequirement, action metadata.Metadata, inputs map[string]string) bool {
 	cache := strings.TrimSpace(inputs["cache"])
-	switch descriptor.CacheRequirement {
+	switch requirement {
+	case actionintegration.CacheAlways:
+		return true
 	case actionintegration.CacheBySelector:
 		return cache != ""
 	case actionintegration.CacheByBoolean:
@@ -123,11 +132,6 @@ func requiresSetupCacheCredentials(lock plan.ActionLock, action metadata.Metadat
 	default:
 		return false
 	}
-}
-
-func overridesGitHubServerURL(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.OverrideGitHubServerURL
 }
 
 func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {

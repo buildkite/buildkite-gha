@@ -81,7 +81,7 @@ func workflowJob(t *testing.T, workspace string) plan.Job {
 	return plan.Job{Workflow: plan.Workflow{Path: ".github/workflows/test.yml", Digest: "sha256:" + hex.EncodeToString(h[:])}}
 }
 
-func TestRequiresSetupCacheCredentials(t *testing.T) {
+func TestRequiresCacheCredentials(t *testing.T) {
 	nodeAutomatic := metadata.Metadata{Inputs: map[string]metadata.Input{"package-manager-cache": {}}}
 	for _, test := range []struct {
 		name       string
@@ -92,6 +92,7 @@ func TestRequiresSetupCacheCredentials(t *testing.T) {
 		inputs     map[string]string
 		want       bool
 	}{
+		{name: "cache action", repository: "actions/cache", want: true},
 		{name: "node explicit", repository: "actions/setup-node", inputs: map[string]string{"cache": " npm "}, want: true},
 		{name: "node automatic", repository: "actions/setup-node", action: nodeAutomatic, inputs: map[string]string{"package-manager-cache": "TRUE"}, want: true},
 		{name: "node automatic empty", repository: "actions/setup-node", action: nodeAutomatic, inputs: map[string]string{"package-manager-cache": ""}, want: true},
@@ -113,8 +114,9 @@ func TestRequiresSetupCacheCredentials(t *testing.T) {
 				source = "github"
 			}
 			lock := plan.ActionLock{Source: source, Repository: test.repository, Path: test.path}
-			if got := requiresSetupCacheCredentials(lock, test.action, test.inputs); got != test.want {
-				t.Fatalf("requiresSetupCacheCredentials() = %t, want %t", got, test.want)
+			requirement := actionCacheRequirement(&lock)
+			if got := requiresCacheCredentials(requirement, test.action, test.inputs); got != test.want {
+				t.Fatalf("requiresCacheCredentials() = %t, want %t", got, test.want)
 			}
 		})
 	}

@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -148,8 +149,8 @@ type javaScriptAction struct {
 	Inputs                   map[string]string
 	Env                      map[string]string
 	Cache                    bool
+	CacheRequirement         actionintegration.CacheRequirement
 	CacheCredentialsRequired bool
-	OverrideGitHubServerURL  bool
 
 	nodeMajor       int
 	reference       string
@@ -643,7 +644,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	if action.Cache {
 		env = isolateCacheActionEnvironment(env)
 	}
-	if action.OverrideGitHubServerURL {
+	if action.CacheRequirement != "" {
 		applyGitHubServerURLOverride(env)
 	}
 	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
