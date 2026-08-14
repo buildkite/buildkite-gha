@@ -215,6 +215,20 @@ func TestTriggerFilterMismatchReason(t *testing.T) {
 			trigger: workflow.Trigger{Event: "push", Branches: []string{"main", "development"}},
 			event:   "push",
 			context: TriggerConditionContext{BranchValue: value("feature")},
+			want:    "Only runs on `main` or `development`.",
+		},
+		{
+			name:    "push branch mismatch with several configured branches",
+			trigger: workflow.Trigger{Event: "push", Branches: []string{"main", "development", "staging", "production"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("feature")},
+			want:    "Only runs on `main`, `development`, `staging`, or `production`.",
+		},
+		{
+			name:    "push branch exclusion mismatch",
+			trigger: workflow.Trigger{Event: "push", BranchesIgnore: []string{"feature"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("feature")},
 			want:    "Doesn’t run on the `feature` branch.",
 		},
 		{

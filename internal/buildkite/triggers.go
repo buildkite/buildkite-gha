@@ -123,6 +123,23 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, cont
 					return "", fmt.Errorf("push branches: %w", err)
 				}
 				if !matches {
+					if len(trigger.Branches) > 0 {
+						branches := make([]string, len(trigger.Branches))
+						for i, branch := range trigger.Branches {
+							if strings.HasPrefix(branch, "!") {
+								return fmt.Sprintf("Doesn’t run on the `%s` branch.", *context.BranchValue), nil
+							}
+							branches[i] = fmt.Sprintf("`%s`", branch)
+						}
+						if len(branches) == 1 {
+							return fmt.Sprintf("Only runs on %s.", branches[0]), nil
+						}
+						separator := " or "
+						if len(branches) > 2 {
+							separator = ", or "
+						}
+						return fmt.Sprintf("Only runs on %s%s%s.", strings.Join(branches[:len(branches)-1], ", "), separator, branches[len(branches)-1]), nil
+					}
 					return fmt.Sprintf("Doesn’t run on the `%s` branch.", *context.BranchValue), nil
 				}
 			}
