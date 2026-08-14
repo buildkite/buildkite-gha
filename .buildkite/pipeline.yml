@@ -1,4 +1,5 @@
 env:
+  COMPATIBILITY_PROOF: "skipped-workflow-annotation"
   MISE_JOBS: "1"
   MISE_LOCKED: "1"
 
@@ -16,7 +17,7 @@ steps:
           set -euo pipefail
           proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
           case "$$proof" in
-            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|upload-artifact|artifact-roundtrip) ;;
+            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|upload-artifact|artifact-roundtrip|skipped-workflow-annotation) ;;
             *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
           esac
           buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
