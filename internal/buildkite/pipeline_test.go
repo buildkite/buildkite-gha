@@ -295,6 +295,52 @@ func TestEmitAggregateOriginWorkflowChecks(t *testing.T) {
 	}
 }
 
+func TestEmitAggregateWorkflowChecksRequireUniqueJobIdentities(t *testing.T) {
+	pipeline := Pipeline{
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
+		EventProvider:      "github",
+		Workflows: []Workflow{{
+			GroupLabel: "Bun",
+			GroupKey:   "gha-workflow-1111111111111111",
+			Event:      "push",
+			Condition:  "true",
+			Jobs: []Job{
+				{Key: "first", Label: "Test", CheckLabel: "first", PlanDigest: testDigest("first")},
+				{Key: "second", Label: "Test", CheckLabel: "second", PlanDigest: testDigest("second")},
+			},
+		}},
+	}
+	output, err := Emit(pipeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Steps []struct {
+			Steps []struct {
+				Notify []struct {
+					GitHubCheck struct {
+						Name string `yaml:"name"`
+					} `yaml:"github_check"`
+				} `yaml:"notify"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(output, &document); err != nil {
+		t.Fatal(err)
+	}
+	steps := document.Steps[0].Steps
+	if len(steps) != 2 || steps[0].Notify[0].GitHubCheck.Name != "Bun / first (push)" || steps[1].Notify[0].GitHubCheck.Name != "Bun / second (push)" {
+		t.Fatalf("job check names = %#v\n%s", steps, output)
+	}
+
+	pipeline.Workflows[0].Jobs[0].CheckLabel = ""
+	pipeline.Workflows[0].Jobs[1].CheckLabel = ""
+	if _, err := Emit(pipeline); err == nil || !strings.Contains(err.Error(), `share provider check label "Test"`) {
+		t.Fatalf("duplicate provider check label error = %v", err)
+	}
+}
+
 func TestEmitAggregateSkippedWorkflowStep(t *testing.T) {
 	output, err := Emit(Pipeline{
 		CompilerStep:  "importer",

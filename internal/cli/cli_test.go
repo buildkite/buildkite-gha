@@ -3697,6 +3697,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	}
 	wantLabels := []string{"bounded multi-prefix artifact selection", "actions/cache v5 proof", "actions/cache v6 proof", "buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
 	seenKeys := make(map[string]bool)
+	seenCheckNames := make(map[string]bool)
 	for i, group := range pipeline.Steps {
 		if i >= len(inputs) {
 			t.Fatalf("unexpected aggregate group %d = %#v", i, group)
@@ -3706,11 +3707,15 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 		}
 		prefix := "gha-" + inputs[i].Identity + "-"
 		for _, step := range group.Steps {
-			wantCheckName := wantLabels[i] + " / " + step.Label + " (push)"
-			if !strings.HasPrefix(step.Key, prefix) || seenKeys[step.Key] || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Name != wantCheckName {
+			if len(step.Notify) != 1 {
+				t.Fatalf("aggregate step %q notifications = %#v", step.Key, step.Notify)
+			}
+			checkName := step.Notify[0].GitHubCheck.Name
+			if !strings.HasPrefix(step.Key, prefix) || seenKeys[step.Key] || seenCheckNames[checkName] || !strings.HasPrefix(checkName, wantLabels[i]+" / ") || !strings.HasSuffix(checkName, " (push)") {
 				t.Fatalf("aggregate step key %q, prefix %q, seen %t", step.Key, prefix, seenKeys[step.Key])
 			}
 			seenKeys[step.Key] = true
+			seenCheckNames[checkName] = true
 			for _, dependency := range step.DependsOn {
 				if dependency.Step == "aggregate-importer" || !strings.HasPrefix(dependency.Step, prefix) {
 					t.Fatalf("step %q has cross-workflow or unnamespaced dependency %q", step.Key, dependency.Step)
@@ -4898,7 +4903,7 @@ func TestRunUploadSkipsReusableOnlyMatchButCompilesItThroughCaller(t *testing.T)
 	for _, workflow := range pipeline.Steps {
 		switch workflow.Group {
 		case ":github: Caller":
-			if workflow.Skip != "" || workflow.DependsOn != "reusable-importer" || workflow.Notify != nil || len(workflow.Steps) != 1 || !strings.HasPrefix(workflow.Steps[0].Key, "gha-") || len(workflow.Steps[0].Notify) != 1 || workflow.Steps[0].Notify[0].GitHubCheck.Name != "Caller / imported / shared (push)" {
+			if workflow.Skip != "" || workflow.DependsOn != "reusable-importer" || workflow.Notify != nil || len(workflow.Steps) != 1 || !strings.HasPrefix(workflow.Steps[0].Key, "gha-") || len(workflow.Steps[0].Notify) != 1 || workflow.Steps[0].Notify[0].GitHubCheck.Name != "Caller / imported.shared (push)" {
 				t.Fatalf("caller group = %#v", workflow)
 			}
 		case "":

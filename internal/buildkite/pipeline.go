@@ -103,6 +103,7 @@ func MiseDataDir(platforms ...string) string {
 type Job struct {
 	Key                string
 	Label              string
+	CheckLabel         string
 	Queue              string
 	Platform           string
 	DistributionDigest string
@@ -194,6 +195,7 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		checkLabels := make(map[string]string, len(jobs))
 		if err := validateConcurrencyGate(workflow.ConcurrencyGate); err != nil {
 			return nil, err
 		}
@@ -202,6 +204,16 @@ func Emit(pipeline Pipeline) ([]byte, error) {
 				return nil, fmt.Errorf("generated step key %q collides with %s", job.Key, owner)
 			}
 			usedKeys[job.Key] = "generated job"
+			if aggregate {
+				checkLabel := job.CheckLabel
+				if checkLabel == "" {
+					checkLabel = job.Label
+				}
+				if owner, exists := checkLabels[checkLabel]; exists {
+					return nil, fmt.Errorf("workflow %q jobs %q and %q share provider check label %q", workflow.GroupKey, owner, job.Key, checkLabel)
+				}
+				checkLabels[checkLabel] = job.Key
+			}
 			if owner, exists := usedDigests[job.PlanDigest]; exists {
 				return nil, fmt.Errorf("jobs %q and %q share plan digest %s", owner, job.Key, job.PlanDigest)
 			}
@@ -378,7 +390,11 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if workflow.Aggregate {
-			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, job.Label, "", "")
+			checkLabel := job.CheckLabel
+			if checkLabel == "" {
+				checkLabel = job.Label
+			}
+			emitWorkflowCheck(out, attributeIndent, pipeline.EventProvider, workflow, job.Key, checkLabel, "", "")
 		}
 		if job.Queue != "" {
 			_, _ = fmt.Fprintf(out, "%sagents:\n", attributeIndent)

@@ -1824,6 +1824,30 @@ func instanceLabel(job workflow.Job, matrix map[string]any, context expression.C
 	if len(matrix) == 0 {
 		return label
 	}
+	return matrixInstanceLabel(label, matrix)
+}
+
+func instanceCheckLabel(job JobInstance) string {
+	if len(job.Matrix) == 0 {
+		return job.LogicalJobID
+	}
+	keys := make([]string, 0, len(job.Matrix))
+	for key := range job.Matrix {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	values := make([]string, 0, len(keys))
+	for _, key := range keys {
+		encoded, _ := json.Marshal(job.Matrix[key])
+		values = append(values, key+"="+string(encoded))
+	}
+	return job.LogicalJobID + " (" + strings.Join(values, ", ") + ")"
+}
+
+func matrixInstanceLabel(label string, matrix map[string]any) string {
+	if len(matrix) == 0 {
+		return label
+	}
 	keys := make([]string, 0, len(matrix))
 	for key := range matrix {
 		keys = append(keys, key)
