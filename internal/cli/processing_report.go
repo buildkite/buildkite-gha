@@ -20,6 +20,7 @@ import (
 
 const (
 	processingAnnotationContext   = "buildkite-gha-processing"
+	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
 	processingAnnotationBodyLimit = 1024 * 1024
 	processingAnnotationEnd       = "</div>\n"
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
@@ -34,6 +35,8 @@ type processingOutput struct {
 	stderr        io.Writer
 	observe       func(compatibility.ProcessingReport)
 	annotationJob string
+	buildURL      string
+	stepID        string
 	agent         transport.Agent
 }
 
@@ -41,6 +44,8 @@ func newProcessingOutput(command, format string, reports, stderr io.Writer, agen
 	out := processingOutput{command: command, format: format, reports: reports, stderr: stderr}
 	if os.Getenv("BUILDKITE") == "true" && os.Getenv("BUILDKITE_JOB_ID") != "" {
 		out.annotationJob = os.Getenv("BUILDKITE_JOB_ID")
+		out.buildURL = os.Getenv("BUILDKITE_BUILD_URL")
+		out.stepID = os.Getenv("BUILDKITE_STEP_ID")
 		out.agent = agent
 	}
 	return out
@@ -72,6 +77,36 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 	if err := o.agent.AnnotateJob(context.Background(), o.annotationJob, annotationContext, style, body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: processing annotation: %v\n", o.command, err)
 	}
+}
+
+func (o processingOutput) annotateSkippedWorkflows(event string, labels []string) {
+	body := skippedWorkflowsAnnotation(event, labels, o.buildURL, o.stepID)
+	if o.annotationJob == "" || body == "" {
+		return
+	}
+	if err := o.agent.AnnotateJob(context.Background(), o.annotationJob, skippedWorkflowsContext, "info", body); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: skipped workflows annotation: %v\n", o.command, err)
+	}
+}
+
+func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID string) string {
+	if len(labels) == 0 || buildURL == "" || stepID == "" {
+		return ""
+	}
+	annotationURL := fmt.Sprintf("%s/canvas?sid=%s&tab=annotations&open=false", strings.TrimRight(buildURL, "/"), stepID)
+	var out strings.Builder
+	if len(labels) == 1 {
+		out.WriteString("#### 1 workflow was skipped\n\n")
+	} else {
+		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(labels))
+	}
+	_, _ = fmt.Fprintf(&out, "These workflows are not triggered by a <code>%s</code> event:\n\n", annotationHTML(event))
+	for _, label := range labels {
+		label = annotationHTML(strings.Join(strings.Fields(label), " "))
+		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
+		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s)\n", label, annotationURL)
+	}
+	return out.String()
 }
 
 func processingAnnotation(report compatibility.ProcessingReport) (style, body string) {

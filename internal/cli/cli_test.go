@@ -4195,6 +4195,9 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_ID", cliTestBuildID)
 	t.Setenv("BUILDKITE_STEP_KEY", "no-applicable-importer")
 	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
 	var stdout, stderr bytes.Buffer
@@ -4214,17 +4217,68 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 			Steps   []any  `yaml:"steps"`
 		} `yaml:"steps"`
 	}
-	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+	var pipelineSource []byte
+	var annotation *cliCommand
+	for i := range runner.commands {
+		command := &runner.commands[i]
+		if slices.Equal(command.args, []string{"pipeline", "upload", "--no-interpolation", "--reject-secrets"}) {
+			pipelineSource = command.stdin
+		}
+		if len(command.args) > 0 && command.args[0] == "annotate" {
+			annotation = command
+		}
+	}
+	if err := yaml.Unmarshal(pipelineSource, &pipeline); err != nil {
 		t.Fatal(err)
 	}
 	wantLabel := filepath.ToSlash(filepath.Clean(workflowPath))
 	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Type != "command" || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != "" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
+	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", []string{wantLabel}, "https://buildkite.com/acme/widgets/builds/42", cliTestBuildID) {
+		t.Fatalf("skipped workflow annotation = %#v", annotation)
+	}
 	for path := range runner.uploaded {
 		if strings.HasSuffix(path, ".json") {
 			t.Fatalf("ignored workflow compiled plan %q", path)
 		}
+	}
+}
+
+func TestSkippedWorkflowsAnnotation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{
+			name:   "singular",
+			labels: []string{"CI"},
+			want: "#### 1 workflow was skipped\n\n" +
+				"These workflows are not triggered by a <code>push</code> event:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+		},
+		{
+			name:   "plural",
+			labels: []string{"CI", "Release [production]"},
+			want: "#### 2 workflows were skipped\n\n" +
+				"These workflows are not triggered by a <code>push</code> event:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n" +
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := skippedWorkflowsAnnotation(
+				"push",
+				test.labels,
+				"https://buildkite.com/acme/widgets/builds/42",
+				"11111111-1111-4111-8111-111111111111",
+			)
+			if body != test.want {
+				t.Fatalf("skipped workflow annotation = %q, want %q", body, test.want)
+			}
+		})
 	}
 }
 
