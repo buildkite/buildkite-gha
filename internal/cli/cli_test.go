@@ -4546,8 +4546,8 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
-	wantBody := skippedWorkflowsAnnotation("push", []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key}}, "https://buildkite.com/acme/widgets/builds/42")
-	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != wantBody {
+	wantWorkflows := []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key, reason: "This workflow is not triggered by a `push` event"}}
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", wantWorkflows, "https://buildkite.com/acme/widgets/builds/42") {
 		t.Fatalf("skipped workflow annotation = %#v", annotation)
 	}
 	for path := range runner.uploaded {
@@ -4555,6 +4555,35 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 			t.Fatalf("ignored workflow compiled plan %q", path)
 		}
 	}
+}
+
+func TestRunUploadExplainsWhenWorkflowTriggerFiltersDoNotMatch(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml": "name: CI\non:\n  push:\n    branches: [main, development]\n  workflow_dispatch:\n  pull_request:\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps: [{run: yarn lint}]\n",
+	})
+	eventPath := writeUploadEvent(t, repository, "push", "refs/heads/feature", map[string]any{})
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_ID", cliTestBuildID)
+	t.Setenv("BUILDKITE_STEP_KEY", "filter-mismatch-importer")
+	runner := &cliCaptureRunner{webhookErr: errors.New("metadata must not be read with --event-path")}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/ci.yml"}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, command := range runner.commands {
+		if slices.Equal(command.args, []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}) {
+			body := string(command.stdin)
+			if !strings.Contains(body, "#### 1 workflow was skipped") || !strings.Contains(body, ":github: CI") || !strings.Contains(body, "Only runs on `main` or `development`.") {
+				t.Fatalf("skipped workflow annotation = %q", body)
+			}
+			return
+		}
+	}
+	t.Fatal("skipped workflow annotation was not published")
 }
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
@@ -4565,21 +4594,21 @@ func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	}{
 		{
 			name:      "singular",
-			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci"}},
+			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci", reason: "This workflow is not triggered by a `push` event"}},
 			want: "#### 1 workflow was skipped\n\n" +
-				"These workflows are not triggered by a <code>push</code> event:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false)\n",
+				"The current <code>push</code> event does not match these workflows:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — This workflow is not triggered by a `push` event\n",
 		},
 		{
 			name: "plural",
 			workflows: []skippedWorkflow{
-				{label: "CI", key: "gha-workflow-ci"},
-				{label: "Release [production]", key: "gha-workflow-release?production"},
+				{label: "CI", key: "gha-workflow-ci", reason: "Only runs on `main` or `development`."},
+				{label: "Release [production]", key: "gha-workflow-release?production", reason: "This workflow is not triggered by a `push` event"},
 			},
 			want: "#### 2 workflows were skipped\n\n" +
-				"These workflows are not triggered by a <code>push</code> event:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false)\n" +
-				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false)\n",
+				"The current <code>push</code> event does not match these workflows:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false) — Only runs on `main` or `development`.\n" +
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false) — This workflow is not triggered by a `push` event\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

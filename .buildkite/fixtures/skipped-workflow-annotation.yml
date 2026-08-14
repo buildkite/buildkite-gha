@@ -1,0 +1,13 @@
+name: Branch-filtered workflow
+
+on:
+  push:
+    branches: [main, development]
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint

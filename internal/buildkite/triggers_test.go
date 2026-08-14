@@ -201,6 +201,87 @@ func TestTriggerEventSkipReason(t *testing.T) {
 	}
 }
 
+func TestTriggerFilterMismatchReason(t *testing.T) {
+	value := func(value string) *string { return &value }
+	for _, test := range []struct {
+		name    string
+		trigger workflow.Trigger
+		event   string
+		context TriggerConditionContext
+		want    string
+	}{
+		{
+			name:    "push branch mismatch",
+			trigger: workflow.Trigger{Event: "push", Branches: []string{"main", "development"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("feature")},
+			want:    "Only runs on `main` or `development`.",
+		},
+		{
+			name:    "push branch mismatch with several configured branches",
+			trigger: workflow.Trigger{Event: "push", Branches: []string{"main", "development", "staging", "production"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("feature")},
+			want:    "Only runs on `main`, `development`, `staging`, or `production`.",
+		},
+		{
+			name:    "push branch exclusion mismatch",
+			trigger: workflow.Trigger{Event: "push", BranchesIgnore: []string{"feature"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("feature")},
+			want:    "Doesn’t run on the `feature` branch.",
+		},
+		{
+			name:    "ordered push branch match",
+			trigger: workflow.Trigger{Event: "push", Branches: []string{"release/**", "!release/**-alpha", "release/special-alpha"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("release/special-alpha")},
+		},
+		{
+			name:    "push tag mismatch",
+			trigger: workflow.Trigger{Event: "push", TagsIgnore: []string{"v0"}},
+			event:   "push",
+			context: TriggerConditionContext{TagValue: value("v0")},
+			want:    `Tag "v0" does not match this workflow's push tag filters.`,
+		},
+		{
+			name:    "branch push with only tag filters",
+			trigger: workflow.Trigger{Event: "push", Tags: []string{"v*"}},
+			event:   "push",
+			context: TriggerConditionContext{BranchValue: value("main")},
+			want:    `Branch push "main" does not match this workflow's push tag filters.`,
+		},
+		{
+			name:    "tag push with only branch filters",
+			trigger: workflow.Trigger{Event: "push", Branches: []string{"main"}},
+			event:   "push",
+			context: TriggerConditionContext{TagValue: value("v1")},
+			want:    `Tag push "v1" does not match this workflow's push branch filters.`,
+		},
+		{
+			name:    "pull request base mismatch",
+			trigger: workflow.Trigger{Event: "pull_request", Branches: []string{"main"}},
+			event:   "pull_request",
+			context: TriggerConditionContext{PullRequestBaseValue: value("development"), PullRequestActionValue: value("opened")},
+			want:    `Base branch "development" does not match this workflow's pull_request branch filters.`,
+		},
+		{
+			name:    "pull request activity mismatch",
+			trigger: workflow.Trigger{Event: "pull_request"},
+			event:   "pull_request",
+			context: TriggerConditionContext{PullRequestActionValue: value("closed")},
+			want:    `Pull request activity "closed" does not match this workflow's pull_request activity filters.`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := TriggerFilterMismatchReason([]workflow.Trigger{test.trigger}, test.event, test.context)
+			if err != nil || got != test.want {
+				t.Fatalf("TriggerFilterMismatchReason() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestTranslatePushSeparatesBranchAndTagFilters(t *testing.T) {
 	condition, err := TranslateTriggerCondition([]workflow.Trigger{{
 		Event:    "push",
