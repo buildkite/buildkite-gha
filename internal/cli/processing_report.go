@@ -38,7 +38,6 @@ type processingOutput struct {
 	observe       func(compatibility.ProcessingReport)
 	annotationJob string
 	buildURL      string
-	stepID        string
 	agent         transport.Agent
 	sourceLinks   sourceLinkContext
 }
@@ -79,7 +78,6 @@ func newProcessingOutput(command, format string, reports, stderr io.Writer, agen
 	if os.Getenv("BUILDKITE") == "true" && os.Getenv("BUILDKITE_JOB_ID") != "" {
 		out.annotationJob = os.Getenv("BUILDKITE_JOB_ID")
 		out.buildURL = os.Getenv("BUILDKITE_BUILD_URL")
-		out.stepID = os.Getenv("BUILDKITE_STEP_ID")
 		out.agent = agent
 	}
 	return out
@@ -113,8 +111,13 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 	}
 }
 
-func (o processingOutput) annotateSkippedWorkflows(event string, labels []string) {
-	body := skippedWorkflowsAnnotation(event, labels, o.buildURL, o.stepID)
+type skippedWorkflow struct {
+	label string
+	key   string
+}
+
+func (o processingOutput) annotateSkippedWorkflows(event string, workflows []skippedWorkflow) {
+	body := skippedWorkflowsAnnotation(event, workflows, o.buildURL)
 	if o.annotationJob == "" || body == "" {
 		return
 	}
@@ -123,20 +126,20 @@ func (o processingOutput) annotateSkippedWorkflows(event string, labels []string
 	}
 }
 
-func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID string) string {
-	if len(labels) == 0 || buildURL == "" || stepID == "" {
+func skippedWorkflowsAnnotation(event string, workflows []skippedWorkflow, buildURL string) string {
+	if len(workflows) == 0 || buildURL == "" {
 		return ""
 	}
-	annotationURL := fmt.Sprintf("%s/canvas?sid=%s&tab=annotations&open=false", strings.TrimRight(buildURL, "/"), stepID)
 	var out strings.Builder
-	if len(labels) == 1 {
+	if len(workflows) == 1 {
 		out.WriteString("#### 1 workflow was skipped\n\n")
 	} else {
-		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(labels))
+		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(workflows))
 	}
 	_, _ = fmt.Fprintf(&out, "These workflows are not triggered by a <code>%s</code> event:\n\n", annotationHTML(event))
-	for _, label := range labels {
-		label = annotationHTML(strings.Join(strings.Fields(label), " "))
+	for _, workflow := range workflows {
+		annotationURL := fmt.Sprintf("%s/canvas?key=%s&open=false", strings.TrimRight(buildURL, "/"), url.QueryEscape(workflow.key))
+		label := annotationHTML(strings.Join(strings.Fields(workflow.label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)
 		_, _ = fmt.Fprintf(&out, "* [:github: %s](%s)\n", label, annotationURL)
 	}

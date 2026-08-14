@@ -4521,6 +4521,7 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		Steps []struct {
 			Group   string `yaml:"group"`
 			Label   string `yaml:"label"`
+			Key     string `yaml:"key"`
 			Type    string `yaml:"type"`
 			Skip    string `yaml:"skip"`
 			Command string `yaml:"command"`
@@ -4542,11 +4543,12 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLabel := filepath.ToSlash(filepath.Clean(workflowPath))
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Type != "command" || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != "" || len(pipeline.Steps[0].Steps) != 0 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != "" || pipeline.Steps[0].Label != ":github: "+wantLabel || pipeline.Steps[0].Key == "" || pipeline.Steps[0].Type != "command" || pipeline.Steps[0].Skip != "This workflow is not triggered by a `push` event" || pipeline.Steps[0].Command != "" || len(pipeline.Steps[0].Steps) != 0 {
 		t.Fatalf("ignored-only pipeline = %#v", pipeline.Steps)
 	}
 	wantAnnotationArgs := []string{"annotate", "--scope", "job", "--job", cliTestJobID, "--context", skippedWorkflowsContext, "--style", "info"}
-	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != skippedWorkflowsAnnotation("push", []string{wantLabel}, "https://buildkite.com/acme/widgets/builds/42", cliTestBuildID) {
+	wantBody := skippedWorkflowsAnnotation("push", []skippedWorkflow{{label: wantLabel, key: pipeline.Steps[0].Key}}, "https://buildkite.com/acme/widgets/builds/42")
+	if annotation == nil || !slices.Equal(annotation.args, wantAnnotationArgs) || string(annotation.stdin) != wantBody {
 		t.Fatalf("skipped workflow annotation = %#v", annotation)
 	}
 	for path := range runner.uploaded {
@@ -4558,32 +4560,34 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		labels []string
-		want   string
+		name      string
+		workflows []skippedWorkflow
+		want      string
 	}{
 		{
-			name:   "singular",
-			labels: []string{"CI"},
+			name:      "singular",
+			workflows: []skippedWorkflow{{label: "CI", key: "gha-workflow-ci"}},
 			want: "#### 1 workflow was skipped\n\n" +
 				"These workflows are not triggered by a <code>push</code> event:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false)\n",
 		},
 		{
-			name:   "plural",
-			labels: []string{"CI", "Release [production]"},
+			name: "plural",
+			workflows: []skippedWorkflow{
+				{label: "CI", key: "gha-workflow-ci"},
+				{label: "Release [production]", key: "gha-workflow-release?production"},
+			},
 			want: "#### 2 workflows were skipped\n\n" +
 				"These workflows are not triggered by a <code>push</code> event:\n\n" +
-				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n" +
-				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-ci&open=false)\n" +
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?key=gha-workflow-release%3Fproduction&open=false)\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body := skippedWorkflowsAnnotation(
 				"push",
-				test.labels,
+				test.workflows,
 				"https://buildkite.com/acme/widgets/builds/42",
-				"11111111-1111-4111-8111-111111111111",
 			)
 			if body != test.want {
 				t.Fatalf("skipped workflow annotation = %q, want %q", body, test.want)
