@@ -4793,6 +4793,44 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	}
 }
 
+func TestRunUploadDefaultsHostedToolchainImageWithoutRunnerQueue(t *testing.T) {
+	requireImporterHost(t)
+	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
+	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "default-image-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	var pipeline struct {
+		Steps []struct {
+			Steps []struct {
+				Key     string            `yaml:"key"`
+				Image   string            `yaml:"image"`
+				Agents  map[string]string `yaml:"agents"`
+				Command string            `yaml:"command"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatalf("uploaded pipeline YAML: %v", err)
+	}
+	if len(pipeline.Steps) != 1 || len(pipeline.Steps[0].Steps) != 3 {
+		t.Fatalf("uploaded steps = %#v", pipeline.Steps)
+	}
+	for _, step := range pipeline.Steps[0].Steps {
+		if len(step.Agents) != 0 {
+			t.Fatalf("step %q agents = %#v, want default targeting", step.Key, step.Agents)
+		}
+		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+			t.Fatalf("step %q image = %q, command = %q", step.Key, step.Image, step.Command)
+		}
+	}
+}
+
 func TestRunUploadUsesExplicitRuntimeImage(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
@@ -4877,8 +4915,8 @@ jobs:
 	if selected.Image != image || selected.Agents["queue"] != "hosted" || !strings.Contains(selected.Command, "--hosted-tool-cache") {
 		t.Fatalf("selected profile step = %#v", selected)
 	}
-	if defaulted.Image != "" || len(defaulted.Agents) != 0 || strings.Contains(defaulted.Command, "--hosted-tool-cache") {
-		t.Fatalf("unmapped Linux step inherited selected profile = %#v", defaulted)
+	if defaulted.Image != defaultJammyRunnerImage || len(defaulted.Agents) != 0 || !strings.Contains(defaulted.Command, "--hosted-tool-cache") {
+		t.Fatalf("unmapped Linux step = %#v, want default targeting with the Jammy hosted-toolchains image", defaulted)
 	}
 }
 

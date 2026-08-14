@@ -70,7 +70,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Configured Linux profiles default to the matching immutable hosted-toolchains image; --runner-image overrides it. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain their default targeting, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -2305,10 +2305,13 @@ func (a *actionSourceAuthentication) warnAnonymousFallback(reason string) {
 }
 
 func hostedOptions(groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string) compiler.Options {
+	// Unmapped Linux labels keep Buildkite default agent targeting but still
+	// select the matching hosted-toolchains image, so ubuntu-latest jobs get
+	// GitHub-comparable tooling without an explicit runners mapping.
 	targets := map[string]compiler.RunnerTarget{
-		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64},
-		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64},
-		"ubuntu-22.04":  {Platform: compiler.PlatformLinuxAMD64},
+		"ubuntu-latest": {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
+		"ubuntu-24.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultNobleRunnerImage},
+		"ubuntu-22.04":  {Platform: compiler.PlatformLinuxAMD64, Image: defaultJammyRunnerImage},
 	}
 	for label, target := range configuredTargets {
 		targets[label] = target

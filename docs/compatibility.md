@@ -310,11 +310,11 @@ Results and outputs come from verified producer manifests. Retrying one producer
 
 A job with `continue-on-error: true` stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
 
-Runner labels do not select GitHub images. Configured Linux profiles default to
-the corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
-image overrides it. Unmapped Linux labels use default Buildkite targeting
-without an image. macOS labels require a runner profile with a native queue and
-reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
+Runner labels do not select GitHub images. Linux labels default to the
+corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
+image overrides it for a configured profile. Unmapped Linux labels use default
+Buildkite agent targeting with that image. macOS labels require a runner
+profile with a native queue and reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
 
 ### Matrix strategies
 
@@ -688,13 +688,13 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Runner tools
 
-Configured Linux profiles use the corresponding Noble or Jammy
-hosted-toolchains image. Unmapped Linux and macOS agents must provide tools used
-by shell steps. These images do not provide GitHub image parity. The runtime
+Linux labels use the corresponding Noble or Jammy hosted-toolchains image.
+macOS agents must provide tools used by shell steps. These images do not provide GitHub image parity. The runtime
 sets `RUNNER_OS` and `RUNNER_ARCH` to `Linux`/`X64` or `macOS`/`ARM64`.
 
-`RUNNER_TOOL_CACHE` is job-private unless a Linux runner profile selects an
-immutable image with `/opt/hostedtoolcache`. macOS images are unsupported.
+`RUNNER_TOOL_CACHE` is job-private unless the Linux job selects an immutable
+image with `/opt/hostedtoolcache`, which the default and configured
+hosted-toolchains images provide. macOS images are unsupported.
 
 ### Results, retries, and cancellation
 
