@@ -246,8 +246,8 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
 		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
 		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
-		{name: "untrusted default targeting", labels: []string{"default"}, trust: EventUntrusted, want: "Map runs-on to a queue allowed"},
-		{name: "untrusted queue", labels: []string{"ubuntu-24.04"}, trust: EventUntrusted, want: "Add the queue"},
+		{name: "untrusted default targeting", labels: []string{"default"}, trust: EventUntrusted, want: "Use a runner label allowed for untrusted events"},
+		{name: "untrusted queue", labels: []string{"ubuntu-24.04"}, trust: EventUntrusted, want: "ask an administrator to allow its queue"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -260,6 +260,18 @@ func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T)
 				t.Fatalf("runnerRejectionDiagnostic() = %q, want %q", message, test.want)
 			}
 		})
+	}
+}
+
+func TestRunnerRejectionDiagnosticOmitsIrrelevantAllowlistForDuplicateLabel(t *testing.T) {
+	policy := RunnerPolicy{Labels: map[string]string{"ubuntu-24.04": "linux"}}
+	_, err := policy.resolve([]string{"ubuntu-24.04", "ubuntu-24.04"}, EventTrusted)
+	if err == nil {
+		t.Fatal("resolve() error = nil, want duplicate-label rejection")
+	}
+	message, detail := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-24.04"}, nil)
+	if message != "runs-on contains a duplicate runner label. Remove duplicate labels from runs-on." || detail != "" {
+		t.Fatalf("runnerRejectionDiagnostic() = %q, %q", message, detail)
 	}
 }
 
