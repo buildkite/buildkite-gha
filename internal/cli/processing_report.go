@@ -95,7 +95,12 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 	}
 	annotationURL := fmt.Sprintf("%s/canvas?sid=%s&tab=annotations&open=false", strings.TrimRight(buildURL, "/"), stepID)
 	var out strings.Builder
-	_, _ = fmt.Fprintf(&out, "#### These workflows didn’t run because %s didn’t trigger them.\n", annotationHTML(event))
+	if len(labels) == 1 {
+		out.WriteString("#### 1 workflow was skipped\n\n")
+	} else {
+		_, _ = fmt.Fprintf(&out, "#### %d workflows were skipped\n\n", len(labels))
+	}
+	_, _ = fmt.Fprintf(&out, "These workflows are not triggered by a <code>%s</code> event:\n\n", annotationHTML(event))
 	for _, label := range labels {
 		label = annotationHTML(strings.Join(strings.Fields(label), " "))
 		label = strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]").Replace(label)

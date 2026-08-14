@@ -4228,17 +4228,38 @@ func TestRunUploadExplainsWhenNoWorkflowsApply(t *testing.T) {
 }
 
 func TestSkippedWorkflowsAnnotation(t *testing.T) {
-	body := skippedWorkflowsAnnotation(
-		"push",
-		[]string{"CI", "Release [production]"},
-		"https://buildkite.com/acme/widgets/builds/42",
-		"11111111-1111-4111-8111-111111111111",
-	)
-	want := "#### These workflows didn’t run because push didn’t trigger them.\n" +
-		"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n" +
-		"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n"
-	if body != want {
-		t.Fatalf("skipped workflow annotation = %q, want %q", body, want)
+	for _, test := range []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{
+			name:   "singular",
+			labels: []string{"CI"},
+			want: "#### 1 workflow was skipped\n\n" +
+				"These workflows are not triggered by a <code>push</code> event:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+		},
+		{
+			name:   "plural",
+			labels: []string{"CI", "Release [production]"},
+			want: "#### 2 workflows were skipped\n\n" +
+				"These workflows are not triggered by a <code>push</code> event:\n\n" +
+				"* [:github: CI](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n" +
+				"* [:github: Release \\[production\\]](https://buildkite.com/acme/widgets/builds/42/canvas?sid=11111111-1111-4111-8111-111111111111&tab=annotations&open=false)\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := skippedWorkflowsAnnotation(
+				"push",
+				test.labels,
+				"https://buildkite.com/acme/widgets/builds/42",
+				"11111111-1111-4111-8111-111111111111",
+			)
+			if body != test.want {
+				t.Fatalf("skipped workflow annotation = %q, want %q", body, test.want)
+			}
+		})
 	}
 }
 
