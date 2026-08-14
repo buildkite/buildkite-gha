@@ -11,7 +11,7 @@ import (
 
 // ProcessingSchema is the versioned, stage-oriented report shared by all
 // workflow-processing commands.
-const ProcessingSchema = "buildkite-gha/processing-report/v1"
+const ProcessingSchema = "buildkite-gha/processing-report/v2"
 
 const (
 	Passed       = "passed"
@@ -33,6 +33,7 @@ type Diagnostic struct {
 	Category string          `json:"category,omitempty"`
 	Stage    string          `json:"stage,omitempty"`
 	Message  string          `json:"message"`
+	Detail   string          `json:"detail,omitempty"`
 	Location *SourceLocation `json:"location,omitempty"`
 	Job      string          `json:"job,omitempty"`
 	Instance string          `json:"instance,omitempty"`
@@ -183,7 +184,10 @@ func (r *ProcessingReport) Finalize() {
 		if left.Code != right.Code {
 			return left.Code < right.Code
 		}
-		return left.Message < right.Message
+		if left.Message != right.Message {
+			return left.Message < right.Message
+		}
+		return left.Detail < right.Detail
 	})
 	r.Diagnostics = compactDiagnostics(r.Diagnostics)
 }
@@ -193,8 +197,8 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 		return diagnostics
 	}
 	type diagnosticKey struct {
-		level, code, category, stage, message, job, action, location string
-		step                                                         int
+		level, code, category, stage, message, detail, job, action, location string
+		step                                                                 int
 	}
 	type matrixDiagnostic struct {
 		index     int
@@ -205,7 +209,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 	for _, diagnostic := range diagnostics {
 		key := diagnosticKey{
 			level: diagnostic.Level, code: diagnostic.Code, category: diagnostic.Category,
-			stage: diagnostic.Stage, message: diagnostic.Message, job: diagnostic.Job,
+			stage: diagnostic.Stage, message: diagnostic.Message, detail: diagnostic.Detail, job: diagnostic.Job,
 			action: diagnostic.Action, step: diagnostic.Step,
 		}
 		if diagnostic.Location != nil {
@@ -240,7 +244,7 @@ func compactDiagnostics(diagnostics []Diagnostic) []Diagnostic {
 }
 
 func sameDiagnostic(left, right Diagnostic) bool {
-	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Message == right.Message && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
+	return left.Level == right.Level && left.Code == right.Code && left.Category == right.Category && left.Stage == right.Stage && left.Message == right.Message && left.Detail == right.Detail && left.Job == right.Job && left.Instance == right.Instance && left.Action == right.Action && left.Step == right.Step && sameLocation(left.Location, right.Location)
 }
 
 func sameLocation(left, right *SourceLocation) bool {
@@ -294,6 +298,11 @@ func WriteProcessing(w io.Writer, format string, report ProcessingReport) error 
 			}
 			if _, err := fmt.Fprintf(w, "%s [%s] %s%s%s\n", marker, diagnostic.Code, diagnostic.Message, textLocation(diagnostic.Location), textDiagnosticMetadata(diagnostic)); err != nil {
 				return err
+			}
+			if diagnostic.Detail != "" {
+				if _, err := fmt.Fprintf(w, "  detail: %s\n", diagnostic.Detail); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

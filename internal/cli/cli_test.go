@@ -1196,7 +1196,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `Runner label "macos-15" is not mapped`) {
+		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `Runner label "macos-15" has no runner-target mapping`) || !strings.Contains(report.Diagnostics[0].Detail, "Supported runner labels:") {
 			t.Fatalf("macOS profile report = %#v", report)
 		}
 	})
@@ -2070,7 +2070,7 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || report.Diagnostics[0].Message != "Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest" {
+	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || strings.Contains(report.Diagnostics[0].Detail, sentinel) || report.Diagnostics[0].Message != "Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label." || report.Diagnostics[0].Detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
@@ -2464,7 +2464,9 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`,
-			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; uses an unsupported operating system`,
+			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
+			`<summary>Diagnostic detail</summary>`,
+			`Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
@@ -2538,6 +2540,20 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	_, body := processingAnnotation(report)
 	if len(body) > processingAnnotationBodyLimit || !strings.Contains(body, "Additional diagnostics omitted") {
 		t.Fatalf("annotation bytes = %d, notice present = %v", len(body), strings.Contains(body, "Additional diagnostics omitted"))
+	}
+}
+
+func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
+	diagnostic := compatibility.Diagnostic{
+		Level: "error", Message: "Keep this actionable guidance intact.", Detail: strings.Repeat("diagnostic context ", 20),
+	}
+	withoutDetail := diagnostic
+	withoutDetail.Detail = ""
+	want := renderProcessingDiagnostic(withoutDetail)
+
+	got := renderProcessingDiagnosticWithin(diagnostic, len(want))
+	if got != want || strings.Contains(got, "<details") {
+		t.Fatalf("bounded diagnostic = %q, want primary message without detail %q", got, want)
 	}
 }
 
@@ -2649,12 +2665,13 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 }
 
 func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testing.T) {
-	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Effective permissions: contents: read.`
+	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Move permissions to the workflow level.`
+	const detail = `Effective permissions: contents: read.`
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
 		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 			Level: "error", Code: "E_PROFILE", Stage: string(compiler.StageAdmission),
-			Message: message, Job: "test", Instance: instance,
+			Message: message, Detail: detail, Job: "test", Instance: instance,
 		})
 	}
 
@@ -2666,7 +2683,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	if err := json.Unmarshal(jsonOutput.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Diagnostics) != 1 || decoded.Diagnostics[0].Message != message || decoded.Diagnostics[0].Instance != "" {
+	if len(decoded.Diagnostics) != 1 || decoded.Diagnostics[0].Message != message || decoded.Diagnostics[0].Detail != detail || decoded.Diagnostics[0].Instance != "" {
 		t.Fatalf("JSON diagnostics = %#v", decoded.Diagnostics)
 	}
 
@@ -2675,9 +2692,10 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 		t.Fatal(err)
 	}
 	_, annotation := processingAnnotation(report)
-	if strings.Count(textOutput.String(), message) != 1 ||
+	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
 		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
-		strings.Count(annotation, `Effective permissions: contents: read.`) != 1 {
+		strings.Count(annotation, `Move permissions to the workflow level.`) != 1 ||
+		strings.Count(annotation, `<summary>Diagnostic detail</summary>`) != 1 || strings.Count(annotation, detail) != 1 {
 		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
 	}
 	if strings.Contains(annotation, "gha-test-") {
@@ -3916,12 +3934,12 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	step := pipeline.Steps[0]
 	wantSummary := "The workflow could not be prepared:\n\n" +
-		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest\n" +
+		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label is not mapped") || !strings.Contains(string(message), "Runner label is not mapped") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -3956,7 +3974,7 @@ fi
 	command.Dir = commandDirectory
 	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
-	plainIndex := strings.Index(string(output), "Runner label is not mapped")
+	plainIndex := strings.Index(string(output), "Runner label has no")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
 	logPrefix := "\x1b[31m"
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationIndex <= plainIndex {
@@ -4155,8 +4173,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		}
 	}
 	firstFailureMessage := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
-	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) ||
-		!strings.Contains(firstFailureMessage, `Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) {
+	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`) ||
+		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
+		strings.Count(firstFailureMessage, "detail: Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 2 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
 	actionFailureAnnotation := string(failureArtifactForStep(pipeline.Steps[1].Plugins, runner.uploaded, "annotations"))
@@ -4307,14 +4326,64 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	}
 	failure := pipeline.Steps[0]
 	message := failureArtifactForStep(failure.Plugins, runner.uploaded, "messages")
-	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), "push path filters are unsupported") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
-		t.Fatalf("trigger failure step = %#v", failure)
+	annotation := failureArtifactForStep(failure.Plugins, runner.uploaded, "annotations")
+	primary := "Push trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step."
+	detail := "push path filters are unsupported: Buildkite if_changed is not equivalent"
+	if failure.Group != "" || failure.Label != ":github: Crowdin upload" || failure.Condition != "" || !isGeneratedFailureCommand(failure.Command) || !strings.Contains(string(message), primary) || !strings.Contains(string(message), "detail: "+detail) || !strings.Contains(string(annotation), "<strong>Push trigger path filters cannot be translated safely.</strong>") || !strings.Contains(string(annotation), "Remove paths and paths-ignore") || !strings.Contains(string(annotation), detail) || strings.Contains(string(message), "translate workflow triggers") || strings.Contains(string(message), ".github/workflows/crowdin-upload.yml") || !failure.Checkout.Skip || len(failure.Steps) != 0 {
+		t.Fatalf("trigger failure step = %#v, message = %q, annotation = %q", failure, message, annotation)
 	}
 	if success := pipeline.Steps[1]; success.Group != ":github: Success" || len(success.Steps) != 1 {
 		t.Fatalf("successful workflow after trigger failure = %#v", success)
 	}
-	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) {
+	if !strings.Contains(stdout.String(), "Pipeline generation: failed") || !strings.Contains(stdout.String(), compiler.CodePipelineGeneration) || !strings.Contains(stdout.String(), primary) || !strings.Contains(stdout.String(), "detail: "+detail) {
 		t.Fatalf("trigger failure omitted processing report: %q", stdout.String())
+	}
+}
+
+func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {
+	requireImporterHost(t)
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"caller.yml":   "name: Caller\non: push\njobs:\n  middle:\n    uses: ./.github/workflows/middle.yml\n",
+		"middle.yml":   "on: workflow_call\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: ${{ needs.prepare.outputs.target }}\n",
+		"reusable.yml": "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+	})
+	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_STEP_KEY", "reusable-input-failure-importer")
+	runner := &cliCaptureRunner{}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", "--event-path", eventPath, ".github/workflows/caller.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Command string             `yaml:"command"`
+			Plugins failureStepPlugins `yaml:"plugins"`
+			Notify  []struct {
+				GitHubCheck struct {
+					Output struct {
+						Summary string `yaml:"summary"`
+					} `yaml:"output"`
+				} `yaml:"github_check"`
+			} `yaml:"notify"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(runner.commands[len(runner.commands)-1].stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 1 || !isGeneratedFailureCommand(pipeline.Steps[0].Command) {
+		t.Fatalf("reusable input failure pipeline = %#v", pipeline.Steps)
+	}
+	primary := `Reusable workflow input "target" uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.`
+	detail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
+	message := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
+	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
+	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses the needs context, which is unavailable before jobs run.</strong>") || !strings.Contains(annotation, "Replace it with a literal") || !strings.Contains(annotation, strings.ReplaceAll(detail, `"`, "&#34;")) || len(pipeline.Steps[0].Notify) != 1 || !strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, primary) || strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, detail) {
+		t.Fatalf("reusable input failure output = message %q, annotation %q, pipeline %#v", message, annotation, pipeline.Steps[0])
 	}
 }
 
@@ -5881,17 +5950,23 @@ func TestRunUploadFailsClosedBeforePipeline(t *testing.T) {
 }
 
 func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
-	for _, capability := range []string{"secrets", "provider-token-write", "privileged-container", "future-capability"} {
+	tests := []struct {
+		capability string
+		want       string
+	}{
+		{capability: "secrets", want: `Job "protected" uses GitHub Actions secrets, which hosted runs do not provide. Pass values through supported Buildkite secret handling or remove the dependency.`},
+		{capability: "privileged-container", want: `Job "protected" requires unsupported hosted runtime capability "privileged-container". Remove the requirement or use a runtime profile that supports it.`},
+		{capability: "future-capability", want: `Job "protected" requires unsupported hosted runtime capability "future-capability". Remove the requirement or use a runtime profile that supports it.`},
+	}
+	for _, test := range tests {
+		capability := test.capability
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 			Workflow:             plan.Workflow{LogicalJobID: "protected"},
 			RequiredCapabilities: []string{capability},
 		}}}}
 		err := validateUnprivilegedBundle(bundle)
-		want := capability
-		if capability == "provider-token-write" {
-			want = "GITHUB_TOKEN"
-		}
-		if err == nil || !strings.Contains(err.Error(), want) {
+		var finding *compiler.ProcessingFinding
+		if err == nil || !errors.As(err, &finding) || finding.Message != test.want || finding.Detail != "" {
 			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
 		}
 	}
@@ -5954,7 +6029,7 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	}
 }
 
-func TestGitHubTokenAdmissionDiagnosticExplainsCausePermissionsAndFix(t *testing.T) {
+func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
 	artifact := compiler.PlanArtifact{
 		Job: plan.Job{
 			Workflow:    plan.Workflow{LogicalJobID: "build"},
@@ -5962,20 +6037,24 @@ func TestGitHubTokenAdmissionDiagnosticExplainsCausePermissionsAndFix(t *testing
 		},
 		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
 	}
-	want := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write. Move the permissions map to the workflow top level.`
-	if got := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions"); got != want {
-		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, want %q", got, want)
+	wantMessage := `Job "build" needs GITHUB_TOKEN, but job-level permissions are unsupported for hosted GITHUB_TOKEN issuance. Move the permissions map to the workflow top level.`
+	wantDetail := `Cause: action "owner/action@v1" defaults an input to github.token. Effective permissions: contents: read, pull-requests: write.`
+	message, detail := githubTokenAdmissionDiagnostic(artifact, "GitHub workflow access tokens do not support job-level permissions")
+	if message != wantMessage || detail != wantDetail {
+		t.Fatalf("githubTokenAdmissionDiagnostic() = %q, %q", message, detail)
 	}
 }
 
-func TestHostedContainerDiagnosticNamesServiceAndBoundary(t *testing.T) {
+func TestHostedContainerDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
 	job := plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "test"},
 		Services: map[string]plan.Container{"postgres": {Image: "postgres:11-alpine"}},
 	}
-	want := `Job "test" uses service container "postgres" (image "postgres:11-alpine"). The compiler supports this construct, but hosted production does not run job or service containers. Replace the container with ordinary steps or an externally reachable service; runner configuration cannot enable containers in the hosted profile.`
-	if got := hostedContainerDiagnostic(job); got != want {
-		t.Fatalf("hostedContainerDiagnostic() = %q, want %q", got, want)
+	wantMessage := `Job "test" uses service container "postgres" (image "postgres:11-alpine"), which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.`
+	wantDetail := `The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them.`
+	message, detail := hostedContainerDiagnostic(job)
+	if message != wantMessage || detail != wantDetail {
+		t.Fatalf("hostedContainerDiagnostic() = %q, %q", message, detail)
 	}
 }
 
@@ -5997,7 +6076,10 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 		Workflow:             plan.Workflow{LogicalJobID: "unproven-docker"},
 		RequiredCapabilities: []string{"docker"},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "unsupported Docker access") {
+	err := validateUnprivilegedBundle(bundle)
+	var finding *compiler.ProcessingFinding
+	want := `Job "unproven-docker" requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.`
+	if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
@@ -6035,7 +6117,9 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 				Actions:  []plan.ActionLock{test.action},
 			}}}}
 			err := validateUnprivilegedBundle(bundle)
-			if err == nil || !strings.Contains(err.Error(), "GitHub Actions "+test.service+" service") || !strings.Contains(err.Error(), "unavailable") {
+			var finding *compiler.ProcessingFinding
+			want := `Action "actions/upload-artifact/merge" requires the GitHub Actions artifact service, which hosted runs do not provide. Replace the action or use a runtime profile that provides this service.`
+			if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 				t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", test.action, err)
 			}
 		})
@@ -6056,13 +6140,18 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		}
 	}
 
-	action := plan.ActionLock{Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40)}
+	action := plan.ActionLock{Source: "github", Repository: "actions/cache", RequestedRef: "v6.0.2", Commit: strings.Repeat("0", 40)}
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "cache-old"},
 		Actions:  []plan.ActionLock{action},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+	err := validateUnprivilegedBundle(bundle)
+	if err == nil || !strings.Contains(err.Error(), "v6.1.0") {
 		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+	}
+	var finding *compiler.ProcessingFinding
+	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
+		t.Fatalf("hosted cache diagnostic = %#v", finding)
 	}
 }
 

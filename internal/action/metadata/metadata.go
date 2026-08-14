@@ -293,6 +293,16 @@ func mappingKeyNode(node *yaml.Node, name string) *yaml.Node {
 	return nil
 }
 
+// UnsupportedRuntimeError identifies a runs.using value that cannot execute in
+// the compatibility runtime.
+type UnsupportedRuntimeError struct {
+	Runtime string
+}
+
+func (e *UnsupportedRuntimeError) Error() string {
+	return fmt.Sprintf("unsupported runtime %q", e.Runtime)
+}
+
 // Runtime classifies the action execution model and rejects unsupported values
 // so compilation and execution share one support boundary.
 func (metadata Metadata) Runtime() (Runtime, error) {
@@ -308,7 +318,7 @@ func (metadata Metadata) Runtime() (Runtime, error) {
 	case string(RuntimeDocker):
 		return RuntimeDocker, nil
 	default:
-		return "", fmt.Errorf("unsupported runtime %q", metadata.Runs.Using)
+		return "", &UnsupportedRuntimeError{Runtime: metadata.Runs.Using}
 	}
 }
 

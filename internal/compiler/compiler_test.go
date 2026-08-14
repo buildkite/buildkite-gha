@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1267,6 +1268,10 @@ jobs:
 		_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
 		if err == nil || !strings.Contains(err.Error(), `input "target" is not statically resolvable`) || !strings.Contains(err.Error(), "./.github/workflows/caller.yml:6:15") {
 			t.Fatalf("Compile() error = %v, want source-located runtime input rejection", err)
+		}
+		var finding *ProcessingFinding
+		if !errors.As(err, &finding) || finding.Message != `Reusable workflow input "target" uses the needs context, which is unavailable before jobs run. Replace it with a literal or an expression that does not depend on job results.` || !strings.Contains(finding.Detail, `Reusable-workflow input "target" is not statically resolvable`) || !strings.Contains(finding.Detail, `unsupported compile-time context "needs"`) {
+			t.Fatalf("Compile() finding = %#v", finding)
 		}
 	})
 

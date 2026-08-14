@@ -1542,7 +1542,6 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
 		if triggerErr != nil {
-			triggerErr = fmt.Errorf("%s: translate workflow triggers: %w", workflows[i].CanonicalPath, triggerErr)
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
 			processingReports[i] = triggerFailureProcessingReport(workflows[i], triggerErr)
@@ -1808,6 +1807,9 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		if len(attribution) != 0 {
 			message += " {" + strings.Join(attribution, ", ") + "}"
 		}
+		if diagnostic.Detail != "" {
+			message += "\n  detail: " + diagnostic.Detail
+		}
 		messages = append(messages, message)
 	}
 	_, annotation := processingAnnotation(report)
@@ -2072,6 +2074,15 @@ func triggerConditionLiteral(value string) string {
 
 func triggerFailureProcessingReport(input workflowInput, err error) compatibility.ProcessingReport {
 	report := triggerProcessingReport(input.Path, input.Source)
+	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
+	if errors.As(err, &pathFilters) {
+		err = &compiler.ProcessingFinding{
+			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
+			Path: input.Path, Line: 1, Column: 1,
+			Message: fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event)),
+			Detail:  pathFilters.Error(), Err: err,
+		}
+	}
 	report.AddFailure(input.Path, string(compiler.StagePipeline), compiler.CodePipelineGeneration, "compatibility", err)
 	report.Result = "incompatible"
 	return report
@@ -2396,11 +2407,11 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		instances[instance.Key] = instance
 	}
 	var diagnostics []error
-	addFailure := func(artifact compiler.PlanArtifact, message string, err error) {
+	addFailure := func(artifact compiler.PlanArtifact, message, detail string, err error) {
 		finding := &compiler.ProcessingFinding{
 			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
 			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
-			Message: message, Err: err,
+			Message: message, Detail: detail, Err: err,
 		}
 		if instance, ok := instances[artifact.Job.Target.StepKey]; ok {
 			finding.Path = instance.SourcePath
@@ -2413,18 +2424,18 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 		for _, capability := range artifact.Job.RequiredCapabilities {
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					message := hostedContainerDiagnostic(artifact.Job)
-					addFailure(artifact, message, errors.New("hosted container unsupported"))
+					message, detail := hostedContainerDiagnostic(artifact.Job)
+					addFailure(artifact, message, detail, errors.New("hosted container unsupported"))
 					continue
 				}
-				message := "Docker is unsupported for this job; hosted production allows Docker only for resolved Dockerfile actions"
-				addFailure(artifact, message, errors.New("unsupported Docker access"))
+				message := fmt.Sprintf("Job %q requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.", artifact.Job.Workflow.LogicalJobID)
+				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
 				continue
 			}
 			if capability == "provider-token-read" {
 				if !slices.Equal(artifact.Authorization.ProviderTokenReadCapabilitySources, []string{"checkout-adapter"}) {
 					message := "GitHub checkout credentials are unsupported for this job; use the managed actions/checkout integration"
-					addFailure(artifact, message, errors.New("unsupported GitHub checkout credentials"))
+					addFailure(artifact, message, "", errors.New("unsupported GitHub checkout credentials"))
 				}
 				continue
 			}
@@ -2435,36 +2446,49 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 					if reason == "" {
 						reason = "the workflow token request does not match the compiled job"
 					}
-					message := githubTokenAdmissionDiagnostic(artifact, reason)
-					addFailure(artifact, message, errors.New("hosted GITHUB_TOKEN unsupported"))
+					message, detail := githubTokenAdmissionDiagnostic(artifact, reason)
+					addFailure(artifact, message, detail, errors.New("hosted GITHUB_TOKEN unsupported"))
 				}
 				continue
 			}
 			if capability != "network" && capability != "docker" {
-				message := fmt.Sprintf("Job %q uses unsupported hosted runtime requirement %q", artifact.Job.Workflow.LogicalJobID, capability)
+				message := fmt.Sprintf("Job %q requires unsupported hosted runtime capability %q. Remove the requirement or use a runtime profile that supports it.", artifact.Job.Workflow.LogicalJobID, capability)
 				if capability == "secrets" {
-					message = fmt.Sprintf("Job %q uses GitHub Actions secrets, which hosted production does not provide", artifact.Job.Workflow.LogicalJobID)
+					message = fmt.Sprintf("Job %q uses GitHub Actions secrets, which hosted runs do not provide. Pass values through supported Buildkite secret handling or remove the dependency.", artifact.Job.Workflow.LogicalJobID)
 				}
-				addFailure(artifact, message, errors.New(message))
+				addFailure(artifact, message, "", errors.New(message))
 			}
 		}
 		for _, action := range artifact.Job.Actions {
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
 			if descriptor.Service == actionintegration.ServiceCache {
 				if err := actionintegration.ValidateCacheCommit(action.Commit); err != nil {
-					addFailure(artifact, "cache action version is not admitted by the hosted profile", fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
+					reference := action.Repository
+					if action.Path != "" {
+						reference += "/" + action.Path
+					}
+					if action.RequestedRef != "" {
+						reference += "@" + action.RequestedRef
+					}
+					message, detail, _ := actionintegration.UnsupportedVersionDiagnostic(reference, err)
+					addFailure(artifact, message, detail, fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
 				}
 				continue
 			}
 			if descriptor.Service != "" {
-				addFailure(artifact, "action requires a service unavailable to the hosted profile", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service", artifact.Job.Workflow.LogicalJobID, action.Repository, descriptor.Service))
+				reference := action.Repository
+				if action.Path != "" {
+					reference += "/" + action.Path
+				}
+				message := fmt.Sprintf("Action %q requires the GitHub Actions %s service, which hosted runs do not provide. Replace the action or use a runtime profile that provides this service.", reference, descriptor.Service)
+				addFailure(artifact, message, "", fmt.Errorf("job %q uses action %q, which requires the unavailable GitHub Actions %s service", artifact.Job.Workflow.LogicalJobID, reference, descriptor.Service))
 			}
 		}
 	}
 	return errors.Join(diagnostics...)
 }
 
-func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason string) string {
+func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason string) (message, detail string) {
 	limitation := reason
 	fix := "Use a supported workflow-level permissions map or remove the GITHUB_TOKEN dependency."
 	switch {
@@ -2516,10 +2540,12 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 		}
 		permissions = strings.Join(values, ", ")
 	}
-	return fmt.Sprintf("Job %q needs GITHUB_TOKEN, but %s. Cause: %s. Effective permissions: %s. %s", artifact.Job.Workflow.LogicalJobID, limitation, strings.Join(causes, "; "), permissions, fix)
+	message = fmt.Sprintf("Job %q needs GITHUB_TOKEN, but %s. %s", artifact.Job.Workflow.LogicalJobID, limitation, fix)
+	detail = fmt.Sprintf("Cause: %s. Effective permissions: %s.", strings.Join(causes, "; "), permissions)
+	return message, detail
 }
 
-func hostedContainerDiagnostic(job plan.Job) string {
+func hostedContainerDiagnostic(job plan.Job) (message, detail string) {
 	var constructs []string
 	if job.Container != nil {
 		constructs = append(constructs, fmt.Sprintf("job container %q", job.Container.Image))
@@ -2535,7 +2561,9 @@ func hostedContainerDiagnostic(job plan.Job) string {
 	if len(constructs) == 0 {
 		constructs = append(constructs, "a job or service container")
 	}
-	return fmt.Sprintf("Job %q uses %s. The compiler supports this construct, but hosted production does not run job or service containers. Replace the container with ordinary steps or an externally reachable service; runner configuration cannot enable containers in the hosted profile.", job.Workflow.LogicalJobID, strings.Join(constructs, " and "))
+	message = fmt.Sprintf("Job %q uses %s, which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.", job.Workflow.LogicalJobID, strings.Join(constructs, " and "))
+	detail = "The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them."
+	return message, detail
 }
 
 func irUsesActions(ir compiler.IR) bool {
