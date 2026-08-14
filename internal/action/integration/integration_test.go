@@ -11,17 +11,17 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		want     Descriptor
 	}{
 		{Identity{Source: "github", Repository: "actions/checkout"}, Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
-		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache, OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
-		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{OverrideGitHubServerURL: true, CacheURLCompatibility: true}},
-		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{OverrideGitHubServerURL: true}},
-		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{OverrideGitHubServerURL: true}},
+		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{CacheClientCompatibility: true}},
+		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{CacheClientCompatibility: true}},
+		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{CacheClientCompatibility: true}},
+		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{CacheClientCompatibility: true}},
+		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{CacheClientCompatibility: true}},
 	}
 	for _, test := range tests {
 		name := test.identity.Repository

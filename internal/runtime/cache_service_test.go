@@ -430,7 +430,7 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	}
 }
 
-func TestSetupActionsOverrideGitHubServerURLWithoutCacheActionIsolation(t *testing.T) {
+func TestSetupActionsUseCacheClientCompatibilityWithoutCacheActionIsolation(t *testing.T) {
 	node := requireNode24(t)
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "action.yml", "name: setup fixture\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: success()\n")
@@ -450,39 +450,36 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 		t.Fatal(err)
 	}
 
-	for _, repository := range []string{
-		"actions/setup-node",
-		"actions/setup-java",
-		"actions/setup-python",
-		"actions/setup-go",
-		"actions/setup-dotnet",
+	for _, setup := range []struct {
+		repository string
+		ref        string
+	}{
+		{repository: "actions/setup-node", ref: "v4"},
+		{repository: "actions/setup-java", ref: "v4"},
+		{repository: "actions/setup-python", ref: "v5"},
+		{repository: "actions/setup-go", ref: "v5"},
+		{repository: "actions/setup-dotnet", ref: "v4"},
 	} {
-		t.Run(strings.TrimPrefix(repository, "actions/"), func(t *testing.T) {
+		t.Run(strings.TrimPrefix(setup.repository, "actions/"), func(t *testing.T) {
 			provider := &sequenceCacheCredentials{tokens: []string{"header.main.signature", "header.post.signature"}}
 			workspace := t.TempDir()
 			workflowPath := ".github/workflows/setup.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: setup action override\n")
 			lifecycle := filepath.Join(workspace, "lifecycle.log")
 			lockID := remoteLifecycleLockID(1)
-			requestedRef := "v1"
-			expectedCacheURL := ""
-			if repository == "actions/setup-node" {
-				requestedRef = "v4"
-				expectedCacheURL = cacheURLCompatibility
-			}
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-				ID: "setup", Kind: "uses", Uses: repository + "@" + requestedRef, Action: &plan.ActionSelector{Lock: lockID},
+				ID: "setup", Kind: "uses", Uses: setup.repository + "@" + setup.ref, Action: &plan.ActionSelector{Lock: lockID},
 			}})
 			job.Schema = plan.Schema
 			job.Event.Provider = "cursor-origin"
 			job.RequiredCapabilities = []string{"network"}
 			job.Env = map[string]string{
-				"EXPECTED_CACHE_URL": expectedCacheURL,
+				"EXPECTED_CACHE_URL": cacheURLCompatibility,
 				"HTTP_PROXY":         "http://proxy.example",
 				"LIFECYCLE_LOG":      lifecycle,
 			}
 			job.Actions = []plan.ActionLock{{
-				ID: lockID, Source: "github", Repository: repository, RequestedRef: requestedRef,
+				ID: lockID, Source: "github", Repository: setup.repository, RequestedRef: setup.ref,
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}

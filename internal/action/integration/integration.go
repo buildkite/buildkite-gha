@@ -96,13 +96,10 @@ const (
 type Descriptor struct {
 	Adapter Adapter
 	Service Service
-	// Before enabling OverrideGitHubServerURL, audit the action source and its
-	// bundled dependencies. Confirm GITHUB_SERVER_URL affects only caching
-	// behavior and is not load-bearing for any request the action makes.
-	OverrideGitHubServerURL bool
-	// CacheURLCompatibility supplies the legacy ACTIONS_CACHE_URL presence
-	// check while cache-v2 requests continue to use ACTIONS_RESULTS_URL.
-	CacheURLCompatibility bool
+	// CacheClientCompatibility adapts bundled cache clients to Buildkite's
+	// cache-v2 environment. Before enabling it, confirm GITHUB_SERVER_URL
+	// affects only caching and ACTIONS_CACHE_URL is only a presence check.
+	CacheClientCompatibility bool
 }
 
 // UsesNativeAdapter reports whether the resolved identity replaces the
@@ -114,17 +111,17 @@ func UsesNativeAdapter(identity Identity) bool {
 
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
-	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
-	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true},
-	{Source: "github", Repository: "actions/setup-dotnet"}:                   {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-node"}:                     {CacheClientCompatibility: true},
+	{Source: "github", Repository: "actions/setup-java"}:                     {CacheClientCompatibility: true},
+	{Source: "github", Repository: "actions/setup-python"}:                   {CacheClientCompatibility: true},
+	{Source: "github", Repository: "actions/setup-go"}:                       {CacheClientCompatibility: true},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheClientCompatibility: true},
 }
 
 var checkoutCommits = map[string]string{
