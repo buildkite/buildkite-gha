@@ -493,9 +493,11 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	var workflowTokens gharuntime.WorkflowTokenProvider
 	if job.HasCapability("provider-token-write") {
 		githubTokens, tokenErr := gharuntime.NewAgentGitHubTokens(gharuntime.AgentGitHubTokenConfig{
-			Endpoint: os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
-			JobID:    os.Getenv("BUILDKITE_JOB_ID"),
-			JobToken: os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			Endpoint:         os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:            os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:         os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			OrganizationSlug: os.Getenv("BUILDKITE_ORGANIZATION_SLUG"),
+			PipelineSlug:     os.Getenv("BUILDKITE_PIPELINE_SLUG"),
 		})
 		if tokenErr != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure GitHub token service: %v\n", tokenErr)

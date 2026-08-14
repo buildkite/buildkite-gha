@@ -211,6 +211,58 @@ func TestAgentGitHubTokensRejectsRedirectsAndUntrustedResponses(t *testing.T) {
 	}
 }
 
+func TestAgentGitHubTokensDisabledWorkflowTokenGuidance(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	for _, test := range []struct {
+		name         string
+		organization string
+		pipeline     string
+		want         string
+	}{
+		{
+			name:         "affected pipeline link",
+			organization: "acme-inc",
+			pipeline:     "my-pipeline",
+			want:         `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings: https://buildkite.com/acme-inc/my-pipeline/settings/repository`,
+		},
+		{
+			name:         "unsafe organization",
+			organization: "acme/other",
+			pipeline:     "my-pipeline",
+			want:         `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings`,
+		},
+		{
+			name:         "unsafe pipeline",
+			organization: "acme-inc",
+			pipeline:     "my-pipeline?token=secret",
+			want:         `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings`,
+		},
+		{
+			name: "missing identity",
+			want: `GitHub workflow access tokens are not enabled for this organization or pipeline; enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := NewAgentGitHubTokens(AgentGitHubTokenConfig{
+				Endpoint:         server.URL,
+				JobID:            testCacheJobID,
+				JobToken:         "job-token",
+				OrganizationSlug: test.organization,
+				PipelineSlug:     test.pipeline,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.WorkflowToken(context.Background(), "buildkite/buildkite-gha", "ci.yml", map[string]string{"contents": "read"})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("WorkflowToken() error = %q, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAgentGitHubTokensHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

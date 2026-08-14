@@ -7014,6 +7014,33 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 	}
 }
 
+func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	job := cliRunJobPlan()
+	job.Workflow.Path = ".github/workflows/ci.yml"
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.RequiredCapabilities = []string{"provider-token-write"}
+	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
+	t.Setenv("BUILDKITE_GHA_AGENT", "/bin/true")
+	t.Setenv("BUILDKITE_ORGANIZATION_SLUG", "acme-inc")
+	t.Setenv("BUILDKITE_PIPELINE_SLUG", "my-pipeline")
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	want := `enable "Allow workflow-authorized GitHub access tokens" in the pipeline's repository settings: https://buildkite.com/acme-inc/my-pipeline/settings/repository`
+	if !strings.Contains(stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+	}
+}
+
 func TestRunJobPublishesWorkflowCommandsAsAdvisoryJobAnnotations(t *testing.T) {
 	diagnostics := "printf '%s\\n' '::warning title=Lint::warning body'; printf '%s\\n' '::error file=main.go,line=7::error body' >&2"
 	tests := []struct {
