@@ -162,8 +162,8 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	var out strings.Builder
 	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
 	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
-	workflowPath := processingAnnotationWorkflowPath(report.Workflow)
-	out.WriteString(annotationSourcePath(workflowPath, 0, 0, sourceLinks))
+	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow)
+	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
 	out.WriteString("</div>\n<div class=\"mb2\">\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len() + len(processingAnnotationEnd)
@@ -195,7 +195,7 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	panic("processing annotation exceeded its precomputed size")
 }
 
-func processingAnnotationWorkflowPath(path string) string {
+func processingAnnotationWorkflowPath(path string) (display string, linkable bool) {
 	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if root == "" {
 		root, _ = os.Getwd()
@@ -208,9 +208,9 @@ func processingAnnotationWorkflowPath(path string) string {
 	}
 	relative, err := filepath.Rel(root, resolved)
 	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return filepath.ToSlash(relative)
+		return filepath.ToSlash(relative), true
 	}
-	return filepath.ToSlash(filepath.Clean(path))
+	return filepath.ToSlash(filepath.Clean(path)), false
 }
 
 func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
@@ -256,7 +256,8 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
 	}
 	if diagnostic.Location != nil {
-		context = append(context, annotationSourcePath(processingAnnotationWorkflowPath(diagnostic.Location.Path), diagnostic.Location.Line, diagnostic.Location.Column, sourceLinks))
+		path, linkable := processingAnnotationWorkflowPath(diagnostic.Location.Path)
+		context = append(context, annotationSourcePath(path, diagnostic.Location.Line, diagnostic.Location.Column, linkable, sourceLinks))
 	}
 	if diagnostic.Job != "" {
 		context = append(context, "Job "+annotationCode(diagnostic.Job))
@@ -288,7 +289,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 	return out.String()
 }
 
-func annotationSourcePath(path string, line, column int, sourceLinks sourceLinkContext) string {
+func annotationSourcePath(path string, line, column int, linkable bool, sourceLinks sourceLinkContext) string {
 	display := path
 	if line > 0 {
 		display += fmt.Sprintf(":%d", line)
@@ -297,7 +298,7 @@ func annotationSourcePath(path string, line, column int, sourceLinks sourceLinkC
 		}
 	}
 	code := annotationCode(display)
-	if link := sourceLinks.link(path, line); link != "" {
+	if link := sourceLinks.link(path, line); linkable && link != "" {
 		return `<a href="` + html.EscapeString(link) + `">` + code + `</a>`
 	}
 	return code

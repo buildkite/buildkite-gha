@@ -2671,6 +2671,25 @@ func TestSourceLinkRequiresRepositoryContextAndRelativePath(t *testing.T) {
 	}
 }
 
+func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
+	checkout := t.TempDir()
+	outside := t.TempDir()
+	t.Chdir(outside)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
+	report := compatibility.NewProcessingReport("ci.yml", "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 2},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+
+	_, annotation := processingAnnotation(report, sourceLinks)
+	summary := failureCheckSummary("ci.yml", report, sourceLinks)
+	if strings.Contains(annotation, "href=") || strings.Contains(summary, "](https://") {
+		t.Fatalf("outside path was linked: annotation=%q summary=%q", annotation, summary)
+	}
+}
+
 func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
@@ -4157,6 +4176,9 @@ func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
 }
 
 func TestFailureCheckSummaryLinksDiagnosticWorkflowPath(t *testing.T) {
+	repository := t.TempDir()
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport(".github/workflows/hello.yml", "hosted")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "error", Message: "runner is unsupported", Job: "test",

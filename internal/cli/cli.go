@@ -1887,10 +1887,15 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 		summary.WriteString("\n- ")
 		pathCode := markdownCode(diagnosticPath)
 		line := 0
+		sourcePath := report.Workflow
 		if diagnostic.Location != nil {
 			line = diagnostic.Location.Line
+			if diagnostic.Location.Path != "" {
+				sourcePath = diagnostic.Location.Path
+			}
 		}
-		if link := sourceLinks.link(diagnosticPath, line); link != "" {
+		_, linkable := processingAnnotationWorkflowPath(sourcePath)
+		if link := sourceLinks.link(diagnosticPath, line); linkable && link != "" {
 			summary.WriteString("[")
 			summary.WriteString(pathCode)
 			summary.WriteString("](")
