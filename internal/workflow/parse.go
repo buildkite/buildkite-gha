@@ -387,6 +387,9 @@ func validateRawContainer(path string, node *yaml.Node) error {
 
 func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
+	if in.Environment != nil {
+		return Job{}, locatedError(path, in.Environment.Pos, fmt.Sprintf("job %q", in.ID.Value), "GitHub environments and environment secrets are unsupported")
+	}
 	ownedConcurrency, err := adaptConcurrency(path, in.ID.Value, in.Concurrency)
 	if err != nil {
 		return Job{}, err

@@ -29,10 +29,12 @@ Digests and immutable action locks detect changed code. They do not make code tr
 | Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and compiler-resolved permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Buildkite verifies the pipeline repository, immutable commit, workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
-| Ordinary workflow secrets | Rejected by production admission. |
+| Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
 | GitHub-compatible OIDC | Unsupported. |
 
 An action that receives a credential can use or exfiltrate it. It can also export `GITHUB_TOKEN` to later steps through `GITHUB_ENV`. Log masking reduces accidental disclosure, but it is not access control and does not catch transformed values.
+
+Ordinary workflow secrets are Buildkite job-accessible secrets, not GitHub event or fork-scoped secrets. Workflow syntax adds no authority: arbitrary workflow code already runs with the destination job's identity and can call `buildkite-agent secret get`. Restrict that identity with Buildkite Secret access policies. Plans and generated pipeline YAML contain secret names only, never values. `GITHUB_TOKEN` remains on its separate workflow-token boundary.
 
 Workflow token issuance requires an organization feature and a default-off pipeline setting. Buildkite reads the top-level permission policy from the workflow at the build's immutable commit. Omitted permissions resolve to exactly `contents: read`; write permissions require an explicit top-level map. Explicit empty permissions, scopes resolving only to `none`, job-level permission maps, and reusable-workflow jobs cannot receive a token. It denies incomplete or cyclic trigger and rebuild provenance. Pull-request ancestry retains a `contents: read` ceiling, and merge-queue ancestry is denied.
 
@@ -62,4 +64,4 @@ Command scoping limits accidental spread. It does not stop a hostile concurrent 
       .github/workflows/ci.yml
     ```
 
-1. Keep unsupported secrets, private actions, OIDC, and protected queues out of imported workflows.
+1. Keep private actions, OIDC, and protected queues out of imported workflows.

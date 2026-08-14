@@ -262,6 +262,17 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
 	providerTokenRequired := job.HasCapability("provider-token-write")
+	secretsRequired := job.HasCapability("secrets")
+	if secretsRequired {
+		if r.Secrets == nil {
+			return JobResult{}, fmt.Errorf("secrets capability requires the Buildkite Agent secret resolver")
+		}
+		resolved, err := resolveAgentSecretsBeforeWorkflow(r.Secrets)
+		if err != nil {
+			return JobResult{}, err
+		}
+		r.Secrets = resolved
+	}
 	cacheRequired := false
 	for _, lock := range job.Actions {
 		if usesCacheService(lock) {
@@ -269,10 +280,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			break
 		}
 	}
-	if providerTokenRequired || r.Cache != nil {
+	if providerTokenRequired || secretsRequired || r.Cache != nil {
 		if r.Redactor == nil {
 			if providerTokenRequired {
 				return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+			}
+			if secretsRequired {
+				return JobResult{}, fmt.Errorf("secrets capability requires the Buildkite Agent redactor")
 			}
 			if cacheRequired {
 				return JobResult{}, fmt.Errorf("actions/cache requires the Buildkite Agent redactor")
@@ -281,7 +295,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		} else {
 			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
 			if err != nil {
-				if providerTokenRequired || cacheRequired {
+				if providerTokenRequired || secretsRequired || cacheRequired {
 					return JobResult{}, err
 				}
 				r.Cache = nil
@@ -888,10 +902,10 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 			return nil, fmt.Errorf("resolve secret %q: %w", name, err)
 		}
 		if value != "" {
-			if err := r.Redactor.AddRedaction(ctx, value); err != nil {
-				return nil, err
-			}
 			processor.addMask(value)
+			if err := r.Redactor.AddRedaction(ctx, value); err != nil {
+				return nil, processor.scrubError(err)
+			}
 		}
 		values[name] = value
 	}

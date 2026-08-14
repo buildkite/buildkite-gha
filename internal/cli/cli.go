@@ -520,13 +520,19 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		runnerToolCache = buildkitepipeline.HostedToolCachePath
 	}
 	runner := gharuntime.Runner{
-		Stdout:                stdout,
-		Stderr:                stderr,
-		MiseDataDir:           prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
-		ToolCache:             runnerToolCache,
-		Docker:                os.Getenv("BUILDKITE_GHA_DOCKER"),
-		Git:                   os.Getenv("BUILDKITE_GHA_GIT"),
-		Secrets:               gharuntime.EnvironmentSecrets{},
+		Stdout:      stdout,
+		Stderr:      stderr,
+		MiseDataDir: prepareMiseDataDir(os.Getenv("BUILDKITE_GHA_MISE_DATA_DIR"), stderr),
+		ToolCache:   runnerToolCache,
+		Docker:      os.Getenv("BUILDKITE_GHA_DOCKER"),
+		Git:         os.Getenv("BUILDKITE_GHA_GIT"),
+		Secrets: gharuntime.AgentSecrets{
+			Executable: os.Getenv("BUILDKITE_GHA_AGENT"),
+			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
+			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
+			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
+			NoHTTP2:    os.Getenv("BUILDKITE_NO_HTTP2"),
+		},
 		Redactor:              gharuntime.AgentRedactor{Executable: os.Getenv("BUILDKITE_GHA_AGENT")},
 		Actions:               actionMaterializer,
 		Artifacts:             agent,
@@ -2398,6 +2404,9 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	}
 	for _, artifact := range bundle.Plans {
 		for _, capability := range artifact.Job.RequiredCapabilities {
+			if capability == "secrets" {
+				continue
+			}
 			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
 				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
 					message, detail := hostedContainerDiagnostic(artifact.Job)
@@ -2429,9 +2438,6 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 			if capability != "network" && capability != "docker" {
 				message := fmt.Sprintf("Job %q requires unsupported hosted runtime capability %q. Remove the requirement or use a runtime profile that supports it.", artifact.Job.Workflow.LogicalJobID, capability)
-				if capability == "secrets" {
-					message = fmt.Sprintf("Job %q uses GitHub Actions secrets, which hosted runs do not provide. Pass values through supported Buildkite secret handling or remove the dependency.", artifact.Job.Workflow.LogicalJobID)
-				}
 				addFailure(artifact, message, "", errors.New(message))
 			}
 		}

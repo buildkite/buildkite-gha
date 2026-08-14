@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -218,6 +219,26 @@ func TestRequiredSecretsRequireCapability(t *testing.T) {
 	job.RequiredSecrets = []string{"TOKEN"}
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "secrets capability") {
 		t.Fatalf("Validate() error = %v, want capability binding", err)
+	}
+}
+
+func TestRequiredSecretsRoundTripAsNamesOnly(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"HOMEBREW_TAP_GITHUB_TOKEN"}
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"required_secrets"`) || !strings.Contains(string(encoded), `"HOMEBREW_TAP_GITHUB_TOKEN"`) || strings.Contains(string(encoded), "secret-value") {
+		t.Fatalf("Encode() = %s", encoded)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(decoded.RequiredSecrets, job.RequiredSecrets) {
+		t.Fatalf("required secrets = %#v", decoded.RequiredSecrets)
 	}
 }
 

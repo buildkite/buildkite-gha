@@ -223,8 +223,11 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 		}
 
 		call := job.Reusable
+		if call.InheritSecrets {
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "secrets: inherit is unsupported")
+		}
 		if call.Secrets {
-			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secrets are runtime-dependent and unsupported")
+			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, "reusable-workflow secret forwarding is unsupported")
 		}
 		if depth >= maxReusableWorkflowDepth {
 			return reusableResolution{}, locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column, fmt.Sprintf("reusable-workflow nesting exceeds maximum depth %d", maxReusableWorkflowDepth))

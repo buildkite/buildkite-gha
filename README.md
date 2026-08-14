@@ -5,7 +5,7 @@ Run GitHub Actions workflows as native Buildkite jobs without creating a GitHub 
 `buildkite-gha` turns each supported workflow job and static matrix entry into a Buildkite job. Steps run in a compatibility runtime inside that job. Buildkite owns scheduling, logs, retries, cancellation, and the build UI.
 
 > [!IMPORTANT]
-> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64 and native macOS arm64. The production path supports local and public actions and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions, ordinary workflow secrets, and GitHub-compatible OIDC are unsupported.
+> `buildkite-gha` is an experimental pre-1.0 preview. The released plugin path supports Linux x86-64 and native macOS arm64. The production path supports local and public actions, static Buildkite job-accessible secrets, and narrowly scoped, job-bound checkout, `GITHUB_TOKEN`, artifact, and cache integrations. Private actions and GitHub-compatible OIDC are unsupported.
 
 ## How it works
 
@@ -88,7 +88,8 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Linux x86-64 and native macOS arm64 jobs using `bash` or `sh` | Windows, Linux arm64, or macOS x86-64 |
 | Local and public JavaScript and composite actions; verified Dockerfile actions on Linux | Private actions, Dockerfile actions on macOS, or arbitrary reusable-workflow source |
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
-| Exact-commit checkout, including managed private repository access | Ordinary workflow secrets, GitHub-compatible OIDC, or protected queues |
+| Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-compatible OIDC, or protected queues |
+| Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` use allowed by Buildkite policy | Ambient or workflow-authored `github.token` use |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |
 | Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path; all Docker use on macOS |
