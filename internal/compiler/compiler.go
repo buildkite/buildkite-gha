@@ -218,6 +218,7 @@ func Validate(path string, source []byte) (Report, error) {
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.GitHub["head_ref"] = "validation"
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)

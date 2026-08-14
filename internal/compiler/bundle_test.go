@@ -683,6 +683,10 @@ jobs:
     runs-on: ubuntu-latest
     concurrency: test-${{ github.sha }}
     steps: [{run: true}]
+  head-ref:
+    runs-on: ubuntu-latest
+    concurrency: ${{ github.head_ref }}
+    steps: [{run: true}]
 `)
 	if _, err := Validate("concurrency.yml", source); err != nil {
 		t.Fatalf("Validate() rejected event-backed concurrency: %v", err)
