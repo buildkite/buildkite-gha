@@ -24,7 +24,6 @@ const (
 	processingAnnotationContext   = "buildkite-gha-processing"
 	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
 	processingAnnotationBodyLimit = 1024 * 1024
-	processingAnnotationEnd       = "</div>\n"
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
 )
 
@@ -144,10 +143,10 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 }
 
 func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
-	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, false)
+	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, true)
 }
 
-func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, checkSummary bool) (style, body string) {
+func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
 	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
@@ -169,47 +168,36 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		heading = "Workflow could not be run"
 	}
 	var out strings.Builder
-	if !checkSummary {
+	if includeHeading {
 		out.WriteString("<h2 class=\"h4 mb2\">")
 		out.WriteString(heading)
 		out.WriteString("</h2>\n")
-	}
-	if checkSummary {
-		out.WriteString("<div>")
-	} else {
-		out.WriteString("<div class=\"mb2\">")
 	}
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
-	if checkSummary {
-		out.WriteString("</div>\n<br>\n<div>\n")
-	} else {
-		out.WriteString("</div>\n<div class=\"mb2\">\n")
-	}
+	out.WriteString("<br />\n")
 	rows := make([]string, len(diagnostics))
-	bodyBytes := out.Len() + len(processingAnnotationEnd)
+	bodyBytes := out.Len()
 	for i, diagnostic := range diagnostics {
-		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
+		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks)
 		bodyBytes += len(rows[i])
 	}
 	if bodyBytes <= bodyLimit {
 		for _, row := range rows {
 			out.WriteString(row)
 		}
-		out.WriteString(processingAnnotationEnd)
 		return style, out.String()
 	}
 
-	remaining := bodyLimit - out.Len() - len(processingAnnotationEnd) - len(truncationNotice)
+	remaining := bodyLimit - out.Len() - len(truncationNotice)
 	for i, row := range rows {
 		if len(row) > remaining {
-			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks, checkSummary); row != "" {
+			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks); row != "" {
 				out.WriteString(row)
 			}
-			out.WriteString(processingAnnotationEnd)
 			out.WriteString(truncationNotice)
 			return style, out.String()
 		}
@@ -264,10 +252,10 @@ func processingAnnotationWorkflowPath(path, workflowSourceRoot string) (display 
 	return display, false
 }
 
-func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext, checkSummary bool) string {
+func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int, sourceLinks sourceLinkContext) string {
 	detail := diagnostic.Detail
 	message := diagnostic.Message
-	row := renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
+	row := renderProcessingDiagnostic(diagnostic, sourceLinks)
 	for len(row) > limit && detail != "" {
 		end := max(0, len(detail)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(detail[:end]) {
@@ -279,7 +267,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 			diagnostic.Detail = detail[:end] + "…"
 		}
 		detail = detail[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
+		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
 	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
@@ -288,7 +276,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 		}
 		diagnostic.Message = message[:end] + "…"
 		message = message[:end]
-		row = renderProcessingDiagnostic(diagnostic, sourceLinks, checkSummary)
+		row = renderProcessingDiagnostic(diagnostic, sourceLinks)
 	}
 	if len(row) > limit {
 		return ""
@@ -296,12 +284,12 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 	return row
 }
 
-func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext, checkSummary bool) string {
+func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
-	out.WriteString("<div><div><strong>")
+	out.WriteString("<p><strong>")
 	out.WriteString(annotationHTML(heading))
-	out.WriteString("</strong></div>")
+	out.WriteString("</strong>")
 	context := make([]string, 0, 4)
 	if diagnostic.Action != "" {
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
@@ -317,41 +305,20 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
 	}
 	if len(context) != 0 {
-		if checkSummary {
-			out.WriteString("<div><br>\n")
-		} else {
-			out.WriteString("<div class=\"mt1\">")
-		}
+		out.WriteString("<br />\n")
 		out.WriteString(strings.Join(context, " · "))
-		out.WriteString("</div>")
 	}
 	if len(details) != 0 {
-		if checkSummary {
-			out.WriteString("<div><br>\n")
-		} else {
-			out.WriteString("<div class=\"mt1\">")
-		}
-		for i, sentence := range details {
-			if i != 0 {
-				out.WriteString("<br>\n")
-			}
+		for _, sentence := range details {
+			out.WriteString("<br />\n")
 			out.WriteString(annotationHTML(sentence))
 		}
-		out.WriteString("</div>")
 	}
+	out.WriteString("</p>\n")
 	if diagnostic.Detail != "" {
-		if checkSummary {
-			out.WriteString("<br>\n<details><summary>Diagnostic detail</summary><div><br>\n")
-		} else {
-			out.WriteString("<details class=\"mt1\"><summary>Diagnostic detail</summary><div class=\"mt1\">")
-		}
+		out.WriteString("<details><summary>Diagnostic detail</summary><p>")
 		out.WriteString(annotationHTML(diagnostic.Detail))
-		out.WriteString("</div></details>")
-	}
-	if checkSummary {
-		out.WriteString("</div>\n<br>\n")
-	} else {
-		out.WriteString("</div>\n")
+		out.WriteString("</p></details>\n")
 	}
 	return out.String()
 }
