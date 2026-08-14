@@ -144,6 +144,10 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 }
 
 func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
+	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice)
+}
+
+func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string) (style, body string) {
 	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
@@ -175,7 +179,7 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks)
 		bodyBytes += len(rows[i])
 	}
-	if bodyBytes <= processingAnnotationBodyLimit {
+	if bodyBytes <= bodyLimit {
 		for _, row := range rows {
 			out.WriteString(row)
 		}
@@ -183,14 +187,14 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 		return style, out.String()
 	}
 
-	remaining := processingAnnotationBodyLimit - out.Len() - len(processingAnnotationEnd) - len(processingAnnotationNotice)
+	remaining := bodyLimit - out.Len() - len(processingAnnotationEnd) - len(truncationNotice)
 	for i, row := range rows {
 		if len(row) > remaining {
 			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks); row != "" {
 				out.WriteString(row)
 			}
 			out.WriteString(processingAnnotationEnd)
-			out.WriteString(processingAnnotationNotice)
+			out.WriteString(truncationNotice)
 			return style, out.String()
 		}
 		out.WriteString(row)

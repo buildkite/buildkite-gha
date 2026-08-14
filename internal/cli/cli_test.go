@@ -2713,8 +2713,8 @@ func TestProcessingDiagnosticsRetainNestedWorkflowSourceRoot(t *testing.T) {
 	wantLink := "https://github.com/owner/repo/blob/abc123/nested/.github/workflows/build-security.yml#L35"
 
 	_, annotation := processingAnnotation(report, sourceLinks)
-	summary := failureCheckSummary("./.github/workflows/caller.yml", report, sourceLinks)
-	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, "]("+wantLink+")") {
+	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
+	if !strings.Contains(annotation, `href="`+wantLink+`"`) || !strings.Contains(summary, `href="`+wantLink+`"`) {
 		t.Fatalf("nested workflow location was not retained: annotation=%q summary=%q", annotation, summary)
 	}
 }
@@ -2783,8 +2783,8 @@ func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
 	_, annotation := processingAnnotation(report, sourceLinks)
-	summary := failureCheckSummary("ci.yml", report, sourceLinks)
-	if strings.Contains(annotation, "href=") || strings.Contains(summary, "](https://") {
+	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
+	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside path was linked: annotation=%q summary=%q", annotation, summary)
 	}
 }
@@ -2809,8 +2809,8 @@ func TestProcessingDiagnosticsDoNotLinkSymlinksOutsideCheckout(t *testing.T) {
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 
 	_, annotation := processingAnnotation(report, sourceLinks)
-	summary := failureCheckSummary(workflowPath, report, sourceLinks)
-	if strings.Contains(annotation, "href=") || strings.Contains(summary, "](https://") {
+	_, summary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
+	if strings.Contains(annotation, "href=") || strings.Contains(summary, "href=") {
 		t.Fatalf("outside symlink was linked: annotation=%q summary=%q", annotation, summary)
 	}
 }
@@ -4197,13 +4197,9 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		t.Fatalf("compiler failure pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 	step := pipeline.Steps[0]
-	wantSummary := "The workflow could not be prepared:\n\n" +
-		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.\n" +
-		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
-		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != string(annotation) || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -4257,8 +4253,7 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 	)
 
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report, sourceLinkContext{})
-	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
+	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != string(artifacts[1].Contents) {
 		t.Fatalf("failure = %#v", workflow.Failure)
 	}
 }
@@ -4301,30 +4296,13 @@ func TestFailureCheckSummaryFitsProviderLimit(t *testing.T) {
 		Level: "error", Message: strings.Repeat("x", workflowCheckSummaryLimit) + "🙂", Job: "test",
 	})
 
-	summary := failureCheckSummary("ci.yml", report, sourceLinkContext{})
-	if len(summary) > workflowCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, "_Additional error details omitted at the provider check summary size limit._") {
+	_, summary := processingAnnotationWithin(report, sourceLinkContext{}, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
+	if len(summary) > workflowCheckSummaryLimit || !utf8.ValidString(summary) || !strings.HasSuffix(summary, workflowCheckSummaryNotice) {
 		t.Fatalf("truncated provider check summary is invalid: bytes=%d, valid UTF-8=%t, suffix=%q", len(summary), utf8.ValidString(summary), summary[len(summary)-100:])
 	}
 }
 
-func TestFailureCheckSummaryUsesDiagnosticWorkflowPath(t *testing.T) {
-	report := compatibility.NewProcessingReport("/work/repo/.github/workflows/caller.yml", "hosted")
-	report.Diagnostics = append(report.Diagnostics,
-		compatibility.Diagnostic{Level: "error", Message: "caller failed", Job: "caller", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/caller.yml", Line: 5, Column: 3}},
-		compatibility.Diagnostic{Level: "error", Message: "reusable failed", Job: "called", Location: &compatibility.SourceLocation{Path: "./.github/workflows/reusable.yml", Line: 7, Column: 3}},
-		compatibility.Diagnostic{Level: "error", Message: "absolute reusable failed", Job: "absolute", Location: &compatibility.SourceLocation{Path: "/work/repo/.github/workflows/absolute.yml", Line: 9, Column: 3}},
-	)
-
-	want := "The workflow could not be prepared:\n\n" +
-		"- `.github/workflows/caller.yml`, job `caller`: caller failed\n" +
-		"- `.github/workflows/reusable.yml`, job `called`: reusable failed\n" +
-		"- `.github/workflows/absolute.yml`, job `absolute`: absolute reusable failed"
-	if got := failureCheckSummary(".github/workflows/caller.yml", report, sourceLinkContext{}); got != want {
-		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
-	}
-}
-
-func TestFailureCheckSummaryLinksDiagnosticWorkflowPath(t *testing.T) {
+func TestFailureCheckSummaryUsesAnnotationMarkupAndLinks(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "hello.yml")
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
@@ -4341,10 +4319,12 @@ func TestFailureCheckSummaryLinksDiagnosticWorkflowPath(t *testing.T) {
 		Location: &compatibility.SourceLocation{Path: ".github/workflows/hello.yml", Line: 100, Column: 3},
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
-	want := "The workflow could not be prepared:\n\n- [`.github/workflows/hello.yml`](https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100), job `test`: runner is unsupported"
+	want := `<a href="https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100"><code>.github/workflows/hello.yml:100:3</code></a>`
 
-	if got := failureCheckSummary(".github/workflows/hello.yml", report, sourceLinks); got != want {
-		t.Fatalf("failureCheckSummary() = %q, want %q", got, want)
+	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/hello.yml", Identity: "ci"}, "push", report, sourceLinks)
+	annotation := string(artifacts[1].Contents)
+	if workflow.Failure.Summary != annotation || !strings.Contains(workflow.Failure.Summary, `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(workflow.Failure.Summary, want) {
+		t.Fatalf("check summary = %q, annotation = %q, want %q", workflow.Failure.Summary, annotation, want)
 	}
 }
 
@@ -4724,7 +4704,7 @@ func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.
 	detail := `Reusable-workflow input "target" is not statically resolvable: unsupported compile-time context "needs"`
 	message := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	annotation := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "annotations"))
-	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses the needs context, which is unavailable before jobs run.</strong>") || !strings.Contains(annotation, "Replace it with a literal") || !strings.Contains(annotation, strings.ReplaceAll(detail, `"`, "&#34;")) || len(pipeline.Steps[0].Notify) != 1 || !strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, primary) || strings.Contains(pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary, detail) {
+	if !strings.Contains(message, primary) || !strings.Contains(message, "detail: "+detail) || !strings.Contains(annotation, "<strong>Reusable workflow input &#34;target&#34; uses the needs context, which is unavailable before jobs run.</strong>") || !strings.Contains(annotation, "Replace it with a literal") || !strings.Contains(annotation, strings.ReplaceAll(detail, `"`, "&#34;")) || len(pipeline.Steps[0].Notify) != 1 || pipeline.Steps[0].Notify[0].GitHubCheck.Output.Summary != annotation {
 		t.Fatalf("reusable input failure output = message %q, annotation %q, pipeline %#v", message, annotation, pipeline.Steps[0])
 	}
 }
