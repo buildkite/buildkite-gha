@@ -7029,9 +7029,13 @@ func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
 	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
+	truePath, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
 	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "job-token")
-	t.Setenv("BUILDKITE_GHA_AGENT", "/bin/true")
+	t.Setenv("BUILDKITE_GHA_AGENT", truePath)
 	t.Setenv("BUILDKITE_ORGANIZATION_SLUG", "acme-inc")
 	t.Setenv("BUILDKITE_PIPELINE_SLUG", "my-pipeline")
 
