@@ -133,14 +133,20 @@ var cacheCommits = map[string]string{
 	CacheCommit:     "v6.1.0",
 }
 
-// ValidateCheckoutCommit rejects semantic drift from the audited upstream
-// manifests and implementations. Mutable references are resolved before this
-// check, so a moved major tag must be deliberately audited and added here.
+// ValidateCheckoutCommit admits the audited release commits plus the
+// checkoutMainCommits snapshot of actions/checkout upstream main history,
+// which covers pinned commit SHAs such as Dependabot and Renovate pins. The
+// adapter replaces every admitted implementation with the same bounded
+// exact-event-SHA checkout, so admission only requires the commit to be a
+// genuine upstream actions/checkout implementation.
 func ValidateCheckoutCommit(commit string) error {
-	if _, ok := checkoutCommits[commit]; !ok {
-		return fmt.Errorf("actions/checkout native adapter does not admit resolved commit %q; supported commits are %s", commit, strings.Join(sortedCheckoutCommits(), ", "))
+	if _, ok := checkoutCommits[commit]; ok {
+		return nil
 	}
-	return nil
+	if _, ok := checkoutMainCommits[commit]; ok {
+		return nil
+	}
+	return fmt.Errorf("actions/checkout native adapter does not admit resolved commit %q; pin a release tag (%s) or a commit from actions/checkout main history no newer than this build's snapshot", commit, strings.Join(sortedCheckoutCommits(), ", "))
 }
 
 func sortedCheckoutCommits() []string {

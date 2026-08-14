@@ -526,7 +526,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-**🟡 Supported subset.** Only these resolved `actions/checkout` commits are admitted:
+**🟡 Supported subset.** These resolved `actions/checkout` commits are admitted:
 
 | Release | Commit |
 | --- | --- |
@@ -536,7 +536,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Major tags work only while they resolve to one of these commits. v1 through v3 and unknown commits are unsupported.
+Pinned commit SHAs (for example Dependabot or Renovate pins such as `de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`) are also admitted when the commit is in the build's snapshot of `actions/checkout` upstream `main` history. The adapter replaces every admitted implementation with the same bounded checkout below. Commits pushed upstream after the snapshot, commits outside `main` history, and unknown commits are rejected; `scripts/generate-checkout-commits` regenerates the snapshot.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 

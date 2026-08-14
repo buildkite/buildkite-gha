@@ -163,8 +163,28 @@ func TestCheckoutCommitsAreExact(t *testing.T) {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateCheckoutCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) {
+	if err := ValidateCheckoutCommit("de0fac2e4500dabe0009e67214ff5f5447ce83dd"); err != nil {
+		t.Fatalf("pinned v6.0.2 main-history commit rejected: %v", err)
+	}
+	if err := ValidateCheckoutCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), "pin a release tag") || !strings.Contains(err.Error(), CheckoutV7Commit) {
 		t.Fatalf("unrecognized checkout commit error = %v", err)
+	}
+}
+
+func TestCheckoutMainCommitsSnapshot(t *testing.T) {
+	if len(checkoutMainCommits) == 0 {
+		t.Fatal("checkout main-history snapshot is empty")
+	}
+	for commit, release := range checkoutMainCommits {
+		if len(commit) != 40 || strings.ToLower(commit) != commit || strings.Trim(commit, "0123456789abcdef") != "" {
+			t.Fatalf("snapshot commit %q is not a lowercase 40-hex SHA", commit)
+		}
+		if release == "" {
+			t.Fatalf("snapshot commit %s has an empty release label", commit)
+		}
+		if err := ValidateCheckoutCommit(commit); err != nil {
+			t.Fatalf("snapshot commit %s rejected: %v", commit, err)
+		}
 	}
 }
 
