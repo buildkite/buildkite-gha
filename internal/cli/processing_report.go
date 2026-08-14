@@ -150,7 +150,11 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 		for end > 0 && !utf8.ValidString(detail[:end]) {
 			end--
 		}
-		diagnostic.Detail = detail[:end] + "…"
+		if end == 0 {
+			diagnostic.Detail = ""
+		} else {
+			diagnostic.Detail = detail[:end] + "…"
+		}
 		detail = detail[:end]
 		row = renderProcessingDiagnostic(diagnostic)
 	}

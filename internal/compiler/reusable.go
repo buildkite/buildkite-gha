@@ -3,6 +3,7 @@ package compiler
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -304,10 +305,17 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 			calleeResolution, err := resolver.resolve(calleeSourcePath, calleeDigest, callee, callNamespace, callLabel, callInputs, needBindings, calleePermissionCeiling, secretAuthority && call.InheritSecrets, depth+1)
 			resolver.stack = resolver.stack[:len(resolver.stack)-1]
 			if err != nil {
+				message := "local reusable workflow could not be resolved"
+				detail := ""
+				var finding *ProcessingFinding
+				if errors.As(err, &finding) {
+					message = finding.Message
+					detail = finding.Detail
+				}
 				return reusableResolution{}, &ProcessingFinding{
 					Stage: StageGraph, Code: CodeGraphInvalid, Category: "compatibility",
 					Path: path, Line: call.Span.Start.Line, Column: call.Span.Start.Column, Job: job.ID,
-					Message: "local reusable workflow could not be resolved",
+					Message: message, Detail: detail,
 					Err: locatedJobError(path, job, call.Span.Start.Line, call.Span.Start.Column,
 						fmt.Sprintf("resolve local reusable workflow %q: %v", call.Uses, err)),
 				}

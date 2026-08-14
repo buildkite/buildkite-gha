@@ -2543,6 +2543,20 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
+	diagnostic := compatibility.Diagnostic{
+		Level: "error", Message: "Keep this actionable guidance intact.", Detail: strings.Repeat("diagnostic context ", 20),
+	}
+	withoutDetail := diagnostic
+	withoutDetail.Detail = ""
+	want := renderProcessingDiagnostic(withoutDetail)
+
+	got := renderProcessingDiagnosticWithin(diagnostic, len(want))
+	if got != want || strings.Contains(got, "<details") {
+		t.Fatalf("bounded diagnostic = %q, want primary message without detail %q", got, want)
+	}
+}
+
 func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "test-image-build.yml")
@@ -4329,7 +4343,8 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"caller.yml":   "name: Caller\non: push\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: ${{ needs.prepare.outputs.target }}\n",
+		"caller.yml":   "name: Caller\non: push\njobs:\n  middle:\n    uses: ./.github/workflows/middle.yml\n",
+		"middle.yml":   "on: workflow_call\njobs:\n  prepare:\n    runs-on: ubuntu-latest\n    outputs:\n      target: ${{ steps.value.outputs.target }}\n    steps:\n      - id: value\n        run: echo target=test >> $GITHUB_OUTPUT\n  call:\n    needs: prepare\n    uses: ./.github/workflows/reusable.yml\n    with:\n      target: ${{ needs.prepare.outputs.target }}\n",
 		"reusable.yml": "on:\n  workflow_call:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
 	})
 	eventPath, err := filepath.Abs(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
