@@ -35,6 +35,15 @@ jobs:
           for name in GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH GITHUB_STATE GITHUB_STEP_SUMMARY; do
             test -w "${!name}"
           done
+          protected=/etc/sudoers.d/buildkite-gha-runner
+          test "$(stat -c '%U:%G:%a' "$protected")" = root:root:440
+          permission_error="$RUNNER_TEMP/pb2731-permission-error"
+          if { printf 'runner must not write this\n' >> "$protected"; } 2> "$permission_error"; then
+            echo "runner unexpectedly wrote $protected" >&2
+            exit 1
+          fi
+          grep -qi 'permission denied' "$permission_error"
+          rm "$permission_error"
           mkdir -p "$RUNNER_TEMP/pb2731-shell-bin"
           echo "PB2731_SHELL=true" >> "$GITHUB_ENV"
           echo "identity=runner" >> "$GITHUB_OUTPUT"
@@ -53,6 +62,20 @@ jobs:
           else
             echo 'PB2731_DOCKER=unavailable'
           fi
+
+      - name: Run Dockerfile action as runner
+        id: dockerfile
+        uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
+        with:
+          who-to-greet: PB-2731 runner
+
+      - name: Verify Dockerfile action output
+        shell: bash
+        env:
+          ACTION_TIME: ${{ steps.dockerfile.outputs.time }}
+        run: |
+          test "$(id -un)" = runner
+          test -n "$ACTION_TIME"
 
       - name: Run JavaScript identity action
         id: javascript

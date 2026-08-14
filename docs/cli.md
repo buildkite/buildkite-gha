@@ -190,8 +190,9 @@ The deprecated `--runtime-queue hosted` argument is accepted as a no-op for comp
 experiment. Generated jobs must start as root. Their bootstrap creates a
 `runner` user, grants passwordless `sudo` and Docker socket access when the
 socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
-runs `buildkite-gha run-job` as `runner`. The option does not infer behavior
-from a queue name and does not affect macOS jobs.
+runs `buildkite-gha run-job` as `runner`. The verified executable and compiled
+plan remain root-owned and read-only to `runner`. The option does not infer
+behavior from a queue name and does not affect macOS jobs.
 
 The existing plugin can run this experiment without a plugin release. Its
 `source-ref` field builds the CLI at the pinned commit and passes the boolean

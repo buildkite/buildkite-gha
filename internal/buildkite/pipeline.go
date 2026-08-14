@@ -355,12 +355,26 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
+		experimentalRunnerUser := pipeline.ExperimentalRunnerUser && platform == "linux/amd64"
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(pipeline.CompilerStep)
+		if experimentalRunnerUser {
+			planPath, err := PlanPath(job.PlanDigest)
+			if err != nil {
+				return fmt.Errorf("job %q: %w", job.Key, err)
+			}
+			commands = append(commands,
+				"buildkite-agent artifact download "+shellQuote(planPath)+` "$bootstrap_dir" --step `+shellQuote(pipeline.CompilerStep),
+				`plan="$bootstrap_dir/`+planPath+`"`,
+				`if command -v sha256sum >/dev/null 2>&1; then actual_plan_digest="$(sha256sum "$plan" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_plan_digest="$(shasum -a 256 "$plan" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
+				"test \"$actual_plan_digest\" = "+shellQuote(job.PlanDigest),
+			)
+			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "")...)
+			runJob = "BUILDKITE_GHA_PLAN_DIGEST=" + shellQuote(job.PlanDigest) + ` "$distribution" run-job --plan "$plan"`
+		}
 		if runtimeImage != "" {
 			runJob += " --hosted-tool-cache"
 		}
-		if pipeline.ExperimentalRunnerUser && platform == "linux/amd64" {
-			commands = append(commands, experimentalRunnerUserBootstrap(job.RequiresMise, runtimeImage != "")...)
+		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
 		}
 		commands = append(commands, runJob)

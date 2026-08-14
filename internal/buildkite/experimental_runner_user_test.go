@@ -45,16 +45,22 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 		"/var/run/docker.sock",
 		"BUILDKITE_AGENT_JOB_API_SOCKET",
 		`chmod g+rw "$job_api_socket"`,
-		`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR"`,
+		`artifact download '.buildkite-gha/plans/`,
+		`sha256sum "$plan"`,
+		`chown root:"$runner_group" "$distribution" "$plan"`,
+		`chmod 0550 "$distribution"`,
+		`chmod 0440 "$plan"`,
+		`mise_runtime_dir="$(dirname "$BUILDKITE_GHA_MISE_DATA_DIR")/runtime/` + MinimumMiseVersion + `"`,
+		`chown -R runner:"$runner_group" "$BUILDKITE_GHA_MISE_DATA_DIR" "$mise_runtime_dir"`,
 		"chown -R runner:\"$runner_group\" '/opt/hostedtoolcache'",
 		"sudo -n --preserve-env --user runner -- env HOME='/home/runner' TMPDIR='/tmp/buildkite-gha-runner'",
-		`"$distribution" run-job --plan-digest`,
+		`BUILDKITE_GHA_PLAN_DIGEST='` + testDigest("linux plan") + `' "$distribution" run-job --plan "$plan"`,
 	} {
 		if !strings.Contains(linux, required) {
 			t.Errorf("experimental Linux command does not contain %q:\n%s", required, linux)
 		}
 	}
-	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /"} {
+	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /", `chown runner:"$runner_group" "$distribution"`, `run-job --plan-digest`} {
 		if strings.Contains(linux, forbidden) {
 			t.Errorf("experimental Linux command contains broad permission change %q:\n%s", forbidden, linux)
 		}
