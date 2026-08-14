@@ -13,6 +13,8 @@ import (
 
 const maxSecretBytes = 64 << 10
 
+var agentTLSEnvironmentNames = [...]string{"SSL_CERT_FILE", "SSL_CERT_DIR"}
+
 // SecretResolver resolves only names declared by the verified job plan.
 type SecretResolver interface {
 	ResolveSecret(context.Context, string) (string, error)
@@ -26,11 +28,12 @@ type Redactor interface {
 // AgentSecrets resolves plan-declared secrets with the destination job's
 // authenticated Buildkite Agent session.
 type AgentSecrets struct {
-	Executable string
-	Endpoint   string
-	JobID      string
-	JobToken   string
-	NoHTTP2    string
+	Executable           string
+	Endpoint             string
+	JobID                string
+	JobToken             string
+	NoHTTP2              string
+	transportEnvironment map[string]string
 }
 
 func resolveAgentSecretsBeforeWorkflow(secrets SecretResolver) (SecretResolver, error) {
@@ -40,6 +43,17 @@ func resolveAgentSecretsBeforeWorkflow(secrets SecretResolver) (SecretResolver, 
 			return AgentSecrets{}, err
 		}
 		secrets.Executable = executable
+		secrets.transportEnvironment = make(map[string]string, len(agentProxyEnvironmentNames)+len(agentTLSEnvironmentNames))
+		for _, name := range agentProxyEnvironmentNames {
+			if value, ok := os.LookupEnv(name); ok {
+				secrets.transportEnvironment[name] = value
+			}
+		}
+		for _, name := range agentTLSEnvironmentNames {
+			if value, ok := os.LookupEnv(name); ok {
+				secrets.transportEnvironment[name] = value
+			}
+		}
 		return secrets, nil
 	}
 	switch secrets := secrets.(type) {
@@ -76,6 +90,16 @@ func (r AgentSecrets) ResolveSecret(ctx context.Context, name string) (string, e
 	}
 	if r.NoHTTP2 != "" {
 		command.Env = append(command.Env, "BUILDKITE_NO_HTTP2="+r.NoHTTP2)
+	}
+	for _, name := range agentProxyEnvironmentNames {
+		if value, ok := r.transportEnvironment[name]; ok {
+			command.Env = append(command.Env, name+"="+value)
+		}
+	}
+	for _, name := range agentTLSEnvironmentNames {
+		if value, ok := r.transportEnvironment[name]; ok {
+			command.Env = append(command.Env, name+"="+value)
+		}
 	}
 	var output boundedSecretBuffer
 	command.Stdout = &output

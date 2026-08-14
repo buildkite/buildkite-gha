@@ -960,7 +960,17 @@ test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3 || exit 14
 test "$BUILDKITE_AGENT_JOB_API_SOCKET" = /tmp/job-api.sock || exit 15
 test "$BUILDKITE_AGENT_JOB_API_TOKEN" = job-api-token || exit 16
 test "$BUILDKITE_NO_HTTP2" = true || exit 17
-test -z "${AMBIENT_SECRET+x}" || exit 18
+test "$HTTP_PROXY" = http://upper-http.example:8080 || exit 18
+test "$HTTPS_PROXY" = http://upper-https.example:8080 || exit 19
+test "$ALL_PROXY" = socks5://upper-all.example:1080 || exit 20
+test "$NO_PROXY" = upper-no-proxy.example || exit 21
+test "$http_proxy" = http://lower-http.example:8080 || exit 22
+test "$https_proxy" = http://lower-https.example:8080 || exit 23
+test "$all_proxy" = socks5://lower-all.example:1080 || exit 24
+test "$no_proxy" = lower-no-proxy.example || exit 25
+test "$SSL_CERT_FILE" = /etc/buildkite/ca.pem || exit 26
+test "$SSL_CERT_DIR" = /etc/buildkite/certs || exit 27
+test -z "${AMBIENT_SECRET+x}" || exit 28
 printf '%s\n' tap-secret
 `)
 	if err := os.Chmod(agent, 0o700); err != nil {
@@ -969,13 +979,30 @@ printf '%s\n' tap-secret
 	t.Setenv("BUILDKITE_AGENT_JOB_API_SOCKET", "/tmp/job-api.sock")
 	t.Setenv("BUILDKITE_AGENT_JOB_API_TOKEN", "job-api-token")
 	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
-	value, err := (AgentSecrets{
+	transportEnvironment := map[string]string{
+		"HTTP_PROXY": "http://upper-http.example:8080", "HTTPS_PROXY": "http://upper-https.example:8080",
+		"ALL_PROXY": "socks5://upper-all.example:1080", "NO_PROXY": "upper-no-proxy.example",
+		"http_proxy": "http://lower-http.example:8080", "https_proxy": "http://lower-https.example:8080",
+		"all_proxy": "socks5://lower-all.example:1080", "no_proxy": "lower-no-proxy.example",
+		"SSL_CERT_FILE": "/etc/buildkite/ca.pem", "SSL_CERT_DIR": "/etc/buildkite/certs",
+	}
+	for name, value := range transportEnvironment {
+		t.Setenv(name, value)
+	}
+	resolved, err := resolveAgentSecretsBeforeWorkflow(AgentSecrets{
 		Executable: agent,
 		Endpoint:   "https://agent.example/v3",
 		JobID:      "job-id",
 		JobToken:   "job-token",
 		NoHTTP2:    "true",
-	}).ResolveSecret(context.Background(), "HOMEBREW_TAP_GITHUB_TOKEN")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range transportEnvironment {
+		t.Setenv(name, "http://workflow-controlled.example")
+	}
+	value, err := resolved.ResolveSecret(context.Background(), "HOMEBREW_TAP_GITHUB_TOKEN")
 	if err != nil || value != "tap-secret" {
 		t.Fatalf("ResolveSecret() = %q, %v", value, err)
 	}
