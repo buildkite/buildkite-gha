@@ -175,8 +175,10 @@ buildkite-gha upload \
 `ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains
 image; `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable
 digest to override the default for a configured profile. Unmapped Linux labels
-keep default agent targeting with the matching image. Every macOS label
-requires a queue and rejects images. Runtime distribution paths must be absolute executables. The
+keep default agent targeting with the matching image. Unmapped `macos-latest`
+targets the hosted `macos-medium` queue provisioned at signup; a mapping
+overrides it, and the queue must exist and allow macOS capacity. `macos-14`
+and `macos-15` require a queue. Every macOS label rejects images. Runtime distribution paths must be absolute executables. The
 importer's platform defaults to its running executable; the other platform has
 no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer

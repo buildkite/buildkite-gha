@@ -1211,6 +1211,25 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
+	t.Run("validate hosted profile admits unmapped macos-latest", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "macos-latest.yml")
+		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macos-latest\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		args := []string{"validate", "--profile", "hosted", "--format", "json", "--event-path", eventPath, workflow}
+		if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+		}
+		var report compatibility.ProcessingReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Result != "admitted" || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
+			t.Fatalf("macos-latest profile report = %#v", report)
+		}
+	})
+
 	t.Run("validate hosted macOS profile requires upload mapping", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "macos.yml")
 		if err := os.WriteFile(workflow, []byte("on: push\njobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: echo macos\n"), 0o600); err != nil {
@@ -4466,7 +4485,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	firstFailureMessage := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
 	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`) ||
 		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
-		strings.Count(firstFailureMessage, "detail: Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 2 {
+		strings.Count(firstFailureMessage, "detail: Supported runner labels: macos-latest, ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 2 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
 	actionFailureAnnotation := string(failureArtifactForStep(pipeline.Steps[1].Plugins, runner.uploaded, "annotations"))
@@ -5177,6 +5196,36 @@ func TestCompileHostedRequiresExplicitMacOSQueueAndRuntime(t *testing.T) {
 	}
 	if len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Target.Queue != "macos" || compiled.Bundle.Plans[0].Job.RuntimeDistributionDigest() != darwinDigest || !bytes.Contains(compiled.Bundle.Pipeline, []byte("queue: \"macos\"")) {
 		t.Fatalf("macOS compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
+	}
+}
+
+func TestCompileHostedDefaultsMacOSLatestToHostedQueue(t *testing.T) {
+	workflow := []byte("on: push\njobs:\n  macos:\n    runs-on: macos-latest\n    steps:\n      - run: echo macos\n")
+	event, err := os.ReadFile(filepath.Join("..", "..", "testdata", "smoke", "events", "push.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compilerDigest := "sha256:" + strings.Repeat("0", 64)
+	darwinDigest := "sha256:" + strings.Repeat("1", 64)
+	_, err = compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no runtime distribution configured for darwin/arm64") {
+		t.Fatalf("unmapped macos-latest without Darwin runtime error = %v", err)
+	}
+	darwinRuntime := map[compiler.Platform]string{compiler.PlatformDarwinARM64: darwinDigest}
+	compiled, err := compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", nil, darwinRuntime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Target.Queue != defaultMacOSRunnerQueue || compiled.Bundle.Plans[0].Job.RuntimeDistributionDigest() != darwinDigest || !bytes.Contains(compiled.Bundle.Pipeline, []byte("queue: \"macos-medium\"")) {
+		t.Fatalf("default macos-latest compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
+	}
+	override := map[string]compiler.RunnerTarget{"macos-latest": {Queue: "custom-macos", Platform: compiler.PlatformDarwinARM64}}
+	compiled, err = compileHosted(context.Background(), "macos.yml", workflow, event, "0.0.0-test", compilerDigest, "importer", "", override, darwinRuntime, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compiled.Bundle.Plans) != 1 || compiled.Bundle.Plans[0].Job.Target.Queue != "custom-macos" || !bytes.Contains(compiled.Bundle.Pipeline, []byte("queue: \"custom-macos\"")) {
+		t.Fatalf("overridden macos-latest compilation = %#v\n%s", compiled.Bundle.Plans, compiled.Bundle.Pipeline)
 	}
 }
 
