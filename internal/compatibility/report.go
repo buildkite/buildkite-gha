@@ -11,7 +11,7 @@ import (
 
 // ProcessingSchema is the versioned, stage-oriented report shared by all
 // workflow-processing commands.
-const ProcessingSchema = "buildkite-gha/processing-report/v1"
+const ProcessingSchema = "buildkite-gha/processing-report/v2"
 
 const (
 	Passed       = "passed"

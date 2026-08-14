@@ -40,7 +40,7 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != 10 || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
-	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v1.schema.json"))
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,10 +49,10 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiler := jsonschema.NewCompiler()
-	if err := compiler.AddResource("processing-report-v1.schema.json", schemaDocument); err != nil {
+	if err := compiler.AddResource("processing-report-v2.schema.json", schemaDocument); err != nil {
 		t.Fatal(err)
 	}
-	schema, err := compiler.Compile("processing-report-v1.schema.json")
+	schema, err := compiler.Compile("processing-report-v2.schema.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +92,48 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	}
 	if err := WriteProcessing(&bytes.Buffer{}, "yaml", report); err == nil {
 		t.Fatal("WriteProcessing() accepted unknown format")
+	}
+}
+
+func TestProcessingReportV1RemainsStrictWithoutDetail(t *testing.T) {
+	report := NewProcessingReport("ci.yml", "")
+	report.Diagnostics = append(report.Diagnostics, Diagnostic{
+		Level: "error", Code: "E_TEST", Message: "actionable guidance", Detail: "lower-level context",
+	})
+	var encoded bytes.Buffer
+	if err := WriteProcessing(&encoded, "json", report); err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	document["schema"] = "buildkite-gha/processing-report/v1"
+	diagnostic := document["diagnostics"].([]any)[0].(map[string]any)
+	delete(diagnostic, "detail")
+
+	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v1.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schemaDocument any
+	if err := json.Unmarshal(schemaSource, &schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("processing-report-v1.schema.json", schemaDocument); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("processing-report-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("original v1 report does not satisfy v1 schema: %v", err)
+	}
+	diagnostic["detail"] = "lower-level context"
+	if err := schema.Validate(document); err == nil {
+		t.Fatal("v1 schema accepted the v2 detail field")
 	}
 }
 

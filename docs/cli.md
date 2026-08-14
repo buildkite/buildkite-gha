@@ -37,7 +37,7 @@ buildkite-gha validate \
 
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 
-Use `--format json` for a `buildkite-gha/processing-report/v1` report.
+Use `--format json` for a `buildkite-gha/processing-report/v2` report.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 

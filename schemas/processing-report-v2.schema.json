@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://buildkite.com/schemas/buildkite-gha/processing-report-v1.schema.json",
-  "title": "buildkite-gha processing report v1",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/processing-report-v2.schema.json",
+  "title": "buildkite-gha processing report v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "workflow", "result", "status", "logical_jobs", "instances", "compile", "admission", "stages", "jobs", "actions", "diagnostics"],
   "properties": {
-    "schema": {"const": "buildkite-gha/processing-report/v1"},
+    "schema": {"const": "buildkite-gha/processing-report/v2"},
     "workflow": {"type": "string", "minLength": 1, "maxLength": 4096},
     "profile": {"type": "string", "maxLength": 128},
     "result": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -104,6 +104,7 @@
         "category": {"enum": ["syntax", "compatibility", "action-resolution", "environment", "admission"]},
         "stage": {"$ref": "#/$defs/stageID"},
         "message": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "detail": {"type": "string", "minLength": 1, "maxLength": 16384},
         "location": {"$ref": "#/$defs/location"},
         "job": {"type": "string", "minLength": 1, "maxLength": 255},
         "instance": {"type": "string", "minLength": 1, "maxLength": 255},
