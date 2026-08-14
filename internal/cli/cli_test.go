@@ -2492,8 +2492,8 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 			t.Fatalf("annotation args = %#v", annotation.args)
 		}
 		for _, want := range []string{
-			`<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`,
-			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
+			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
+			`<div class="py2"><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
 			`<summary>Diagnostic detail</summary>`,
 			`Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.`,
 			"Job <code>test</code>",
@@ -2590,8 +2590,8 @@ func TestProcessingAnnotationReservesSpaceForTruncationNotice(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	probe := compatibility.Diagnostic{Level: "warning", Code: "W_LARGE", Message: "a"}
 	probeRow := renderProcessingDiagnostic(probe, sourceLinkContext{})
-	prefixBytes := len("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n") +
-		len("<div class=\"mb2\"><strong>Workflow:</strong> ") + len(annotationCode(report.Workflow)) +
+	prefixBytes := len("<h2 class=\"h4 mb2\">Workflow could not be run</h2>\n") +
+		len("<div class=\"mb2\">") + len(annotationCode(report.Workflow)) +
 		len("</div>\n<div class=\"mb2\">\n")
 	messageBytes := processingAnnotationBodyLimit - prefixBytes - len(processingAnnotationEnd) - len(processingAnnotationNotice)/2 - (len(probeRow) - len(probe.Message))
 	report.Diagnostics = append(report.Diagnostics,
@@ -2630,7 +2630,7 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	})
 
 	_, body := processingAnnotation(report, sourceLinkContext{})
-	wantWorkflow := "<strong>Workflow:</strong> <code>.github/workflows/test-image-build.yml</code>"
+	wantWorkflow := "<div class=\"mb2\"><code>.github/workflows/test-image-build.yml</code></div>"
 	wantLocation := "<code>.github/workflows/test-image-build.yml:4:2</code>"
 	if !strings.Contains(body, wantWorkflow) || !strings.Contains(body, wantLocation) || strings.Contains(body, repository) {
 		t.Fatalf("annotation = %q, want %q and %q without checkout path", body, wantWorkflow, wantLocation)
@@ -2870,7 +2870,7 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 
 	_, body := processingAnnotation(report, sourceLinkContext{})
 	for _, want := range []string{
-		`<div class="border-top border-gray py2"><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
+		`<div class="py2"><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
 		"Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2",
 	} {
 		if !strings.Contains(body, want) {
@@ -4203,7 +4203,7 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -4239,7 +4239,7 @@ fi
 	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
 	plainIndex := strings.Index(string(output), "Runner label has no")
-	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
+	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">Workflow could not be run</h2>`)
 	logPrefix := "\x1b[31m"
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationIndex <= plainIndex {
 		t.Fatalf("compiler failure command output/error = %q / %v", output, err)
@@ -4258,7 +4258,7 @@ func TestFailedGeneratedWorkflowIncludesWarnings(t *testing.T) {
 
 	workflow, artifacts := failedGeneratedWorkflow(workflowInput{Name: "CI", CanonicalPath: ".github/workflows/ci.yml", Identity: "ci", TriggerCondition: "false"}, "push", report, sourceLinkContext{})
 	wantSummary := "The workflow could not be prepared:\n\n- `.github/workflows/ci.yml`, job `test`: runner is unsupported"
-	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
+	if workflow.Condition != "" || workflow.Failure == nil || len(artifacts) != 2 || workflow.Failure.MessagePath != artifacts[0].Path || workflow.Failure.AnnotationPath != artifacts[1].Path || !bytes.HasPrefix(artifacts[0].Contents, []byte("\x1b[31m")) || !bytes.HasSuffix(artifacts[0].Contents, []byte("\x1b[0m\n")) || !strings.Contains(string(artifacts[1].Contents), `<h2 class="h4 mb2">Workflow could not be run</h2>`) || !strings.Contains(string(artifacts[1].Contents), "<strong>runner is unsupported</strong>") || !strings.Contains(string(artifacts[1].Contents), "<strong>cancel-in-progress is ignored</strong>") || workflow.Failure.Summary != wantSummary {
 		t.Fatalf("failure = %#v", workflow.Failure)
 	}
 }

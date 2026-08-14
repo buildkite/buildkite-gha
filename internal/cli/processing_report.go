@@ -161,8 +161,8 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	}
 
 	var out strings.Builder
-	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
-	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
+	out.WriteString("<h2 class=\"h4 mb2\">Workflow could not be run</h2>\n")
+	out.WriteString("<div class=\"mb2\">")
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
@@ -279,7 +279,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
-	out.WriteString("<div class=\"border-top border-gray py2\"><div><strong>")
+	out.WriteString("<div class=\"py2\"><div><strong>")
 	out.WriteString(annotationHTML(heading))
 	out.WriteString("</strong></div>")
 	context := make([]string, 0, 4)
