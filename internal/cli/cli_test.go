@@ -1196,7 +1196,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `Runner label "macos-15" is not mapped`) {
+		if report.Result != "incompatible" || report.Compile.Result != "incompatible" || len(report.Diagnostics) != 1 || !strings.Contains(report.Diagnostics[0].Message, `Runner label "macos-15" has no runner-target mapping`) || !strings.Contains(report.Diagnostics[0].Detail, "Supported runner labels:") {
 			t.Fatalf("macOS profile report = %#v", report)
 		}
 	})
@@ -2070,7 +2070,7 @@ func TestProcessingReportRedactsEventDerivedRunnerValues(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || report.Diagnostics[0].Message != "Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest" {
+	if len(report.Diagnostics) != 1 || strings.Contains(report.Diagnostics[0].Message, sentinel) || strings.Contains(report.Diagnostics[0].Detail, sentinel) || report.Diagnostics[0].Message != "Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label." || report.Diagnostics[0].Detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
@@ -2464,7 +2464,9 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`,
-			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; uses an unsupported operating system`,
+			`<div class="border-top border-gray py2"><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
+			`<summary>Diagnostic detail</summary>`,
+			`Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.`,
 			"Job <code>test</code>",
 		} {
 			if !strings.Contains(string(annotation.stdin), want) {
@@ -2649,12 +2651,13 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 }
 
 func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testing.T) {
-	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Effective permissions: contents: read.`
+	const message = `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported. Move permissions to the workflow level.`
+	const detail = `Effective permissions: contents: read.`
 	report := compatibility.NewProcessingReport("ci.yml", "hosted")
 	for _, instance := range []string{"gha-test-a", "gha-test-b"} {
 		report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 			Level: "error", Code: "E_PROFILE", Stage: string(compiler.StageAdmission),
-			Message: message, Job: "test", Instance: instance,
+			Message: message, Detail: detail, Job: "test", Instance: instance,
 		})
 	}
 
@@ -2666,7 +2669,7 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 	if err := json.Unmarshal(jsonOutput.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Diagnostics) != 1 || decoded.Diagnostics[0].Message != message || decoded.Diagnostics[0].Instance != "" {
+	if len(decoded.Diagnostics) != 1 || decoded.Diagnostics[0].Message != message || decoded.Diagnostics[0].Detail != detail || decoded.Diagnostics[0].Instance != "" {
 		t.Fatalf("JSON diagnostics = %#v", decoded.Diagnostics)
 	}
 
@@ -2675,9 +2678,10 @@ func TestProcessingDiagnosticRenderingsUseTheSameMessageAndAggregation(t *testin
 		t.Fatal(err)
 	}
 	_, annotation := processingAnnotation(report)
-	if strings.Count(textOutput.String(), message) != 1 ||
+	if strings.Count(textOutput.String(), message) != 1 || strings.Count(textOutput.String(), "detail: "+detail) != 1 ||
 		strings.Count(annotation, `Job &#34;test&#34; needs GITHUB_TOKEN, but job-level permissions are unsupported.`) != 1 ||
-		strings.Count(annotation, `Effective permissions: contents: read.`) != 1 {
+		strings.Count(annotation, `Move permissions to the workflow level.`) != 1 ||
+		strings.Count(annotation, `<summary>Diagnostic detail</summary>`) != 1 || strings.Count(annotation, detail) != 1 {
 		t.Fatalf("text = %q; annotation = %q", textOutput.String(), annotation)
 	}
 	if strings.Contains(annotation, "gha-test-") {
@@ -3868,12 +3872,12 @@ func TestRunUploadEmitsApplicableCompilationFailuresAsFailingSteps(t *testing.T)
 	}
 	step := pipeline.Steps[0]
 	wantSummary := "The workflow could not be prepared:\n\n" +
-		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest\n" +
+		"- `" + filepath.ToSlash(workflowPath) + "`, job `alpha`: Runner label has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `beta`: runs-on expression cannot be resolved at compile time: compile-time object contains ambiguous properties\n" +
 		"- `" + filepath.ToSlash(workflowPath) + "`, job `gamma`: runs-on expression cannot be resolved at compile time: fromJSON argument is invalid JSON"
 	message := failureArtifactForStep(step.Plugins, runner.uploaded, "messages")
 	annotation := failureArtifactForStep(step.Plugins, runner.uploaded, "annotations")
-	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label is not mapped") || !strings.Contains(string(message), "Runner label is not mapped") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
+	if step.Label != ":github: Invalid push" || step.Condition != "" || !isGeneratedFailureCommand(step.Command) || strings.Contains(step.Command, "Runner label has no") || !strings.Contains(string(message), "Runner label has no") || !strings.Contains(string(message), "detail: Supported runner labels:") || !strings.Contains(string(annotation), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`) || !strings.Contains(string(annotation), "Job <code>alpha</code>") || !strings.Contains(string(annotation), "Job <code>beta</code>") || !strings.Contains(string(annotation), "Job <code>gamma</code>") || len(step.Notify) != 1 || step.Notify[0].GitHubCheck.Output.Title != "Workflow could not be run" || step.Notify[0].GitHubCheck.Output.Summary != wantSummary || !step.Checkout.Skip {
 		t.Fatalf("compiler failure step = %#v", step)
 	}
 	if strings.Contains(step.Notify[0].GitHubCheck.Output.Summary, "E_EXPRESSION_INVALID") {
@@ -3908,7 +3912,7 @@ fi
 	command.Dir = commandDirectory
 	command.Env = append(os.Environ(), "PATH="+agentDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := command.CombinedOutput()
-	plainIndex := strings.Index(string(output), "Runner label is not mapped")
+	plainIndex := strings.Index(string(output), "Runner label has no")
 	annotationIndex := strings.Index(string(output), `<h2 class="h4 mb2">GitHub Actions workflow diagnostics</h2>`)
 	logPrefix := "\x1b[31m"
 	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 || !strings.HasPrefix(string(output), logPrefix) || plainIndex == -1 || annotationIndex <= plainIndex {
@@ -4107,8 +4111,9 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 		}
 	}
 	firstFailureMessage := string(failureArtifactForStep(pipeline.Steps[0].Plugins, runner.uploaded, "messages"))
-	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) ||
-		!strings.Contains(firstFailureMessage, `Runner label "macos-15" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`) {
+	if !strings.Contains(firstFailureMessage, `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`) ||
+		!strings.Contains(firstFailureMessage, `Runner label "macos-15" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`) ||
+		strings.Count(firstFailureMessage, "detail: Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.") != 2 {
 		t.Fatalf("multi-diagnostic failure message = %q", firstFailureMessage)
 	}
 	actionFailureAnnotation := string(failureArtifactForStep(pipeline.Steps[1].Plugins, runner.uploaded, "annotations"))
@@ -5970,13 +5975,18 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		}
 	}
 
-	action := plan.ActionLock{Source: "github", Repository: "actions/cache", Commit: strings.Repeat("0", 40)}
+	action := plan.ActionLock{Source: "github", Repository: "actions/cache", RequestedRef: "v6.0.2", Commit: strings.Repeat("0", 40)}
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
 		Workflow: plan.Workflow{LogicalJobID: "cache-old"},
 		Actions:  []plan.ActionLock{action},
 	}}}}
-	if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "v6.1.0") {
+	err := validateUnprivilegedBundle(bundle)
+	if err == nil || !strings.Contains(err.Error(), "v6.1.0") {
 		t.Fatalf("validateUnprivilegedBundle(%#v) error = %v", action, err)
+	}
+	var finding *compiler.ProcessingFinding
+	if !errors.As(err, &finding) || finding.Message != "actions/cache v6.0.2 is unsupported. Use a supported version from https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#cache-action." || !strings.Contains(finding.Detail, "Buildkite cache-v2 service") || !strings.Contains(finding.Detail, action.Commit) || strings.Contains(finding.Message, action.Commit) {
+		t.Fatalf("hosted cache diagnostic = %#v", finding)
 	}
 }
 

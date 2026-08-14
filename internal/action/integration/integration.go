@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -133,12 +134,53 @@ var cacheCommits = map[string]string{
 	CacheCommit:     "v6.1.0",
 }
 
+type unsupportedVersionError struct {
+	action    string
+	commit    string
+	boundary  string
+	supported []string
+}
+
+func (e *unsupportedVersionError) Error() string {
+	return fmt.Sprintf("%s %s does not admit resolved commit %q; supported commits are %s", e.action, e.boundary, e.commit, strings.Join(e.supported, ", "))
+}
+
+// UnsupportedVersionDiagnostic separates corrective version guidance from
+// immutable admission details for a rejected action integration.
+func UnsupportedVersionDiagnostic(reference string, err error) (message, detail string, ok bool) {
+	var versionErr *unsupportedVersionError
+	if !errors.As(err, &versionErr) {
+		return "", "", false
+	}
+	requested := ""
+	if _, ref, found := strings.Cut(reference, "@"); found {
+		requested = strings.TrimSpace(ref)
+	}
+	anchor := map[string]string{
+		"actions/checkout":          "checkout-action",
+		"actions/upload-artifact":   "upload-artifact-action",
+		"actions/download-artifact": "download-artifact-action",
+		"actions/cache":             "cache-action",
+	}[versionErr.action]
+	docs := "https://github.com/buildkite/buildkite-gha/blob/main/docs/compatibility.md#" + anchor
+	if requested == "" {
+		message = fmt.Sprintf("This %s version is unsupported. Use a supported version from %s.", versionErr.action, docs)
+	} else {
+		message = fmt.Sprintf("%s %s is unsupported. Use a supported version from %s.", versionErr.action, requested, docs)
+	}
+	return message, versionErr.Error(), true
+}
+
+func versionError(action, boundary, commit string, supported []string) error {
+	return &unsupportedVersionError{action: action, boundary: boundary, commit: commit, supported: supported}
+}
+
 // ValidateCheckoutCommit rejects semantic drift from the audited upstream
 // manifests and implementations. Mutable references are resolved before this
 // check, so a moved major tag must be deliberately audited and added here.
 func ValidateCheckoutCommit(commit string) error {
 	if _, ok := checkoutCommits[commit]; !ok {
-		return fmt.Errorf("actions/checkout native adapter does not admit resolved commit %q; supported commits are %s", commit, strings.Join(sortedCheckoutCommits(), ", "))
+		return versionError("actions/checkout", "native adapter", commit, sortedCheckoutCommits())
 	}
 	return nil
 }
@@ -160,7 +202,7 @@ func ValidateUploadArtifactCommit(commit string) error {
 			commits = append(commits, version+" ("+supported+")")
 		}
 		sort.Strings(commits)
-		return fmt.Errorf("actions/upload-artifact native adapter does not admit resolved commit %q; supported commits are %s", commit, strings.Join(commits, ", "))
+		return versionError("actions/upload-artifact", "native adapter", commit, commits)
 	}
 	return nil
 }
@@ -171,7 +213,7 @@ func ValidateDownloadArtifactCommit(commit string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("actions/download-artifact native adapter does not support resolved commit %q; supported commits are %s", commit, strings.Join(DownloadArtifactCommits(), ", "))
+	return versionError("actions/download-artifact", "native adapter", commit, DownloadArtifactCommits())
 }
 
 // DownloadArtifactCommits returns the complete immutable admission set.
@@ -195,7 +237,7 @@ func ValidateCacheCommit(commit string) error {
 			commits = append(commits, version+" ("+supported+")")
 		}
 		sort.Strings(commits)
-		return fmt.Errorf("buildkite cache-v2 service does not admit resolved actions/cache commit %q; supported commits are %s", commit, strings.Join(commits, ", "))
+		return versionError("actions/cache", "Buildkite cache-v2 service", commit, commits)
 	}
 	return nil
 }

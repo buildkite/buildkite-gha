@@ -1807,6 +1807,9 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		if len(attribution) != 0 {
 			message += " {" + strings.Join(attribution, ", ") + "}"
 		}
+		if diagnostic.Detail != "" {
+			message += "\n  detail: " + diagnostic.Detail
+		}
 		messages = append(messages, message)
 	}
 	_, annotation := processingAnnotation(report)
@@ -2393,10 +2396,14 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	}
 	var diagnostics []error
 	addFailure := func(artifact compiler.PlanArtifact, message string, err error) {
+		detail := err.Error()
+		if detail == message {
+			detail = ""
+		}
 		finding := &compiler.ProcessingFinding{
 			Stage: compiler.StageAdmission, Code: "E_PROFILE", Category: "admission",
 			Job: artifact.Job.Workflow.LogicalJobID, Instance: artifact.Job.Target.StepKey,
-			Message: message, Err: err,
+			Message: message, Detail: detail, Err: err,
 		}
 		if instance, ok := instances[artifact.Job.Target.StepKey]; ok {
 			finding.Path = instance.SourcePath
@@ -2448,7 +2455,15 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
 			if descriptor.Service == actionintegration.ServiceCache {
 				if err := actionintegration.ValidateCacheCommit(action.Commit); err != nil {
-					addFailure(artifact, "cache action version is not admitted by the hosted profile", fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
+					reference := action.Repository
+					if action.Path != "" {
+						reference += "/" + action.Path
+					}
+					if action.RequestedRef != "" {
+						reference += "@" + action.RequestedRef
+					}
+					message, _, _ := actionintegration.UnsupportedVersionDiagnostic(reference, err)
+					addFailure(artifact, message, fmt.Errorf("job %q uses unsupported cache action: %w", artifact.Job.Workflow.LogicalJobID, err))
 				}
 				continue
 			}

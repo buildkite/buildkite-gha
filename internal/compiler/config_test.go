@@ -228,7 +228,7 @@ func TestRunsOnPolicyFailsClosedWithLocatedDiagnostics(t *testing.T) {
 	}
 }
 
-func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
+func TestRunnerRejectionDiagnosticIsActionableWithoutResolvedLabel(t *testing.T) {
 	policy := RunnerPolicy{
 		Labels:          map[string]string{"ubuntu-24.04": "linux", "self-hosted": "one", "linux": "two", "default": ""},
 		Targets:         map[string]RunnerTarget{"macos": {Queue: "macos", Platform: PlatformDarwinARM64}},
@@ -240,14 +240,14 @@ func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
 		trust  EventTrust
 		want   string
 	}{
-		{name: "no labels", trust: EventTrusted, want: reasonNoLabels},
-		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: reasonDuplicateLabel},
-		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: reasonUnsupportedOS},
-		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: reasonUnmappedLabel},
-		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: reasonConflictingQueues},
-		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: reasonConflictingTarget},
-		{name: "untrusted default targeting", labels: []string{"default"}, trust: EventUntrusted, want: reasonUntrustedDefault},
-		{name: "untrusted queue", labels: []string{"ubuntu-24.04"}, trust: EventUntrusted, want: reasonUntrustedQueue},
+		{name: "no labels", trust: EventTrusted, want: "Set runs-on"},
+		{name: "duplicate label", labels: []string{"ubuntu-24.04", "ubuntu-24.04"}, trust: EventTrusted, want: "Remove duplicate labels"},
+		{name: "unsupported operating system", labels: []string{"windows-latest"}, trust: EventTrusted, want: "Use a Linux or macOS runner label"},
+		{name: "unmapped label", labels: []string{"macos-15"}, trust: EventTrusted, want: "Configure a mapping"},
+		{name: "conflicting queues", labels: []string{"self-hosted", "linux"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
+		{name: "conflicting targets", labels: []string{"ubuntu-24.04", "macos"}, trust: EventTrusted, want: "Use labels that map to one runner target"},
+		{name: "untrusted default targeting", labels: []string{"default"}, trust: EventUntrusted, want: "Map runs-on to a queue allowed"},
+		{name: "untrusted queue", labels: []string{"ubuntu-24.04"}, trust: EventUntrusted, want: "Add the queue"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -255,33 +255,34 @@ func TestRunnerRejectionMessageNamesReasonWithoutResolvedLabel(t *testing.T) {
 			if err == nil {
 				t.Fatal("resolve() error = nil, want rejection")
 			}
-			message := runnerRejectionMessage(err, nil, []string{"ubuntu-latest"})
-			if !strings.Contains(message, test.want) && !strings.Contains(message, "unsupported operating system") && !strings.Contains(message, "not mapped") {
-				t.Fatalf("runnerRejectionMessage() = %q, want reason %q", message, test.want)
+			message, _ := runnerRejectionDiagnostic(err, nil, []string{"ubuntu-latest"}, policy.UntrustedQueues)
+			if !strings.Contains(message, test.want) {
+				t.Fatalf("runnerRejectionDiagnostic() = %q, want %q", message, test.want)
 			}
 		})
 	}
 }
 
-func TestRunnerRejectionMessageFallsBackWhenUnclassified(t *testing.T) {
-	if message := runnerRejectionMessage(errors.New("boom"), nil, nil); message != "runner target is unsupported" {
-		t.Fatalf("runnerRejectionMessage() = %q, want the bare policy message", message)
+func TestRunnerRejectionDiagnosticFallsBackWhenUnclassified(t *testing.T) {
+	message, detail := runnerRejectionDiagnostic(errors.New("boom"), nil, nil, nil)
+	if message != "Runner target is unsupported. Use a configured Linux or macOS runner target." || detail != "" {
+		t.Fatalf("runnerRejectionDiagnostic() = %q, %q", message, detail)
 	}
 }
 
-func TestRunnerRejectionMessageNamesStaticLabelAndSupportedTargets(t *testing.T) {
+func TestRunnerRejectionDiagnosticSeparatesStaticLabelFromAllowlist(t *testing.T) {
 	supported := []string{"ubuntu-22.04", "ubuntu-24.04", "ubuntu-latest"}
 	tests := []struct {
-		label string
-		want  string
+		label       string
+		wantMessage string
 	}{
 		{
-			label: "windows-latest",
-			want:  `Runner label "windows-latest" uses an unsupported operating system (Windows); supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest`,
+			label:       "windows-latest",
+			wantMessage: `Runner label "windows-latest" requires Windows, which is unsupported. Use a Linux or macOS runner label.`,
 		},
 		{
-			label: "macos-latest",
-			want:  `Runner label "macos-latest" is not mapped to a runner target; configure a runner-target mapping for this label or use ubuntu-22.04, ubuntu-24.04, ubuntu-latest`,
+			label:       "macos-latest",
+			wantMessage: `Runner label "macos-latest" has no runner-target mapping. Configure a mapping for this label or use a mapped runner label.`,
 		},
 	}
 	policy := RunnerPolicy{Targets: map[string]RunnerTarget{
@@ -294,8 +295,12 @@ func TestRunnerRejectionMessageNamesStaticLabelAndSupportedTargets(t *testing.T)
 		if err == nil {
 			t.Fatalf("resolve(%q) error = nil", test.label)
 		}
-		if got := runnerRejectionMessage(err, []string{test.label}, supported); got != test.want {
-			t.Fatalf("runnerRejectionMessage(%q) = %q, want %q", test.label, got, test.want)
+		message, detail := runnerRejectionDiagnostic(err, []string{test.label}, supported, nil)
+		if message != test.wantMessage || detail != "Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest." {
+			t.Fatalf("runnerRejectionDiagnostic(%q) = %q, %q", test.label, message, detail)
+		}
+		if strings.Contains(message, "ubuntu-22.04") {
+			t.Fatalf("runner allowlist leaked into message: %q", message)
 		}
 	}
 }

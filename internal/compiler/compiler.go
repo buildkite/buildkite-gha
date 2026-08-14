@@ -1016,10 +1016,11 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			if runsOnErr == nil {
 				target, err = options.Runners.resolve(labels, options.EventTrust)
 				if err != nil {
+					message, detail := runnerRejectionDiagnostic(err, reportableRunnerLabels(job, labels), options.Runners.supportedLabels(), options.Runners.UntrustedQueues)
 					finding := &ProcessingFinding{
 						Stage: StageExpressions, Code: CodeExpressionInvalid, Category: "compatibility",
 						Path: jobPath, Line: runsOnPosition(job).Line, Column: runsOnPosition(job).Column,
-						Job: job.ID, Instance: key, Message: runnerRejectionMessage(err, reportableRunnerLabels(job, labels), options.Runners.supportedLabels()),
+						Job: job.ID, Instance: key, Message: message, Detail: detail,
 						Err: locatedJobError(jobPath, job, runsOnPosition(job).Line, runsOnPosition(job).Column, err.Error()),
 					}
 					diagnostics = append(diagnostics, finding)

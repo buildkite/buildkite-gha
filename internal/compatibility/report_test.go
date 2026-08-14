@@ -25,7 +25,7 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	report.Actions = append(report.Actions, ActionResult{Reference: "./.github/actions/test", Job: "gha-test", Step: 1, Result: Failed})
 	report.Diagnostics = append(report.Diagnostics, Diagnostic{
 		Level: "error", Code: "E_ACTION_RESOLUTION", Category: "action-resolution",
-		Stage: "action-resolution", Message: "action metadata is invalid", Job: "test", Instance: "gha-test", Action: "./.github/actions/test", Step: 1,
+		Stage: "action-resolution", Message: "action metadata is invalid; update the action", Detail: "unsupported runtime node12", Job: "test", Instance: "gha-test", Action: "./.github/actions/test", Step: 1,
 		Location: &SourceLocation{Path: "ci.yml", Line: 8, Column: 9},
 	})
 
@@ -37,7 +37,7 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != 10 || decoded.Status != Failed {
+	if decoded.Schema != ProcessingSchema || len(decoded.Stages) != 10 || decoded.Status != Failed || decoded.Diagnostics[0].Detail != "unsupported runtime node12" {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	schemaSource, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v1.schema.json"))
@@ -82,7 +82,8 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 		"Immutable action resolution: failed",
 		"Job-plan construction: not-evaluated",
 		"action ./.github/actions/test (job gha-test, step 1): failed",
-		"[E_ACTION_RESOLUTION] action metadata is invalid",
+		"[E_ACTION_RESOLUTION] action metadata is invalid; update the action",
+		"detail: unsupported runtime node12",
 		"instance=gha-test, action=./.github/actions/test, step=1",
 	} {
 		if !strings.Contains(rendered.String(), want) {

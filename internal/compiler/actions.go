@@ -112,20 +112,20 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 				continue
 			}
 			position := step.Span.Start
-			message, action := actionResolutionMessage(step.Uses, err)
+			message, detail, action := actionResolutionMessage(step.Uses, err)
 			diagnostics = append(diagnostics, &ProcessingFinding{
 				Stage: StageResolution, Code: CodeActionResolution, Category: "action-resolution",
 				Path: instance.SourcePath, Line: position.Line, Column: position.Column,
 				Job: instance.LogicalJobID, Instance: instance.Key, Action: action, Step: i + 1,
-				Message: message,
-				Err:     fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
+				Message: message, Detail: detail,
+				Err: fmt.Errorf("%s:%d:%d: job %q action %q at step %d: %w", instance.SourcePath, position.Line, position.Column, instance.LogicalJobID, step.Uses, i+1, err),
 			})
 		}
 	}
 	return evidence, errors.Join(diagnostics...)
 }
 
-func actionResolutionMessage(reference string, err error) (message, action string) {
+func actionResolutionMessage(reference string, err error) (message, detail, action string) {
 	action = reference
 	for {
 		var childErr *actionChildError
@@ -135,9 +135,16 @@ func actionResolutionMessage(reference string, err error) (message, action strin
 		action = childErr.child
 		err = childErr.err
 	}
+	if message, detail, ok := actionintegration.UnsupportedVersionDiagnostic(action, err); ok {
+		return message, detail, action
+	}
+	var runtimeErr *metadata.UnsupportedRuntimeError
+	if errors.As(err, &runtimeErr) {
+		return fmt.Sprintf("Action %q uses unsupported runtime %q. Set runs.using to node16, node20, node24, composite, or docker.", action, runtimeErr.Runtime), runtimeErr.Error(), action
+	}
 	reason := strings.TrimPrefix(err.Error(), fmt.Sprintf("compile action %q: ", action))
 	if strings.HasPrefix(reason, "resolve action reference: ") || strings.HasPrefix(reason, "download action source: ") {
-		return fmt.Sprintf("Action %q could not be resolved: %s", action, reason[strings.Index(reason, ": ")+2:]), action
+		return fmt.Sprintf("Action %q could not be resolved: %s", action, reason[strings.Index(reason, ": ")+2:]), "", action
 	}
 	if start := strings.Index(reason, "parse action metadata \""); start >= 0 {
 		pathStart := start + len("parse action metadata \"")
@@ -148,7 +155,7 @@ func actionResolutionMessage(reference string, err error) (message, action strin
 	if fields := unsupportedMetadataFields(reason); fields != "" {
 		reason = "action metadata uses " + fields
 	}
-	return fmt.Sprintf("Action %q is unsupported: %s", action, reason), action
+	return fmt.Sprintf("Action %q is unsupported: %s", action, reason), "", action
 }
 
 type actionChildError struct {

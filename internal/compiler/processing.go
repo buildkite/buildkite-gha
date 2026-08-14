@@ -48,7 +48,10 @@ type ProcessingFinding struct {
 	// Message replaces Err's text in the rendered report. Set it whenever Err
 	// can quote event-derived data, so that data cannot reach the report.
 	Message string
-	Err     error
+	// Detail adds lower-level diagnostic information after Message. It must not
+	// contain event-derived data.
+	Detail string
+	Err    error
 }
 
 func (e *ProcessingFinding) Error() string { return e.Err.Error() }

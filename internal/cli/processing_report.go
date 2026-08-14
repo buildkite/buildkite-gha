@@ -142,8 +142,18 @@ func processingAnnotationWorkflowPath(path string) string {
 }
 
 func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit int) string {
+	detail := diagnostic.Detail
 	message := diagnostic.Message
 	row := renderProcessingDiagnostic(diagnostic)
+	for len(row) > limit && detail != "" {
+		end := max(0, len(detail)-(len(row)-limit))
+		for end > 0 && !utf8.ValidString(detail[:end]) {
+			end--
+		}
+		diagnostic.Detail = detail[:end] + "…"
+		detail = detail[:end]
+		row = renderProcessingDiagnostic(diagnostic)
+	}
 	for len(row) > limit && message != "" {
 		end := max(0, len(message)-(len(row)-limit))
 		for end > 0 && !utf8.ValidString(message[:end]) {
@@ -192,6 +202,11 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic) string {
 			out.WriteString(annotationHTML(sentence))
 		}
 		out.WriteString("</div>")
+	}
+	if diagnostic.Detail != "" {
+		out.WriteString("<details class=\"mt1\"><summary>Diagnostic detail</summary><div class=\"mt1\">")
+		out.WriteString(annotationHTML(diagnostic.Detail))
+		out.WriteString("</div></details>")
 	}
 	out.WriteString("</div>\n")
 	return out.String()
