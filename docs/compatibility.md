@@ -532,7 +532,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-**🟡 Supported subset.** Only these resolved `actions/checkout` commits are admitted:
+**🟡 Supported subset.** Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
 
 | Release | Commit |
 | --- | --- |
@@ -542,7 +542,7 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Major tags work only while they resolve to one of these commits. v1 through v3 and unknown commits are unsupported.
+Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the current adapter contract; the upstream JavaScript doesn't run. v1 through v3 and unknown commits are unsupported. Maintainers can update the snapshot with `go generate ./internal/action/integration`.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 

@@ -162,14 +162,23 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 	}
 }
 
-func TestCheckoutCommitsAreExact(t *testing.T) {
+func TestCheckoutCommitAdmission(t *testing.T) {
 	for _, commit := range []string{CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
 		if err := ValidateCheckoutCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateCheckoutCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) {
-		t.Fatalf("unrecognized checkout commit error = %v", err)
+	if err := ValidateCheckoutCommit("de0fac2e4500dabe0009e67214ff5f5447ce83dd"); err != nil {
+		t.Fatalf("upstream main commit rejected: %v", err)
+	}
+	for _, commit := range []string{
+		"f43a0e5ff2bd294095638e18286ca9a3d1956744", // v3.6.0 is an ancestor of upstream main.
+		"a37ce9120846195fa4ece8f58b268e6043cb2f26", // v3.7.0 isn't on upstream main.
+		strings.Repeat("0", 40),
+	} {
+		if err := ValidateCheckoutCommit(commit); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) || !strings.Contains(err.Error(), checkoutMainSnapshotCommit) {
+			t.Fatalf("unrecognized checkout commit %s error = %v", commit, err)
+		}
 	}
 }
 

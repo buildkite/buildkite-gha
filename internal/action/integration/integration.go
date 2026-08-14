@@ -1,3 +1,5 @@
+//go:generate ../../../scripts/update-checkout-main-commits
+
 // Package integration classifies actions with Buildkite-specific execution or
 // service requirements.
 package integration
@@ -184,12 +186,16 @@ func versionError(action, boundary, commit string, supported []string) error {
 	return &unsupportedVersionError{action: action, boundary: boundary, commit: commit, supported: supported}
 }
 
-// ValidateCheckoutCommit rejects semantic drift from the audited upstream
-// manifests and implementations. Mutable references are resolved before this
-// check, so a moved major tag must be deliberately audited and added here.
+// ValidateCheckoutCommit admits known releases and a static snapshot of commits
+// reachable from upstream main. Mutable references are resolved before this
+// check, so changes after the snapshot remain fail-closed until regeneration.
 func ValidateCheckoutCommit(commit string) error {
-	if _, ok := checkoutCommits[commit]; !ok {
-		return versionError("actions/checkout", "native adapter", commit, sortedCheckoutCommits())
+	if _, ok := checkoutCommits[commit]; ok {
+		return nil
+	}
+	if _, ok := checkoutMainCommits[commit]; !ok {
+		supported := append(sortedCheckoutCommits(), "upstream main snapshot ("+checkoutMainSnapshotCommit+")")
+		return versionError("actions/checkout", "native adapter", commit, supported)
 	}
 	return nil
 }
