@@ -177,8 +177,9 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
+	out.WriteString("<p>")
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
-	out.WriteString("<br /><br />\n")
+	out.WriteString("</p>\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len()
 	for i, diagnostic := range diagnostics {
