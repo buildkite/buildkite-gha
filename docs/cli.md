@@ -111,11 +111,12 @@ to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields. The importer uses its verified executable for jobs
-on the same platform and fetches the other platform's distribution from the
-same release only when a workflow requires it. Custom importers can use the
-public flags below. Runner queue mappings affect generated jobs, not the
-importer step.
+`minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
+Unknown fields and non-boolean experiment values are rejected before upload.
+The importer uses its verified executable for jobs on the same platform and
+fetches the other platform's distribution from the same release only when a
+workflow requires it. Custom importers can use the public flags below. Runner
+queue mappings affect generated jobs, not the importer step.
 
 ### Select workflows
 
@@ -191,6 +192,29 @@ experiment. Generated jobs must start as root. Their bootstrap creates a
 socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
 runs `buildkite-gha run-job` as `runner`. The option does not infer behavior
 from a queue name and does not affect macOS jobs.
+
+The existing plugin can run this experiment without a plugin release. Its
+`source-ref` field builds the CLI at the pinned commit and passes the boolean
+configuration to the zero-argument `plugin` entry point:
+
+```yaml
+steps:
+  - label: ":github: PB-2731 runner user proof"
+    key: "pb-2731-runner-user"
+    agents:
+      queue: "hosted"
+    plugins:
+      - github-actions#v0.9.3:
+          workflow: .github/workflows/experimental-runner-user.yml
+          source-ref: 43a35b90bcfd2e2c807f9fed4e609b40432e98b8
+          experimental-runner-user: true
+          runners:
+            - runs-on: ubuntu-latest
+              queue: hosted
+```
+
+`experimental-runner-user` must be a YAML boolean, not a quoted string. Do not
+set `version` with `source-ref`.
 
 ## Disable telemetry
 
