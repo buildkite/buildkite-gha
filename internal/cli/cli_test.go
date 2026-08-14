@@ -6259,6 +6259,21 @@ func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 	}
 }
 
+func TestHasSetupNodeActionMatchesOnlyRootGitHubAction(t *testing.T) {
+	if !hasSetupNodeAction([]plan.ActionLock{{Source: "github", Repository: "actions/setup-node"}}) {
+		t.Fatal("root actions/setup-node lock was not detected")
+	}
+	for _, lock := range []plan.ActionLock{
+		{Source: "github", Repository: "actions/setup-node", Path: "nested"},
+		{Source: "workspace", Repository: "actions/setup-node"},
+		{Source: "github", Repository: "owner/setup-node"},
+	} {
+		if hasSetupNodeAction([]plan.ActionLock{lock}) {
+			t.Fatalf("unexpected setup-node match for %#v", lock)
+		}
+	}
+}
+
 func TestUnprivilegedUploadAllowsNativeDownloadArtifactAdapter(t *testing.T) {
 	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{Workflow: plan.Workflow{LogicalJobID: "consumer"}, Actions: []plan.ActionLock{{Source: "github", Repository: "actions/download-artifact", Commit: actionintegration.DownloadArtifactCommit}}}}}}
 	if err := validateUnprivilegedBundle(bundle); err != nil {

@@ -652,6 +652,9 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	if cacheErr != nil && action.Cache {
 		return fmt.Errorf("configure actions/cache service: %w", cacheErr)
 	}
+	if cacheErr != nil && strings.HasPrefix(action.reference, "actions/setup-node@") {
+		processor.trustedWarning(fmt.Sprintf("Cache credentials unavailable for %q entry %q; ACTIONS_RESULTS_URL will be omitted: %v", action.reference, entry, processor.scrubError(cacheErr)))
+	}
 	cacheToken := ""
 	if cacheErr == nil {
 		env = mergeStringMaps(env, cacheEnv)
