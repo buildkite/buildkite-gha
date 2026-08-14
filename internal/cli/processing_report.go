@@ -202,7 +202,10 @@ func processingAnnotationWorkflowPath(path string) (display string, linkable boo
 	}
 	resolved := path
 	if !filepath.IsAbs(resolved) {
-		if workingDirectory, err := os.Getwd(); err == nil {
+		slashPath := filepath.ToSlash(path)
+		if strings.HasPrefix(slashPath, "./.github/workflows/") {
+			resolved = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(slashPath, "./")))
+		} else if workingDirectory, err := os.Getwd(); err == nil {
 			resolved = filepath.Join(workingDirectory, resolved)
 		}
 	}

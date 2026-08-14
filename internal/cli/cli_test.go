@@ -2630,6 +2630,28 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationResolvesCompilerLocationsFromCheckoutRoot(t *testing.T) {
+	repository := t.TempDir()
+	workingDirectory := filepath.Join(repository, ".github")
+	if err := os.MkdirAll(workingDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDirectory)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport("workflows/caller.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid reusable workflow",
+		Location: &compatibility.SourceLocation{Path: "./.github/workflows/build-security.yml", Line: 35, Column: 13},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+
+	_, body := processingAnnotation(report, sourceLinks)
+	want := `<a href="https://github.com/owner/repo/blob/abc123/.github/workflows/build-security.yml#L35"><code>.github/workflows/build-security.yml:35:13</code></a>`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want %q", body, want)
+	}
+}
+
 func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 	repository := t.TempDir()
 	t.Chdir(repository)
