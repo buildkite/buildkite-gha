@@ -2786,6 +2786,30 @@ func TestProcessingDiagnosticsDoNotLinkSymlinksOutsideCheckout(t *testing.T) {
 	}
 }
 
+func TestProcessingDiagnosticsLinkThroughCheckoutRootSymlink(t *testing.T) {
+	realCheckout := t.TempDir()
+	workflowPath := filepath.Join(realCheckout, "ci.yml")
+	if err := os.WriteFile(workflowPath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checkout := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Symlink(realCheckout, checkout); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", checkout)
+	report := compatibility.NewProcessingReport(filepath.Join(checkout, "ci.yml"), "hosted")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: filepath.Join(checkout, "ci.yml"), Line: 1, Column: 1},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+
+	_, annotation := processingAnnotation(report, sourceLinks)
+	if want := `href="https://github.com/owner/repo/blob/abc123/ci.yml#L1"`; !strings.Contains(annotation, want) {
+		t.Fatalf("checkout symlink location was not linked: annotation=%q want=%q", annotation, want)
+	}
+}
+
 func TestProcessingAnnotationDoesNotRepeatDiagnosticLocation(t *testing.T) {
 	report := compatibility.NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{

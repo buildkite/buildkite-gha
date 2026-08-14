@@ -233,7 +233,11 @@ func processingAnnotationWorkflowPath(path, workflowSourceRoot string) (display 
 	if err != nil {
 		return display, false
 	}
-	relative, err := filepath.Rel(root, canonical)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return display, false
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonical)
 	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(relative), true
 	}
