@@ -937,11 +937,12 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	for version, commit := range map[string]string{
-		"v4":     actionintegration.CheckoutV4Commit,
-		"v5":     actionintegration.CheckoutV5Commit,
-		"v6":     actionintegration.CheckoutV6Commit,
-		"v7.0.0": actionintegration.CheckoutV7InitialCommit,
-		"v7.0.1": actionintegration.CheckoutV7Commit,
+		"v4":         actionintegration.CheckoutV4Commit,
+		"v5":         actionintegration.CheckoutV5Commit,
+		"v6":         actionintegration.CheckoutV6Commit,
+		"v6.0.2 pin": "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+		"v7.0.0":     actionintegration.CheckoutV7InitialCommit,
+		"v7.0.1":     actionintegration.CheckoutV7Commit,
 	} {
 		t.Run(version, func(t *testing.T) {
 			actionSource := &fakeActionSource{root: remote, commit: commit, calls: map[string]int{}}
