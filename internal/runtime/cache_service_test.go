@@ -226,6 +226,7 @@ func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 import {spawnSync} from "node:child_process";
 const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
+if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 for (const name of [
   "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
@@ -239,7 +240,7 @@ if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, cacheActionToolPath, phase)
+`, githubServerURLOverride, cacheActionToolPath, phase)
 		writeFixtureFile(t, remote, phase+".js", program)
 	}
 	writeFixtureFile(t, remote, "ordinary/action.yml", "name: ordinary\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
@@ -249,6 +250,7 @@ for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_
   if (!process.env[name]) throw new Error("missing " + name);
 for (const name of ["ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL", "BUILDKITE_AGENT_ACCESS_TOKEN"])
   if (process.env[name]) throw new Error(name + " leaked");
+if (process.env.GITHUB_SERVER_URL !== "https://origin.cursor.com") throw new Error("ordinary action server URL changed");
 if (process.env.PATH === %q) throw new Error("ordinary action PATH was isolated");
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
@@ -291,6 +293,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 		{ID: "shell-after", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
 	})
 	job.Schema = plan.Schema
+	job.Event.Provider = "cursor-origin"
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "ATTACKER_BIN": attackerBin}
 	job.Actions = []plan.ActionLock{
@@ -394,7 +397,7 @@ func TestShouldOverrideGitHubServerURL(t *testing.T) {
 	}
 }
 
-func TestIsolateCacheActionEnvironmentOverridesGitHubServerURLWhenNeeded(t *testing.T) {
+func TestIsolateCacheActionEnvironmentLeavesGitHubServerURLForSharedOverride(t *testing.T) {
 	env := map[string]string{
 		"GITHUB_SERVER_URL":            "https://origin.cursor.com",
 		"ACTIONS_CACHE_SERVICE_V2":     "true",
@@ -404,8 +407,8 @@ func TestIsolateCacheActionEnvironmentOverridesGitHubServerURLWhenNeeded(t *test
 		"BUILDKITE_JOB_ID":             "job-id",
 	}
 	isolated := isolateCacheActionEnvironment(env)
-	if got := isolated["GITHUB_SERVER_URL"]; got != githubServerURLOverride {
-		t.Fatalf("GITHUB_SERVER_URL = %q, want %q", got, githubServerURLOverride)
+	if got := isolated["GITHUB_SERVER_URL"]; got != "https://origin.cursor.com" {
+		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://origin.cursor.com", got)
 	}
 	if isolated["PATH"] != cacheActionToolPath {
 		t.Fatalf("PATH = %q, want %q", isolated["PATH"], cacheActionToolPath)
@@ -424,6 +427,62 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	isolated := isolateCacheActionEnvironment(env)
 	if got := isolated["GITHUB_SERVER_URL"]; got != "https://github.com" {
 		t.Fatalf("GITHUB_SERVER_URL = %q, want unchanged https://github.com", got)
+	}
+}
+
+func TestSetupActionsOverrideGitHubServerURLWithoutCacheActionIsolation(t *testing.T) {
+	node := requireNode24(t)
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: setup fixture\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: success()\n")
+	for _, phase := range []string{"main", "post"} {
+		writeFixtureFile(t, remote, phase+".js", fmt.Sprintf(`const fs = require("node:fs");
+if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
+if (process.env.HTTP_PROXY !== "http://proxy.example") throw new Error("setup action environment was isolated");
+fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
+`, githubServerURLOverride, phase))
+	}
+	digest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, repository := range []string{
+		"actions/setup-node",
+		"actions/setup-java",
+		"actions/setup-python",
+		"actions/setup-go",
+		"actions/setup-dotnet",
+	} {
+		t.Run(strings.TrimPrefix(repository, "actions/"), func(t *testing.T) {
+			workspace := t.TempDir()
+			workflowPath := ".github/workflows/setup.yml"
+			writeFixtureFile(t, workspace, workflowPath, "name: setup action override\n")
+			lifecycle := filepath.Join(workspace, "lifecycle.log")
+			lockID := remoteLifecycleLockID(1)
+			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+				ID: "setup", Kind: "uses", Uses: repository + "@v1", Action: &plan.ActionSelector{Lock: lockID},
+			}})
+			job.Schema = plan.Schema
+			job.Event.Provider = "cursor-origin"
+			job.RequiredCapabilities = []string{"network"}
+			job.Env = map[string]string{
+				"HTTP_PROXY":    "http://proxy.example",
+				"LIFECYCLE_LOG": lifecycle,
+			}
+			job.Actions = []plan.ActionLock{{
+				ID: lockID, Source: "github", Repository: repository, RequestedRef: "v1",
+				Commit: strings.Repeat("a", 40), SourceDigest: digest,
+			}}
+			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+			result, err := (Runner{Node24: node, Actions: materializer}).RunJob(context.Background(), job, workspace)
+			if err != nil || result.Conclusion != "success" {
+				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+			}
+			contents, err := os.ReadFile(lifecycle)
+			if err != nil || string(contents) != "main\npost\n" {
+				t.Fatalf("setup lifecycle = %q, %v", contents, err)
+			}
+		})
 	}
 }
 

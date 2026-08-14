@@ -221,10 +221,10 @@ func removeCacheServiceEnvironment(env map[string]string) map[string]string {
 }
 
 // shouldOverrideGitHubServerURL reports whether serverURL needs to be
-// replaced with githubServerURLOverride before starting actions/cache: its
-// isGhes() forces the unsupported cache-v1 path for every host outside its
-// own allowlist (github.com, *.ghe.com, *.localhost). Malformed/empty values
-// are left untouched.
+// replaced with githubServerURLOverride before starting an audited action
+// with a bundled cache client. Its isGhes() forces the unsupported cache-v1
+// path for every host outside its own allowlist (github.com, *.ghe.com,
+// *.localhost). Malformed/empty values are left untouched.
 func shouldOverrideGitHubServerURL(serverURL string) bool {
 	u, err := url.Parse(serverURL)
 	if err != nil || u.Hostname() == "" {
@@ -248,11 +248,14 @@ func isolateCacheActionEnvironment(env map[string]string) map[string]string {
 	} {
 		delete(isolated, name)
 	}
-	if shouldOverrideGitHubServerURL(isolated["GITHUB_SERVER_URL"]) {
-		isolated["GITHUB_SERVER_URL"] = githubServerURLOverride
-	}
 	isolated["PATH"] = cacheActionToolPath
 	return isolated
+}
+
+func applyGitHubServerURLOverride(env map[string]string) {
+	if shouldOverrideGitHubServerURL(env["GITHUB_SERVER_URL"]) {
+		env["GITHUB_SERVER_URL"] = githubServerURLOverride
+	}
 }
 
 func (r Runner) cacheActionEnvironment(ctx context.Context, processor *commandProcessor) (map[string]string, error) {
