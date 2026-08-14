@@ -559,24 +559,43 @@ func TestUploadArtifactRejectsSymlinkComponentReplacementToSelectedInode(t *test
 	}
 }
 
-type cancellationArtifactUploader struct{}
+type cancellationArtifactUploader struct {
+	started chan<- struct{}
+}
 
 func (cancellationArtifactUploader) DownloadArtifact(context.Context, string, string, string) error {
 	return errors.New("unexpected artifact download")
 }
 
-func (cancellationArtifactUploader) UploadArtifactFrom(ctx context.Context, _, _ string) error {
+func (u cancellationArtifactUploader) UploadArtifactFrom(ctx context.Context, _, _ string) error {
+	close(u.started)
 	<-ctx.Done()
 	return ctx.Err()
 }
 
 func TestUploadArtifactCancellationStopsAgentUpload(t *testing.T) {
+	t.Parallel()
+
 	workspace := t.TempDir()
 	writeFixtureFile(t, workspace, "payload", "upload")
+	started := make(chan struct{})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	r := Runner{Artifacts: cancellationArtifactUploader{}, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
-	if _, err := r.runUploadArtifact(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": "payload"}); !errors.Is(err, context.DeadlineExceeded) {
+	r := Runner{Artifacts: cancellationArtifactUploader{started: started}, artifactRegistry: &artifactRegistry{names: map[string]bool{}}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.runUploadArtifact(ctx, newCommandProcessor(io.Discard, io.Discard), workspace, map[string]string{"path": "payload"})
+		done <- err
+	}()
+	select {
+	case <-started:
+		cancel()
+	case err := <-done:
+		t.Fatalf("upload returned before cancellation: %v", err)
+	case <-ctx.Done():
+		t.Fatal("agent upload did not start")
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("agent upload cancellation = %v", err)
 	}
 	if len(r.artifactRegistry.names) != 0 {
@@ -585,6 +604,8 @@ func TestUploadArtifactCancellationStopsAgentUpload(t *testing.T) {
 }
 
 func TestUploadArtifactSourceBounds(t *testing.T) {
+	t.Parallel()
+
 	workspace := t.TempDir()
 	tooLarge := filepath.Join(workspace, "too-large")
 	file, err := os.Create(tooLarge)

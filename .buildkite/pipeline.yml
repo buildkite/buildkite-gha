@@ -80,7 +80,24 @@ steps:
           # previous build's checkout paths, which breaks nolint filtering
           # (golangci/golangci-lint#3502). Keep the cache local to this VM.
           export GOLANGCI_LINT_CACHE=/tmp/golangci-lint
-          mise run --jobs 1 check
+          mise run check:ci
+
+      - label: ":test_tube: Go tests %n/%t"
+        key: "go-tests"
+        if: build.env("DEMO_SUITE") != "plugin"
+        parallelism: 2
+        cache: ".buildkite/cache-volume"
+        plugins:
+          - setup-go#v0.1.0:
+              mise-version: "2026.5.12"
+          - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+              version: "2026.5.12"
+          - tests#v1.0.0:
+              client-version: "3.0.0"
+              test-runner: "gotest"
+              test-cmd: "go test -count=1 -json {{packages}}"
+              result-path: "gotest-results.jsonl"
+        command: "bktec run"
 
       - label: ":go: macOS arm64 build and tests"
         key: "macos-arm64"
