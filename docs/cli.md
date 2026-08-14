@@ -207,7 +207,7 @@ steps:
     plugins:
       - github-actions#v0.9.3:
           workflow: .github/workflows/experimental-runner-user.yml
-          source-ref: 1f40c890725ae21d2a523b031167c57141f85b4e
+          source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
           experimental-runner-user: true
           runners:
             - runs-on: ubuntu-latest
