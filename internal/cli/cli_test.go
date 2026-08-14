@@ -2582,9 +2582,9 @@ func TestProcessingAnnotationDropsDetailBeforeTruncatingMessage(t *testing.T) {
 	}
 	withoutDetail := diagnostic
 	withoutDetail.Detail = ""
-	want := renderProcessingDiagnostic(withoutDetail)
+	want := renderProcessingDiagnostic(withoutDetail, sourceLinkContext{})
 
-	got := renderProcessingDiagnosticWithin(diagnostic, len(want))
+	got := renderProcessingDiagnosticWithin(diagnostic, len(want), sourceLinkContext{})
 	if got != want || strings.Contains(got, "<details") {
 		t.Fatalf("bounded diagnostic = %q, want primary message without detail %q", got, want)
 	}
