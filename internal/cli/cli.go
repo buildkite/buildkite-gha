@@ -459,22 +459,17 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		actionMaterializer = store
 	}
 	var cacheCredentials gharuntime.CacheCredentialProvider
-	cacheRequired, err := cacheServiceRequired(job.Actions)
-	if err != nil {
+	if err := validateCacheActions(job.Actions); err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", err)
 		return 1
 	}
-	if cacheRequired || len(job.Actions) > 0 {
+	if len(job.Actions) > 0 {
 		cacheCredentials, err = gharuntime.NewAgentCacheCredentials(gharuntime.AgentCacheConfig{
 			Endpoint:   os.Getenv("BUILDKITE_AGENT_ENDPOINT"),
 			JobID:      os.Getenv("BUILDKITE_JOB_ID"),
 			JobToken:   os.Getenv("BUILDKITE_AGENT_ACCESS_TOKEN"),
 			ResultsURL: os.Getenv("BUILDKITE_GHA_CACHE_URL"),
 		})
-		if err != nil && cacheRequired {
-			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: configure actions/cache service: %v\n", err)
-			return 1
-		}
 		if err != nil {
 			cacheCredentials = gharuntime.UnavailableCacheCredentials(err)
 		}
@@ -1094,18 +1089,16 @@ func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 	return false
 }
 
-func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
-	required := false
+func validateCacheActions(locks []plan.ActionLock) error {
 	for _, lock := range locks {
 		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
 		if descriptor.Service == actionintegration.ServiceCache {
-			required = true
 			if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
-				return false, fmt.Errorf("unsupported cache action: %w", err)
+				return fmt.Errorf("unsupported cache action: %w", err)
 			}
 		}
 	}
-	return required, nil
+	return nil
 }
 
 func resultProducer(job plan.Job, planDigest, expectedDigest string) (transport.Producer, bool, error) {

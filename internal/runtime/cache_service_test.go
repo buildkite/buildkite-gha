@@ -667,39 +667,45 @@ func TestGenericActionDoesNotNeedPinnedCacheRedactor(t *testing.T) {
 	}
 }
 
-func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T) {
+func TestExplicitCacheFallsBackWhenRedactorCannotBePinned(t *testing.T) {
 	workspace := t.TempDir()
-	workflowPath := ".github/workflows/cache-strict.yml"
-	writeFixtureFile(t, workspace, workflowPath, "name: strict cache\n")
+	workflowPath := ".github/workflows/cache-best-effort.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: best-effort cache\n")
 	marker := filepath.Join(workspace, "workflow-ran")
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "action.yml", "name: cache\nruns:\n  using: node24\n  main: main.js\n")
 	writeFixtureFile(t, remote, "main.js", "")
+	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "run", Kind: "run", Command: `: > "$MARKER"`},
 		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Action: &plan.ActionSelector{Lock: lockID}},
 	})
 	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"MARKER": marker}
 	job.Actions = []plan.ActionLock{{
 		ID: lockID, Source: "github", Repository: "actions/cache",
 		RequestedRef: actionintegration.CacheCommit, Commit: actionintegration.CacheCommit,
-		SourceDigest: digestTree(t, remote),
+		SourceDigest: digest,
 	}}
 	provider := &sequenceCacheCredentials{tokens: []string{"header.unused.signature"}}
-	_, err := (Runner{
-		Cache:    provider,
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	result, err := (Runner{
+		Node24: requireNode24(t), Actions: materializer, Cache: provider,
 		Redactor: AgentRedactor{Executable: filepath.Join(t.TempDir(), "missing-agent")},
 	}).RunJob(context.Background(), job, workspace)
-	if err == nil || !strings.Contains(err.Error(), "resolve Buildkite Agent redactor before workflow execution") {
-		t.Fatalf("RunJob() error = %v", err)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("workflow executed before strict cache redactor failure: %v", err)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("workflow did not execute before cache fallback: %v", err)
 	}
 	if provider.calls != 0 {
-		t.Fatalf("cache credential provider called %d times before redactor failure", provider.calls)
+		t.Fatalf("cache credential provider called %d times after redactor setup failure", provider.calls)
+	}
+	if !strings.Contains(result.WarningAnnotations, "continuing without cache") || !strings.Contains(result.WarningAnnotations, "resolve Buildkite Agent redactor before workflow execution") {
+		t.Fatalf("cache fallback warnings = %q", result.WarningAnnotations)
 	}
 }
 
@@ -735,12 +741,16 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if err := (Runner{Cache: UnavailableCacheCredentials(errors.New("cache unavailable")), Redactor: &testRedactor{}}).runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
-		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true, CacheRequirement: actionintegration.CacheRequired}, "main.js", nil, nil, &result,
-	); err == nil || !strings.Contains(err.Error(), "configure actions/cache service: cache unavailable") {
-		t.Fatalf("explicit cache action error = %v", err)
+		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true, ProvideCacheCredentials: true}, "main.js", nil, nil, &result,
+	); err != nil {
+		t.Fatalf("explicit cache fallback error = %v", err)
 	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("strict cache action executed or marker stat failed: %v", err)
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "executed" {
+		t.Fatalf("cache fallback marker = %q, %v", contents, err)
+	}
+	warnings, _, _, _ := processor.workflowCommandAnnotations()
+	if !strings.Contains(warnings, "continuing without cache: cache unavailable") {
+		t.Fatalf("cache fallback warning = %q", warnings)
 	}
 }
 
@@ -784,29 +794,6 @@ func (r failingCacheRedactor) AddRedaction(context.Context, string) error {
 	return fmt.Errorf("redactor rejected %s", r.token)
 }
 
-func TestRequiredCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *testing.T) {
-	token := "header.secret.signature"
-	actionRoot := t.TempDir()
-	marker := filepath.Join(actionRoot, "executed")
-	writeFixtureFile(t, actionRoot, "main.js", `require("node:fs").writeFileSync(process.env.MARKER, "executed")`)
-	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
-		return CacheCredentials{ResultsURL: "https://cache.example", Token: token}, nil
-	})
-	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
-	result := newResult()
-	result.Env["MARKER"] = marker
-	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
-		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheRequired}, "main.js", nil, nil, &result,
-	)
-	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
-		t.Fatalf("runJavaScriptPhase() error = %v", err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("action marker exists or stat failed unexpectedly: %v", err)
-	}
-}
-
 func TestBestEffortCacheRedactorFailureWarnsAndScrubsToken(t *testing.T) {
 	token := "header.best-effort-secret.signature"
 	actionRoot := t.TempDir()
@@ -820,7 +807,7 @@ func TestBestEffortCacheRedactorFailureWarnsAndScrubsToken(t *testing.T) {
 	result := newResult()
 	result.Env["MARKER"] = marker
 	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
-		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheBestEffort}, "main.js", nil, nil, &result,
+		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true, ProvideCacheCredentials: true}, "main.js", nil, nil, &result,
 	)
 	if err != nil {
 		t.Fatalf("runJavaScriptPhase() error = %v", err)
@@ -858,7 +845,7 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			state := map[string]string{"kept": "action state"}
 			err := (Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
 				context.Background(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
-				javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheBestEffort}, "main.js", nil, state, &result,
+				javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", ProvideCacheCredentials: true}, "main.js", nil, state, &result,
 			)
 			if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "phase effects were discarded") {
 				t.Fatalf("runJavaScriptPhase() error = %v", err)

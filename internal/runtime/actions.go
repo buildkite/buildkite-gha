@@ -103,12 +103,12 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func actionCacheRequirement(lock *plan.ActionLock) actionintegration.CacheRequirement {
+func actionProvidesCacheCredentials(lock *plan.ActionLock) bool {
 	if lock == nil {
-		return ""
+		return false
 	}
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.CacheRequirement
+	return descriptor.ProvideCacheCredentials
 }
 
 func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {

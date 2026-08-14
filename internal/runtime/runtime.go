@@ -23,7 +23,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 )
@@ -141,15 +140,15 @@ func (r *Runner) setExplicitNode(major int, path string) {
 
 // javaScriptAction is an already-resolved local JavaScript action.
 type javaScriptAction struct {
-	Name             string
-	Path             string
-	Pre              string
-	Main             string
-	Post             string
-	Inputs           map[string]string
-	Env              map[string]string
-	Cache            bool
-	CacheRequirement actionintegration.CacheRequirement
+	Name                    string
+	Path                    string
+	Pre                     string
+	Main                    string
+	Post                    string
+	Inputs                  map[string]string
+	Env                     map[string]string
+	Cache                   bool
+	ProvideCacheCredentials bool
 
 	nodeMajor       int
 	reference       string
@@ -621,16 +620,13 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		env = isolateCacheActionEnvironment(env)
 	}
 	cacheToken := ""
-	if action.CacheRequirement != "" {
+	if action.ProvideCacheCredentials {
 		applyGitHubServerURLOverride(env)
 		cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
 		if cacheErr != nil && ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if cacheErr != nil {
-			if action.CacheRequirement != actionintegration.CacheBestEffort {
-				return fmt.Errorf("configure actions/cache service: %w", cacheErr)
-			}
 			reference := action.reference
 			if reference == "" {
 				reference = action.Name

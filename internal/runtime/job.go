@@ -262,26 +262,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
 	providerTokenRequired := job.HasCapability("provider-token-write")
-	cacheRequired := false
-	for _, lock := range job.Actions {
-		if usesCacheService(lock) {
-			cacheRequired = true
-			break
-		}
-	}
 	if providerTokenRequired || r.Cache != nil {
 		if r.Redactor == nil {
 			if providerTokenRequired {
 				return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
 			}
-			if cacheRequired {
-				return JobResult{}, fmt.Errorf("actions/cache requires the Buildkite Agent redactor")
-			}
 			r.Cache = UnavailableCacheCredentials(errors.New("cache credential provider requires the Buildkite Agent redactor"))
 		} else {
 			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
 			if err != nil {
-				if providerTokenRequired || cacheRequired {
+				if providerTokenRequired {
 					return JobResult{}, err
 				}
 				r.Cache = UnavailableCacheCredentials(err)
@@ -1309,8 +1299,8 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if err != nil {
 			return result, err
 		}
-		requirement := actionCacheRequirement(&lock)
-		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), CacheRequirement: requirement, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		provideCacheCredentials := actionProvidesCacheCredentials(&lock)
+		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), ProvideCacheCredentials: provideCacheCredentials, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1550,8 +1540,8 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := environment.process()
-		requirement := actionCacheRequirement(actionLock)
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheRequirement: requirement, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		provideCacheCredentials := actionProvidesCacheCredentials(actionLock)
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), ProvideCacheCredentials: provideCacheCredentials, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {

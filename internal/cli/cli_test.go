@@ -6028,23 +6028,21 @@ func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	}
 }
 
-func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
-	required, err := cacheServiceRequired([]plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}})
-	if err != nil || required {
-		t.Fatalf("ordinary action cache requirement = %v, %v", required, err)
+func TestValidateCacheActionsUsesOnlyAuditedCacheLocks(t *testing.T) {
+	if err := validateCacheActions([]plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}}); err != nil {
+		t.Fatalf("ordinary action cache validation = %v", err)
 	}
 
 	locks := []plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}}
 	for _, commit := range []string{actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
 		locks = append(locks[:1], plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore", Commit: commit})
-		required, err = cacheServiceRequired(locks)
-		if err != nil || !required {
-			t.Fatalf("cache requirement for %s = %v, %v", commit, required, err)
+		if err := validateCacheActions(locks); err != nil {
+			t.Fatalf("cache validation for %s = %v", commit, err)
 		}
 	}
 
 	locks[1].Commit = strings.Repeat("b", 40)
-	if _, err := cacheServiceRequired(locks); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if err := validateCacheActions(locks); err == nil || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported cache lock error = %v", err)
 	}
 }
