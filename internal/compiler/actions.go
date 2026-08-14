@@ -127,14 +127,17 @@ func validateActionResolutions(ctx context.Context, ir IR, options Options) (Pro
 
 func actionResolutionMessage(reference string, err error) (message, detail, action string) {
 	action = reference
+	localMetadata := true
 	for {
 		var childErr *actionChildError
 		if !errors.As(err, &childErr) {
 			break
 		}
+		localMetadata = localMetadata && childErr.parentSource == "workspace"
 		action = childErr.child
 		err = childErr.err
 	}
+	localMetadata = localMetadata && strings.HasPrefix(action, "./")
 	if message, detail, ok := actionintegration.UnsupportedVersionDiagnostic(action, err); ok {
 		return message, detail, action
 	}
@@ -144,7 +147,7 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 		if version := strings.TrimPrefix(runtimeErr.Runtime, "node"); version != runtimeErr.Runtime {
 			runtime = "Node.js " + version
 		}
-		if strings.HasPrefix(action, "./") {
+		if localMetadata {
 			return fmt.Sprintf("Action %q uses %s, which is unsupported. Update runs.using to node16, node20, or node24.", action, runtime), "", action
 		}
 		return fmt.Sprintf("Action %q uses %s, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.", action, runtime), "", action
@@ -166,8 +169,9 @@ func actionResolutionMessage(reference string, err error) (message, detail, acti
 }
 
 type actionChildError struct {
-	child string
-	err   error
+	child        string
+	parentSource string
+	err          error
 }
 
 func (e *actionChildError) Error() string { return fmt.Sprintf("child action %q: %v", e.child, e.err) }
@@ -334,7 +338,7 @@ func (b *actionLockBuilder) add(ctx context.Context, raw string, depth int) (*ac
 			}
 			child, err := b.add(ctx, step.Uses, depth+1)
 			if err != nil {
-				return nil, &actionChildError{child: step.Uses, err: err}
+				return nil, &actionChildError{child: step.Uses, parentSource: n.lock.Source, err: err}
 			}
 			if n.lock.Children == nil {
 				n.lock.Children = map[string]plan.ActionSelector{}

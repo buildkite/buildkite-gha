@@ -100,10 +100,10 @@ func TestActionResolutionMessageDistinguishesResolutionFailure(t *testing.T) {
 
 func TestActionResolutionMessageIdentifiesNestedChild(t *testing.T) {
 	err := &actionChildError{
-		child: "owner/composite@v1",
+		child: "owner/composite@v1", parentSource: "workspace",
 		err: &actionChildError{
-			child: "owner/missing@v2",
-			err:   errors.New(`compile action "owner/missing@v2": resolve action reference: tag v2 was not found`),
+			child: "owner/missing@v2", parentSource: "github",
+			err: errors.New(`compile action "owner/missing@v2": resolve action reference: tag v2 was not found`),
 		},
 	}
 	want := `Action "owner/missing@v2" could not be resolved: tag v2 was not found`
@@ -132,6 +132,18 @@ func TestActionResolutionMessageMakesUnsupportedRuntimeActionable(t *testing.T) 
 		if message != test.want || detail != "" || action != test.reference {
 			t.Fatalf("actionResolutionMessage(%q) = %q, %q, %q", test.reference, message, detail, action)
 		}
+	}
+}
+
+func TestActionResolutionMessageTreatsPublicCompositeChildrenAsPublic(t *testing.T) {
+	err := &actionChildError{
+		child:        "./child",
+		parentSource: "github",
+		err:          fmt.Errorf(`compile action "./child": %w`, &metadata.UnsupportedRuntimeError{Runtime: "node12"}),
+	}
+	want := `Action "./child" uses Node.js 12, which is unsupported. Use an action release that supports Node.js 16, 20, or 24.`
+	if got, detail, action := actionResolutionMessage("owner/composite@v1", err); got != want || detail != "" || action != "./child" {
+		t.Fatalf("actionResolutionMessage() = %q, %q, %q; want %q, empty detail, %q", got, detail, action, want, "./child")
 	}
 }
 
