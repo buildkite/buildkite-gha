@@ -28,7 +28,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	actionsource "github.com/buildkite/buildkite-gha/internal/action/source"
@@ -97,6 +96,7 @@ const (
 	pluginArchiveLimit                          = 256 << 20
 	maxWebhookMetadataBytes                     = 25 << 20
 	workflowCheckSummaryLimit                   = 65535
+	workflowCheckSummaryNotice                  = "\n\n_Additional diagnostics omitted at the provider check summary size limit._\n"
 	defaultNobleRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:62a45683afffaae9edfd669c16d2fee23b5a571679f31715e1063dada667ea24"
 	defaultJammyRunnerImage                     = "buildkite.namespace-images.com/agent-base@sha256:a014d0bae6b06bb315d10b5ff8bb226d5fe7fa468bcf140b3c0d7e72a33aa1ac"
 )
@@ -1851,6 +1851,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		messages = append(messages, message)
 	}
 	_, annotation := processingAnnotation(report, sourceLinks)
+	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
@@ -1860,7 +1861,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		Failure: &buildkitepipeline.Failure{
 			AnnotationPath: annotationArtifact.Path,
 			MessagePath:    messageArtifact.Path,
-			Summary:        failureCheckSummary(input.CanonicalPath, report, sourceLinks),
+			Summary:        checkSummary,
 		},
 	}
 	return workflow, []transport.Artifact{messageArtifact, annotationArtifact}
@@ -1871,133 +1872,6 @@ func generatedFailureArtifact(kind, extension, contents string) transport.Artifa
 	digest := transport.Digest(encoded)
 	path := ".buildkite-gha/failures/" + kind + "/" + strings.TrimPrefix(digest, "sha256:") + extension
 	return transport.Artifact{Path: path, Digest: digest, Contents: encoded}
-}
-
-func failureCheckSummary(path string, report compatibility.ProcessingReport, sourceLinks sourceLinkContext) string {
-	if path == "" {
-		path = report.Workflow
-	}
-	if _, linkable := processingAnnotationWorkflowPath(report.Workflow, ""); linkable {
-		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
-	}
-	var summary strings.Builder
-	summary.WriteString("The workflow could not be prepared:\n")
-	for _, diagnostic := range report.Diagnostics {
-		if diagnostic.Level != "error" {
-			continue
-		}
-		diagnosticPath := failureCheckDiagnosticPath(path, report.Workflow, diagnostic.Location)
-		message := diagnostic.Message
-		prefixes := []string{report.Workflow + ": ", path + ": ", diagnosticPath + ": "}
-		if diagnostic.Location != nil {
-			prefixes = append(prefixes, diagnostic.Location.Path+": ")
-		}
-		for _, prefix := range prefixes {
-			message = strings.TrimPrefix(message, prefix)
-		}
-		if diagnostic.Job != "" {
-			message = strings.TrimPrefix(message, fmt.Sprintf("job %q: ", diagnostic.Job))
-		}
-		summary.WriteString("\n- ")
-		line := 0
-		sourcePath := report.Workflow
-		if diagnostic.Location != nil {
-			line = diagnostic.Location.Line
-			if diagnostic.Location.Path != "" {
-				sourcePath = diagnostic.Location.Path
-			}
-		}
-		linkedPath, linkable := processingAnnotationWorkflowPath(sourcePath, sourceLinks.workflowSourceRoot)
-		link := ""
-		if linkable {
-			link = sourceLinks.link(linkedPath, line)
-		}
-		if link != "" {
-			diagnosticPath = linkedPath
-		}
-		pathCode := markdownCode(diagnosticPath)
-		if link != "" {
-			summary.WriteString("[")
-			summary.WriteString(pathCode)
-			summary.WriteString("](")
-			summary.WriteString(link)
-			summary.WriteString(")")
-		} else {
-			summary.WriteString(pathCode)
-		}
-		if diagnostic.Job != "" {
-			summary.WriteString(", job ")
-			summary.WriteString(markdownCode(diagnostic.Job))
-		}
-		if diagnostic.Step != 0 {
-			_, _ = fmt.Fprintf(&summary, ", step %d", diagnostic.Step)
-		}
-		summary.WriteString(": ")
-		summary.WriteString(markdownText(message))
-	}
-	return truncateFailureCheckSummary(summary.String())
-}
-
-func markdownCode(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
-	if strings.Contains(value, "`") {
-		longest, current := 0, 0
-		for _, r := range value {
-			if r == '`' {
-				current++
-				longest = max(longest, current)
-			} else {
-				current = 0
-			}
-		}
-		delimiter := strings.Repeat("`", longest+1)
-		return delimiter + " " + value + " " + delimiter
-	}
-	return "`" + value + "`"
-}
-
-func markdownText(value string) string {
-	value = strings.Join(strings.Fields(value), " ")
-	value = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
-	replacer := strings.NewReplacer(
-		"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-		"<", "\\<", ">", "\\>", "#", "\\#", "|", "\\|",
-	)
-	return replacer.Replace(value)
-}
-
-func failureCheckDiagnosticPath(rootPath, reportPath string, location *compatibility.SourceLocation) string {
-	rootPath = filepath.ToSlash(filepath.Clean(rootPath))
-	if location == nil || location.Path == "" {
-		return rootPath
-	}
-	reportPath = filepath.ToSlash(filepath.Clean(reportPath))
-	diagnosticPath := filepath.ToSlash(filepath.Clean(location.Path))
-	if diagnosticPath == reportPath || diagnosticPath == rootPath {
-		return rootPath
-	}
-	if filepath.IsAbs(diagnosticPath) && filepath.IsAbs(reportPath) && !filepath.IsAbs(rootPath) {
-		rootSuffix := "/" + strings.TrimPrefix(rootPath, "./")
-		if strings.HasSuffix(reportPath, rootSuffix) {
-			repositoryRoot := strings.TrimSuffix(reportPath, rootSuffix)
-			if relative, ok := strings.CutPrefix(diagnosticPath, repositoryRoot+"/"); ok {
-				return relative
-			}
-		}
-	}
-	return strings.TrimPrefix(diagnosticPath, "./")
-}
-
-func truncateFailureCheckSummary(summary string) string {
-	if len(summary) <= workflowCheckSummaryLimit {
-		return summary
-	}
-	const notice = "\n\n_Additional error details omitted at the provider check summary size limit._"
-	end := workflowCheckSummaryLimit - len(notice)
-	for !utf8.ValidString(summary[:end]) {
-		end--
-	}
-	return summary[:end] + notice
 }
 
 func requiredRuntimePlatforms(workflowPath string, workflowSource, eventSource []byte, groupLabel string, configuredTargets map[string]compiler.RunnerTarget) (map[compiler.Platform]bool, error) {

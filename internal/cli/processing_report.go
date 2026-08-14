@@ -144,6 +144,10 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 }
 
 func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
+	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice)
+}
+
+func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string) (style, body string) {
 	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
@@ -160,9 +164,15 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 		return "", ""
 	}
 
+	heading := "GitHub Actions workflow diagnostics"
+	if style == "error" {
+		heading = "Workflow could not be run"
+	}
 	var out strings.Builder
-	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
-	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
+	out.WriteString("<h2 class=\"h4 mb2\">")
+	out.WriteString(heading)
+	out.WriteString("</h2>\n")
+	out.WriteString("<div class=\"mb2\">")
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
@@ -175,7 +185,7 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 		rows[i] = renderProcessingDiagnostic(diagnostic, sourceLinks)
 		bodyBytes += len(rows[i])
 	}
-	if bodyBytes <= processingAnnotationBodyLimit {
+	if bodyBytes <= bodyLimit {
 		for _, row := range rows {
 			out.WriteString(row)
 		}
@@ -183,14 +193,14 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 		return style, out.String()
 	}
 
-	remaining := processingAnnotationBodyLimit - out.Len() - len(processingAnnotationEnd) - len(processingAnnotationNotice)
+	remaining := bodyLimit - out.Len() - len(processingAnnotationEnd) - len(truncationNotice)
 	for i, row := range rows {
 		if len(row) > remaining {
 			if row = renderProcessingDiagnosticWithin(diagnostics[i], remaining, sourceLinks); row != "" {
 				out.WriteString(row)
 			}
 			out.WriteString(processingAnnotationEnd)
-			out.WriteString(processingAnnotationNotice)
+			out.WriteString(truncationNotice)
 			return style, out.String()
 		}
 		out.WriteString(row)
@@ -279,7 +289,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
-	out.WriteString("<div class=\"border-top border-gray py2\"><div><strong>")
+	out.WriteString("<div><div><strong>")
 	out.WriteString(annotationHTML(heading))
 	out.WriteString("</strong></div>")
 	context := make([]string, 0, 4)
