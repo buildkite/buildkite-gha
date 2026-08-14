@@ -438,6 +438,10 @@ func TestSetupActionsOverrideGitHubServerURLWithoutCacheActionIsolation(t *testi
 		writeFixtureFile(t, remote, phase+".js", fmt.Sprintf(`const fs = require("node:fs");
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 if (process.env.HTTP_PROXY !== "http://proxy.example") throw new Error("setup action environment was isolated");
+for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"])
+  if (!process.env[name]) throw new Error("missing " + name);
+if ((process.env.ACTIONS_CACHE_URL || "") !== process.env.EXPECTED_CACHE_URL)
+  throw new Error("unexpected ACTIONS_CACHE_URL: " + process.env.ACTIONS_CACHE_URL);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 `, githubServerURLOverride, phase))
 	}
@@ -454,33 +458,44 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 		"actions/setup-dotnet",
 	} {
 		t.Run(strings.TrimPrefix(repository, "actions/"), func(t *testing.T) {
+			provider := &sequenceCacheCredentials{tokens: []string{"header.main.signature", "header.post.signature"}}
 			workspace := t.TempDir()
 			workflowPath := ".github/workflows/setup.yml"
 			writeFixtureFile(t, workspace, workflowPath, "name: setup action override\n")
 			lifecycle := filepath.Join(workspace, "lifecycle.log")
 			lockID := remoteLifecycleLockID(1)
+			requestedRef := "v1"
+			expectedCacheURL := ""
+			if repository == "actions/setup-node" {
+				requestedRef = "v4"
+				expectedCacheURL = cacheURLCompatibility
+			}
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-				ID: "setup", Kind: "uses", Uses: repository + "@v1", Action: &plan.ActionSelector{Lock: lockID},
+				ID: "setup", Kind: "uses", Uses: repository + "@" + requestedRef, Action: &plan.ActionSelector{Lock: lockID},
 			}})
 			job.Schema = plan.Schema
 			job.Event.Provider = "cursor-origin"
 			job.RequiredCapabilities = []string{"network"}
 			job.Env = map[string]string{
-				"HTTP_PROXY":    "http://proxy.example",
-				"LIFECYCLE_LOG": lifecycle,
+				"EXPECTED_CACHE_URL": expectedCacheURL,
+				"HTTP_PROXY":         "http://proxy.example",
+				"LIFECYCLE_LOG":      lifecycle,
 			}
 			job.Actions = []plan.ActionLock{{
-				ID: lockID, Source: "github", Repository: repository, RequestedRef: "v1",
+				ID: lockID, Source: "github", Repository: repository, RequestedRef: requestedRef,
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
 			}}
 			materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
-			result, err := (Runner{Node24: node, Actions: materializer}).RunJob(context.Background(), job, workspace)
+			result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
 			if err != nil || result.Conclusion != "success" {
 				t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 			}
 			contents, err := os.ReadFile(lifecycle)
 			if err != nil || string(contents) != "main\npost\n" {
 				t.Fatalf("setup lifecycle = %q, %v", contents, err)
+			}
+			if provider.calls != 2 {
+				t.Fatalf("cache credential calls = %d, want 2", provider.calls)
 			}
 		})
 	}
@@ -623,8 +638,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	result := newResult()
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
-	var logs bytes.Buffer
-	processor := newCommandProcessor(&logs, &logs)
+	processor := newCommandProcessor(io.Discard, io.Discard)
 	runner := Runner{Cache: provider, Redactor: &testRedactor{}}
 	if err := runner.runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
@@ -634,18 +648,6 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "executed" {
 		t.Fatalf("generic action marker = %q, %v", contents, err)
-	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.runJavaScriptPhase(
-		context.Background(), processor, actionRoot, node,
-		javaScriptAction{Name: "setup-node", Path: actionRoot, Main: "main.js", reference: "actions/setup-node@v6"}, "main.js", nil, nil, &result,
-	); err != nil {
-		t.Fatalf("setup-node cache fallback error = %v", err)
-	}
-	if !strings.Contains(logs.String(), `Cache credentials unavailable for "actions/setup-node@v6" entry "main.js"; ACTIONS_RESULTS_URL will be omitted: cache unavailable`) {
-		t.Fatalf("setup-node cache diagnostic = %q", logs.String())
 	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)

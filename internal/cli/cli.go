@@ -486,9 +486,6 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			return 1
 		}
 		if err != nil {
-			if hasSetupNodeAction(job.Actions) {
-				_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: actions/setup-node cache credentials unavailable: %v\n", err)
-			}
 			cacheCredentials = nil
 		}
 	}
@@ -1101,15 +1098,6 @@ func canonicalNonSymlinkDirectory(path string) (string, error) {
 func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 	for _, lock := range locks {
 		if lock.Source == "github" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSetupNodeAction(locks []plan.ActionLock) bool {
-	for _, lock := range locks {
-		if lock.Source == "github" && lock.Repository == "actions/setup-node" && lock.Path == "" {
 			return true
 		}
 	}
