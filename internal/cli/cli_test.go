@@ -2702,6 +2702,9 @@ func TestProcessingDiagnosticsDoNotLinkPathsOutsideCheckout(t *testing.T) {
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "error", Message: "invalid workflow",
 		Location: &compatibility.SourceLocation{Path: "ci.yml", Line: 4, Column: 2},
+	}, compatibility.Diagnostic{
+		Level: "error", Message: "invalid reusable workflow",
+		Location: &compatibility.SourceLocation{Path: "./.github/workflows/ci.yml", Line: 5, Column: 3},
 	})
 	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
 

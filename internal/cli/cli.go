@@ -1866,6 +1866,7 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 	if path == "" {
 		path = report.Workflow
 	}
+	_, sourceLinks.workflowInCheckout = processingAnnotationWorkflowPath(report.Workflow, false)
 	var summary strings.Builder
 	summary.WriteString("The workflow could not be prepared:\n")
 	for _, diagnostic := range report.Diagnostics {
@@ -1894,7 +1895,7 @@ func failureCheckSummary(path string, report compatibility.ProcessingReport, sou
 				sourcePath = diagnostic.Location.Path
 			}
 		}
-		_, linkable := processingAnnotationWorkflowPath(sourcePath)
+		_, linkable := processingAnnotationWorkflowPath(sourcePath, sourceLinks.workflowInCheckout)
 		if link := sourceLinks.link(diagnosticPath, line); linkable && link != "" {
 			summary.WriteString("[")
 			summary.WriteString(pathCode)

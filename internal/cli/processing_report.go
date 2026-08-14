@@ -44,9 +44,10 @@ type processingOutput struct {
 }
 
 type sourceLinkContext struct {
-	serverURL  string
-	repository string
-	sha        string
+	serverURL          string
+	repository         string
+	sha                string
+	workflowInCheckout bool
 }
 
 func sourceLinksForEvent(event compiler.Event) sourceLinkContext {
@@ -162,7 +163,8 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	var out strings.Builder
 	out.WriteString("<h2 class=\"h4 mb2\">GitHub Actions workflow diagnostics</h2>\n")
 	out.WriteString("<div class=\"mb2\"><strong>Workflow:</strong> ")
-	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow)
+	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, false)
+	sourceLinks.workflowInCheckout = workflowLinkable
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
 	out.WriteString("</div>\n<div class=\"mb2\">\n")
 	rows := make([]string, len(diagnostics))
@@ -195,7 +197,7 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 	panic("processing annotation exceeded its precomputed size")
 }
 
-func processingAnnotationWorkflowPath(path string) (display string, linkable bool) {
+func processingAnnotationWorkflowPath(path string, repositoryRelative bool) (display string, linkable bool) {
 	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if root == "" {
 		root, _ = os.Getwd()
@@ -203,7 +205,7 @@ func processingAnnotationWorkflowPath(path string) (display string, linkable boo
 	resolved := path
 	if !filepath.IsAbs(resolved) {
 		slashPath := filepath.ToSlash(path)
-		if strings.HasPrefix(slashPath, "./.github/workflows/") {
+		if repositoryRelative && strings.HasPrefix(slashPath, "./.github/workflows/") {
 			resolved = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(slashPath, "./")))
 		} else if workingDirectory, err := os.Getwd(); err == nil {
 			resolved = filepath.Join(workingDirectory, resolved)
@@ -259,7 +261,7 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, "Action "+annotationCode(diagnostic.Action))
 	}
 	if diagnostic.Location != nil {
-		path, linkable := processingAnnotationWorkflowPath(diagnostic.Location.Path)
+		path, linkable := processingAnnotationWorkflowPath(diagnostic.Location.Path, sourceLinks.workflowInCheckout)
 		context = append(context, annotationSourcePath(path, diagnostic.Location.Line, diagnostic.Location.Column, linkable, sourceLinks))
 	}
 	if diagnostic.Job != "" {
