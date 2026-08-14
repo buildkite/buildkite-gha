@@ -430,7 +430,7 @@ func TestIsolateCacheActionEnvironmentLeavesRealGitHubServerURLUnchanged(t *test
 	}
 }
 
-func TestSetupActionsOverrideGitHubServerURLWithoutCacheActionIsolation(t *testing.T) {
+func TestSetupActionsUseCacheClientCompatibilityWithoutCacheActionIsolation(t *testing.T) {
 	node := requireNode24(t)
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "action.yml", "name: setup fixture\nruns:\n  using: node24\n  main: main.js\n  post: post.js\n  post-if: success()\n")

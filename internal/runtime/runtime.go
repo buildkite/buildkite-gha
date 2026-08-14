@@ -140,16 +140,15 @@ func (r *Runner) setExplicitNode(major int, path string) {
 
 // javaScriptAction is an already-resolved local JavaScript action.
 type javaScriptAction struct {
-	Name                    string
-	Path                    string
-	Pre                     string
-	Main                    string
-	Post                    string
-	Inputs                  map[string]string
-	Env                     map[string]string
-	Cache                   bool
-	OverrideGitHubServerURL bool
-	CacheURLCompatibility   bool
+	Name                     string
+	Path                     string
+	Pre                      string
+	Main                     string
+	Post                     string
+	Inputs                   map[string]string
+	Env                      map[string]string
+	Cache                    bool
+	CacheClientCompatibility bool
 
 	nodeMajor       int
 	reference       string
@@ -643,7 +642,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	if action.Cache {
 		env = isolateCacheActionEnvironment(env)
 	}
-	if action.OverrideGitHubServerURL {
+	if action.Cache || action.CacheClientCompatibility {
 		applyGitHubServerURLOverride(env)
 	}
 	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
@@ -655,7 +654,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	}
 	cacheToken := ""
 	if cacheErr == nil {
-		if action.CacheURLCompatibility {
+		if action.CacheClientCompatibility {
 			cacheEnv["ACTIONS_CACHE_URL"] = cacheURLCompatibility
 		}
 		env = mergeStringMaps(env, cacheEnv)

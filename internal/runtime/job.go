@@ -1309,7 +1309,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if err != nil {
 			return result, err
 		}
-		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), OverrideGitHubServerURL: overridesGitHubServerURL(lock), CacheURLCompatibility: usesCacheURLCompatibility(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: action.Path, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Cache: usesCacheService(lock), CacheClientCompatibility: usesCacheClientCompatibility(lock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		invocation := &preparedInvocation{action: javascript, state: map[string]string{}}
 		prepared[invocationID] = invocation
 		if javascript.Pre != "" && runPre {
@@ -1549,7 +1549,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return result, err
 		}
 		actionEnv := environment.process()
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), OverrideGitHubServerURL: actionLock != nil && overridesGitHubServerURL(*actionLock), CacheURLCompatibility: actionLock != nil && usesCacheURLCompatibility(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheClientCompatibility: actionLock != nil && usesCacheClientCompatibility(*actionLock), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {

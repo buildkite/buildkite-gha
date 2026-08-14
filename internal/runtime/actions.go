@@ -103,14 +103,9 @@ func usesCacheService(lock plan.ActionLock) bool {
 	return descriptor.Service == actionintegration.ServiceCache
 }
 
-func overridesGitHubServerURL(lock plan.ActionLock) bool {
+func usesCacheClientCompatibility(lock plan.ActionLock) bool {
 	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.OverrideGitHubServerURL
-}
-
-func usesCacheURLCompatibility(lock plan.ActionLock) bool {
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	return descriptor.CacheURLCompatibility
+	return descriptor.CacheClientCompatibility
 }
 
 func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {
