@@ -2631,6 +2631,9 @@ func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
 }
 
 func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
+	repository := t.TempDir()
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
 	report := compatibility.NewProcessingReport(".github/workflows/hello world.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
 		Level: "error", Message: "invalid workflow",
