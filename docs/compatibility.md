@@ -1,6 +1,6 @@
 # GitHub Actions compatibility
 
-<!-- # (internal) If this is ever moved, please update the GitHub Actions template -->
+<!-- (internal) If this file is ever moved, please update the GitHub Actions template -->
 
 This page defines the initial production contract for `buildkite-gha`. It applies to the `hosted` profile used by `upload` and the Buildkite plugin.
 
