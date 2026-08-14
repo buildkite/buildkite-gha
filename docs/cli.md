@@ -111,11 +111,12 @@ to one explicit path or `workflows` to a non-empty array of explicit paths; the
 fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
-`minimum-release-age` fields. The importer uses its verified executable for jobs
-on the same platform and fetches the other platform's distribution from the
-same release only when a workflow requires it. Custom importers can use the
-public flags below. Runner queue mappings affect generated jobs, not the
-importer step.
+`minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
+Unknown fields and non-boolean experiment values are rejected before upload.
+The importer uses its verified executable for jobs on the same platform and
+fetches the other platform's distribution from the same release only when a
+workflow requires it. Custom importers can use the public flags below. Runner
+queue mappings affect generated jobs, not the importer step.
 
 ### Select workflows
 
@@ -182,6 +183,39 @@ no direct-upload default.
 supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
+
+### Experiment with a non-root runner user
+
+`upload --experimental-runner-user` enables the removable PB-2731 Linux
+experiment. Generated jobs must start as root. Their bootstrap creates a
+`runner` user, grants passwordless `sudo` and Docker socket access when the
+socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
+runs `buildkite-gha run-job` as `runner`. The verified executable and compiled
+plan remain root-owned and read-only to `runner`. The option does not infer
+behavior from a queue name and does not affect macOS jobs.
+
+The existing plugin can run this experiment without a plugin release. Its
+`source-ref` field builds the CLI at the pinned commit and passes the boolean
+configuration to the zero-argument `plugin` entry point:
+
+```yaml
+steps:
+  - label: ":github: PB-2731 runner user proof"
+    key: "pb-2731-runner-user"
+    agents:
+      queue: "hosted"
+    plugins:
+      - github-actions#v0.9.3:
+          workflow: .github/workflows/experimental-runner-user.yml
+          source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
+          experimental-runner-user: true
+          runners:
+            - runs-on: ubuntu-latest
+              queue: hosted
+```
+
+`experimental-runner-user` must be a YAML boolean, not a quoted string. Do not
+set `version` with `source-ref`.
 
 ## Disable telemetry
 

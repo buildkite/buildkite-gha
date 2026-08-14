@@ -58,7 +58,7 @@ Run "buildkite-gha help <command>" for command help.
 var commandUsage = map[string]string{
 	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
+	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -70,7 +70,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, and every macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The experimental --experimental-runner-user option provisions and uses a non-root Linux runner identity; it does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -195,12 +195,13 @@ func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		return 1
 	}
 	return uploadParsedContext(ctx, parsedUploadArgs{
-		workflowOperands:      configuration.Workflows,
-		explicitWorkflowPaths: true,
-		runnerTargets:         configuration.runnerTargets,
-		pluginAcquisition:     &pluginRuntimeAcquisition{version: version},
-		importerPlatform:      importerPlatform,
-		telemetry:             details,
+		workflowOperands:       configuration.Workflows,
+		explicitWorkflowPaths:  true,
+		runnerTargets:          configuration.runnerTargets,
+		experimentalRunnerUser: configuration.ExperimentalRunnerUser,
+		pluginAcquisition:      &pluginRuntimeAcquisition{version: version},
+		importerPlatform:       importerPlatform,
+		telemetry:              details,
 	}, stdout, stderr, version, transport.Agent{Runner: runner})
 }
 
@@ -216,8 +217,9 @@ func importerPlatform(goos, goarch string) (compiler.Platform, error) {
 }
 
 type pluginConfiguration struct {
-	Workflows     []string
-	runnerTargets map[string]compiler.RunnerTarget
+	Workflows              []string
+	ExperimentalRunnerUser bool
+	runnerTargets          map[string]compiler.RunnerTarget
 }
 
 func parsePluginConfiguration(source string) (pluginConfiguration, error) {
@@ -241,9 +243,17 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 	}
 	for key := range encoded {
 		switch key {
-		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age":
+		case "workflow", "workflows", "runners", "version", "source-ref", "minimum-release-age", "experimental-runner-user":
 		default:
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
+		}
+	}
+	experimentalRunnerUser := false
+	if value, configured := encoded["experimental-runner-user"]; configured {
+		var ok bool
+		experimentalRunnerUser, ok = value.(bool)
+		if !ok {
+			return pluginConfiguration{}, fmt.Errorf("%s experimental-runner-user must be a boolean", pluginConfigurationEnvironment)
 		}
 	}
 	workflowValue, hasWorkflow := encoded["workflow"]
@@ -318,7 +328,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			targets[label] = target
 		}
 	}
-	return pluginConfiguration{Workflows: workflows, runnerTargets: targets}, nil
+	return pluginConfiguration{Workflows: workflows, ExperimentalRunnerUser: experimentalRunnerUser, runnerTargets: targets}, nil
 }
 
 func normalizePluginCommit(ctx context.Context, getenv func(string) string, setenv func(string, string) error, runner transport.Runner) error {
@@ -1702,9 +1712,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
-		CompilerStep:  importerStep,
-		EventProvider: effectiveEvent.Event.Provider,
-		Workflows:     generatedWorkflows,
+		CompilerStep:           importerStep,
+		EventProvider:          effectiveEvent.Event.Provider,
+		ExperimentalRunnerUser: uploadArguments.experimentalRunnerUser,
+		Workflows:              generatedWorkflows,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
@@ -2617,6 +2628,7 @@ type parsedUploadArgs struct {
 	eventPath                string
 	runtimeDistributionPaths map[compiler.Platform]string
 	runnerTargets            map[string]compiler.RunnerTarget
+	experimentalRunnerUser   bool
 	pluginAcquisition        *pluginRuntimeAcquisition
 	importerPlatform         compiler.Platform
 	telemetry                *commandTelemetryDetails
@@ -2637,6 +2649,7 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	runtimeQueue := ""
 	runtimeQueueSeen := false
 	deprecatedPrivateCheckoutSeen := false
+	experimentalRunnerUser := false
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
 		if optionsEnded {
@@ -2664,6 +2677,13 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 				return parsedUploadArgs{}, fmt.Errorf("--private-checkout may only be specified once")
 			}
 			deprecatedPrivateCheckoutSeen = true
+			continue
+		}
+		if args[i] == "--experimental-runner-user" {
+			if experimentalRunnerUser {
+				return parsedUploadArgs{}, fmt.Errorf("--experimental-runner-user may only be specified once")
+			}
+			experimentalRunnerUser = true
 			continue
 		}
 		if args[i] == "--runtime-distribution" {
@@ -2752,7 +2772,7 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 			return parsedUploadArgs{}, fmt.Errorf("--runner-image for %q requires --runner-queue", label)
 		}
 	}
-	return parsedUploadArgs{workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets}, nil
+	return parsedUploadArgs{workflowOperands: workflowOperands, eventPath: eventPath, runtimeDistributionPaths: runtimeDistributionPaths, runnerTargets: runnerTargets, experimentalRunnerUser: experimentalRunnerUser}, nil
 }
 
 func configuredRunnerTarget(label, queue, image string) (string, compiler.RunnerTarget, error) {

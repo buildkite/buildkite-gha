@@ -1,0 +1,12 @@
+name: Experimental runner identity JavaScript action
+description: Proves the PB-2731 process identity and writable-path experiment.
+
+outputs:
+  identity:
+    description: Observed operating-system user.
+
+runs:
+  using: node24
+  main: index.js
+  post: post.js
+  post-if: always()

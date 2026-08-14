@@ -408,6 +408,30 @@ func TestPluginRequiresConfigurationWithoutSideEffects(t *testing.T) {
 	}
 }
 
+func TestPluginRejectsUnknownAndNonBooleanConfigurationWithoutSideEffects(t *testing.T) {
+	requireImporterHost(t)
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "unknown field", source: `{"workflow":"ci.yml","unknown":true}`, want: "unknown field"},
+		{name: "non-boolean experiment", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(pluginConfigurationEnvironment, test.source)
+			runner := &cliCaptureRunner{}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"plugin"}, &stdout, &stderr, "dev", runner); code != 2 {
+				t.Fatalf("run() code = %d, want 2; stderr = %q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), test.want) || stdout.Len() != 0 || len(runner.commands) != 0 || len(runner.uploaded) != 0 {
+				t.Fatalf("invalid configuration reached upload: stdout = %q, stderr = %q, commands = %#v, uploads = %#v", stdout.String(), stderr.String(), runner.commands, runner.uploaded)
+			}
+		})
+	}
+}
+
 func TestParsePluginConfiguration(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	configuration, err := parsePluginConfiguration(`{
@@ -415,6 +439,7 @@ func TestParsePluginConfiguration(t *testing.T) {
   "version": "0.8.0",
   "source-ref": "0123456789abcdef0123456789abcdef01234567",
   "minimum-release-age": "24h",
+  "experimental-runner-user": true,
   "runners": [
     {"runs-on":"ubuntu-latest","queue":"hosted","image":"` + image + `"},
     {"runs-on":"macos-14","queue":"macos-sonoma-arm64"}
@@ -423,7 +448,7 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || len(configuration.runnerTargets) != 2 {
+	if !slices.Equal(configuration.Workflows, []string{".github/workflows/ci.yml", ".github/workflows/release.yml"}) || !configuration.ExperimentalRunnerUser || len(configuration.runnerTargets) != 2 {
 		t.Fatalf("configuration = %#v", configuration)
 	}
 	if got := configuration.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {
@@ -432,8 +457,8 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
-	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || len(minimal.runnerTargets) != 0 {
+	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
 	}
 
@@ -453,6 +478,9 @@ func TestParsePluginConfiguration(t *testing.T) {
 		{name: "empty workflow entry", source: `{"workflows":["one.yml",""]}`, want: "workflows entry 1 must be a non-empty string"},
 		{name: "unknown top-level field", source: `{"workflow":"ci.yml","runnerss":[]}`, want: "unknown field"},
 		{name: "retired source acquisition field", source: `{"workflow":"ci.yml","buildkite-gha-source-ref":"latest"}`, want: "unknown field"},
+		{name: "string experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":"true"}`, want: "must be a boolean"},
+		{name: "numeric experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":1}`, want: "must be a boolean"},
+		{name: "null experimental runner user", source: `{"workflow":"ci.yml","experimental-runner-user":null}`, want: "must be a boolean"},
 		{name: "null runners", source: `{"workflow":"ci.yml","runners":null}`, want: "non-empty array"},
 		{name: "empty runners", source: `{"workflow":"ci.yml","runners":[]}`, want: "non-empty array"},
 		{name: "unknown runner field", source: `{"workflow":"ci.yml","runners":[{"runs-on":"ubuntu-latest","queue":"hosted","extra":true}]}`, want: "unknown field"},
@@ -582,8 +610,9 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuration, err := json.Marshal(map[string]any{
-		"workflow": workflowPath,
-		"version":  "0.8.0",
+		"workflow":                 workflowPath,
+		"version":                  "0.8.0",
+		"experimental-runner-user": true,
 		"runners": []map[string]string{
 			{"runs-on": "ubuntu-latest", "queue": "hosted"},
 		},
@@ -619,7 +648,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 		t.Fatalf("workflow groups = %#v", pipeline.Steps)
 	}
 	for _, step := range pipeline.Steps[0].Steps {
-		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+		if step.Agents["queue"] != "hosted" || step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("plugin profile was not applied: %#v", step)
 		}
 	}
@@ -4909,7 +4938,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	}
 }
 
-func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
+func TestRunUploadUsesExplicitTargetQueueAndRunnerUserExperiment(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -4917,7 +4946,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--experimental-runner-user", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 
@@ -4941,7 +4970,7 @@ func TestRunUploadUsesExplicitTargetQueue(t *testing.T) {
 		if step.Agents["queue"] != "hosted" {
 			t.Fatalf("step %q agents = %#v, want hosted queue", step.Key, step.Agents)
 		}
-		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") {
+		if step.Image != defaultNobleRunnerImage || !strings.Contains(step.Command, "--hosted-tool-cache") || !strings.Contains(step.Command, "useradd --create-home") || !strings.Contains(step.Command, "sudo -n --preserve-env --user runner") {
 			t.Fatalf("step %q image = %q, command = %q", step.Key, step.Image, step.Command)
 		}
 	}
@@ -7023,6 +7052,9 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := uploadArgs([]string{"--runtime-queue", "one", "--runtime-queue", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("uploadArgs() error = %v, want duplicate runtime queue error", err)
 	}
+	if _, err := parseUploadArgs([]string{"--experimental-runner-user", "--experimental-runner-user", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("parseUploadArgs() error = %v, want duplicate experimental runner user error", err)
+	}
 	workflows, event, err := uploadArgs([]string{"workflow.yml"})
 	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
 		t.Fatalf("uploadArgs() default = %q, %q, %v", workflows, event, err)
@@ -7067,6 +7099,7 @@ func TestUploadArgsAcceptsExplicitPathsAndEndOfOptions(t *testing.T) {
 func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	parsed, err := parseUploadArgs([]string{
+		"--experimental-runner-user",
 		"--runner-queue", "ubuntu-latest=hosted",
 		"--runner-image", "ubuntu-latest=" + image,
 		"--runner-queue", "macos-14=macos-sonoma-arm64",
@@ -7078,7 +7111,7 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" {
+	if !slices.Equal(parsed.workflowOperands, []string{"workflow.yml"}) || parsed.eventPath != "event.json" || parsed.runtimeDistributionPaths[compiler.PlatformLinuxAMD64] != "/tmp/buildkite-gha-linux" || parsed.runtimeDistributionPaths[compiler.PlatformDarwinARM64] != "/tmp/buildkite-gha-darwin" || !parsed.experimentalRunnerUser {
 		t.Fatalf("parseUploadArgs() = %#v", parsed)
 	}
 	if got := parsed.runnerTargets["ubuntu-latest"]; got != (compiler.RunnerTarget{Queue: "hosted", Platform: compiler.PlatformLinuxAMD64, Image: image}) {

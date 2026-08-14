@@ -1,0 +1,161 @@
+name: Experimental runner user proof
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  runner-user-producer:
+    runs-on: ubuntu-latest
+    outputs:
+      post-ran: ${{ env.PB2731_JAVASCRIPT_POST }}
+    steps:
+      - name: Checkout exact repository commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify shell identity and writable paths
+        id: shell
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = runner
+          test "$(id -u)" -ne 0
+          test "$HOME" = /home/runner
+          test "$GITHUB_WORKSPACE" = "$PWD"
+          test "$RUNNER_TEMP" != "$GITHUB_WORKSPACE"
+          test "$RUNNER_TOOL_CACHE" != "$GITHUB_WORKSPACE"
+          for directory in "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$RUNNER_TOOL_CACHE"; do
+            test -d "$directory"
+            test -w "$directory"
+            probe="$directory/.pb2731-shell-$$"
+            echo runner > "$probe"
+            rm "$probe"
+          done
+          for name in GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH GITHUB_STATE GITHUB_STEP_SUMMARY; do
+            test -w "${!name}"
+          done
+          protected=/etc/sudoers.d/buildkite-gha-runner
+          test "$(stat -c '%U:%G:%a' "$protected")" = root:root:440
+          permission_error="$RUNNER_TEMP/pb2731-permission-error"
+          if { printf 'runner must not write this\n' >> "$protected"; } 2> "$permission_error"; then
+            echo "runner unexpectedly wrote $protected" >&2
+            exit 1
+          fi
+          grep -qi 'permission denied' "$permission_error"
+          rm "$permission_error"
+          mkdir -p "$RUNNER_TEMP/pb2731-shell-bin"
+          echo "PB2731_SHELL=true" >> "$GITHUB_ENV"
+          echo "identity=runner" >> "$GITHUB_OUTPUT"
+          echo "$RUNNER_TEMP/pb2731-shell-bin" >> "$GITHUB_PATH"
+          echo "phase=shell" >> "$GITHUB_STATE"
+          echo 'Shell step ran as `runner`.' >> "$GITHUB_STEP_SUMMARY"
+          test "$(sudo -n id -u)" -eq 0
+          if [[ -S /var/run/docker.sock ]]; then
+            test -w /var/run/docker.sock
+            if command -v docker >/dev/null 2>&1; then
+              docker version >/dev/null
+            else
+              test "$(curl --silent --show-error --unix-socket /var/run/docker.sock http://localhost/_ping)" = OK
+            fi
+            echo 'PB2731_DOCKER=available'
+          else
+            echo 'PB2731_DOCKER=unavailable'
+          fi
+
+      - name: Prepare Dockerfile action client
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -S /var/run/docker.sock
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo -n apt-get update
+            sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends docker.io docker-buildx
+          fi
+          docker version >/dev/null
+          docker buildx inspect default >/dev/null
+
+      - name: Run Dockerfile action as runner
+        id: dockerfile
+        uses: actions/hello-world-docker-action@66e612e94eca3366d470e868d0c2d86bd25e693d
+        with:
+          who-to-greet: PB-2731 runner
+
+      - name: Verify Dockerfile action output
+        shell: bash
+        env:
+          ACTION_TIME: ${{ steps.dockerfile.outputs.time }}
+        run: |
+          test "$(id -un)" = runner
+          test -n "$ACTION_TIME"
+
+      - name: Run JavaScript identity action
+        id: javascript
+        uses: ./.github/actions/experimental-runner-user/javascript
+
+      - name: Run composite identity action
+        id: composite
+        uses: ./.github/actions/experimental-runner-user/composite
+
+      - name: Restore experimental cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: pb2731-cache
+          key: pb2731-runner-user-${{ github.sha }}
+
+      - name: Create cache and artifact payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$PB2731_SHELL" = true
+          test "$PB2731_JAVASCRIPT_MAIN" = true
+          test "$PB2731_COMPOSITE" = true
+          test "${{ steps.shell.outputs.identity }}" = runner
+          test "${{ steps.javascript.outputs.identity }}" = runner
+          test "${{ steps.composite.outputs.identity }}" = runner
+          mkdir -p pb2731-cache pb2731-artifact
+          echo runner > pb2731-cache/identity
+          printf '%s\n' "runner:$HOME" > pb2731-artifact/identity
+
+      - name: Upload runner artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pb2731-runner-user
+          path: pb2731-artifact/identity
+          if-no-files-found: error
+
+  runner-user-consumer:
+    needs: runner-user-producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify producer post cleanup
+        env:
+          POST_RAN: ${{ needs.runner-user-producer.outputs.post-ran }}
+        run: test "$POST_RAN" = true
+
+      - name: Download runner artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pb2731-runner-user
+          path: pb2731-artifact
+
+      - name: Restore producer cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: pb2731-cache
+          key: pb2731-runner-user-${{ github.sha }}
+
+      - name: Verify integrations as runner
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = runner
+          test "$(id -u)" -ne 0
+          test "$HOME" = /home/runner
+          test "$(cat pb2731-artifact/identity)" = runner:/home/runner
+          test "$CACHE_HIT" = true
+          test "$(cat pb2731-cache/identity)" = runner
+          test "$(sudo -n id -u)" -eq 0
