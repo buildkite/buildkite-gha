@@ -289,7 +289,7 @@ func renderProcessingDiagnosticWithin(diagnostic compatibility.Diagnostic, limit
 func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks sourceLinkContext) string {
 	heading, details := annotationDiagnosticPresentation(diagnostic)
 	var out strings.Builder
-	out.WriteString("<div class=\"py2\"><div><strong>")
+	out.WriteString("<div><div><strong>")
 	out.WriteString(annotationHTML(heading))
 	out.WriteString("</strong></div>")
 	context := make([]string, 0, 4)

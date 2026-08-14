@@ -2493,7 +2493,7 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 		}
 		for _, want := range []string{
 			`<h2 class="h4 mb2">Workflow could not be run</h2>`,
-			`<div class="py2"><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
+			`<div><div><strong>Runner label &#34;windows-latest&#34; requires Windows, which is unsupported.`,
 			`<summary>Diagnostic detail</summary>`,
 			`Supported runner labels: ubuntu-22.04, ubuntu-24.04, ubuntu-latest.`,
 			"Job <code>test</code>",
@@ -2873,7 +2873,7 @@ func TestProcessingAnnotationPresentsActionFailureAsAConciseCard(t *testing.T) {
 
 	_, body := processingAnnotation(report, sourceLinkContext{})
 	for _, want := range []string{
-		`<div class="py2"><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
+		`<div><div><strong>Action metadata uses unsupported field &#34;deprecationMessage&#34;</strong></div>`,
 		"Action <code>actions/setup-java@v4</code> · Job <code>test</code> · Step 2",
 	} {
 		if !strings.Contains(body, want) {
