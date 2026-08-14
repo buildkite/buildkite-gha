@@ -1,0 +1,11 @@
+steps:
+  - label: ":github: Import workflow"
+    key: "skipped-workflow-annotation"
+    plugins:
+      - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
+          version: "2026.5.12"
+    command: >-
+      mise exec -- go run ./cmd/buildkite-gha upload
+      --event-path testdata/smoke/events/push.json
+      --runner-queue ubuntu-latest=hosted
+      .github/workflows/example-basic.yml
