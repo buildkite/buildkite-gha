@@ -144,10 +144,10 @@ func skippedWorkflowsAnnotation(event string, labels []string, buildURL, stepID 
 }
 
 func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sourceLinkContext) (style, body string) {
-	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice)
+	return processingAnnotationWithin(report, sourceLinks, processingAnnotationBodyLimit, processingAnnotationNotice, true)
 }
 
-func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string) (style, body string) {
+func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLinks sourceLinkContext, bodyLimit int, truncationNotice string, includeHeading bool) (style, body string) {
 	report.Finalize()
 	style = "warning"
 	diagnostics := make([]compatibility.Diagnostic, 0, len(report.Diagnostics))
@@ -169,16 +169,18 @@ func processingAnnotationWithin(report compatibility.ProcessingReport, sourceLin
 		heading = "Workflow could not be run"
 	}
 	var out strings.Builder
-	out.WriteString("<h2 class=\"h4 mb2\">")
-	out.WriteString(heading)
-	out.WriteString("</h2>\n")
-	out.WriteString("<div class=\"mb2\">")
+	if includeHeading {
+		out.WriteString("<h2 class=\"h4 mb2\">")
+		out.WriteString(heading)
+		out.WriteString("</h2>\n")
+	}
+	out.WriteString("<div>")
 	workflowPath, workflowLinkable := processingAnnotationWorkflowPath(report.Workflow, "")
 	if workflowLinkable {
 		sourceLinks.workflowSourceRoot = processingWorkflowSourceRoot(report.Workflow)
 	}
 	out.WriteString(annotationSourcePath(workflowPath, 0, 0, workflowLinkable, sourceLinks))
-	out.WriteString("</div>\n<div class=\"mb2\">\n")
+	out.WriteString("</div>\n<br>\n<div>\n")
 	rows := make([]string, len(diagnostics))
 	bodyBytes := out.Len() + len(processingAnnotationEnd)
 	for i, diagnostic := range diagnostics {
@@ -307,12 +309,12 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		context = append(context, fmt.Sprintf("Step %d", diagnostic.Step))
 	}
 	if len(context) != 0 {
-		out.WriteString("<div class=\"mt1\">")
+		out.WriteString("<div><br>\n")
 		out.WriteString(strings.Join(context, " · "))
 		out.WriteString("</div>")
 	}
 	if len(details) != 0 {
-		out.WriteString("<div class=\"mt1\">")
+		out.WriteString("<div><br>\n")
 		for i, sentence := range details {
 			if i != 0 {
 				out.WriteString("<br>\n")
@@ -322,11 +324,11 @@ func renderProcessingDiagnostic(diagnostic compatibility.Diagnostic, sourceLinks
 		out.WriteString("</div>")
 	}
 	if diagnostic.Detail != "" {
-		out.WriteString("<details class=\"mt1\"><summary>Diagnostic detail</summary><div class=\"mt1\">")
+		out.WriteString("<br>\n<details><summary>Diagnostic detail</summary><div><br>\n")
 		out.WriteString(annotationHTML(diagnostic.Detail))
 		out.WriteString("</div></details>")
 	}
-	out.WriteString("</div>\n")
+	out.WriteString("</div>\n<br>\n")
 	return out.String()
 }
 

@@ -1864,7 +1864,7 @@ func failedGeneratedWorkflow(input workflowInput, event string, report compatibi
 		messages = append(messages, message)
 	}
 	_, annotation := processingAnnotation(report, sourceLinks)
-	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice)
+	_, checkSummary := processingAnnotationWithin(report, sourceLinks, workflowCheckSummaryLimit, workflowCheckSummaryNotice, false)
 	messageArtifact := generatedFailureArtifact("messages", ".txt", "\x1b[31m"+strings.Join(messages, "\n")+"\x1b[0m\n")
 	annotationArtifact := generatedFailureArtifact("annotations", ".html", annotation)
 	workflow := buildkitepipeline.Workflow{
