@@ -196,14 +196,17 @@ func processingAnnotation(report compatibility.ProcessingReport, sourceLinks sou
 }
 
 func processingAnnotationWorkflowPath(path string) string {
-	if !filepath.IsAbs(path) {
-		return filepath.ToSlash(filepath.Clean(path))
-	}
 	root := os.Getenv("BUILDKITE_BUILD_CHECKOUT_PATH")
 	if root == "" {
 		root, _ = os.Getwd()
 	}
-	relative, err := filepath.Rel(root, path)
+	resolved := path
+	if !filepath.IsAbs(resolved) {
+		if workingDirectory, err := os.Getwd(); err == nil {
+			resolved = filepath.Join(workingDirectory, resolved)
+		}
+	}
+	relative, err := filepath.Rel(root, resolved)
 	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(relative)
 	}

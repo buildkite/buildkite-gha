@@ -2608,6 +2608,28 @@ func TestProcessingAnnotationUsesRepositoryRelativeWorkflowPath(t *testing.T) {
 	}
 }
 
+func TestProcessingAnnotationResolvesPathsFromBelowCheckoutRoot(t *testing.T) {
+	repository := t.TempDir()
+	workingDirectory := filepath.Join(repository, ".github")
+	if err := os.MkdirAll(workingDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workingDirectory)
+	t.Setenv("BUILDKITE_BUILD_CHECKOUT_PATH", repository)
+	report := compatibility.NewProcessingReport("workflows/hello.yml", "")
+	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
+		Level: "error", Message: "invalid workflow",
+		Location: &compatibility.SourceLocation{Path: "workflows/hello.yml", Line: 100, Column: 3},
+	})
+	sourceLinks := sourceLinkContext{serverURL: "https://github.com", repository: "owner/repo", sha: "abc123"}
+
+	_, body := processingAnnotation(report, sourceLinks)
+	want := `href="https://github.com/owner/repo/blob/abc123/.github/workflows/hello.yml#L100"`
+	if !strings.Contains(body, want) {
+		t.Fatalf("annotation = %q, want %q", body, want)
+	}
+}
+
 func TestProcessingAnnotationLinksWorkflowLocationsToSource(t *testing.T) {
 	report := compatibility.NewProcessingReport(".github/workflows/hello world.yml", "")
 	report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{
