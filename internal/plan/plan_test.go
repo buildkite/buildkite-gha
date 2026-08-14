@@ -12,7 +12,9 @@ import (
 )
 
 func TestDecodePreservesPlanContract(t *testing.T) {
-	source, err := Encode(validJob())
+	fixture := validJob()
+	fixture.Event.HeadRef = "feature/head-ref"
+	source, err := Encode(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,9 +22,10 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Target.StepKey != "gha-test" {
+	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Target.StepKey != "gha-test" {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
 	}
+	validateJobPlanSchema(t, source)
 }
 
 func TestDecodeFailsClosed(t *testing.T) {

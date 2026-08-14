@@ -463,8 +463,8 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
-| `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
-| `github.head_ref`, `github.ref_name` | ❌ No | ❌ No |
+| `github.actor`, `github.event_name`, `github.head_ref`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
+| `github.ref_name` | ❌ No | ❌ No |
 | `runner.os`, `runner.arch` | ✅ Yes | ✅ Yes |
 | `needs.<job>.result`, `needs.<job>.outputs.<name>` | ✅ Yes | ✅ Yes |
 | `vars.<name>`, `matrix.<name>` | ✅ Yes | ✅ Yes |
@@ -492,7 +492,7 @@ A runtime interpolation can read a verified upstream output directly:
 run: echo "${{ needs.build.outputs.image }}"
 ```
 
-At runtime, only `github.actor`, `github.event_name`, `github.ref`, `github.repository`, `github.server_url`, and `github.sha` are retained. `github.server_url` identifies the event repository provider. `github.event` is unavailable.
+At runtime, only `github.actor`, `github.event_name`, `github.head_ref`, `github.ref`, `github.repository`, `github.server_url`, and `github.sha` are retained. `github.head_ref` is the pull request source branch for `pull_request` and `pull_request_target` events, and an empty string for other events. `github.server_url` identifies the event repository provider. `github.event` is unavailable.
 
 `hashFiles()` evaluates when its step field is consumed. A step condition and normal step execution observe earlier steps such as checkout. A JavaScript action's `with` and `env` values can also be evaluated for its `pre` phase, then reevaluated for `main`. Patterns apply in argument order. `!` excludes matches, and a later positive pattern can include them again. Directory matches include descendants, hidden files match normally, overlapping patterns hash each path once, and matching is case-insensitive on Windows only. An empty match returns an empty string.
 

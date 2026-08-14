@@ -481,6 +481,35 @@ func TestCompileBundleDoesNotExposeEventValues(t *testing.T) {
 	}
 }
 
+func TestCompileBundleRetainsGitHubHeadRefWithoutPayload(t *testing.T) {
+	path := smokePath(".github", "workflows", "shell.yml")
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "pull_request"
+	event["payload"] = map[string]any{
+		"private_fixture_value": "super-secret-value",
+		"pull_request":          map[string]any{"head": map[string]any{"ref": "feature/plan"}},
+	}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := CompileBundle(path, readFile(t, path), eventSource, "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.Event.HeadRef != "feature/plan" {
+			t.Fatalf("plan %q head ref = %q", artifact.Job.Target.StepKey, artifact.Job.Event.HeadRef)
+		}
+		if bytes.Contains(artifact.Contents, []byte("super-secret-value")) {
+			t.Fatalf("plan %q contains an unrelated event payload value", artifact.Job.Target.StepKey)
+		}
+	}
+}
+
 func TestCompileBundleTranslatesWorkflowAndJobConcurrency(t *testing.T) {
 	source := []byte(`name: Deployment
 on: push

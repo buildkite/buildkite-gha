@@ -100,6 +100,7 @@ type Event struct {
 	PayloadDigest string `json:"payload_digest"`
 	Repository    string `json:"repository,omitempty"`
 	Ref           string `json:"ref,omitempty"`
+	HeadRef       string `json:"head_ref,omitempty"`
 	SHA           string `json:"sha,omitempty"`
 	Actor         string `json:"actor,omitempty"`
 }

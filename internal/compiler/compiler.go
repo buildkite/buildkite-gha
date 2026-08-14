@@ -548,7 +548,7 @@ instances:
 				Event: plan.Event{
 					Provider: ir.Event.Provider, Name: ir.Event.Event, PayloadDigest: "sha256:" + hex.EncodeToString(eventDigest[:]),
 					Repository: ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name,
-					Ref:        ir.Event.Ref, SHA: ir.Event.SHA, Actor: ir.Event.Actor,
+					Ref:        ir.Event.Ref, HeadRef: eventHeadRef(ir.Event), SHA: ir.Event.SHA, Actor: ir.Event.Actor,
 				},
 				Target:                  plan.Target{StepKey: instance.Key, Queue: instance.Queue},
 				RequiredCapabilities:    capabilities,
@@ -820,6 +820,7 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 		GitHub: map[string]any{
 			"event_name":       event.Event,
 			"event":            event.Payload,
+			"head_ref":         eventHeadRef(event),
 			"repository":       repository,
 			"repository_owner": event.Repository.Owner,
 			"ref":              event.Ref,
@@ -830,6 +831,22 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 		Event: event.Payload,
 		Vars:  vars,
 	}
+}
+
+func eventHeadRef(event Event) string {
+	if event.Event != "pull_request" && event.Event != "pull_request_target" {
+		return ""
+	}
+	pullRequest, ok := event.Payload["pull_request"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	head, ok := pullRequest["head"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	ref, _ := head["ref"].(string)
+	return ref
 }
 
 func canonicalWorkflowName(path string) string {

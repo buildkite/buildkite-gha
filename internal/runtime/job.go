@@ -941,6 +941,7 @@ func githubContext(job plan.Job) map[string]any {
 	return map[string]any{
 		"repository": job.Event.Repository,
 		"ref":        job.Event.Ref,
+		"head_ref":   job.Event.HeadRef,
 		"sha":        job.Event.SHA,
 		"actor":      job.Event.Actor,
 		"event_name": job.Event.Name,

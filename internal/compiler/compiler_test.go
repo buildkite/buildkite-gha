@@ -1711,6 +1711,52 @@ jobs:
 	}
 }
 
+func TestCompileExposesGitHubHeadRef(t *testing.T) {
+	workflow := []byte(`on: [push, pull_request, pull_request_target]
+concurrency: group-${{ github.head_ref }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.head_ref }}"
+`)
+	tests := []struct {
+		name    string
+		event   string
+		payload string
+		want    string
+	}{
+		{name: "pull request", event: "pull_request", payload: `{"pull_request":{"head":{"ref":"feature/pr"}}}`, want: "feature/pr"},
+		{name: "pull request target", event: "pull_request_target", payload: `{"pull_request":{"head":{"ref":"feature/target"}}}`, want: "feature/target"},
+		{name: "push ignores pull request shape", event: "push", payload: `{"pull_request":{"head":{"ref":"not-a-pr"}}}`, want: ""},
+		{name: "missing pull request shape", event: "pull_request", payload: `{}`, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := []byte(fmt.Sprintf(`{
+  "provider": "github",
+  "event": %q,
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/heads/main",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": %s
+}`, test.event, test.payload))
+			result, err := Compile("ci.yml", workflow, event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ir IR
+			if err := json.Unmarshal(result, &ir); err != nil {
+				t.Fatal(err)
+			}
+			if ir.Workflow.ConcurrencyGroup != "group-"+test.want {
+				t.Fatalf("github.head_ref concurrency group = %q, want %q", ir.Workflow.ConcurrencyGroup, "group-"+test.want)
+			}
+		})
+	}
+}
+
 func TestCompileFoldsEventBackedConditionsBeforeRuntime(t *testing.T) {
 	workflow := []byte(`on: pull_request
 jobs:
