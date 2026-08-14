@@ -1332,7 +1332,6 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			}
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
-			javascript.CacheCredentialsRequired = requiresCacheCredentials(requirement, action, inputs)
 			invocation.action = javascript
 			node, err := r.discoverNode(ctx, major, explicit)
 			if err != nil {
@@ -1552,7 +1551,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		actionEnv := environment.process()
 		requirement := actionCacheRequirement(actionLock)
-		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheRequirement: requirement, CacheCredentialsRequired: requiresCacheCredentials(requirement, action, inputs), nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
+		javascript := javaScriptAction{Name: actionName(action, step), Path: actionPath, Pre: action.Runs.Pre, Main: action.Runs.Main, Post: action.Runs.Post, Inputs: inputs, Env: actionEnv, Cache: actionLock != nil && usesCacheService(*actionLock), CacheRequirement: requirement, nodeMajor: major, reference: step.Uses, jobStatusInputs: jobStatusInputs}
 		state := map[string]string{}
 		wasPrepared := false
 		if invocation := prepared[invocationID]; invocation != nil {
@@ -1566,7 +1565,6 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			// again with every main-visible effect committed.
 			javascript.Inputs = inputs
 			javascript.Env = environment.process()
-			javascript.CacheCredentialsRequired = requiresCacheCredentials(javascript.CacheRequirement, action, inputs)
 			invocation.action = javascript
 		}
 		if !wasPrepared {

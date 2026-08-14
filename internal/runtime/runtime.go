@@ -141,16 +141,15 @@ func (r *Runner) setExplicitNode(major int, path string) {
 
 // javaScriptAction is an already-resolved local JavaScript action.
 type javaScriptAction struct {
-	Name                     string
-	Path                     string
-	Pre                      string
-	Main                     string
-	Post                     string
-	Inputs                   map[string]string
-	Env                      map[string]string
-	Cache                    bool
-	CacheRequirement         actionintegration.CacheRequirement
-	CacheCredentialsRequired bool
+	Name             string
+	Path             string
+	Pre              string
+	Main             string
+	Post             string
+	Inputs           map[string]string
+	Env              map[string]string
+	Cache            bool
+	CacheRequirement actionintegration.CacheRequirement
 
 	nodeMajor       int
 	reference       string
@@ -419,14 +418,6 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 			return result, err
 		}
 	}
-	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
-	if cacheErr != nil && ctx.Err() != nil {
-		return result, ctx.Err()
-	}
-	cacheToken := ""
-	if cacheErr == nil {
-		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
-	}
 	args := []string{"run", "--name", container, "--label", owner, "--mount", "type=bind,source=" + files.dir + ",target=/github/file_commands"}
 	if r.jobDocker != nil {
 		args = append(args, "--network", r.jobDocker.network)
@@ -466,16 +457,9 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 		"--env", "GITHUB_STATE=/github/file_commands/state",
 		"--env", "GITHUB_STEP_SUMMARY=/github/file_commands/summary",
 	)
-	dockerRunEnv := dockerEnv
-	for _, name := range sortedKeys(cacheEnv) {
-		args = append(args, "--env", name)
-	}
-	if len(cacheEnv) > 0 {
-		dockerRunEnv = mergeStringMaps(dockerEnv, cacheEnv)
-	}
 	args = append(args, image)
 	ran = true
-	runErr := r.runStreaming(ctx, processor, "", dockerRunEnv, docker, args...)
+	runErr := r.runStreaming(ctx, processor, "", dockerEnv, docker, args...)
 	if runErr != nil {
 		runErr = fmt.Errorf("run Docker action %q: %w", action.Name, runErr)
 	}
@@ -483,14 +467,6 @@ func (r Runner) runDocker(ctx context.Context, processor *commandProcessor, acti
 	effects.reportSummaryUploadFailure(processor)
 	if fileErr != nil {
 		fileErr = fmt.Errorf("process Docker action %q file commands: %w", action.Name, fileErr)
-	}
-	if cacheToken != "" {
-		runErr = processor.scrubError(runErr)
-		fileErr = processor.scrubError(fileErr)
-		if resultContains(result, cacheToken) {
-			result = newResult()
-			return result, errors.Join(runErr, fileErr, errors.New("action runtime cache token leakage detected; action effects were discarded"))
-		}
 	}
 	return result, errors.Join(runErr, fileErr)
 }
@@ -644,20 +620,26 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	if action.Cache {
 		env = isolateCacheActionEnvironment(env)
 	}
+	cacheToken := ""
 	if action.CacheRequirement != "" {
 		applyGitHubServerURLOverride(env)
-	}
-	cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
-	if cacheErr != nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if cacheErr != nil && (action.Cache || action.CacheCredentialsRequired) {
-		return fmt.Errorf("configure actions/cache service: %w", cacheErr)
-	}
-	cacheToken := ""
-	if cacheErr == nil {
-		env = mergeStringMaps(env, cacheEnv)
-		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
+		cacheEnv, cacheErr := r.cacheActionEnvironment(ctx, processor)
+		if cacheErr != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if cacheErr != nil {
+			if action.CacheRequirement != actionintegration.CacheBestEffort {
+				return fmt.Errorf("configure actions/cache service: %w", cacheErr)
+			}
+			reference := action.reference
+			if reference == "" {
+				reference = action.Name
+			}
+			processor.trustedWarning(fmt.Sprintf("Cache credentials unavailable for action %q entry %q; continuing without cache: %v", reference, entry, processor.scrubError(cacheErr)))
+		} else {
+			env = mergeStringMaps(env, cacheEnv)
+			cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
+		}
 	}
 	entrypoint := filepath.Join(action.Path, entry)
 	if r.jobContainer != nil {

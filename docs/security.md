@@ -28,7 +28,7 @@ Digests and immutable action locks detect changed code. They do not make code tr
 | --- | --- |
 | Repository checkout | The verified adapter checks the event repository and exact commit. Buildkite authorizes managed private access; credentials are command-scoped and not persisted. |
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and compiler-resolved permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Buildkite verifies the pipeline repository, immutable commit, workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
-| Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
+| Cache token | Direct `actions/cache` invocations and audited root `actions/setup-*` integrations receive a fresh job-bound token for each lifecycle phase. Other JavaScript and Docker actions and shell steps do not receive it. |
 | Ordinary workflow secrets | Rejected by production admission. |
 | GitHub-compatible OIDC | Unsupported. |
 

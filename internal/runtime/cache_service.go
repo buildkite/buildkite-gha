@@ -46,9 +46,8 @@ func (p unavailableCacheCredentials) Credentials(context.Context) (CacheCredenti
 	return CacheCredentials{}, p.err
 }
 
-// UnavailableCacheCredentials preserves an optional provider setup failure so
-// an action that enables caching can report the cause instead of running
-// uncached.
+// UnavailableCacheCredentials preserves a provider setup failure so required
+// integrations can fail with its cause and best-effort integrations can warn.
 func UnavailableCacheCredentials(err error) CacheCredentialProvider {
 	if err == nil {
 		err = errors.New("cache credential provider is unavailable")

@@ -111,29 +111,6 @@ func actionCacheRequirement(lock *plan.ActionLock) actionintegration.CacheRequir
 	return descriptor.CacheRequirement
 }
 
-func requiresCacheCredentials(requirement actionintegration.CacheRequirement, action metadata.Metadata, inputs map[string]string) bool {
-	cache := strings.TrimSpace(inputs["cache"])
-	switch requirement {
-	case actionintegration.CacheAlways:
-		return true
-	case actionintegration.CacheBySelector:
-		return cache != ""
-	case actionintegration.CacheByBoolean:
-		return strings.EqualFold(cache, "true")
-	case actionintegration.CacheByNode:
-		if cache != "" {
-			return true
-		}
-		if _, supported := action.Inputs["package-manager-cache"]; !supported {
-			return false
-		}
-		automatic := strings.TrimSpace(inputs["package-manager-cache"])
-		return automatic == "" || strings.EqualFold(automatic, "true")
-	default:
-		return false
-	}
-}
-
 func (r *actionLockResolver) source(selector plan.ActionSelector) (_ string, err error) {
 	defer func() { err = markHardJobFailure(err) }()
 	if r == nil || selector.Lock == "" {

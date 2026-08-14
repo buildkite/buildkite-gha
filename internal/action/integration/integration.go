@@ -89,19 +89,17 @@ const (
 	ServiceCache    Service = "cache"
 )
 
-// CacheRequirement identifies how an audited action enables its bundled cache
-// client. A requirement also opts the action into the synthetic
-// GITHUB_SERVER_URL needed for cache-v2 selection. It is separate from
-// ServiceCache because setup actions retain their ordinary environment rather
-// than actions/cache isolation. Before adding a requirement, confirm the
+// CacheRequirement identifies how an audited action handles unavailable cache
+// credentials. A requirement also opts the action into cache credentials and
+// the synthetic GITHUB_SERVER_URL needed for cache-v2 selection. It is separate
+// from ServiceCache because setup actions retain their ordinary environment
+// rather than actions/cache isolation. Before adding a requirement, confirm the
 // action and its bundled dependencies use GITHUB_SERVER_URL only for caching.
 type CacheRequirement string
 
 const (
-	CacheAlways     CacheRequirement = "always"
-	CacheBySelector CacheRequirement = "selector"
-	CacheByBoolean  CacheRequirement = "boolean"
-	CacheByNode     CacheRequirement = "node"
+	CacheRequired   CacheRequirement = "required"
+	CacheBestEffort CacheRequirement = "best-effort"
 )
 
 // Descriptor records Buildkite-specific handling for one exact action identity.
@@ -120,17 +118,17 @@ func UsesNativeAdapter(identity Identity) bool {
 
 var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/checkout"}:                       {Adapter: AdapterCheckoutExactEventSHA},
-	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, CacheRequirement: CacheAlways},
-	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, CacheRequirement: CacheAlways},
-	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, CacheRequirement: CacheAlways},
+	{Source: "github", Repository: "actions/cache"}:                          {Service: ServiceCache, CacheRequirement: CacheRequired},
+	{Source: "github", Repository: "actions/cache", Path: "restore"}:         {Service: ServiceCache, CacheRequirement: CacheRequired},
+	{Source: "github", Repository: "actions/cache", Path: "save"}:            {Service: ServiceCache, CacheRequirement: CacheRequired},
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
-	{Source: "github", Repository: "actions/setup-node"}:                     {CacheRequirement: CacheByNode},
-	{Source: "github", Repository: "actions/setup-java"}:                     {CacheRequirement: CacheBySelector},
-	{Source: "github", Repository: "actions/setup-python"}:                   {CacheRequirement: CacheBySelector},
-	{Source: "github", Repository: "actions/setup-go"}:                       {CacheRequirement: CacheByBoolean},
-	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheRequirement: CacheByBoolean},
+	{Source: "github", Repository: "actions/setup-node"}:                     {CacheRequirement: CacheBestEffort},
+	{Source: "github", Repository: "actions/setup-java"}:                     {CacheRequirement: CacheBestEffort},
+	{Source: "github", Repository: "actions/setup-python"}:                   {CacheRequirement: CacheBestEffort},
+	{Source: "github", Repository: "actions/setup-go"}:                       {CacheRequirement: CacheBestEffort},
+	{Source: "github", Repository: "actions/setup-dotnet"}:                   {CacheRequirement: CacheBestEffort},
 }
 
 var checkoutCommits = map[string]string{

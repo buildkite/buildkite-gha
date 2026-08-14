@@ -247,13 +247,12 @@ console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	for _, phase := range []string{"pre", "main", "post"} {
 		writeFixtureFile(t, remote, "ordinary/"+phase+".js", fmt.Sprintf(`import fs from "node:fs";
 for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"])
-  if (!process.env[name]) throw new Error("missing " + name);
+  if (process.env[name]) throw new Error(name + " leaked");
 for (const name of ["ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL", "BUILDKITE_AGENT_ACCESS_TOKEN"])
   if (process.env[name]) throw new Error(name + " leaked");
 if (process.env.GITHUB_SERVER_URL !== "https://origin.cursor.com") throw new Error("ordinary action server URL changed");
 if (process.env.PATH === %q) throw new Error("ordinary action PATH was isolated");
-fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
-console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
+fs.appendFileSync(process.env.LIFECYCLE_LOG, "ordinary-%s\n");
 `, cacheActionToolPath, phase))
 	}
 	digest, err := source.DigestTree(remote)
@@ -302,7 +301,6 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 	provider := &sequenceCacheCredentials{tokens: []string{
 		"header.first.signature", "header.second.signature", "header.third.signature",
-		"header.fourth.signature", "header.fifth.signature", "header.sixth.signature",
 	}}
 	redactor := &testRedactor{}
 	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
@@ -325,6 +323,13 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	}
 	seenTokens := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(contents)), "\n") {
+		if strings.HasPrefix(line, "ordinary-") {
+			if _, ok := wantPhases[line]; !ok || wantPhases[line] {
+				t.Fatalf("unexpected or duplicate lifecycle phase %q in %q", line, contents)
+			}
+			wantPhases[line] = true
+			continue
+		}
 		fields := strings.Split(line, "|")
 		if len(fields) != 4 || fields[2] != "https://cache.example/" || fields[3] != "true" {
 			t.Fatalf("invalid lifecycle record %q in %q", line, contents)
@@ -348,7 +353,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 			t.Fatalf("cache credential %q missing from %q", token, contents)
 		}
 	}
-	if provider.calls != 6 || fmt.Sprint(redactor.values) != fmt.Sprint(provider.tokens) {
+	if provider.calls != 3 || fmt.Sprint(redactor.values) != fmt.Sprint(provider.tokens) {
 		t.Fatalf("credential calls/redactions = %d / %#v", provider.calls, redactor.values)
 	}
 	for _, token := range provider.tokens {
@@ -486,16 +491,10 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "\n");
 	}
 }
 
-func TestSetupActionsRequireCredentialsWhenCachingIsEnabled(t *testing.T) {
+func TestSetupActionsUseBestEffortCacheCredentialsWithoutInputs(t *testing.T) {
 	node := requireNode24(t)
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "action.yml", `name: setup cache fixture
-inputs:
-  cache:
-    description: Cache selector or boolean
-  package-manager-cache:
-    description: Automatic package manager cache
-    default: "true"
 runs:
   using: node24
   main: main.js
@@ -504,11 +503,13 @@ runs:
 `)
 	for _, phase := range []string{"main", "post"} {
 		writeFixtureFile(t, remote, phase+".js", fmt.Sprintf(`const fs = require("node:fs");
-for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"])
-  if (!process.env[name]) throw new Error("missing " + name);
+const names = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"];
+const available = names.every(name => process.env[name]);
+if (process.env.EXPECT_CACHE === "true" && !available) throw new Error("missing cache credentials");
+if (process.env.EXPECT_CACHE !== "true" && names.some(name => process.env[name])) throw new Error("partial cache credentials");
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 if (process.env.HTTP_PROXY !== "http://proxy.example") throw new Error("setup action environment was isolated");
-fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "|" + process.env.ACTIONS_RUNTIME_TOKEN + "\n");
+fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "|" + (process.env.ACTIONS_RUNTIME_TOKEN || "uncached") + "\n");
 `, githubServerURLOverride, phase))
 	}
 	digest := digestTree(t, remote)
@@ -516,14 +517,12 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "|" + process.env.ACTIONS_RUNT
 	for _, test := range []struct {
 		name       string
 		repository string
-		inputs     map[string]string
 	}{
-		{name: "setup-node-explicit", repository: "actions/setup-node", inputs: map[string]string{"cache": "npm"}},
-		{name: "setup-node-automatic", repository: "actions/setup-node"},
-		{name: "setup-java", repository: "actions/setup-java", inputs: map[string]string{"cache": "maven"}},
-		{name: "setup-python", repository: "actions/setup-python", inputs: map[string]string{"cache": "pip"}},
-		{name: "setup-go", repository: "actions/setup-go", inputs: map[string]string{"cache": "true"}},
-		{name: "setup-dotnet", repository: "actions/setup-dotnet", inputs: map[string]string{"cache": "true"}},
+		{name: "setup-node", repository: "actions/setup-node"},
+		{name: "setup-java", repository: "actions/setup-java"},
+		{name: "setup-python", repository: "actions/setup-python"},
+		{name: "setup-go", repository: "actions/setup-go"},
+		{name: "setup-dotnet", repository: "actions/setup-dotnet"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspace := t.TempDir()
@@ -532,13 +531,13 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "|" + process.env.ACTIONS_RUNT
 			lifecycle := filepath.Join(workspace, "lifecycle.log")
 			lockID := remoteLifecycleLockID(1)
 			job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
-				ID: "setup", Kind: "uses", Uses: test.repository + "@v1", With: test.inputs,
+				ID: "setup", Kind: "uses", Uses: test.repository + "@v1",
 				Action: &plan.ActionSelector{Lock: lockID},
 			}})
 			job.Schema = plan.Schema
 			job.Event.Provider = "cursor-origin"
 			job.RequiredCapabilities = []string{"network"}
-			job.Env = map[string]string{"HTTP_PROXY": "http://proxy.example", "LIFECYCLE_LOG": lifecycle}
+			job.Env = map[string]string{"EXPECT_CACHE": "true", "HTTP_PROXY": "http://proxy.example", "LIFECYCLE_LOG": lifecycle}
 			job.Actions = []plan.ActionLock{{
 				ID: lockID, Source: "github", Repository: test.repository, RequestedRef: "v1",
 				Commit: strings.Repeat("a", 40), SourceDigest: digest,
@@ -561,28 +560,33 @@ fs.appendFileSync(process.env.LIFECYCLE_LOG, %q + "|" + process.env.ACTIONS_RUNT
 			if err := os.Remove(lifecycle); err != nil {
 				t.Fatal(err)
 			}
-			failed, err := (Runner{
+			delete(job.Env, "EXPECT_CACHE")
+			uncached, err := (Runner{
 				Node24: node, Actions: materializer,
 				Cache: UnavailableCacheCredentials(errors.New("cache provider setup failed")), Redactor: &testRedactor{},
 			}).RunJob(context.Background(), job, workspace)
-			if err == nil || !strings.Contains(err.Error(), "configure actions/cache service: cache provider setup failed") || failed.Conclusion != "failure" {
-				t.Fatalf("required cache result = %#v, error = %v", failed, err)
+			if err != nil || uncached.Conclusion != "success" {
+				t.Fatalf("best-effort cache result = %#v, error = %v", uncached, err)
 			}
-			if _, err := os.Stat(lifecycle); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("setup action ran without required cache credentials: %v", err)
+			contents, err = os.ReadFile(lifecycle)
+			if err != nil || string(contents) != "main|uncached\npost|uncached\n" {
+				t.Fatalf("uncached setup lifecycle = %q, %v", contents, err)
+			}
+			if count := strings.Count(uncached.WarningAnnotations, "continuing without cache"); count != 2 || !strings.Contains(uncached.WarningAnnotations, "cache provider setup failed") {
+				t.Fatalf("best-effort cache warnings = %q", uncached.WarningAnnotations)
 			}
 		})
 	}
 }
 
-func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
+func TestSetupActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache-redactor.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache redactor\n")
-	actionPath := ".github/actions/generic"
-	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: generic\nruns:\n  using: node24\n  main: main.js\n")
-	writeFixtureFile(t, workspace, actionPath+"/main.js", "")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "name: setup\nruns:\n  using: node24\n  main: main.js\n")
+	writeFixtureFile(t, remote, "main.js", "")
 
 	token := "header.pinned.signature"
 	trustedDir := canonicalTempDir(t)
@@ -609,16 +613,18 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 	lockID := remoteLifecycleLockID(1)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
 		{ID: "poison", Kind: "run", Command: `rm -f "$LOOKUP_AGENT" && ln -s "$POISON_AGENT" "$LOOKUP_AGENT"`},
-		{ID: "generic", Kind: "uses", Uses: "./" + actionPath, Action: &plan.ActionSelector{Lock: lockID}},
+		{ID: "setup", Kind: "uses", Uses: "actions/setup-node@v1", Action: &plan.ActionSelector{Lock: lockID}},
 	})
 	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LOOKUP_AGENT": lookupAgent, "POISON_AGENT": poisonAgent}
 	job.Actions = []plan.ActionLock{{
-		ID: lockID, Source: "workspace", Path: actionPath,
-		SourceDigest: digestTree(t, filepath.Join(workspace, filepath.FromSlash(actionPath))),
+		ID: lockID, Source: "github", Repository: "actions/setup-node", RequestedRef: "v1",
+		Commit: strings.Repeat("a", 40), SourceDigest: digestTree(t, remote),
 	}}
 	provider := &sequenceCacheCredentials{tokens: []string{token}}
-	result, err := (Runner{Node24: node, Cache: provider, Redactor: AgentRedactor{}}).RunJob(context.Background(), job, workspace)
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digestTree(t, remote)}}
+	result, err := (Runner{Node24: node, Actions: materializer, Cache: provider, Redactor: AgentRedactor{}}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
@@ -633,7 +639,7 @@ func TestActionCacheRedactorIsPinnedBeforeWorkflowExecution(t *testing.T) {
 	}
 }
 
-func TestGenericActionCacheDisablesWhenRedactorCannotBePinned(t *testing.T) {
+func TestGenericActionDoesNotNeedPinnedCacheRedactor(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache-fallback.yml"
@@ -697,7 +703,7 @@ func TestExplicitCacheRequiresPinnedRedactorBeforeWorkflowExecution(t *testing.T
 	}
 }
 
-func TestGenericJavaScriptCacheCredentialFailureFallsBackUncached(t *testing.T) {
+func TestGenericJavaScriptDoesNotReceiveCacheCredentials(t *testing.T) {
 	node := requireNode24(t)
 	actionRoot := t.TempDir()
 	marker := filepath.Join(actionRoot, "executed")
@@ -706,9 +712,7 @@ for (const name of ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_
   if (process.env[name]) throw new Error(name + " leaked");
 fs.writeFileSync(process.env.MARKER, "executed");
 `)
-	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
-		return CacheCredentials{}, fmt.Errorf("cache unavailable")
-	})
+	provider := &sequenceCacheCredentials{tokens: []string{"header.unused.signature"}}
 	result := newResult()
 	result.Env["MARKER"] = marker
 	result.Env["ACTIONS_RUNTIME_TOKEN"] = "workflow-token"
@@ -723,12 +727,15 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "executed" {
 		t.Fatalf("generic action marker = %q, %v", contents, err)
 	}
+	if provider.calls != 0 {
+		t.Fatalf("generic action requested %d cache credentials", provider.calls)
+	}
 	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.runJavaScriptPhase(
+	if err := (Runner{Cache: UnavailableCacheCredentials(errors.New("cache unavailable")), Redactor: &testRedactor{}}).runJavaScriptPhase(
 		context.Background(), processor, actionRoot, node,
-		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true}, "main.js", nil, nil, &result,
+		javaScriptAction{Name: "cache", Path: actionRoot, Main: "main.js", Cache: true, CacheRequirement: actionintegration.CacheRequired}, "main.js", nil, nil, &result,
 	); err == nil || !strings.Contains(err.Error(), "configure actions/cache service: cache unavailable") {
 		t.Fatalf("explicit cache action error = %v", err)
 	}
@@ -737,7 +744,7 @@ fs.writeFileSync(process.env.MARKER, "executed");
 	}
 }
 
-func TestDockerActionReceivesCacheCredentialsWithoutTokenInArguments(t *testing.T) {
+func TestDockerActionDoesNotReceiveCacheCredentials(t *testing.T) {
 	token := "header.docker.signature"
 	provider := &sequenceCacheCredentials{tokens: []string{token}}
 	redactor := &testRedactor{}
@@ -749,9 +756,8 @@ func TestDockerActionReceivesCacheCredentialsWithoutTokenInArguments(t *testing.
 	if _, err := (Runner{Docker: fake.path, Cache: provider, Redactor: redactor}).runDockerAction(context.Background(), action); err != nil {
 		t.Fatal(err)
 	}
-	cacheRuntime, err := os.ReadFile(filepath.Join(fake.root, "cache-runtime"))
-	if err != nil || string(cacheRuntime) != token+"|https://cache.example/|true" {
-		t.Fatalf("Docker cache environment = %q, %v", cacheRuntime, err)
+	if _, err := os.Stat(filepath.Join(fake.root, "cache-runtime")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Docker cache environment was exposed: %v", err)
 	}
 	calls := fake.calls(t)
 	runIndex := callIndex(calls, "run")
@@ -763,11 +769,11 @@ func TestDockerActionReceivesCacheCredentialsWithoutTokenInArguments(t *testing.
 		t.Fatalf("Docker arguments contain cache credential: %#v", calls[runIndex].args)
 	}
 	for _, name := range []string{"ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"} {
-		if !strings.Contains(arguments, "\x00--env\x00"+name+"\x00") {
-			t.Fatalf("Docker arguments omit inherited %s: %#v", name, calls[runIndex].args)
+		if strings.Contains(arguments, "\x00--env\x00"+name) {
+			t.Fatalf("Docker arguments expose %s: %#v", name, calls[runIndex].args)
 		}
 	}
-	if provider.calls != 1 || fmt.Sprint(redactor.values) != fmt.Sprint([]string{token}) {
+	if provider.calls != 0 || len(redactor.values) != 0 {
 		t.Fatalf("credential calls/redactions = %d / %#v", provider.calls, redactor.values)
 	}
 }
@@ -791,13 +797,39 @@ func TestRequiredCacheRedactorFailureAbortsBeforeExecutionAndScrubsToken(t *test
 	result := newResult()
 	result.Env["MARKER"] = marker
 	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
-		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheCredentialsRequired: true}, "main.js", nil, nil, &result,
+		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheRequired}, "main.js", nil, nil, &result,
 	)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("runJavaScriptPhase() error = %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("action marker exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestBestEffortCacheRedactorFailureWarnsAndScrubsToken(t *testing.T) {
+	token := "header.best-effort-secret.signature"
+	actionRoot := t.TempDir()
+	marker := filepath.Join(actionRoot, "executed")
+	writeFixtureFile(t, actionRoot, "main.js", `require("node:fs").writeFileSync(process.env.MARKER, "executed")`)
+	provider := cacheCredentialProviderFunc(func(context.Context) (CacheCredentials, error) {
+		return CacheCredentials{ResultsURL: "https://cache.example", Token: token}, nil
+	})
+	var logs bytes.Buffer
+	processor := newCommandProcessor(&logs, &logs)
+	result := newResult()
+	result.Env["MARKER"] = marker
+	err := (Runner{Cache: provider, Redactor: failingCacheRedactor{token: token}}).runJavaScriptPhase(
+		context.Background(), processor, actionRoot, "node", javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheBestEffort}, "main.js", nil, nil, &result,
+	)
+	if err != nil {
+		t.Fatalf("runJavaScriptPhase() error = %v", err)
+	}
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "executed" {
+		t.Fatalf("action marker = %q, %v", contents, err)
+	}
+	if strings.Contains(logs.String(), token) || !strings.Contains(logs.String(), "continuing without cache: redactor rejected ***") {
+		t.Fatalf("best-effort cache warning = %q", logs.String())
 	}
 }
 
@@ -826,7 +858,7 @@ func TestActionRuntimeCacheTokenCommandFileEffectsAreDiscarded(t *testing.T) {
 			state := map[string]string{"kept": "action state"}
 			err := (Runner{Cache: provider, Redactor: &testRedactor{}}).runJavaScriptPhase(
 				context.Background(), newCommandProcessor(io.Discard, io.Discard), actionRoot, node,
-				javaScriptAction{Name: "ordinary", Path: actionRoot, Main: "main.js"}, "main.js", nil, state, &result,
+				javaScriptAction{Name: "setup", Path: actionRoot, Main: "main.js", CacheRequirement: actionintegration.CacheBestEffort}, "main.js", nil, state, &result,
 			)
 			if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "phase effects were discarded") {
 				t.Fatalf("runJavaScriptPhase() error = %v", err)

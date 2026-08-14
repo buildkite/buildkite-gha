@@ -11,17 +11,17 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 		want     Descriptor
 	}{
 		{Identity{Source: "github", Repository: "actions/checkout"}, Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
-		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheAlways}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheAlways}},
-		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheAlways}},
+		{Identity{Source: "github", Repository: "actions/cache"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheRequired}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheRequired}},
+		{Identity{Source: "github", Repository: "actions/cache", Path: "save"}, Descriptor{Service: ServiceCache, CacheRequirement: CacheRequired}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact"}, Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
 		{Identity{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}, Descriptor{Service: ServiceArtifact}},
 		{Identity{Source: "github", Repository: "actions/download-artifact"}, Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
-		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{CacheRequirement: CacheByNode}},
-		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{CacheRequirement: CacheBySelector}},
-		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{CacheRequirement: CacheBySelector}},
-		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{CacheRequirement: CacheByBoolean}},
-		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{CacheRequirement: CacheByBoolean}},
+		{Identity{Source: "github", Repository: "actions/setup-node"}, Descriptor{CacheRequirement: CacheBestEffort}},
+		{Identity{Source: "github", Repository: "actions/setup-java"}, Descriptor{CacheRequirement: CacheBestEffort}},
+		{Identity{Source: "github", Repository: "actions/setup-python"}, Descriptor{CacheRequirement: CacheBestEffort}},
+		{Identity{Source: "github", Repository: "actions/setup-go"}, Descriptor{CacheRequirement: CacheBestEffort}},
+		{Identity{Source: "github", Repository: "actions/setup-dotnet"}, Descriptor{CacheRequirement: CacheBestEffort}},
 	}
 	for _, test := range tests {
 		name := test.identity.Repository

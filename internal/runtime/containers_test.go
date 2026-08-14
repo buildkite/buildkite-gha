@@ -1400,7 +1400,7 @@ func TestRunJobContainerJavaScriptLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunJobContainerSetupActionReceivesRequiredCacheCredentials(t *testing.T) {
+func TestRunJobContainerSetupActionReceivesBestEffortCacheCredentials(t *testing.T) {
 	f := newJobDocker(t, "")
 	workspace := t.TempDir()
 	remote := t.TempDir()
@@ -1420,7 +1420,7 @@ if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SER
 	digest := digestTree(t, remote)
 	lockID := remoteLifecycleLockID(1)
 	job := jobContainerPlan(t, workspace, []plan.Step{{
-		ID: "setup", Kind: "uses", Uses: "actions/setup-node@v6", With: map[string]string{"cache": "npm"},
+		ID: "setup", Kind: "uses", Uses: "actions/setup-node@v6",
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Event.Provider = "cursor-origin"
