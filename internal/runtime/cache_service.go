@@ -18,6 +18,7 @@ const (
 	cacheCredentialResponseLimit = 64 << 10
 	cacheActionToolPath          = "/usr/local/bin:/usr/bin:/bin"
 	defaultCacheResultsURL       = "https://ghacs.buildkite.com/"
+	cacheURLCompatibility        = "https://buildkite-gha-cache-gate.invalid/"
 
 	// githubServerURLOverride is the synthetic, non-resolvable server URL
 	// substituted in when shouldOverrideGitHubServerURL reports true, so

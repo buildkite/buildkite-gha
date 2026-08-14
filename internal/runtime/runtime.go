@@ -149,6 +149,7 @@ type javaScriptAction struct {
 	Env                     map[string]string
 	Cache                   bool
 	OverrideGitHubServerURL bool
+	CacheURLCompatibility   bool
 
 	nodeMajor       int
 	reference       string
@@ -652,11 +653,11 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	if cacheErr != nil && action.Cache {
 		return fmt.Errorf("configure actions/cache service: %w", cacheErr)
 	}
-	if cacheErr != nil && strings.HasPrefix(action.reference, "actions/setup-node@") {
-		processor.trustedWarning(fmt.Sprintf("Cache credentials unavailable for %q entry %q; ACTIONS_RESULTS_URL will be omitted: %v", action.reference, entry, processor.scrubError(cacheErr)))
-	}
 	cacheToken := ""
 	if cacheErr == nil {
+		if action.CacheURLCompatibility {
+			cacheEnv["ACTIONS_CACHE_URL"] = cacheURLCompatibility
+		}
 		env = mergeStringMaps(env, cacheEnv)
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}

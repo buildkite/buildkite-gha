@@ -98,6 +98,9 @@ type Descriptor struct {
 	// bundled dependencies. Confirm GITHUB_SERVER_URL affects only caching
 	// behavior and is not load-bearing for any request the action makes.
 	OverrideGitHubServerURL bool
+	// CacheURLCompatibility supplies the legacy ACTIONS_CACHE_URL presence
+	// check while cache-v2 requests continue to use ACTIONS_RESULTS_URL.
+	CacheURLCompatibility bool
 }
 
 // UsesNativeAdapter reports whether the resolved identity replaces the
@@ -115,7 +118,7 @@ var catalog = map[Identity]Descriptor{
 	{Source: "github", Repository: "actions/upload-artifact"}:                {Adapter: AdapterUploadArtifactBuildkite},
 	{Source: "github", Repository: "actions/upload-artifact", Path: "merge"}: {Service: ServiceArtifact},
 	{Source: "github", Repository: "actions/download-artifact"}:              {Adapter: AdapterDownloadArtifactBuildkite},
-	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true},
+	{Source: "github", Repository: "actions/setup-node"}:                     {OverrideGitHubServerURL: true, CacheURLCompatibility: true},
 	{Source: "github", Repository: "actions/setup-java"}:                     {OverrideGitHubServerURL: true},
 	{Source: "github", Repository: "actions/setup-python"}:                   {OverrideGitHubServerURL: true},
 	{Source: "github", Repository: "actions/setup-go"}:                       {OverrideGitHubServerURL: true},
