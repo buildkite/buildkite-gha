@@ -187,6 +187,14 @@ func TestParsePreservesPartialServiceContainerCredentials(t *testing.T) {
 	}
 }
 
+func TestParseRejectsExpressionValuedServiceContainerEnvironment(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        env: ${{ fromJSON('{}') }}\n    steps: [{run: true}]\n")
+	_, err := Parse("containers.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "containers.yml:8:14: job \"test\": expression-valued service container env is unsupported") {
+		t.Fatalf("Parse() error = %v", err)
+	}
+}
+
 func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
 	for name, body := range map[string]string{
 		"credentials": "credentials: {username: me, password: secret}",

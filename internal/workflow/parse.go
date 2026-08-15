@@ -875,6 +875,9 @@ func adaptServiceContainer(path, jobID string, in *actionlint.Container, raw raw
 	if in.Image == nil || strings.TrimSpace(raw.Image) == "" {
 		return ServiceContainer{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
 	}
+	if in.Env != nil && in.Env.Expression != nil {
+		return ServiceContainer{}, locatedError(path, in.Env.Expression.Pos, jobID, "expression-valued service container env is unsupported")
+	}
 	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos)}
 	return out, nil
 }
