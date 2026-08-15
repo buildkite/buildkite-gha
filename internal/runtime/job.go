@@ -441,7 +441,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	}
 	serviceEval := eval
 	serviceEval.Env = jobEnv
-	services, err := evaluateServiceMap(job.Services, job.ServicesExpression, serviceEval)
+	services, evaluatedServiceOrder, err := evaluateServiceMap(job.Services, job.ServiceOrder, job.ServicesExpression, serviceEval)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate services: %w", err))
 	}
@@ -524,7 +524,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, serviceOrder(services, job.ServiceOrder), containerMounts...)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -537,7 +537,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}()
 	} else if len(services) != 0 {
-		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, serviceOrder(services, job.ServiceOrder))
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, evaluatedServiceOrder)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -890,28 +890,24 @@ func serviceOrder(services map[string]plan.Container, preferred []string) []stri
 	return result
 }
 
-func evaluateServiceMap(static map[string]plan.Container, source string, eval expression.Context) (map[string]plan.Container, error) {
+func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, source string, eval expression.Context) (map[string]plan.Container, []string, error) {
 	if source == "" {
-		return evaluateServices(static, eval)
+		services, err := evaluateServices(static, eval)
+		return services, serviceOrder(services, staticOrder), err
 	}
-	value, err := expression.EvaluateValue(source, eval)
+	entries, err := expression.EvaluateObject(source, eval)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if value == nil {
-		return map[string]plan.Container{}, nil
+	if len(entries) > 32 {
+		return nil, nil, fmt.Errorf("services expression has more than 32 entries")
 	}
-	object, ok := value.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("services expression resolved to %T, want an object", value)
-	}
-	if len(object) > 32 {
-		return nil, fmt.Errorf("services expression has more than 32 entries")
-	}
-	services := make(map[string]plan.Container, len(object))
-	for name, raw := range object {
+	services := make(map[string]plan.Container, len(entries))
+	order := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name, raw := entry.Name, entry.Value
 		if !plan.ValidateServiceName(name) {
-			return nil, fmt.Errorf("service name %q must be lowercase and valid", name)
+			return nil, nil, fmt.Errorf("service name %q must be lowercase and valid", name)
 		}
 		var service plan.Container
 		if image, ok := raw.(string); ok {
@@ -919,30 +915,31 @@ func evaluateServiceMap(static map[string]plan.Container, source string, eval ex
 		} else {
 			encoded, err := json.Marshal(raw)
 			if err != nil {
-				return nil, fmt.Errorf("encode service %q: %w", name, err)
+				return nil, nil, fmt.Errorf("encode service %q: %w", name, err)
 			}
 			decoder := json.NewDecoder(bytes.NewReader(encoded))
 			decoder.DisallowUnknownFields()
 			if err := decoder.Decode(&service); err != nil {
-				return nil, fmt.Errorf("decode service %q: %w", name, err)
+				return nil, nil, fmt.Errorf("decode service %q: %w", name, err)
 			}
 		}
 		if service.Credentials != nil {
-			return nil, fmt.Errorf("service %q expression cannot introduce registry credentials", name)
+			return nil, nil, fmt.Errorf("service %q expression cannot introduce registry credentials", name)
 		}
 		validationService := service
 		if validationService.Image == "" {
 			validationService.Image = "scratch"
 		}
 		if err := plan.ValidateEvaluatedServiceContainer(validationService); err != nil {
-			return nil, fmt.Errorf("service %q: %w", name, err)
+			return nil, nil, fmt.Errorf("service %q: %w", name, err)
 		}
 		if service.Image == "" {
 			continue
 		}
 		services[name] = service
+		order = append(order, name)
 	}
-	return services, nil
+	return services, order, nil
 }
 
 func stepDisplayName(step plan.Step, eval expression.Context) string {

@@ -51,7 +51,8 @@
         }
       }
     },
-    {"if": {"properties": {"required_capabilities": {"contains": {"const": "provider-token-write"}}}}, "then": {"required": ["github_token"]}}
+    {"if": {"properties": {"required_capabilities": {"contains": {"const": "provider-token-write"}}}}, "then": {"required": ["github_token"]}},
+    {"if": {"required": ["services"]}, "then": {"required": ["service_order"]}}
   ],
   "$defs": {
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

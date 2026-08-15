@@ -1515,6 +1515,14 @@ func (p *commandProcessor) writeMaskedLineLocked(target io.Writer, line string) 
 	_, _ = fmt.Fprintln(target, p.maskTextLocked(line))
 }
 
+func (p *commandProcessor) writeLiteral(target io.Writer, line string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.discard {
+		p.writeMaskedLineLocked(target, line)
+	}
+}
+
 func (p *commandProcessor) maskTextLocked(text string) string {
 	for _, mask := range p.masks {
 		text = strings.ReplaceAll(text, mask, "***")

@@ -341,6 +341,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "logs":
+		if scenario == "service-log-command" {
+			fmt.Print("::warning::not-an-annotation\n::add-mask::not-a-mask\nnot-a-mask\n")
+			os.Exit(0)
+		}
 		fmt.Print("diagnostic sibling-secret\n")
 		os.Exit(0)
 	case "ps":
@@ -694,6 +698,7 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 		"z-cache": {Image: "redis:7", Env: map[string]string{"Z": "last", "A": "first"}, Ports: j.Container.Ports},
 		"a-db":    {Image: "postgres:16", Env: map[string]string{"B": "two"}},
 	}
+	j.ServiceOrder = []string{"z-cache", "a-db"}
 	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
 	}
@@ -714,9 +719,9 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	if len(creates) != 3 || len(starts) != 3 || len(healthInspects) != 2 {
 		t.Fatalf("unexpected service lifecycle: %#v", calls)
 	}
-	// Sorted IDs retain their association with aliases/images, and all service
+	// Declared IDs retain their association with aliases/images, and all service
 	// creates and starts precede readiness inspection.
-	if strings.Join(creates[0].Args, " ") == "" || !strings.Contains(strings.Join(creates[0].Args, " "), "--network-alias a-db") || creates[0].Args[len(creates[0].Args)-1] != "postgres:16" || !strings.Contains(strings.Join(creates[1].Args, " "), "--network-alias z-cache") || creates[1].Args[len(creates[1].Args)-1] != "redis:7" {
+	if strings.Join(creates[0].Args, " ") == "" || !strings.Contains(strings.Join(creates[0].Args, " "), "--network-alias z-cache") || creates[0].Args[len(creates[0].Args)-1] != "redis:7" || !strings.Contains(strings.Join(creates[1].Args, " "), "--network-alias a-db") || creates[1].Args[len(creates[1].Args)-1] != "postgres:16" {
 		t.Fatalf("service order/association: %#v", creates)
 	}
 	firstInspect := jobDockerCallIndex(calls, "inspect", "--format", `{{if .State.Health}}{{.State.Health.Status}}{{end}}`)
@@ -729,7 +734,7 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	if startsBeforeInspect != 2 {
 		t.Fatalf("only %d service starts preceded readiness", startsBeforeInspect)
 	}
-	serviceArgs := strings.Join(creates[1].Args, " ")
+	serviceArgs := strings.Join(creates[0].Args, " ")
 	jobArgs := strings.Join(creates[2].Args, " ")
 	for _, want := range []string{"--env A=first --env Z=last", "--publish 8080", "--publish 5432:5432", "--publish 9000:90/udp"} {
 		if !strings.Contains(serviceArgs, want) && strings.HasPrefix(want, "--env") || (!strings.HasPrefix(want, "--env") && (!strings.Contains(serviceArgs, want) || !strings.Contains(jobArgs, want))) {
@@ -897,10 +902,11 @@ func TestRunServiceContainerCompleteArguments(t *testing.T) {
 }
 
 func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T) {
-	f := newJobDocker(t, "")
+	f := newJobDocker(t, "service-log-command")
 	var output bytes.Buffer
+	processor := newCommandProcessor(&output, &output)
 	b, err := (Runner{Docker: f.path}).startJobContainerOrdered(
-		context.Background(), newCommandProcessor(&output, &output), t.TempDir(), t.TempDir(), plan.Container{},
+		context.Background(), processor, t.TempDir(), t.TempDir(), plan.Container{},
 		map[string]plan.Container{"alpha": {Image: "one"}, "zed": {Image: "two"}}, []string{"zed", "alpha"},
 	)
 	if err != nil {
@@ -923,6 +929,9 @@ func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T)
 	}
 	if calls := f.calls(t); jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[0].name) < 0 || jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[1].name) < 0 {
 		t.Fatalf("successful service logs were not emitted: %#v", calls)
+	}
+	if !strings.Contains(output.String(), "::warning::not-an-annotation") || !strings.Contains(output.String(), "::add-mask::not-a-mask\nnot-a-mask") || len(processor.warnings.commands) != 0 {
+		t.Fatalf("service logs were interpreted as workflow commands: output = %q, warnings = %#v", output.String(), processor.warnings.commands)
 	}
 }
 
@@ -1069,12 +1078,12 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 
 func TestEvaluateServiceMapExpression(t *testing.T) {
 	eval := expression.Context{Needs: map[string]map[string]string{"build": {"services": `{"database":{"image":"postgres:16","env":{"MODE":"test"},"ports":["5432"]},"cache":"redis:7"}`}}}
-	got, err := evaluateServiceMap(nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
+	got, order, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got["database"].Image != "postgres:16" || got["database"].Env["MODE"] != "test" || got["cache"].Image != "redis:7" {
-		t.Fatalf("evaluated services = %#v", got)
+	if len(got) != 2 || got["database"].Image != "postgres:16" || got["database"].Env["MODE"] != "test" || got["cache"].Image != "redis:7" || !slices.Equal(order, []string{"database", "cache"}) {
+		t.Fatalf("evaluated services = %#v, order = %#v", got, order)
 	}
 }
 
@@ -1090,7 +1099,7 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 		{name: "nested expression", value: `{"db":{"image":"redis:7","options":"--label token=${{ secrets.TOKEN }}"}}`, want: "retains a runtime template"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := evaluateServiceMap(nil, "${{ fromJSON(needs.build.outputs.services) }}", expression.Context{Needs: map[string]map[string]string{"build": {"services": test.value}}})
+			_, _, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", expression.Context{Needs: map[string]map[string]string{"build": {"services": test.value}}})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
@@ -1197,6 +1206,7 @@ func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
@@ -1210,6 +1220,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T)
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
 
@@ -1224,6 +1235,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateMalformedServicePortEvidence(t *tes
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
@@ -1331,6 +1343,7 @@ func TestRunJobHostServicesLifecycle(t *testing.T) {
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
 	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
@@ -1353,6 +1366,7 @@ func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
+	job.ServiceOrder = []string{"redis"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), job, workspace); err != nil {
 		t.Fatal(err)
@@ -1386,6 +1400,7 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
 	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
+	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
@@ -2621,6 +2636,7 @@ func TestLiveAuthenticatedServiceRegistry(t *testing.T) {
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
+	job.ServiceOrder = []string{"private"}
 	before := liveDockerOwnedResources(t, docker)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -2720,6 +2736,7 @@ CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"unhealthy": {Image: image}}
+	job.ServiceOrder = []string{"unhealthy"}
 	var logs bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

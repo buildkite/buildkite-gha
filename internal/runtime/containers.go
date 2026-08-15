@@ -576,11 +576,40 @@ func (b *jobContainerBackend) waitForService(ctx context.Context, processor *com
 func (b *jobContainerBackend) serviceDiagnostics(processor *commandProcessor, name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), serviceDiagnosticTimeout)
 	defer cancel()
+	b.emitServiceLogOutput(processor, b.serviceLogOutput(ctx, name))
+}
+
+func (b *jobContainerBackend) serviceLogOutput(ctx context.Context, name string) string {
 	output, _ := boundedDockerCombinedOutput(ctx, b.env, b.docker, "logs", "--tail", serviceLogTail, name)
+	return output
+}
+
+func (b *jobContainerBackend) emitServiceLogOutput(processor *commandProcessor, output string) {
 	for _, line := range strings.Split(strings.TrimSuffix(strings.ReplaceAll(output, "\r\n", "\n"), "\n"), "\n") {
 		if line != "" {
-			_ = processor.process(processor.stderr, line)
+			processor.writeLiteral(processor.stderr, line)
 		}
+	}
+}
+
+func (b *jobContainerBackend) emitReadyServiceLogs(ctx context.Context) {
+	logs := make([]string, len(b.services))
+	logCtx, cancel := context.WithTimeout(ctx, serviceDiagnosticTimeout)
+	defer cancel()
+	var wait sync.WaitGroup
+	for i := range b.services {
+		if !b.services[i].ready {
+			continue
+		}
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			logs[index] = b.serviceLogOutput(logCtx, b.services[index].name)
+		}(i)
+	}
+	wait.Wait()
+	for _, output := range logs {
+		b.emitServiceLogOutput(b.processor, output)
 	}
 }
 
@@ -760,6 +789,7 @@ func (b *jobContainerBackend) cleanup() error {
 			}
 		}
 	}
+	b.emitReadyServiceLogs(ctx)
 	for i := 0; i < len(b.services); i++ {
 		service := b.services[i]
 		if service.created {
@@ -770,9 +800,6 @@ func (b *jobContainerBackend) cleanup() error {
 			}
 			if queryErr == nil && !exists {
 				continue
-			}
-			if service.ready {
-				b.serviceDiagnostics(b.processor, name)
 			}
 			_, stopErr := boundedDockerOutput(ctx, b.env, b.docker, "stop", "--time", "2", name)
 			exists, queryErr = b.serviceContainerExists(ctx, name)

@@ -456,17 +456,15 @@ func (job Job) Validate() error {
 		if len(job.Services) > 32 {
 			return fmt.Errorf("job plan has more than 32 services")
 		}
-		if len(job.ServiceOrder) != 0 {
-			if len(job.ServiceOrder) != len(job.Services) {
-				return fmt.Errorf("job plan service order must name every static service")
+		if len(job.ServiceOrder) != len(job.Services) {
+			return fmt.Errorf("job plan service order must name every static service")
+		}
+		seen := make(map[string]bool, len(job.ServiceOrder))
+		for _, name := range job.ServiceOrder {
+			if _, ok := job.Services[name]; !ok || seen[name] {
+				return fmt.Errorf("job plan service order contains unknown or repeated service %q", name)
 			}
-			seen := make(map[string]bool, len(job.ServiceOrder))
-			for _, name := range job.ServiceOrder {
-				if _, ok := job.Services[name]; !ok || seen[name] {
-					return fmt.Errorf("job plan service order contains unknown or repeated service %q", name)
-				}
-				seen[name] = true
-			}
+			seen[name] = true
 		}
 		for name, service := range job.Services {
 			if !serviceNamePattern.MatchString(name) {

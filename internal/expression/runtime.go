@@ -114,6 +114,76 @@ func EvaluateValue(source string, context Context) (any, error) {
 	return evaluateDirectRuntimeNode(node, context)
 }
 
+type ObjectEntry struct {
+	Name  string
+	Value any
+}
+
+// EvaluateObject evaluates one fromJSON expression while retaining JSON object
+// order for surfaces, such as services, where declaration order is observable.
+func EvaluateObject(source string, context Context) ([]ObjectEntry, error) {
+	body, err := expressionBody(source)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
+		return nil, fmt.Errorf("expression must call fromJSON with one argument")
+	}
+	value, err := evaluateDirectRuntimeNode(call.Args[0], context)
+	if err != nil {
+		return nil, err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if token == nil {
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+		}
+		return nil, nil
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("fromJSON resolved to a non-object, want an object")
+	}
+	var result []ObjectEntry
+	seen := map[string]bool{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		name := key.(string)
+		if seen[name] {
+			return nil, fmt.Errorf("fromJSON object repeats key %q", name)
+		}
+		seen[name] = true
+		var entry any
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		result = append(result, ObjectEntry{Name: name, Value: entry})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+	}
+	return result, nil
+}
+
 // EvaluateStep substitutes direct runtime references and hashFiles calls in a
 // workflow step template. Other runtime surfaces remain direct-reference only.
 func EvaluateStep(template string, context Context) (string, error) {
