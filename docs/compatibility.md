@@ -349,13 +349,39 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 ### Containers and services
 
-**🟡 Supported subset.** Linux jobs support job `container` and GitHub-compatible service definitions. Services support image, credentials, environment, ports, volumes, Docker options, command, and entrypoint. Service fields can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values or runtime `needs` outputs. Non-credential service maps can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`; declare credentials statically so the compiler can prove their secret authority. An empty evaluated image skips that service. A job can define at most 32 services; each service can define at most 256 environment entries and 128 ports or volumes.
+**🟡 Supported subset.** Linux jobs support job containers and GitHub-compatible services. A typical PostgreSQL service works without Buildkite-specific syntax:
 
-Explicit service registry credentials support direct values and `github`, `vars`, `secrets`, or `env` expressions, matching GitHub's narrower credential context. The runtime passes passwords through standard input to `docker login`, uses a private per-job Docker configuration, retries pulls, and removes the configuration during cleanup. It never uses ambient Docker credentials. Implicit GitHub Container Registry authentication is unsupported; provide explicit credentials. Mutable tags are accepted and resolved by Docker at job start. Use a digest reference when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    env:
+      POSTGRES_PASSWORD: test
+    ports:
+      - 5432
+    options: >-
+      --health-cmd pg_isready
+      --health-interval 2s
+      --health-timeout 5s
+      --health-retries 10
+```
 
-Each job uses a uniquely named, labeled Docker bridge network. Containers on that network reach services by service name. Host jobs reach declared publications through the Docker host; omitted host ports are assigned dynamically. The `job.services.<service>` context exposes `id`, `network`, and `ports`. A service with a Docker health check must become healthy before steps run; a service without one is ready after it starts. Readiness uses bounded exponential backoff and emits bounded status, health, port, and log diagnostics on failure.
+Services support `image`, `credentials`, `env`, `ports`, `volumes`, `options`, `command`, and `entrypoint`.
 
-Service Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings. Named, anonymous, and absolute bind volume forms are supported. After every result, the runtime removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. It verifies that no owned resources remain, and cleanup failures fail the job. These Docker resources do not create a security or resource-isolation boundary: the hosted queue must provide whole-job isolation and enforce host CPU, memory, and disk limits. See the [security model](security.md#isolate-the-whole-job).
+- Service fields can use compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` values or runtime `needs` outputs. An empty evaluated image skips the service.
+- A complete non-credential service map can use `${{ fromJSON(needs.<job>.outputs.<name>) }}`. Declare credentials statically so the compiler can prove their secret authority.
+- Credentials accept direct values and `github`, `vars`, `secrets`, or `env` expressions. Passwords pass to `docker login` through standard input. Authentication uses a private per-job Docker configuration and never reads ambient Docker credentials.
+- Docker options pass through except `--network` and its `--net` aliases, which GitHub Actions does not support. Options can grant privileges, mount host paths, publish ports, and change resource settings.
+- Named, anonymous, and absolute bind volumes are supported.
+- A job can define 32 services. Each service can define 256 environment entries and 128 ports or volumes.
+
+Implicit GHCR authentication is unsupported; provide explicit credentials. Mutable tags resolve at job start. Use a digest when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
+
+Each job uses a private Docker bridge network. Container jobs reach services by service name. Host jobs use declared published ports; omitted host ports are assigned dynamically. The `job.services.<service>` context exposes `id`, `network`, and `ports`.
+
+A service with a Docker health check must become healthy before steps run. A service without one is ready after it starts. Failures include bounded status, health, port, and log diagnostics.
+
+Cleanup removes the job container, emits masked and bounded service logs, then removes services in declaration order, the network, newly created volumes, and private Docker configuration. Remaining owned resources fail the job. Docker resources are not a security or resource-isolation boundary: the hosted queue must isolate the whole job and enforce host CPU, memory, disk, and network limits. See the [security model](security.md#isolate-the-whole-job).
 
 macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
 
