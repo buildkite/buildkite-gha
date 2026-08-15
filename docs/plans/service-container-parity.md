@@ -294,6 +294,10 @@ Update:
 
 ## Delivery slices
 
+All four slices are implemented. The exact-commit hosted proof and GitHub
+differential oracle cover the supported runtime behavior. Implicit GHCR
+authentication remains the named backend-dependent limitation.
+
 ### 1. Static syntax and Docker fidelity
 
 Add statically resolvable `options`, `command`, `entrypoint`, and volumes. Pass
