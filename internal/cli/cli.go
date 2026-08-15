@@ -393,6 +393,13 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if err != nil {
 		return usageError(stderr, "run-job: %v", err)
 	}
+	failureVisible := false
+	_, _ = fmt.Fprintln(stdout, "~~~ :package: Prepare GitHub Actions job")
+	defer func() {
+		if code != 0 && !failureVisible {
+			_, _ = fmt.Fprintln(stdout, "^^^ +++")
+		}
+	}()
 	if options.planProducer != "" {
 		planRoot, mkdirErr := os.MkdirTemp("", "buildkite-gha-plan-")
 		if mkdirErr != nil {
@@ -583,6 +590,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	}
 	if runErr == nil {
 		result, runErr = runner.RunJob(ctx, job, "")
+		failureVisible = result.FailureVisible()
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
 		}
@@ -600,6 +608,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if publish && runErr != nil && !result.FailureVisible() {
 		_, _ = fmt.Fprintln(stdout, "+++ :warning: Prepare GitHub Actions job failed")
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", runErr)
+		failureVisible = true
 	}
 	if publish {
 		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
@@ -618,6 +627,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		if err != nil || publication.MetadataMirrorError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
 			_, _ = fmt.Fprintln(stdout, "^^^ +++")
+			failureVisible = true
 		}
 		if err != nil {
 			details.setFailurePhase(telemetry.FailurePhaseResultPublication)

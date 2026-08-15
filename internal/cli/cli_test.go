@@ -6906,6 +6906,15 @@ func TestRunJobExecutesBoundPlanAndWritesResult(t *testing.T) {
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", "sha256:"+strings.Repeat("0", 64))
 	stdout.Reset()
 	stderr.Reset()
+	failedArtifactRunner := &cliCaptureRunner{failAt: 1}
+	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer", "--result", artifactResultPath}, &stdout, &stderr, "dev", failedArtifactRunner); code != 1 || !strings.Contains(stderr.String(), "download plan") {
+		t.Fatalf("failed artifact Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "~~~ :package: Prepare GitHub Actions job\n^^^ +++\n") {
+		t.Fatalf("failed artifact stdout = %q, want expanded preparation group", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
 	if code := run([]string{"run-job", "--plan-digest", artifactDigest, "--plan-producer", "gha-importer", "--result", artifactResultPath}, &stdout, &stderr, "dev", artifactRunner); code != 0 {
 		t.Fatalf("artifact Run() code = %d, stderr = %q", code, stderr.String())
 	}
