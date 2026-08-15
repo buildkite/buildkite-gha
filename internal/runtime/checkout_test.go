@@ -1302,6 +1302,41 @@ func TestProviderTokenReadRuntimeAuthorityIsCheckoutOnly(t *testing.T) {
 	}
 }
 
+func TestCompositeCheckoutPreservesDynamicRefProvenance(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested checkout provenance\n")
+	const checkoutUses = "actions/checkout@v7"
+	writeFixtureFile(t, workspace, ".github/actions/outer/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: "+checkoutUses+"\n      with:\n        ref: ${{ needs.configure.outputs.sha }}\n")
+	outerDigest, err := source.DigestTree(filepath.Join(workspace, ".github/actions/outer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "action.yml", "runs:\n  using: node24\n  main: dist/index.js\n")
+	writeFixtureFile(t, remote, "dist/index.js", "")
+	remoteDigest, err := source.DigestTree(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outerID, checkoutID := "a-0000000000000001", "a-0000000000000002"
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "outer", Kind: "uses", Uses: "./.github/actions/outer", Action: &plan.ActionSelector{Lock: outerID}}})
+	job.Event.Repository = "buildkite/buildkite-gha"
+	job.Event.Ref = "refs/heads/main"
+	job.Event.SHA = strings.Repeat("a", 40)
+	job.RequiredCapabilities = []string{"network"}
+	job.Needs = map[string]plan.Need{"configure": {Result: "success", Outputs: map[string]string{"sha": strings.Repeat("b", 40)}}}
+	job.Actions = []plan.ActionLock{
+		{ID: outerID, Source: "workspace", Path: ".github/actions/outer", SourceDigest: outerDigest, Children: map[string]plan.ActionSelector{checkoutUses: {Lock: checkoutID}}},
+		{ID: checkoutID, Source: "github", Repository: "actions/checkout", RequestedRef: "v7", Commit: actionintegration.CheckoutV7Commit, SourceDigest: remoteDigest},
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, ActionRoot: remote, SourceDigest: remoteDigest}}
+
+	if _, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "dynamic ref must resolve to the exact event SHA") {
+		t.Fatalf("nested dynamic checkout ref error = %v", err)
+	}
+}
+
 func TestProviderTokenReadPreflightRejectsAnyUnknownCheckoutCommit(t *testing.T) {
 	validID, parentID, unknownID := "a-0000000000000001", "a-0000000000000002", "a-0000000000000003"
 	job := plan.Job{

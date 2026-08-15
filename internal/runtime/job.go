@@ -1718,7 +1718,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			if childErr == nil {
 				childWith, childErr = evaluateMap(step.With, eval)
 			}
-			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: childWith, Env: childEnv}
+			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
 			if actionLock != nil {
 				selector, ok := actionLock.Children[step.Uses]
 				if !ok {
