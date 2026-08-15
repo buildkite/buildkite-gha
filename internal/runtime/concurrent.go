@@ -192,14 +192,15 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 }
 
 func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step plan.Step, result Result, err error, eval expression.Context) stepExecution {
-	if err != nil && step.ContinueOnErrorExpression != "" {
+	execution := classifyStepExecution(jobCtx, runCtx, step, result, err)
+	if execution.outcome == "failure" && !isHardJobFailure(err) && step.ContinueOnErrorExpression != "" {
 		resolved, controlErr := evaluateStepContinueOnError(step, eval)
 		if controlErr != nil {
 			return classifyStepExecution(jobCtx, runCtx, step, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
 		}
-		step = resolved
+		return classifyStepExecution(jobCtx, runCtx, resolved, result, err)
 	}
-	return classifyStepExecution(jobCtx, runCtx, step, result, err)
+	return execution
 }
 
 func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) stepExecution {

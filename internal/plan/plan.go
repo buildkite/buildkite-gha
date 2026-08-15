@@ -263,6 +263,24 @@ func Decode(source []byte) (Job, error) {
 	if err := rejectDuplicateKeys(source); err != nil {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
+	var presence struct {
+		Steps []map[string]json.RawMessage `json:"steps"`
+	}
+	if err := json.Unmarshal(source, &presence); err != nil {
+		return Job{}, fmt.Errorf("decode job plan: %w", err)
+	}
+	for i, step := range presence.Steps {
+		if _, literal := step["continue_on_error"]; literal {
+			if _, expression := step["continue_on_error_expression"]; expression {
+				return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
+			}
+		}
+		if _, literal := step["timeout_minutes"]; literal {
+			if _, expression := step["timeout_minutes_expression"]; expression {
+				return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
+			}
+		}
+	}
 	var job Job
 	decoder := json.NewDecoder(bytes.NewReader(source))
 	decoder.UseNumber()

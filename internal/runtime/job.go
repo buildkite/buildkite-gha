@@ -601,11 +601,6 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 			preEval := stepExpressionContext(eval)
-			step, err = evaluateStepTimeout(step, preEval)
-			if err != nil {
-				preFailures[stepIndex] = classifyStepExecutionWithControls(ctx, runCtx, step, newResult(), fmt.Errorf("controls: %w", err), preEval)
-				continue
-			}
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
@@ -615,7 +610,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
 			if preErr != nil {
-				execution := classifyStepExecutionWithControls(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre: %w", step.Uses, preErr), preEval)
+				failureEval := preEval
+				if stepEnv, envErr := evaluateStepMap(step.Env, preEval); envErr == nil {
+					failureEval.Env = mergeStringMaps(failureEval.Env, stepEnv)
+				}
+				execution := classifyStepExecutionWithControls(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre: %w", step.Uses, preErr), failureEval)
 				preFailures[stepIndex] = execution
 				if execution.conclusion != "success" {
 					preStatus.unsuccessful = true
@@ -1440,6 +1439,16 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 				return result, err
 			}
 			eval.Env = mergeStringMaps(eval.Env, stepEnv)
+			phaseCtx := ctx
+			cancelPhase := func() {}
+			if workflowStep {
+				resolvedStep, err := evaluateStepTimeout(step, eval)
+				if err != nil {
+					return result, fmt.Errorf("controls: %w", err)
+				}
+				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
+			}
+			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
 			if err != nil {
 				return result, err
@@ -1451,14 +1460,14 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			javascript.Inputs = inputs
 			javascript.Env = mergeStepEnvironment(jobEnv, stepEnv)
 			invocation.action = javascript
-			node, err := r.discoverNode(ctx, major, explicit)
+			node, err := r.discoverNode(phaseCtx, major, explicit)
 			if err != nil {
 				return result, err
 			}
 			invocation.node = node
 			posts.register(postForInvocation(invocation, action.Runs.PostIf))
 			invocation.postRegistered = true
-			if err := r.runJavaScriptPhase(ctx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
+			if err := r.runJavaScriptPhase(phaseCtx, processor, workspace, node, javascript, javascript.Pre, nil, invocation.state, &result); err != nil {
 				return result, err
 			}
 		}

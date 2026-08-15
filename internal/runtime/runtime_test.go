@@ -1779,6 +1779,16 @@ func TestExpressionContinueOnErrorAppliesToPreparedActionFailure(t *testing.T) {
 	}
 }
 
+func TestExpressionContinueOnErrorIsNotEvaluatedForCancellation(t *testing.T) {
+	jobCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	step := plan.Step{ID: "cancelled", ContinueOnErrorExpression: "${{ fromJSON('invalid') }}"}
+	execution := classifyStepExecutionWithControls(jobCtx, jobCtx, step, newResult(), context.Canceled, expression.Context{})
+	if execution.outcome != "cancelled" || execution.err != context.Canceled {
+		t.Fatalf("cancelled execution = %#v", execution)
+	}
+}
+
 func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"
@@ -4763,9 +4773,9 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	withPreID, withoutPreID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
 	falsePreID, mainFailsID := remoteLifecycleLockID(3), remoteLifecycleLockID(4)
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
-		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}, With: map[string]string{"token": "${{ github.token }}"}},
+		{ID: "with-pre", Kind: "uses", Uses: remoteLifecycleUses("with-pre"), Action: &plan.ActionSelector{Lock: withPreID}, With: map[string]string{"token": "${{ github.token }}"}, Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"},
 		{ID: "without-pre", Kind: "uses", Uses: remoteLifecycleUses("without-pre"), Action: &plan.ActionSelector{Lock: withoutPreID}, Condition: "failure()"},
-		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()"},
+		{ID: "pre-if-false", Kind: "uses", Uses: remoteLifecycleUses("pre-if-false"), Action: &plan.ActionSelector{Lock: falsePreID}, Condition: "failure()", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}"},
 		{ID: "main-fails", Kind: "uses", Uses: remoteLifecycleUses("main-fails"), Action: &plan.ActionSelector{Lock: mainFailsID}},
 	})
 	job.Schema = plan.Schema

@@ -149,6 +149,36 @@ func TestStepControlExpressionContract(t *testing.T) {
 	}
 }
 
+func TestDecodeRejectsBothStepControlWireKeysAtZeroValues(t *testing.T) {
+	for _, test := range []struct {
+		literal, expression string
+		value               any
+	}{
+		{literal: "continue_on_error", expression: "continue_on_error_expression", value: false},
+		{literal: "timeout_minutes", expression: "timeout_minutes_expression", value: 0},
+	} {
+		job := validJob()
+		encoded, err := json.Marshal(job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(encoded, &wire); err != nil {
+			t.Fatal(err)
+		}
+		step := wire["steps"].([]any)[0].(map[string]any)
+		step[test.literal] = test.value
+		step[test.expression] = "${{ true }}"
+		encoded, err = json.Marshal(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "both") {
+			t.Errorf("Decode() %s error = %v", test.literal, err)
+		}
+	}
+}
+
 func TestValidateConcurrentStepTopology(t *testing.T) {
 	job := validJob()
 	job.Steps = []Step{
