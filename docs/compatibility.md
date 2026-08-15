@@ -114,13 +114,30 @@ An explicit event snapshot never consults contradictory live Buildkite event fie
 
 Supported `pull_request` activity types are `assigned`, `unassigned`, `labeled`, `unlabeled`, `opened`, `edited`, `closed`, `reopened`, `synchronize`, `converted_to_draft`, `locked`, `unlocked`, `enqueued`, `dequeued`, `milestoned`, `demilestoned`, `ready_for_review`, `review_requested`, `review_request_removed`, `auto_merge_enabled`, and `auto_merge_disabled`.
 
-Pull-request path filters require the reserved linked-webhook metadata and use its exact base and head commits in a bounded local three-dot Git diff before pipeline upload. The webhook must report the pull request as mergeable. Its repository, pull-request number, base branch, base commit, head commit, and synthetic merge commit must match the Buildkite build and local Git state. The merge commit must have the event base and head as its two parents. A workflow with path filters in either the working tree or merge commit must have the same contents in both. This prevents admission for conflicted pull requests, stale merge refs, or workflows that differ from the version GitHub evaluates.
+#### Pull request path filters
 
-The base, head, synthetic merge, and unique merge base must already exist in a non-shallow checkout. Filtering supports added, modified, deleted, and type-changed paths. A local match admits the workflow because GitHub also runs it when its own diff times out. A local non-match remains fail-closed because the webhook does not report that provider timeout outcome.
+`paths` and `paths-ignore` support ordered GitHub patterns. For example, this runs for changes under `src`, except generated files:
 
-Evaluation also fails closed for explicit event files, reduced Buildkite snapshots, renamed files, any diff combining additions and deletions, more than the importer's 300-file local bound, oversized or malformed Git output, backslash-containing paths or patterns, missing or shallow history, multiple merge bases, stale or mismatched event data, or invalid patterns. Rejecting combined additions and deletions covers renames that GitHub and local Git might classify differently. Copies are evaluated as added destination paths. Public, private, and fork pull requests use the checkout's existing Git authorization without giving the importer another credential.
+```yaml
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "!src/generated/**"
+```
 
-Branch-push path filters remain unsupported. GitHub uses the event-specific two-dot `before..after` range, a special base for new branches, and run-all behavior after more than 1,000 commits or a diff timeout. Webhook commit arrays can be truncated and are not the final two-dot diff, while reduced Buildkite snapshots contain no comparison base. Buildkite `if_changed` instead uses a default-branch merge base, has different glob ordering and limits, and can fail open. Tag pushes do not evaluate path filters, matching GitHub behavior. Unsupported trigger events, unsupported or indeterminate path filters, push type/workflow filters, pull request tag/workflow filters, inexact activity types, and invalid include/ignore combinations are not approximated; they replace the affected workflow with a failing step. Trigger shapes are validated even on a different event, but only the selected event contributes a group condition.
+Before upload, the importer compares the pull request merge base with its head using the local checkout. It admits a workflow only when a changed path matches and the linked webhook, commits, synthetic merge, base branch, and workflow file all agree. It uses the checkout's existing Git access for public, private, and fork pull requests. It does not call GitHub or use Buildkite `if_changed`.
+
+| Admitted | Fails closed |
+| --- | --- |
+| A matching added, modified, deleted, or type-changed path | No local match |
+| A copied destination that matches | A rename, or a diff containing both additions and deletions |
+| At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
+| A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, invalid pattern, or malformed Git output |
+
+A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge.
+
+Push path filters remain unsupported because GitHub uses a different diff range and timeout rules without exposing enough data to reproduce them safely. Tag pushes do not evaluate path filters, matching GitHub behavior. Other unsupported or inexact trigger filters also replace the affected workflow with a failing step rather than broadening when it runs.
 
 A top-level workflow that does not declare the effective event is excluded before event-dependent validation or compilation and represented by one top-level skipped command step. A workflow that declares that event remains represented by a group even when a same-event branch, tag, base-branch, or action condition evaluates false in Buildkite. If no directly runnable workflow declares the event, upload succeeds with a skipped-only pipeline.
 
