@@ -49,15 +49,17 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		return nil
 	}
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
-	validator.validateCall = func(_ *semanticValidator, node *actionlint.FuncCallNode) error {
-		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
-			return fmt.Errorf("action input default function %q is unsupported", node.Callee)
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 {
+			root, path, err := referencePath(node.Args[0])
+			if err == nil && strings.EqualFold(root, "matrix") && len(path) == 0 {
+				return nil
+			}
 		}
-		root, path, err := referencePath(node.Args[0])
-		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
-			return fmt.Errorf("action input default toJSON requires the complete matrix context")
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
 		}
-		return nil
+		return fmt.Errorf("action input default function %q is unsupported", node.Callee)
 	}
 	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
 	return validator.validate(node)
@@ -140,19 +142,21 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
 		return fmt.Errorf("action input default logical operator %s is unsupported", kind)
 	}
-	evaluator.call = func(_ *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
-		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
-			return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
+	evaluator.call = func(evaluator *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
+		if strings.EqualFold(node.Callee, "toJSON") && len(node.Args) == 1 {
+			root, path, err := referencePath(node.Args[0])
+			if err == nil && strings.EqualFold(root, "matrix") && len(path) == 0 {
+				value, err := json.MarshalIndent(context.Matrix, "", "  ")
+				if err != nil {
+					return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
+				}
+				return string(value), nil
+			}
 		}
-		root, path, err := referencePath(node.Args[0])
-		if err != nil || !strings.EqualFold(root, "matrix") || len(path) != 0 {
-			return nil, fmt.Errorf("action input default toJSON requires the complete matrix context")
+		if value, recognized, err := evaluatePureFunction(evaluator, node); recognized {
+			return value, err
 		}
-		value, err := json.MarshalIndent(context.Matrix, "", "  ")
-		if err != nil {
-			return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
-		}
-		return string(value), nil
+		return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
 	}
 	return evaluator.evaluate(node)
 }

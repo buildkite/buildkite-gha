@@ -166,7 +166,7 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ toJSON(matrix.value) }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -287,6 +287,11 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
 		{name: "falsy short circuit", template: "${{ false && github.missing || 'fallback' }}", want: "fallback"},
 		{name: "missing member is null", template: "${{ matrix.missing == null && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{}}, want: "yes"},
+		{name: "primitive string conversion", template: "${{ startsWith(123, '12') }}", want: "true"},
+		{name: "format", template: "${{ format('{0}-{1}', 'release', 2) }}", want: "release-2"},
+		{name: "array membership", template: "${{ contains(fromJSON('[\"push\",2]'), 2) }}", want: "true"},
+		{name: "join", template: "${{ join(fromJSON('[\"one\",2]'), '-') }}", want: "one-2"},
+		{name: "lazy case", template: "${{ case(true, 'selected', github.missing) }}", want: "selected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := EvaluateActionInputDefault(test.template, test.context)
@@ -488,7 +493,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 	}{
 		{name: "hashFiles needs a pattern", source: "hashFiles()", scope: StepCondition, want: `condition function "hashFiles" requires 1 to 255 arguments`},
 		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
-		{name: "unsupported function", source: "contains('a', 'b')", scope: StepCondition, want: `condition function "contains" is unsupported`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
 		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
 		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
@@ -764,6 +768,29 @@ func TestEvaluateConditionMatchesGitHubCoercionAndOrdering(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
+	for _, condition := range []string{
+		"startsWith(123, '12')",
+		"endsWith(true, 'UE')",
+		"contains(fromJSON('[1,\"Deploy\"]'), 'deploy')",
+		"format('{0}-{1}', 'release', 2) == 'release-2'",
+		"join(fromJSON('[\"one\",2]'), '-') == 'one-2'",
+		"fromJSON(toJSON(true))",
+		"case(false, matrix.unavailable, true, 'selected', matrix.unavailable) == 'selected'",
+	} {
+		got, err := EvaluateCondition(condition, ConditionContext{})
+		if err != nil || !got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+		}
+	}
+	if err := ValidateCondition("case(true, 'selected', false, secrets.TOKEN, '')", StepCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed an unsupported context in a lazy branch")
+	}
+	if _, err := EvaluateCondition("case('true', 'selected', 'fallback')", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "want boolean") {
+		t.Fatalf("EvaluateCondition() case predicate error = %v", err)
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if got, err := EvaluateCondition("1 < 2", ConditionContext{}); err != nil || !got {
 		t.Fatalf("EvaluateCondition() ordered comparison = %v, %v", got, err)
@@ -815,6 +842,12 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ contains(github.ref, 'ISSUES') }}", want: false},
 		{expression: "${{ endsWith(github.ref, '/MERGE') }}", want: true},
 		{expression: "${{ endsWith(github.ref, '/HEAD') }}", want: false},
+		{expression: "${{ endsWith('ref', true) }}", want: false},
+		{expression: "${{ contains(fromJSON('[\"push\",\"pull_request\"]'), 'PUSH') }}", want: true},
+		{expression: "${{ format('{0}-{1}', github.event_name, 2) }}", want: "push-2"},
+		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
+		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
+		{expression: "${{ case(false, github.missing, true, 'selected', github.missing) }}", want: "selected"},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -990,10 +1023,8 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ github.token }}", want: `unavailable value "github.token"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
-		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
-		{expression: "${{ contains(github.ref) }}", want: `unsupported compile-time function "contains"`},
-		{expression: "${{ endsWith('ref', true) }}", want: "endsWith arguments resolved to string and bool, want strings"},
-		{expression: "${{ contains(fromJSON('[\"push\"]'), 'push') }}", want: "contains arguments resolved to []interface {} and string, want strings"},
+		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" requires 2 arguments`},
+		{expression: "${{ contains(github.ref) }}", want: `function "contains" requires 2 arguments`},
 		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
 		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
 	}

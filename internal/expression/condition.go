@@ -82,7 +82,10 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 		return nil
 	}
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
-	validator.validateCall = func(_ *semanticValidator, node *actionlint.FuncCallNode) error {
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
 		switch strings.ToLower(node.Callee) {
 		case "always", "success", "failure", "cancelled":
 			if len(node.Args) != 0 {
@@ -131,6 +134,9 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 	}
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
 	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
 		switch {
 		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
 			return nil
@@ -280,6 +286,9 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 		return fmt.Errorf("condition logical operator %s is unsupported", kind)
 	}
 	evaluator.call = func(_ *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(&evaluator, node); recognized {
+			return value, err
+		}
 		switch strings.ToLower(node.Callee) {
 		case "always":
 			if len(node.Args) != 0 {

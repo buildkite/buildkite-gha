@@ -271,43 +271,11 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		return fmt.Errorf("unsupported compile-time logical operator %s", kind)
 	}
 	evaluator.call = func(evaluator *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
-		switch {
-		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1:
-			value, err := evaluator.evaluate(node.Args[0])
-			if err != nil {
-				return nil, err
-			}
-			text, ok := value.(string)
-			if !ok {
-				return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
-			}
-			return decodeJSONValue(text)
-		case (strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
-			value, err := evaluator.evaluate(node.Args[0])
-			if err != nil {
-				return nil, err
-			}
-			search, err := evaluator.evaluate(node.Args[1])
-			if err != nil {
-				return nil, err
-			}
-			valueText, valueOK := value.(string)
-			searchText, searchOK := search.(string)
-			if !valueOK || !searchOK {
-				return nil, fmt.Errorf("%s arguments resolved to %T and %T, want strings", node.Callee, value, search)
-			}
-			valueText, searchText = strings.ToLower(valueText), strings.ToLower(searchText)
-			switch {
-			case strings.EqualFold(node.Callee, "startsWith"):
-				return strings.HasPrefix(valueText, searchText), nil
-			case strings.EqualFold(node.Callee, "contains"):
-				return strings.Contains(valueText, searchText), nil
-			default:
-				return strings.HasSuffix(valueText, searchText), nil
-			}
-		default:
-			return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
+		value, recognized, err := evaluatePureFunction(evaluator, node)
+		if recognized {
+			return value, err
 		}
+		return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
 	}
 	return evaluator.evaluate(node)
 }
