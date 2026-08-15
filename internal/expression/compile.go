@@ -33,7 +33,47 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
+	if err := validateCompileExpressionNode(node); err != nil {
+		return nil, err
+	}
 	return evaluateCompileNode(node, context)
+}
+
+func validateCompileExpressionNode(node actionlint.ExprNode) error {
+	validator := newSemanticValidator(compileTimeSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		reference := referenceName(root, path)
+		switch {
+		case strings.EqualFold(root, "vars") && len(path) == 1,
+			strings.EqualFold(root, "matrix") && len(path) == 1,
+			strings.EqualFold(root, "event") && len(path) >= 1:
+			return nil
+		case strings.EqualFold(root, "github") && len(path) == 1:
+			switch strings.ToLower(path[0]) {
+			case "actor", "event_name", "head_ref", "ref", "repository", "repository_owner", "sha", "workflow":
+				return nil
+			}
+		case strings.EqualFold(root, "github") && len(path) >= 2 && strings.EqualFold(path[0], "event"):
+			return nil
+		}
+		if strings.EqualFold(root, "github") {
+			return fmt.Errorf("compile-time expression references unavailable value %q", reference)
+		}
+		if !strings.EqualFold(root, "vars") && !strings.EqualFold(root, "matrix") && !strings.EqualFold(root, "event") {
+			return fmt.Errorf("unsupported compile-time context %q", root)
+		}
+		return fmt.Errorf("unsupported compile-time reference %q", reference)
+	}
+	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, node); recognized {
+			return err
+		}
+		return fmt.Errorf("unsupported compile-time function %q", node.Callee)
+	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported compile-time expression") }
+	return validator.validate(node)
 }
 
 // EvaluateCompileCondition evaluates a condition whose entire value is known

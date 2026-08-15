@@ -71,12 +71,15 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		if err != nil {
 			return nil, true, err
 		}
-		search, err := evaluator.evaluate(node.Args[1])
-		if err != nil {
-			return nil, true, err
-		}
 		if name == "contains" {
 			if items, ok := expressionCollection(value); ok {
+				if len(items) == 0 {
+					return false, true, nil
+				}
+				search, err := evaluator.evaluate(node.Args[1])
+				if err != nil {
+					return nil, true, err
+				}
 				for _, item := range items {
 					if githubEqual(item, search) {
 						return true, true, nil
@@ -87,11 +90,15 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		}
 		valueText, ok := expressionString(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
+			return false, true, nil
+		}
+		search, err := evaluator.evaluate(node.Args[1])
+		if err != nil {
+			return nil, true, err
 		}
 		searchText, ok := expressionString(search)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, search)
+			return false, true, nil
 		}
 		valueText, searchText = strings.ToLower(valueText), strings.ToLower(searchText)
 		switch name {
@@ -106,33 +113,43 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		if argc < 1 || argc > 255 {
 			return nil, true, fmt.Errorf("function %q requires 1 to 255 arguments", node.Callee)
 		}
-		values, err := evaluateFunctionArguments(evaluator, node.Args)
+		value, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
 			return nil, true, err
 		}
-		format, ok := values[0].(string)
+		format, ok := expressionString(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q format resolved to %T, want string", node.Callee, values[0])
+			return nil, true, fmt.Errorf("function %q cannot convert %T to a format string", node.Callee, value)
 		}
-		formatted, err := expressionFormat(format, values[1:])
+		formatted, err := expressionFormat(format, len(node.Args)-1, func(index int) (any, error) {
+			return evaluator.evaluate(node.Args[index+1])
+		})
 		return formatted, true, err
 	case "join":
 		if argc != 1 && argc != 2 {
 			return nil, true, fmt.Errorf("function %q requires 1 or 2 arguments", node.Callee)
 		}
-		values, err := evaluateFunctionArguments(evaluator, node.Args)
+		value, err := evaluator.evaluate(node.Args[0])
 		if err != nil {
 			return nil, true, err
 		}
-		items, ok := expressionCollection(values[0])
+		items, ok := expressionCollection(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q value resolved to %T, want array", node.Callee, values[0])
+			joined, convertible := expressionString(value)
+			if !convertible {
+				return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
+			}
+			return joined, true, nil
 		}
 		separator := ","
 		if argc == 2 {
-			separator, ok = expressionString(values[1])
+			value, err := evaluator.evaluate(node.Args[1])
+			if err != nil {
+				return nil, true, err
+			}
+			separator, ok = expressionString(value)
 			if !ok {
-				return nil, true, fmt.Errorf("function %q separator cannot convert %T to a string", node.Callee, values[1])
+				return nil, true, fmt.Errorf("function %q separator cannot convert %T to a string", node.Callee, value)
 			}
 		}
 		parts := make([]string, len(items))
@@ -164,27 +181,15 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		if err != nil {
 			return nil, true, err
 		}
-		text, ok := value.(string)
+		text, ok := expressionString(value)
 		if !ok {
-			return nil, true, fmt.Errorf("function %q argument resolved to %T, want string", node.Callee, value)
+			return nil, true, fmt.Errorf("function %q cannot convert %T to a string", node.Callee, value)
 		}
 		decoded, err := decodeJSONValue(text)
 		return decoded, true, err
 	default:
 		return nil, false, nil
 	}
-}
-
-func evaluateFunctionArguments(evaluator *semanticEvaluator, nodes []actionlint.ExprNode) ([]any, error) {
-	values := make([]any, len(nodes))
-	for i, node := range nodes {
-		value, err := evaluator.evaluate(node)
-		if err != nil {
-			return nil, err
-		}
-		values[i] = value
-	}
-	return values, nil
 }
 
 func expressionCollection(value any) ([]any, bool) {
@@ -226,8 +231,9 @@ func expressionString(value any) (string, bool) {
 	}
 }
 
-func expressionFormat(format string, values []any) (string, error) {
+func expressionFormat(format string, valueCount int, value func(int) (any, error)) (string, error) {
 	var formatted strings.Builder
+	values := make(map[int]any)
 	for i := 0; i < len(format); {
 		switch {
 		case strings.HasPrefix(format[i:], "{{"):
@@ -243,14 +249,22 @@ func expressionFormat(format string, values []any) (string, error) {
 			}
 			end += i + 1
 			index, err := strconv.Atoi(format[i+1 : end])
-			if err != nil || index < 0 || index >= len(values) {
+			if err != nil || index < 0 || index >= valueCount {
 				return "", fmt.Errorf("format placeholder %q is invalid", format[i:end+1])
 			}
-			value, ok := expressionString(values[index])
-			if !ok {
-				return "", fmt.Errorf("format argument %d cannot convert %T to a string", index, values[index])
+			argument, exists := values[index]
+			if !exists {
+				argument, err = value(index)
+				if err != nil {
+					return "", err
+				}
+				values[index] = argument
 			}
-			formatted.WriteString(value)
+			text, ok := expressionString(argument)
+			if !ok {
+				return "", fmt.Errorf("format argument %d cannot convert %T to a string", index, argument)
+			}
+			formatted.WriteString(text)
 			i = end + 1
 		case format[i] == '}':
 			return "", fmt.Errorf("format string contains an unmatched '}'")

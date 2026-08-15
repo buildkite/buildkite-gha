@@ -282,6 +282,44 @@ jobs:
 	}
 }
 
+func TestCompileRejectsAuthorityAndWholeEventInLazyGraphFunctions(t *testing.T) {
+	eventSource := readFile(t, smokePath("events", "push.json"))
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			name: "skipped secret in runner",
+			source: `on: push
+jobs:
+  test:
+    runs-on: ${{ case(true, 'ubuntu-latest', secrets.TOKEN) }}
+    steps:
+      - run: true
+`,
+			want: `unsupported compile-time context "secrets"`,
+		},
+		{
+			name: "whole event in concurrency",
+			source: `on: push
+concurrency:
+  group: ${{ toJSON(github.event) }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+`,
+			want: `unavailable value "github.event"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Compile("expressions.yml", []byte(test.source), eventSource); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Compile() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCompileRetainsSupportedRuntimeDependentConditions(t *testing.T) {
 	source := []byte(`on: push
 jobs:

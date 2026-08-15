@@ -776,6 +776,12 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 		"format('{0}-{1}', 'release', 2) == 'release-2'",
 		"join(fromJSON('[\"one\",2]'), '-') == 'one-2'",
 		"fromJSON(toJSON(true))",
+		"fromJSON(true)",
+		"join('abc', '-') == 'abc'",
+		"format(123) == '123'",
+		"format('ok', fromJSON('bad')) == 'ok'",
+		"contains(fromJSON('[]'), fromJSON('bad')) == false",
+		"startsWith(fromJSON('[]'), 'x') == false",
 		"case(false, matrix.unavailable, true, 'selected', matrix.unavailable) == 'selected'",
 	} {
 		got, err := EvaluateCondition(condition, ConditionContext{})
@@ -847,7 +853,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ format('{0}-{1}', github.event_name, 2) }}", want: "push-2"},
 		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
-		{expression: "${{ case(false, github.missing, true, 'selected', github.missing) }}", want: "selected"},
+		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -1022,9 +1028,12 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 	}{
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ github.token }}", want: `unavailable value "github.token"`},
+		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
+		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
+		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
-		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" requires 2 arguments`},
-		{expression: "${{ contains(github.ref) }}", want: `function "contains" requires 2 arguments`},
+		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" received an unsupported number of arguments`},
+		{expression: "${{ contains(github.ref) }}", want: `function "contains" received an unsupported number of arguments`},
 		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
 		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
 	}
