@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -184,9 +185,33 @@ func TestPrepareSecretsMigrationDiscoversAndRenders(t *testing.T) {
 
 func TestRejectExistingBuildkiteSecretsBeforeWorkflowGeneration(t *testing.T) {
 	runner := &migrationTestRunner{results: []migrationCommandResult{{output: []byte(`[{"key":"API_KEY"},{"key":"OTHER"}]`)}}}
-	err := rejectExistingBuildkiteSecrets(context.Background(), runner, testMigrationCluster, []string{"API_KEY", "DEPLOY_TOKEN"})
+	err := rejectExistingBuildkiteSecrets(context.Background(), runner, "acme", testMigrationCluster, []string{"API_KEY", "DEPLOY_TOKEN"})
 	if err == nil || !strings.Contains(err.Error(), "API_KEY") || !strings.Contains(err.Error(), "will not be overwritten") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error = %v", err)
+	}
+	if command := runner.commands[0]; command.name != "bk" || !slices.Equal(command.args, []string{
+		"api", "/organizations/acme/clusters/" + testMigrationCluster + "/secrets?per_page=100&page=1", "--no-input",
+	}) {
+		t.Fatalf("list command = %#v", command)
+	}
+}
+
+func TestRejectExistingBuildkiteSecretsPaginates(t *testing.T) {
+	firstPage := make([]map[string]string, 100)
+	for index := range firstPage {
+		firstPage[index] = map[string]string{"key": fmt.Sprintf("OTHER_%d", index)}
+	}
+	encodedFirstPage, err := json.Marshal(firstPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &migrationTestRunner{results: []migrationCommandResult{
+		{output: encodedFirstPage},
+		{output: []byte(`[{"key":"API_KEY"}]`)},
+	}}
+	err = rejectExistingBuildkiteSecrets(context.Background(), runner, "acme", testMigrationCluster, []string{"API_KEY"})
+	if err == nil || !strings.Contains(err.Error(), "API_KEY") || len(runner.commands) != 2 || !strings.Contains(runner.commands[1].args[1], "page=2") {
+		t.Fatalf("rejectExistingBuildkiteSecrets() error/commands = %v/%#v", err, runner.commands)
 	}
 }
 

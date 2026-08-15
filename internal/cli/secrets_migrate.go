@@ -199,7 +199,7 @@ func prepareSecretsMigration(ctx context.Context, options migrateSecretsPrepareO
 			return err
 		}
 	}
-	if err := rejectExistingBuildkiteSecrets(ctx, runner, options.cluster, selectedNames); err != nil {
+	if err := rejectExistingBuildkiteSecrets(ctx, runner, options.organization, options.cluster, selectedNames); err != nil {
 		return err
 	}
 
@@ -416,16 +416,26 @@ func buildkitePipelineMatchesGitHubRepository(pipelineRepository, repository str
 	return false
 }
 
-func rejectExistingBuildkiteSecrets(ctx context.Context, runner transport.Runner, cluster string, selected []string) error {
-	output, err := runner.Run(ctx, "", "bk", []string{"secret", "list", "--cluster-uuid", cluster, "--json", "--no-input"}, nil)
-	if err != nil {
-		return fmt.Errorf("list Buildkite secrets with bk: %w", err)
-	}
+func rejectExistingBuildkiteSecrets(ctx context.Context, runner transport.Runner, organization, cluster string, selected []string) error {
 	var secrets []struct {
 		Key string `json:"key"`
 	}
-	if err := json.Unmarshal(output, &secrets); err != nil {
-		return fmt.Errorf("decode bk secrets response: %w", err)
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("/organizations/%s/clusters/%s/secrets?per_page=100&page=%d", organization, cluster, page)
+		output, err := runner.Run(ctx, "", "bk", []string{"api", endpoint, "--no-input"}, nil)
+		if err != nil {
+			return fmt.Errorf("list Buildkite secrets with bk: %w", err)
+		}
+		var batch []struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(output, &batch); err != nil {
+			return fmt.Errorf("decode bk secrets response: %w", err)
+		}
+		secrets = append(secrets, batch...)
+		if len(batch) < 100 {
+			break
+		}
 	}
 	existing := map[string]bool{}
 	for _, secret := range secrets {
