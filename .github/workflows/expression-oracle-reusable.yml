@@ -5,7 +5,7 @@ on:
     inputs:
       event-label:
         type: string
-        default: ${{ format('{0}-event', github.event_name) }}
+        default: pre-${{ format('{{{0}}}', github.event_name) }}
       dispatch-label:
         type: string
         default: ${{ inputs.oracle_prefix }}
@@ -20,5 +20,5 @@ jobs:
           EVENT_LABEL: ${{ inputs.event-label }}
           DISPATCH_LABEL: ${{ inputs.dispatch-label }}
         run: |
-          test "$EVENT_LABEL" = "workflow_dispatch-event"
+          test "$EVENT_LABEL" = "pre-{workflow_dispatch}"
           test "$DISPATCH_LABEL" = "dispatch"

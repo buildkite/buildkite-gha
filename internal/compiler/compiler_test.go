@@ -1728,6 +1728,24 @@ jobs:
 	}
 }
 
+func TestValidateRejectsInvalidReusableInputDefaultWithoutCall(t *testing.T) {
+	source := []byte(`on:
+  push:
+  workflow_call:
+    inputs:
+      value:
+        type: string
+        default: ${{ secrets.TOKEN }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+`)
+	if _, err := Validate("workflow.yml", source); err == nil || !strings.Contains(err.Error(), `default for workflow_call input "value" is invalid`) || !strings.Contains(err.Error(), `context "secrets" is unavailable`) {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestCompileValidatesReusableWorkflowInputDefaults(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -1748,7 +1766,7 @@ func TestCompileValidatesReusableWorkflowInputDefaults(t *testing.T) {
 			path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"+with)
 			writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\n        default: "+test.input+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 			_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "./.github/workflows/reusable.yml:6:") {
+			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), ".github/workflows/reusable.yml:6:") {
 				t.Fatalf("Compile() error = %v, want %q", err, test.want)
 			}
 		})

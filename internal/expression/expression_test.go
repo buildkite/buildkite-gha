@@ -695,6 +695,7 @@ func TestEvaluateReusableInputDefaultUsesOnlyGraphTimeValues(t *testing.T) {
 		{template: "${{ github.ref == 'refs/heads/main' }}", want: true},
 		{template: "${{ fromJSON(vars.COUNT) }}", want: json.Number("3")},
 		{template: "deploy-${{ vars.SUFFIX }}", want: "deploy-release"},
+		{template: "pre-${{ format('{{{0}}}', vars.SUFFIX) }}", want: "pre-{release}"},
 	} {
 		got, err := EvaluateReusableInputDefault(test.template, context)
 		if err != nil || !reflect.DeepEqual(got, test.want) {

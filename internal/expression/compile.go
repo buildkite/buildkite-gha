@@ -264,7 +264,7 @@ func compileScalarLiteral(value any) (string, bool) {
 
 // EvaluateCompileTemplate substitutes supported graph-time expressions once.
 func EvaluateCompileTemplate(template string, context CompileContext) (string, error) {
-	const open, close = "${{", "}}"
+	const open = "${{"
 	var evaluated strings.Builder
 	remaining := template
 	for {
@@ -274,12 +274,12 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 			return evaluated.String(), nil
 		}
 		evaluated.WriteString(remaining[:start])
-		end := strings.Index(remaining[start+len(open):], close)
-		if end < 0 {
-			return "", fmt.Errorf("unterminated expression")
+		source := remaining[start+len(open):]
+		_, consumed, lexErr := actionlint.LexExpression(source)
+		if lexErr != nil {
+			return "", fmt.Errorf("invalid expression: %w", lexErr)
 		}
-		end += start + len(open)
-		text := remaining[start : end+len(close)]
+		text := open + source[:consumed]
 		value, err := EvaluateCompile(Expression{Text: text}, context)
 		if err != nil {
 			return "", err
@@ -293,7 +293,7 @@ func EvaluateCompileTemplate(template string, context CompileContext) (string, e
 		default:
 			return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 		}
-		remaining = remaining[end+len(close):]
+		remaining = source[consumed:]
 	}
 }
 

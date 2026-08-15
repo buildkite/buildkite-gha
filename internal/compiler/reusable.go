@@ -524,24 +524,6 @@ func namespacedJobID(namespace, id string) string {
 }
 
 func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWorkflowCall, callee *workflow.Workflow, parentInputs, matrix map[string]any, context expression.CompileContext) (map[string]any, error) {
-	for _, name := range sortedValueKeys(callee.CallInputs) {
-		declaration := callee.CallInputs[name]
-		if declaration.Default == nil {
-			continue
-		}
-		text, ok := declaration.Default.Data.(string)
-		if !ok || !strings.Contains(text, "${{") {
-			continue
-		}
-		if err := expression.ValidateReusableInputDefault(text); err != nil {
-			message := fmt.Sprintf("default for reusable-workflow input %q is invalid: %v", name, err)
-			if strings.Contains(err.Error(), `context "inputs" is unavailable`) {
-				message = fmt.Sprintf("default for reusable-workflow input %q references workflow-dispatch inputs, which are unavailable during compilation", name)
-			}
-			return nil, locatedJobError(call.Uses, job, declaration.Default.Span.Start.Line, declaration.Default.Span.Start.Column, message)
-		}
-	}
-
 	values := make(map[string]any, len(call.Inputs))
 	for _, name := range sortedValueKeys(call.Inputs) {
 		value := call.Inputs[name]

@@ -254,14 +254,18 @@ func containsStatusFunction(node actionlint.ExprNode) bool {
 
 func expressionBody(text string) (string, error) {
 	trimmed := strings.TrimSpace(text)
-	if !strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}") {
+	if !strings.HasPrefix(trimmed, "${{") {
 		return "", fmt.Errorf("expected a complete ${{ ... }} expression")
 	}
-	body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "${{"), "}}"))
-	if strings.Contains(body, "}}") {
+	source := strings.TrimPrefix(trimmed, "${{")
+	_, consumed, err := actionlint.LexExpression(source)
+	if err != nil {
+		return "", fmt.Errorf("invalid expression: %w", err)
+	}
+	if consumed != len(source) {
 		return "", fmt.Errorf("expression contains an embedded closing delimiter")
 	}
-	return body, nil
+	return strings.TrimSpace(strings.TrimSuffix(source[:consumed], "}}")), nil
 }
 
 func referencePath(node actionlint.ExprNode) (string, []string, error) {
