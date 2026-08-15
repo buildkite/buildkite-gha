@@ -16,6 +16,7 @@ import (
 )
 
 func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
+	filteredWorkflow := []byte("name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	repository := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -29,10 +30,10 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	runGit("init", "-q")
 	runGit("config", "user.email", "test@example.com")
 	runGit("config", "user.name", "Test")
-	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("base\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, "ci.yml"), filteredWorkflow, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runGit("add", "README.md")
+	runGit("add", "ci.yml")
 	runGit("commit", "-qm", "base")
 	base := runGit("rev-parse", "HEAD")
 	runGit("update-ref", "refs/remotes/origin/main", base)
@@ -61,7 +62,13 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 			"merge_commit_sha": merge,
 		}},
 	}
-	paths, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", nil)
+	input := workflowInput{
+		Path:          filepath.Join(repository, "ci.yml"),
+		CanonicalPath: "ci.yml",
+		Source:        filteredWorkflow,
+		Triggers:      []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
+	}
+	paths, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input})
 	if err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
 		t.Fatalf("pullRequestChangedPaths() = %#v, %v", paths, err)
 	}
@@ -75,17 +82,74 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	}
 	pullRequest["mergeable"] = true
 	workflow := workflowInput{
-		CanonicalPath: "README.md",
+		Path:          filepath.Join(repository, "ci.yml"),
+		CanonicalPath: "ci.yml",
 		Source:        []byte("different\n"),
 		Triggers:      []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
 	}
 	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{workflow})
-	if err != nil || !strings.Contains(workflowErrors["README.md"], "does not match the event merge commit") {
+	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("workflow merge source result = %#v, %v", workflowErrors, err)
 	}
 	pullRequest["base"].(map[string]any)["sha"] = head
-	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "does not match the local origin base branch") {
+	if _, _, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{input}); err == nil || !strings.Contains(err.Error(), "does not bind the event base and head") {
 		t.Fatalf("forged base SHA error = %v", err)
+	}
+}
+
+func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
+	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	filtered := []byte("name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\n" + jobs)
+	unfiltered := []byte("name: CI\non: pull_request\n" + jobs)
+	repository := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	workflowPath := filepath.Join(repository, "ci.yml")
+	if err := os.WriteFile(workflowPath, unfiltered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "ci.yml")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	runGit("commit", "--allow-empty", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	if err := os.WriteFile(workflowPath, filtered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "ci.yml")
+	mergeTree := runGit("write-tree")
+	runGit("reset", "-q", head)
+	if err := os.WriteFile(workflowPath, unfiltered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	merge := runGit("commit-tree", mergeTree, "-p", base, "-p", head, "-m", "merge")
+	t.Chdir(repository)
+	event := compiler.Event{
+		Event: "pull_request", SHA: head,
+		Repository: compiler.Repository{Owner: "buildkite", Name: "buildkite-gha"},
+		Payload: map[string]any{"number": 42, "pull_request": map[string]any{
+			"base":             map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+			"head":             map[string]any{"sha": head},
+			"mergeable":        true,
+			"merge_commit_sha": merge,
+		}},
+	}
+	_, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", []workflowInput{{
+		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
+		Triggers: []workflow.Trigger{{Event: "pull_request"}},
+	}})
+	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
+		t.Fatalf("merge-added path filter result = %#v, %v", workflowErrors, err)
 	}
 }
 

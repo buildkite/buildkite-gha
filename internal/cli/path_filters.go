@@ -12,6 +12,7 @@ import (
 
 	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/workflow"
 )
 
 const (
@@ -20,32 +21,47 @@ const (
 )
 
 func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
-	if event.Event != "pull_request" || !workflowsUsePathFilters(workflows, event.Event) {
+	if event.Event != "pull_request" {
 		return
 	}
 	if origin != effectiveEventFromWebhook {
-		context.ChangedPathsError = "pull request path filters require linked Buildkite webhook data"
+		if workflowsUsePathFilters(workflows, event.Event) {
+			context.ChangedPathsError = "pull request path filters require linked Buildkite webhook data"
+		}
+		return
+	}
+	pullRequest, _ := event.Payload["pull_request"].(map[string]any)
+	if !workflowsUsePathFilters(workflows, event.Event) && nestedString(pullRequest, "merge_commit_sha") == "" {
 		return
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
 	if err != nil || pullRequestNumber <= 0 {
-		context.ChangedPathsError = "pull request path filters require the Buildkite pull request number"
+		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request number")
 		return
 	}
 	baseRef := os.Getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH")
 	if baseRef == "" {
-		context.ChangedPathsError = "pull request path filters require the Buildkite pull request base branch"
+		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch")
 		return
 	}
 	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows)
 	if err != nil {
-		context.ChangedPathsError = err.Error()
+		setPathFiltersError(context, workflows, event.Event, err.Error())
 		return
 	}
 	context.ChangedPaths = paths
 	context.ChangedPathsKnown = true
 	for i := range workflows {
 		workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
+	}
+}
+
+func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string) {
+	context.ChangedPathsError = reason
+	for i := range workflows {
+		if workflowUsesEvent(workflows[i], event) {
+			workflows[i].PathFiltersError = reason
+		}
 	}
 }
 
@@ -93,18 +109,10 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if err := gitCommand(root, "check-ref-format", "refs/heads/"+baseRef).Run(); err != nil {
 		return nil, nil, fmt.Errorf("buildkite pull request base branch is invalid")
 	}
-	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
-	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
-		return nil, nil, fmt.Errorf("pull request path filters require a complete non-shallow checkout")
-	}
 	for _, commit := range []struct{ label, sha string }{{"base", baseSHA}, {"head", headSHA}, {"merge", mergeSHA}} {
 		if err := gitCommand(root, "cat-file", "-e", commit.sha+"^{commit}").Run(); err != nil {
 			return nil, nil, fmt.Errorf("pull request %s commit is unavailable in the local checkout", commit.label)
 		}
-	}
-	baseTipBytes, err := gitCommand(root, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}").Output()
-	if err != nil || strings.TrimSpace(string(baseTipBytes)) != baseSHA {
-		return nil, nil, fmt.Errorf("webhook pull request base commit does not match the local origin base branch")
 	}
 	mergeParentsBytes, err := gitCommand(root, "rev-list", "--parents", "-n", "1", mergeSHA).Output()
 	mergeParents := strings.Fields(string(mergeParentsBytes))
@@ -113,13 +121,34 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	}
 	workflowErrors := make(map[string]string)
 	for _, input := range workflows {
-		if !workflowUsesPathFilters(input, event.Event) {
+		if !workflowUsesEvent(input, event.Event) {
 			continue
 		}
 		mergeSource, err := gitCommand(root, "cat-file", "blob", mergeSHA+":"+input.CanonicalPath).Output()
-		if err != nil || !bytes.Equal(mergeSource, input.Source) {
+		if err != nil {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is unavailable in the event merge commit", input.CanonicalPath)
+			continue
+		}
+		mergeWorkflow, err := workflow.Parse(input.Path, mergeSource)
+		if err != nil {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q cannot be parsed from the event merge commit", input.CanonicalPath)
+			continue
+		}
+		mergeUsesPathFilters := workflowUsesPathFilters(workflowInput{Triggers: mergeWorkflow.Triggers}, event.Event)
+		if (workflowUsesPathFilters(input, event.Event) || mergeUsesPathFilters) && !bytes.Equal(mergeSource, input.Source) {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the event merge commit", input.CanonicalPath)
 		}
+	}
+	if !workflowsUsePathFilters(workflows, event.Event) {
+		return nil, workflowErrors, nil
+	}
+	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
+		return nil, nil, fmt.Errorf("pull request path filters require a complete non-shallow checkout")
+	}
+	baseTipBytes, err := gitCommand(root, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}").Output()
+	if err != nil || strings.TrimSpace(string(baseTipBytes)) != baseSHA {
+		return nil, nil, fmt.Errorf("webhook pull request base commit does not match the local origin base branch")
 	}
 	mergeBaseBytes, err := gitCommand(root, "merge-base", "--all", baseSHA, headSHA).Output()
 	if err != nil {
@@ -140,6 +169,15 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 func workflowUsesPathFilters(input workflowInput, event string) bool {
 	for _, trigger := range input.Triggers {
 		if trigger.Event == event && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowUsesEvent(input workflowInput, event string) bool {
+	for _, trigger := range input.Triggers {
+		if trigger.Event == event {
 			return true
 		}
 	}

@@ -4754,7 +4754,8 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 
 func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	requireImporterHost(t)
-	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	workflowJobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\n" + workflowJobs
 	repository := writeUploadWorkflowRepository(t, map[string]string{
 		"ci.yml":       "name: CI\n" + workflowSource,
 		"mismatch.yml": "name: Original\n" + workflowSource,
@@ -4783,7 +4784,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
 	merge := runGit("commit-tree", head+"^{tree}", "-p", base, "-p", head, "-m", "merge")
-	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+workflowSource), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\non: pull_request\n"+workflowJobs), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	webhook, err := json.Marshal(map[string]any{
