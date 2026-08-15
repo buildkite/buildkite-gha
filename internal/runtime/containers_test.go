@@ -2492,9 +2492,12 @@ func runLiveDocker(t *testing.T, docker string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, docker, args...).CombinedOutput()
+	command := exec.CommandContext(ctx, docker, args...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
-		t.Fatalf("docker %s: %v: %s", strings.Join(args, " "), err, output)
+		t.Fatalf("docker %s: %v: %s", strings.Join(args, " "), err, stderr.Bytes())
 	}
 	return string(output)
 }
