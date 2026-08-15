@@ -365,10 +365,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''
     steps:
       - id: test
-        if: success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready
+        if: success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''
         run: true
       - if: failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]
         run: true
@@ -377,7 +377,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
+	if len(plans) != 2 || plans[1].Condition != "always() && needs.prepare.result == 'success' && needs.prepare.outputs.ready && matrix.os && github.ref && github.head_ref == ''" || plans[1].Steps[0].Condition != "success() && env.ENABLED && vars.FLAG && needs.prepare.outputs.ready && github.head_ref == ''" || plans[1].Steps[1].Condition != "failure() && steps.test.outcome == 'failure' && steps.test.conclusion == 'success' && steps.test.outputs.ready && job.services.redis.ports[6379]" {
 		t.Fatalf("runtime conditions were not retained: %#v", plans)
 	}
 }
@@ -1708,6 +1708,52 @@ jobs:
 	}
 	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo false true" {
 		t.Fatalf("event-backed reusable inputs = %#v", ir.Jobs)
+	}
+}
+
+func TestCompileExposesGitHubHeadRef(t *testing.T) {
+	workflow := []byte(`on: [push, pull_request, pull_request_target]
+concurrency: group-${{ github.head_ref }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.head_ref }}"
+`)
+	tests := []struct {
+		name    string
+		event   string
+		payload string
+		want    string
+	}{
+		{name: "pull request", event: "pull_request", payload: `{"pull_request":{"head":{"ref":"feature/pr"}}}`, want: "feature/pr"},
+		{name: "pull request target", event: "pull_request_target", payload: `{"pull_request":{"head":{"ref":"feature/target"}}}`, want: "feature/target"},
+		{name: "push ignores pull request shape", event: "push", payload: `{"pull_request":{"head":{"ref":"not-a-pr"}}}`, want: ""},
+		{name: "missing pull request shape", event: "pull_request", payload: `{}`, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := []byte(fmt.Sprintf(`{
+  "provider": "github",
+  "event": %q,
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/heads/main",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": %s
+}`, test.event, test.payload))
+			result, err := Compile("ci.yml", workflow, event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ir IR
+			if err := json.Unmarshal(result, &ir); err != nil {
+				t.Fatal(err)
+			}
+			if ir.Workflow.ConcurrencyGroup != "group-"+test.want {
+				t.Fatalf("github.head_ref concurrency group = %q, want %q", ir.Workflow.ConcurrencyGroup, "group-"+test.want)
+			}
+		})
 	}
 }
 

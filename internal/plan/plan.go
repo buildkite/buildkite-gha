@@ -100,6 +100,7 @@ type Event struct {
 	PayloadDigest string `json:"payload_digest"`
 	Repository    string `json:"repository,omitempty"`
 	Ref           string `json:"ref,omitempty"`
+	HeadRef       string `json:"head_ref,omitempty"`
 	SHA           string `json:"sha,omitempty"`
 	Actor         string `json:"actor,omitempty"`
 }
@@ -380,7 +381,7 @@ func (job Job) Validate() error {
 	if (job.Event.Provider != "github" && job.Event.Provider != "cursor-origin") || job.Event.Name == "" || !digestPattern.MatchString(job.Event.PayloadDigest) {
 		return fmt.Errorf("job plan requires a supported event binding")
 	}
-	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
+	if len(job.Event.Repository) > 512 || len(job.Event.Ref) > 1024 || len(job.Event.HeadRef) > 1024 || len(job.Event.SHA) > 128 || len(job.Event.Actor) > 256 {
 		return fmt.Errorf("job plan event identity exceeds its size limit")
 	}
 	if job.Workflow.Path == "" || !digestPattern.MatchString(job.Workflow.Digest) || job.Workflow.LogicalJobID == "" {

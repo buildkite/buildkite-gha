@@ -12,7 +12,9 @@ import (
 )
 
 func TestDecodePreservesPlanContract(t *testing.T) {
-	source, err := Encode(validJob())
+	fixture := validJob()
+	fixture.Event.HeadRef = "feature/head-ref"
+	source, err := Encode(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,8 +22,32 @@ func TestDecodePreservesPlanContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Target.StepKey != "gha-test" {
+	if job.Compiler.DistributionDigest == "" || job.Event.PayloadDigest == "" || job.Event.HeadRef != "feature/head-ref" || job.Target.StepKey != "gha-test" {
 		t.Fatalf("decoded fixture lost trust bindings: %#v", job)
+	}
+	validateJobPlanSchema(t, source)
+}
+
+func TestEventHeadRefSizeLimit(t *testing.T) {
+	job := validJob()
+	job.Event.HeadRef = strings.Repeat("a", 1024)
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatalf("Encode() maximum head_ref error = %v", err)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	oversized := strings.Repeat("a", 1025)
+	job.Event.HeadRef = oversized
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+		t.Fatalf("Validate() oversized head_ref error = %v", err)
+	}
+	if _, err := Encode(job); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+		t.Fatalf("Encode() oversized head_ref error = %v", err)
+	}
+	encoded = []byte(strings.Replace(string(encoded), strings.Repeat("a", 1024), oversized, 1))
+	if _, err := Decode(encoded); err == nil || !strings.Contains(err.Error(), "event identity exceeds its size limit") {
+		t.Fatalf("Decode() oversized head_ref error = %v", err)
 	}
 }
 

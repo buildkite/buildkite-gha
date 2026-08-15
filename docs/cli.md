@@ -70,7 +70,7 @@ Validation may use the public network to resolve actions. Apart from annotation 
 }
 ```
 
-The snapshot supplies compile-time context. Generated plans retain the event name, repository, ref, SHA, actor, and a payload digest. They do not retain the payload object. Runtime expressions cannot use `github.event`.
+The snapshot supplies compile-time context. Generated plans retain the event name, repository, ref, pull request head ref, SHA, actor, and a payload digest. They do not retain the payload object. Runtime expressions cannot use `github.event`.
 
 The snapshot is compatibility data, not authorization.
 

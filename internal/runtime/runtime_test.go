@@ -2280,6 +2280,25 @@ func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	}
 }
 
+func TestGitHubContextExposesHeadRef(t *testing.T) {
+	tests := []struct {
+		name    string
+		headRef string
+	}{
+		{name: "pull request source branch", headRef: "feature/runtime"},
+		{name: "unavailable", headRef: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			github := githubContext(plan.Job{Event: plan.Event{HeadRef: test.headRef}})
+			got, err := expression.Evaluate("${{ github.head_ref }}", expression.Context{GitHub: github})
+			if err != nil || got != test.headRef {
+				t.Fatalf("github.head_ref = %#v, %v, want %q", got, err, test.headRef)
+			}
+		})
+	}
+}
+
 func TestRunJobSuppliesScopedGitHubTokenToEffectiveActionDefault(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
