@@ -118,7 +118,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 	return run(args, stdout, stderr, version, transport.CommandRunner{Stderr: stderr})
 }
 
-func run(args []string, stdout, stderr io.Writer, version string, agentRunner transport.Runner) int {
+func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRunner transport.Runner) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -126,6 +126,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 	if args[0] == gharuntime.ContainerProcessHelperCommand {
 		return gharuntime.RunContainerProcessHelper(args[1:])
 	}
+	version := commandVersion(clientVersion)
 
 	switch args[0] {
 	case "-h", "--help":
@@ -137,10 +138,10 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 		if len(args) != 1 {
 			return usageError(stderr, "%s does not accept arguments", args[0])
 		}
-		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", version)
+		_, _ = fmt.Fprintf(stdout, "buildkite-gha %s\n", clientVersion)
 		return 0
 	case "plugin":
-		return plugin(args[1:], stdout, stderr, version, agentRunner)
+		return plugin(args[1:], stdout, stderr, version, clientVersion, agentRunner)
 	default:
 		if _, ok := commandUsage[args[0]]; ok {
 			if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
@@ -155,7 +156,7 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 			case "upload":
 				return upload(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "run-job":
-				return runJob(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:
 				_, _ = fmt.Fprintf(stderr, "buildkite-gha: %s: not implemented\n", args[0])
 				return 1
@@ -166,18 +167,25 @@ func run(args []string, stdout, stderr io.Writer, version string, agentRunner tr
 	}
 }
 
-func plugin(args []string, stdout, stderr io.Writer, version string, runner transport.Runner) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return pluginContext(ctx, args, stdout, stderr, version, runner)
+func commandVersion(clientVersion string) string {
+	if clientVersion == "dev" || strings.HasPrefix(clientVersion, "dev+") {
+		return "dev"
+	}
+	return clientVersion
 }
 
-func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, runner transport.Runner) (code int) {
+func plugin(args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return pluginContext(ctx, args, stdout, stderr, version, clientVersion, runner)
+}
+
+func pluginContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, runner transport.Runner) (code int) {
 	started := time.Now()
 	details := &commandTelemetryDetails{}
 	defer func() {
 		outcome := telemetryOutcome(code, "", ctx.Err())
-		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, version, time.Since(started), details.forOutcome(outcome))
+		emitCommandTelemetry(telemetry.CommandPluginImport, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
 	}()
 	if len(args) != 0 {
 		return usageError(stderr, "plugin does not accept arguments")
@@ -367,19 +375,19 @@ func help(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runJob(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+func runJob(args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runJobContext(ctx, args, stdout, stderr, version, agent)
+	return runJobContext(ctx, args, stdout, stderr, version, clientVersion, agent)
 }
 
-func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string, agent transport.Agent) (code int) {
+func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer, version, clientVersion string, agent transport.Agent) (code int) {
 	started := time.Now()
 	var result gharuntime.JobResult
+	details := &commandTelemetryDetails{}
 	defer func() {
 		outcome := telemetryOutcome(code, result.Conclusion, ctx.Err())
-		details := (&commandTelemetryDetails{}).forOutcome(outcome)
-		emitCommandTelemetry(telemetry.CommandRunJob, outcome, version, time.Since(started), details)
+		emitCommandTelemetry(telemetry.CommandRunJob, outcome, clientVersion, time.Since(started), details.forOutcome(outcome))
 	}()
 	options, err := runJobArgs(args)
 	if err != nil {
@@ -563,17 +571,22 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 	if len(job.NeedSources) != 0 {
 		job.Needs, runErr = gharuntime.ResolveNeeds(ctx, agent, artifactRoot, producer.BuildID, job.NeedSources, job.NeedOutputs)
 		if runErr != nil {
+			details.setFailurePhase(telemetry.FailurePhaseSourceResolution)
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
 	if runErr == nil {
 		result, runErr = runner.RunJob(ctx, job, "")
+		if runErr != nil {
+			details.setFailurePhase(telemetry.FailurePhaseExecution)
+		}
 	}
 	if result.Conclusion == "" {
 		result.Conclusion = terminalErrorConclusion(ctx)
 	}
 	if options.resultPath != "" && result.Conclusion != "" {
 		if err := writeJobResult(options.resultPath, result); err != nil {
+			details.setFailurePhase(telemetry.FailurePhaseResultPublication)
 			runErr = errors.Join(runErr, err)
 			result.Conclusion = terminalErrorConclusion(ctx)
 		}
@@ -593,6 +606,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow error annotation: %v\n", publication.ErrorAnnotationError)
 		}
 		if err != nil {
+			details.setFailurePhase(telemetry.FailurePhaseResultPublication)
 			runErr = errors.Join(runErr, fmt.Errorf("publish terminal result: %w", err))
 		}
 	}
@@ -1810,6 +1824,9 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	}
 	if len(artifacts) == 0 {
 		if err := agent.UploadPipeline(ctx, aggregatePipeline); err != nil {
+			if uploadArguments.telemetry != nil {
+				uploadArguments.telemetry.setFailurePhase(telemetry.FailurePhasePipelineUpload)
+			}
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: upload pipeline: %v\n", err)
 			return 1
 		}
@@ -1825,6 +1842,13 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 	defer func() { _ = os.RemoveAll(root) }()
 
 	if err := transport.UploadArtifacts(ctx, agent, root, artifacts, aggregatePipeline); err != nil {
+		if uploadArguments.telemetry != nil {
+			phase := telemetry.FailurePhaseArtifactUpload
+			if errors.Is(err, transport.ErrPipelineUpload) {
+				phase = telemetry.FailurePhasePipelineUpload
+			}
+			uploadArguments.telemetry.setFailurePhase(phase)
+		}
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: %v\n", err)
 		return 1
 	}

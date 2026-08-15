@@ -198,6 +198,10 @@ type Artifact struct {
 	Contents []byte
 }
 
+// ErrPipelineUpload identifies the pipeline-upload stage while preserving the
+// underlying agent error.
+var ErrPipelineUpload = errors.New("upload pipeline")
+
 // UploadArtifacts materializes and verifies every artifact before uploading
 // them from one root, then uploads the pipeline only after all artifacts pass.
 func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []Artifact, pipeline []byte) error {
@@ -249,7 +253,7 @@ func UploadArtifacts(ctx context.Context, agent Agent, root string, artifacts []
 		}
 	}
 	if err := agent.UploadPipeline(ctx, pipeline); err != nil {
-		return fmt.Errorf("upload pipeline: %w", err)
+		return fmt.Errorf("%w: %w", ErrPipelineUpload, err)
 	}
 	return nil
 }

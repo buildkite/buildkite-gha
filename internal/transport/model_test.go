@@ -314,6 +314,15 @@ func TestUploadArtifactsFailsBeforePipeline(t *testing.T) {
 	}
 }
 
+func TestUploadArtifactsIdentifiesPipelineFailure(t *testing.T) {
+	artifact := Artifact{Path: ".buildkite-gha/plans/plan.json", Contents: []byte("plan")}
+	artifact.Digest = Digest(artifact.Contents)
+	err := UploadArtifacts(context.Background(), Agent{Runner: &captureRunner{failAt: 2}}, t.TempDir(), []Artifact{artifact}, []byte("steps: []\n"))
+	if !errors.Is(err, ErrPipelineUpload) || !strings.Contains(err.Error(), "upload pipeline") {
+		t.Fatalf("UploadArtifacts() error = %v", err)
+	}
+}
+
 func TestCommandRunnerBoundsOutputWhileReading(t *testing.T) {
 	stdout, _, err := (CommandRunner{}).RunBounded(context.Background(), "", "sh", []string{"-c", "printf 123456789"}, nil, 8)
 	if err == nil || !strings.Contains(err.Error(), "exceeds 8 bytes") || len(stdout) != 0 {

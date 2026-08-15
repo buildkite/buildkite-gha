@@ -13,7 +13,8 @@ steps:
       scripts/verify-source-checkout "$$commit"
       distribution_root="$$(mktemp -d "$${TMPDIR:-/tmp}/buildkite-gha-shell-upload.XXXXXXXX")"
       trap 'rm -rf -- "$$distribution_root"' EXIT
-      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
+      revision="$$(git rev-parse HEAD)"
+      CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -ldflags "-X main.revision=$$revision" -o "$$distribution_root/buildkite-gha" ./cmd/buildkite-gha
       "$$distribution_root/buildkite-gha" upload \
         --event-path testdata/smoke/events/push.json \
         --runner-queue ubuntu-latest=hosted \
