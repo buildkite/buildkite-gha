@@ -294,9 +294,9 @@ Update:
 
 ## Delivery slices
 
-All four slices are implemented. The exact-commit hosted proof and GitHub
-differential oracle cover the supported runtime behavior. Implicit GHCR
-authentication remains the named backend-dependent limitation.
+All four slices are implemented. The exact same service-container oracle runs
+as a GitHub Actions workflow and in the exact-commit hosted Buildkite proof.
+Implicit GHCR authentication remains the named backend-dependent limitation.
 
 ### 1. Static syntax and Docker fidelity
 

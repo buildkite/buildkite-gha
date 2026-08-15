@@ -2707,6 +2707,39 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 	}
 }
 
+func TestLiveServiceDifferentialFixture(t *testing.T) {
+	docker := requireDocker(t)
+	sourcePath := fixturePath(t, "..", ".github", "workflows", "service-container-oracle.yml")
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "service-container-oracle.yml")
+	writeFixtureFile(t, workspace, ".github/workflows/service-container-oracle.yml", string(source))
+	eventSource, err := os.ReadFile(fixturePath(t, "smoke", "events", "workflow_dispatch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := compiler.CompileBundle(workflowPath, source, eventSource, "service-differential-live", "sha256:"+strings.Repeat("3", 64), "service-differential-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !slices.Equal(bundle.Plans[0].Job.ServiceOrder, []string{"z-writer", "a-reader", "postgres", "redis"}) {
+		t.Fatalf("differential service plans = %#v", bundle.Plans)
+	}
+	before := liveDockerOwnedResources(t, docker)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, runErr := (Runner{Docker: docker}).RunJob(ctx, bundle.Plans[0].Job, workspace)
+	if runErr != nil || result.Conclusion != "success" || result.Outputs["observation"] != "selection,context,ports,command-entrypoint,health,volume,postgres,redis" {
+		t.Fatalf("differential service result = %#v, error = %v", result, runErr)
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("differential service fixture leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestLiveUnhealthyServiceDiagnostics(t *testing.T) {
 	docker := requireDocker(t)
 	contextDir := t.TempDir()

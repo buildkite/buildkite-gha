@@ -22,7 +22,7 @@ node24="$(mise where node@24)/bin/node"
   testdata/container-runtime/.github/workflows/runtime.yml \
   | jq -e '.result == "admitted" and .admission.result == "admitted"' >/dev/null
 
-readonly tests='^(TestLiveJobContainerPersistsAcrossShellSteps|TestLiveJobContainerDefaultNonRootUser|TestLiveJobContainerCancellationKillsProcessTree|TestLiveJobContainerJavaScriptCompositeAndPost|TestLiveCompiledContainerRuntime|TestLiveAuthenticatedServiceRegistry|TestLiveManifestContainerFixtures|TestLiveUnhealthyServiceDiagnostics)$'
+readonly tests='^(TestLiveJobContainerPersistsAcrossShellSteps|TestLiveJobContainerDefaultNonRootUser|TestLiveJobContainerCancellationKillsProcessTree|TestLiveJobContainerJavaScriptCompositeAndPost|TestLiveCompiledContainerRuntime|TestLiveAuthenticatedServiceRegistry|TestLiveManifestContainerFixtures|TestLiveServiceDifferentialFixture|TestLiveUnhealthyServiceDiagnostics)$'
 output="$work/live-tests.log"
 set +e
 BUILDKITE_GHA_LIVE_REQUIRED=1 \
@@ -41,6 +41,7 @@ for test in \
   TestLiveCompiledContainerRuntime \
   TestLiveAuthenticatedServiceRegistry \
   TestLiveManifestContainerFixtures \
+  TestLiveServiceDifferentialFixture \
   TestLiveUnhealthyServiceDiagnostics
 do
   grep -F -- "--- PASS: $test " "$output" >/dev/null
@@ -51,4 +52,4 @@ if grep -F -- '--- SKIP:' "$output" >/dev/null; then
 fi
 
 echo 'CONTAINER_RUNTIME_OBSERVATION={"container":"persistent","services":"container-and-host","service_context":"id-network-ports","readiness":"health-gated","command_entrypoint":"verified","shared_volume":"verified","conditional_service":"skipped","actions":"javascript-composite-docker","cleanup":"verified"}'
-echo 'SERVICE_CONTAINER_OBSERVATION={"selection":"empty-image-skipped","context":"id-network-ports","command_entrypoint":"verified","health":"gated","volume":"named"}'
+echo 'SERVICE_CONTAINER_OBSERVATION={"selection":"static","context":"id-network-ports","command_entrypoint":"verified","health":"gated","volume":"named","databases":"postgres-redis"}'
