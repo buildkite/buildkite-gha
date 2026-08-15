@@ -95,6 +95,82 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 	}
 }
 
+func TestProcessingReportV3PreservesPerEventOutcomes(t *testing.T) {
+	validation := NewProcessingReport("ci.yml", "")
+	validation.Result = "compilable"
+	validation.SetStage("workflow-parsing", Passed)
+	push := NewProcessingReport("ci.yml", "hosted")
+	push.Result = "admitted"
+	push.Admission.Result = "admitted"
+	pullRequest := NewProcessingReport("ci.yml", "hosted")
+	pullRequest.Result = "incompatible"
+	pullRequest.SetStage("expression-validation", Failed)
+	pullRequest.Diagnostics = append(pullRequest.Diagnostics, Diagnostic{
+		Level: "error", Code: "E_EXPRESSION", Category: "compatibility",
+		Stage: "expression-validation", Message: "payload field is unsupported",
+	})
+	report := NewProcessingReportV3("ci.yml", "hosted", validation)
+	report.Evaluations = append(report.Evaluations,
+		EventEvaluation{Event: "push", Source: "generated", Report: push},
+		EventEvaluation{Event: "pull_request", Source: "generated", Report: pullRequest},
+	)
+
+	var encoded bytes.Buffer
+	if err := WriteProcessingV3(&encoded, "json", report); err != nil {
+		t.Fatal(err)
+	}
+	var decoded ProcessingReportV3
+	if err := json.Unmarshal(encoded.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Schema != ProcessingSchemaV3 || decoded.Result != "incompatible" || decoded.Status != Failed || len(decoded.Evaluations) != 2 || decoded.Evaluations[0].Report.Result != "admitted" || decoded.Evaluations[1].Report.Result != "incompatible" {
+		t.Fatalf("decoded report = %#v", decoded)
+	}
+	v2Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v2.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v3Source, err := os.ReadFile(filepath.Join("..", "..", "schemas", "processing-report-v3.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v2Document, v3Document any
+	if err := json.Unmarshal(v2Source, &v2Document); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(v3Source, &v3Document); err != nil {
+		t.Fatal(err)
+	}
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("https://buildkite.com/schemas/buildkite-gha/processing-report-v2.schema.json", v2Document); err != nil {
+		t.Fatal(err)
+	}
+	if err := compiler.AddResource("processing-report-v3.schema.json", v3Document); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := compiler.Compile("processing-report-v3.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(encoded.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err != nil {
+		t.Fatalf("processing report does not satisfy v3 schema: %v", err)
+	}
+
+	var rendered bytes.Buffer
+	if err := WriteProcessingV3(&rendered, "text", report); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"processing-report/v3", "Event-independent validation:", "Generated event push:", "Generated event pull_request:", "Result: incompatible"} {
+		if !strings.Contains(rendered.String(), want) {
+			t.Fatalf("text report = %q, want %q", rendered.String(), want)
+		}
+	}
+}
+
 func TestProcessingReportV1RemainsStrictWithoutDetail(t *testing.T) {
 	report := NewProcessingReport("ci.yml", "")
 	report.Diagnostics = append(report.Diagnostics, Diagnostic{

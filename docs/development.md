@@ -2,7 +2,7 @@
 
 ## Set up the development toolchain
 
-The repository pins Go, Node, lint, and release tools with `mise`:
+The repository pins Go, Node, lint, and packaging tools with `mise`:
 
 ```sh
 mise trust mise.toml
@@ -106,10 +106,14 @@ The branch must be pushed, and its remote commit must match `HEAD`. Use `--githu
 From a clean, up-to-date `main`, run:
 
 ```sh
-mise run release
+mise run release -- <next-v0-tag>
 ```
 
-The task runs `check`, chooses the next conventional-commit-derived `v0` tag, and pushes it. The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
+Before running the task, inspect every commit and the complete diff since the latest release. Choose a minor bump for additive compatibility, features, or breaking changes. Because the project is pre-1.0, breaking changes increment the minor version rather than creating v1. Choose a patch bump only for fixes and internal-only changes. Do not derive the bump from commit-message prefixes.
+
+The task runs `check`, fetches `origin/main` and tags, and accepts only the next pre-1.0 patch or minor tag. It then requires you to type the exact proposed tag before creating and pushing it. Stop without running the task when the changes do not warrant a release or the correct bump is ambiguous.
+
+The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
 
 `GHA_GITHUB_RELEASE_TOKEN` must be a fine-grained, repository-scoped token with Contents read and write access. Store it as a Buildkite secret restricted to this release pipeline and webhook-created `v*` tag builds, with no access from ordinary branch or pull request builds. The publisher verifies the remote tag, checkout, and Buildkite commit before requesting the secret.
 

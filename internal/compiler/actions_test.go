@@ -709,15 +709,11 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 	for _, path := range []string{"", "restore", "save"} {
 		writeAction(t, remote, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
 	}
-	for version, commit := range map[string]string{
-		"v5.0.3": actionintegration.CacheV503Commit,
-		"v5.1.0": actionintegration.CacheV5Commit,
-		"v6.1.0": actionintegration.CacheCommit,
-	} {
+	for _, commit := range actionintegration.CacheCommits() {
 		for _, path := range []string{"", "restore", "save"} {
-			name := version + "/root"
+			name := commit[:12] + "/root"
 			if path != "" {
-				name = version + "/" + path
+				name = commit[:12] + "/" + path
 			}
 			t.Run(name, func(t *testing.T) {
 				uses := "actions/cache"
@@ -746,7 +742,7 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 
 	resolved := strings.Repeat("a", 40)
 	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV503Commit) || !strings.Contains(err.Error(), actionintegration.CacheV5Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV3Commit) || !strings.Contains(err.Error(), actionintegration.CacheV4Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}
 	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})
@@ -907,8 +903,8 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		ResolveActions: true,
 		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 	}
-	compile := func(with string) ([]plan.Job, error) {
-		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" + with)
+	compile := func(commit, with string) ([]plan.Job, error) {
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -926,7 +922,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
-		plans, err := compile(with)
+		plans, err := compile(actionintegration.CheckoutV7Commit, with)
 		if err != nil {
 			t.Fatalf("checkout with %q: %v", with, err)
 		}
@@ -947,11 +943,15 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	}
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
-			_, err := compile("        with:\n" + input)
+			_, err := compile(actionintegration.CheckoutV7Commit, "        with:\n"+input)
 			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") {
 				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
+	}
+
+	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" value is unsupported") {
+		t.Fatalf("v3.7.0 later-contract input error = %v", err)
 	}
 }
 
@@ -959,6 +959,7 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	for version, commit := range map[string]string{
+		"v3.7.0":     actionintegration.CheckoutV3Commit,
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
 		"v6":         actionintegration.CheckoutV6Commit,

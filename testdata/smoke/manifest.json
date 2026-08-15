@@ -155,6 +155,24 @@
       "action_preflight": "hosted"
     },
     {
+      "id": "cache-v2-compatibility",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-compatibility.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-source Buildkite build 1173 saved a build-unique v3.4.0 archive to Buildkite Results, restored it with v6.1.0, and verified the payload.",
+      "note": "Build 1173 used implementation commit 9691b3a48bf3cf6e7eee313374ab7941f16c82f7; producer job 01a00574-e0f4-4c9d-88ff-21acce7b6152 and consumer job 01a00574-e10f-4811-803d-0043acb022df passed.",
+      "action_preflight": "hosted"
+    },
+    {
+      "id": "cache-v2-admission",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-admission.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "The hosted profile resolves and admits the restore entry point from every supported immutable actions/cache release commit.",
+      "note": "This fixture is compile and admission coverage only. It does not execute cache restores or prove a Buildkite Results roundtrip.",
+      "action_preflight": "hosted"
+    },
+    {
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",

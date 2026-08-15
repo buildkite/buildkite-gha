@@ -51,6 +51,15 @@ func TestTranslateTriggerConditionRequiresDirectBuildSource(t *testing.T) {
 	}
 }
 
+func TestValidateTriggerConditionsAllowsReusableOnlyWorkflow(t *testing.T) {
+	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "workflow_call"}}); err != nil {
+		t.Fatalf("ValidateTriggerConditions(workflow_call) error = %v", err)
+	}
+	if err := ValidateTriggerConditions([]workflow.Trigger{{Event: "issues"}}); err == nil || !strings.Contains(err.Error(), "unsupported GitHub trigger") {
+		t.Fatalf("ValidateTriggerConditions(issues) error = %v", err)
+	}
+}
+
 func TestTranslateEventTriggerConditionSelectsOnlyEffectiveEvent(t *testing.T) {
 	triggers := []workflow.Trigger{
 		{Event: "push", Branches: []string{"main"}},

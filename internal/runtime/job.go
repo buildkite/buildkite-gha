@@ -1599,7 +1599,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			if err := validateCheckoutRefProvenance(step.With, inputs, job.Event.SHA); err != nil {
 				return result, err
 			}
-			return r.runCheckout(ctx, processor, workspace, job, inputs)
+			return r.runCheckout(ctx, processor, workspace, job, lock.Commit, inputs)
 		}
 		if usesUploadArtifactAdapter(lock) {
 			inputs := evaluatedWith

@@ -549,17 +549,18 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-**🟡 Supported subset.** Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** The final v3.7.0 release commit is admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
 
 | Release | Commit |
 | --- | --- |
+| v3.7.0 | [`a37ce9120846195fa4ece8f58b268e6043cb2f26`](https://github.com/actions/checkout/tree/a37ce9120846195fa4ece8f58b268e6043cb2f26) |
 | v4 | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/tree/11d5960a326750d5838078e36cf38b85af677262) |
 | v5 | [`fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09`](https://github.com/actions/checkout/tree/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09) |
 | v6 | [`d23441a48e516b6c34aea4fa41551a30e30af803`](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30e30af803) |
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the current adapter contract; the upstream JavaScript doesn't run. v1 through v3 and unknown commits are unsupported. Maintainers can update the snapshot with `go generate ./internal/action/integration`.
+Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. v1, v2, pre-v3.7.0 commits, and unknown commits are unsupported. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen v3 admission.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
@@ -570,19 +571,23 @@ The adapter checks out a detached commit or static branch from the event reposit
 | `token` | Omitted only. |
 | `ssh-key`, `ssh-known-hosts` | Omitted or empty. |
 | `ssh-strict` | Omitted or `true`. |
-| `ssh-user` | Omitted or `git`. |
+| `ssh-user` | v4 and later: omitted or `git`. v3.7.0: omitted. |
 | `persist-credentials` | Omitted or `false`. |
 | `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory. |
 | `clean` | Omitted or `true`; the root workspace or selected path must be empty or absent. |
-| `filter`, `sparse-checkout` | Omitted or empty. |
+| `filter` | v4 and later: omitted or empty. v3.7.0: omitted. |
+| `sparse-checkout` | Omitted or empty. |
 | `sparse-checkout-cone-mode` | Omitted or `true`. |
 | `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. |
-| `fetch-tags`, `show-progress` | Omitted, `true`, or `false`. |
+| `fetch-tags` | Omitted, `true`, or `false`. |
+| `show-progress` | v4 and later: omitted, `true`, or `false`. v3.7.0: omitted. |
 | `lfs` | Omitted or `false`. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
 | `set-safe-directory` | Omitted or `true`. |
 | `github-server-url` | Omitted, empty, or `https://github.com`. |
 | `allow-unsafe-pr-checkout` | Omitted or `false`. |
+
+The `ref` and `commit` outputs are unavailable for v3.7.0. Upstream added them in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
@@ -648,9 +653,35 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-**🟡 Supported subset.** Public runtime support remains limited to `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9). Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service.
+**🟡 Supported subset.** The exact releases below run their stock cache-v2 clients against the Buildkite Results service. Root, `restore`, and `save` entry points are supported.
 
-The hosted profile also admits the exact v5.0.3 and v5.1.0 commits for runtime-proof collection. They are not part of the public compatibility contract until that hosted proof is complete. Other v5 commits, v4, and unknown v6 commits remain unsupported.
+| Release | Commit | Node | `@actions/cache` |
+| --- | --- | --- | --- |
+| v3.4.0 | [`f4b3439a656ba812b8cb417d2d49f9c810103092`](https://github.com/actions/cache/tree/f4b3439a656ba812b8cb417d2d49f9c810103092) | 16 | 4.0.0 |
+| v3.4.2 | [`387e18722e6ff315b24a3b8b071feddd27b7bf7e`](https://github.com/actions/cache/tree/387e18722e6ff315b24a3b8b071feddd27b7bf7e) | 16 | 4.0.1 |
+| v3.4.3 | [`2f8e54208210a422b2efd51efaa6bd6d7ca8920f`](https://github.com/actions/cache/tree/2f8e54208210a422b2efd51efaa6bd6d7ca8920f) | 16 | 4.0.2 |
+| v3.5.0 | [`6f8efc29b200d32929f49075959781ed54ec270c`](https://github.com/actions/cache/tree/6f8efc29b200d32929f49075959781ed54ec270c) | 16 | 4.1.0 |
+| v4.2.0 | [`1bd1e32a3bdc45362d1e726936510720a7c30a57`](https://github.com/actions/cache/tree/1bd1e32a3bdc45362d1e726936510720a7c30a57) | 20 | 4.0.0 |
+| v4.2.1 | [`0c907a75c2c80ebcb7f088228285e798b750cf8f`](https://github.com/actions/cache/tree/0c907a75c2c80ebcb7f088228285e798b750cf8f) | 20 | 4.0.1 |
+| v4.2.2 | [`d4323d4df104b026a6aa633fdb11d772146be0bf`](https://github.com/actions/cache/tree/d4323d4df104b026a6aa633fdb11d772146be0bf) | 20 | 4.0.2 |
+| v4.2.3 | [`5a3ec84eff668545956fd18022155c47e93e2684`](https://github.com/actions/cache/tree/5a3ec84eff668545956fd18022155c47e93e2684) | 20 | 4.0.3 |
+| v4.2.4 | [`0400d5f644dc74513175e3cd8d07132dd4860809`](https://github.com/actions/cache/tree/0400d5f644dc74513175e3cd8d07132dd4860809) | 20 | 4.0.5 |
+| v4.3.0 | [`0057852bfaa89a56745cba8c7296529d2fc39830`](https://github.com/actions/cache/tree/0057852bfaa89a56745cba8c7296529d2fc39830) | 20 | 4.1.0 |
+| v5.0.0 | [`a7833574556fa59680c1b7cb190c1735db73ebf0`](https://github.com/actions/cache/tree/a7833574556fa59680c1b7cb190c1735db73ebf0) | 24 | 5.0.0 |
+| v5.0.1 | [`9255dc7a253b0ccc959486e2bca901246202afeb`](https://github.com/actions/cache/tree/9255dc7a253b0ccc959486e2bca901246202afeb) | 24 | 5.0.1 |
+| v5.0.2 | [`8b402f58fbc84540c8b491a91e594a4576fec3d7`](https://github.com/actions/cache/tree/8b402f58fbc84540c8b491a91e594a4576fec3d7) | 24 | 5.0.3 |
+| v5.0.3 | [`cdf6c1fa76f9f475f3d7449005a359c84ca0f306`](https://github.com/actions/cache/tree/cdf6c1fa76f9f475f3d7449005a359c84ca0f306) | 24 | 5.0.5 |
+| v5.0.4 | [`668228422ae6a00e4ad889ee87cd7109ec5666a7`](https://github.com/actions/cache/tree/668228422ae6a00e4ad889ee87cd7109ec5666a7) | 24 | 5.0.5 |
+| v5.0.5 | [`27d5ce7f107fe9357f9df03efb73ab90386fccae`](https://github.com/actions/cache/tree/27d5ce7f107fe9357f9df03efb73ab90386fccae) | 24 | 5.0.5 |
+| v5.1.0 | [`caa296126883cff596d87d8935842f9db880ef25`](https://github.com/actions/cache/tree/caa296126883cff596d87d8935842f9db880ef25) | 24 | 5.1.0 |
+| v6.0.0 | [`2c8a9bd7457de244a408f35966fab2fb45fda9c8`](https://github.com/actions/cache/tree/2c8a9bd7457de244a408f35966fab2fb45fda9c8) | 24 | 6.0.1 |
+| v6.1.0 | [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) | 24 | 6.1.0 |
+
+The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. A non-routable `ACTIONS_CACHE_URL` satisfies the legacy availability gate; cache traffic still uses `ACTIONS_RESULTS_URL`. Their tar with zstd-or-gzip archive versioning is compatible across releases.
+
+v3.4.1 is excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1). Releases before v3.4.0 and v4.2.0 bundle cache-v1 clients. Floating tags, prereleases, unknown commits, and future releases require a source and bundled-dependency audit before admission.
+
+Hosted runtime proof covers v6.1.0 and the cross-generation v3.4.0 producer to v6.1.0 consumer lifecycle. [Build 1173](https://buildkite.com/buildkite/buildkite-gha/builds/1173) saved a build-unique v3 archive to Buildkite Results, restored it with v6, and verified the payload. The hosted profile validates resolution, compilation, and admission for every listed commit but does not execute the actions.
 
 JavaScript and Docker actions with compatible bundled cache clients also receive job-bound cache-v2 credentials when the service is available. Root invocations of `actions/setup-node`, `actions/setup-java`, `actions/setup-python`, `actions/setup-go`, and `actions/setup-dotnet` use a subprocess-scoped synthetic `GITHUB_SERVER_URL` when the real host would make their clients select cache v1. Each allowlist entry requires an audit of the action source and bundled dependencies to confirm that `GITHUB_SERVER_URL` affects only caching behavior and is not load-bearing for any request the action makes. The workflow expression context retains the real server URL. Ordinary `run` steps and native action adapters do not receive cache credentials.
 
@@ -753,11 +784,13 @@ hosted-toolchains images provide. macOS images are unsupported.
 
 ## Validation
 
-Check syntax and static graph construction without an event:
+Check syntax, static graph construction, and every declared trigger without an event:
 
 ```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
+
+This result is event-independent and does not claim hosted admission.
 
 Apply the same profile as production upload:
 
@@ -768,9 +801,13 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
+Use `--event push`, `--event pull_request`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. Generated snapshots are compatibility test inputs, not equivalents to real payloads. The options are mutually exclusive.
+
+Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes.
+
 The results mean:
 
-- **Compilable**: Syntax and the static job graph can be translated.
+- **Compilable**: Syntax, declared triggers, and the static job graph can be translated.
 - **Not applicable**: The workflow does not declare the selected event, so upload would skip it without compiling it.
 - **Admitted**: Resolved actions and generated plans pass production policy.
 - **Runtime-proven**: Repository tests or hosted evidence have executed the behavior.

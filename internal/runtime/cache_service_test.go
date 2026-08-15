@@ -214,21 +214,38 @@ func (p *sequenceCacheCredentials) Credentials(context.Context) (CacheCredential
 }
 
 func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		using  string
+		commit string
+	}{
+		{name: "v4.3.0", using: "node20", commit: actionintegration.CacheV4Commit},
+		{name: "v6.1.0", using: "node24", commit: actionintegration.CacheCommit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testCacheServiceLifecycleUsesFreshIsolatedCredentials(t, test.using, test.commit)
+		})
+	}
+}
+
+func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, commit string) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/cache.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "package.json", `{"type":"module"}`)
-	writeFixtureFile(t, remote, "action.yml", "name: cache service fixture\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "action.yml", "name: cache service fixture\nruns:\n  using: "+using+"\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
-const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"];
+if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache did not use managed Node 24");
+const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_URL"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
+if (process.env.ACTIONS_CACHE_URL !== %q) throw new Error("unexpected ACTIONS_CACHE_URL: " + process.env.ACTIONS_CACHE_URL);
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 for (const name of [
-  "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
+  "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
   "OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
   "TAR_OPTIONS",
@@ -240,7 +257,7 @@ if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, githubServerURLOverride, cacheActionToolPath, phase)
+`, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
 		writeFixtureFile(t, remote, phase+".js", program)
 	}
 	writeFixtureFile(t, remote, "ordinary/action.yml", "name: ordinary\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
@@ -289,7 +306,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 			"ACTIONS_RESULTS_URL": "https://attacker.invalid", "ACTIONS_RUNTIME_TOKEN": "workflow-token", "ACTIONS_CACHE_SERVICE_V2": "false",
 			"ACTIONS_CACHE_URL": "https://legacy.invalid", "ACTIONS_RUNTIME_URL": "https://legacy.invalid",
 		}, Action: &plan.ActionSelector{Lock: ordinaryID}},
-		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
+		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + commit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
 		{ID: "shell-after", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
 	})
 	job.Schema = plan.Schema
@@ -297,7 +314,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "ATTACKER_BIN": attackerBin}
 	job.Actions = []plan.ActionLock{
-		{ID: cacheID, Source: "github", Repository: "actions/cache", RequestedRef: actionintegration.CacheCommit, Commit: actionintegration.CacheCommit, SourceDigest: digest},
+		{ID: cacheID, Source: "github", Repository: "actions/cache", RequestedRef: commit, Commit: commit, SourceDigest: digest},
 		{ID: ordinaryID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("a", 40), Path: "ordinary", SourceDigest: digest},
 	}
 	provider := &sequenceCacheCredentials{tokens: []string{

@@ -6,7 +6,7 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 
 - Use the fewest words that preserve meaning. Prefer examples and tables to long explanations.
 - Write directly, in active voice, with sentence-case headings.
-- Describe current behavior. Keep plans and remaining work in Linear.
+- Describe current behavior in product documentation. Durable engineering plans may live in `docs/plans/`; keep task tracking and remaining work in Linear.
 - State each fact once, then link to its source of truth. `README.md` is the overview; `docs/compatibility.md` owns supported behavior; the CLI, security, and development guides own their respective details.
 - Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
 
@@ -19,7 +19,7 @@ CLI. Manual GUI testing does not apply.
 ### Toolchain (managed by mise)
 
 - The toolchain (Go 1.26.5, Node 20/24, `golangci-lint`, `shellcheck`, `jq`,
-  `goreleaser`, `svu`) is pinned in `mise.toml` and installed with `mise`.
+  `goreleaser`) is pinned in `mise.toml` and installed with `mise`.
 - `mise` is installed at `~/.local/bin/mise` and activated for interactive
   shells via `~/.bashrc`. The startup update script runs `mise install`, so
   the toolchain is already present at session start.
@@ -49,3 +49,16 @@ CLI. Manual GUI testing does not apply.
   smoke:profile` and the hosted runtime proofs (`bk build create ...`) require
   network access / Buildkite SaaS and are **optional** — not needed for local
   dev, build, or the default check gate.
+
+### Releases
+
+- When explicitly asked to make a release, fetch `origin/main` and tags, then
+  inspect every commit and the complete diff from the latest stable tag to
+  `origin/main`. Do not infer the bump from commit-message prefixes.
+- Choose a minor bump for additive compatibility, features, or breaking
+  changes. This project is pre-1.0, so breaking changes also increment the
+  minor version. Choose a patch bump only for fixes and internal-only changes.
+- State the proposed version and the highest-impact reason for it. If no
+  release is warranted or the bump is ambiguous, stop and ask the user.
+- Run `mise run release -- <next-v0-tag>`. The task validates the proposed tag
+  and preserves the release safeguards before creating and pushing it.
