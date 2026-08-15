@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -261,7 +262,7 @@ printf '%s\n' "$*" >> ` + shellTestQuote(gitLog) + `
 	}
 	var logs bytes.Buffer
 	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(
-		context.Background(), newCommandProcessor(&logs, &logs), workspace, job, nil,
+		context.Background(), newCommandProcessor(&logs, &logs), workspace, job, actionintegration.CheckoutV7Commit, nil,
 	)
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
@@ -291,18 +292,18 @@ func TestCheckoutAdapterRejectsUnsupportedInputsAndState(t *testing.T) {
 	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
 	processor := newCommandProcessor(io.Discard, io.Discard)
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: repository, SHA: sha}}
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "unsupported") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, map[string]string{"token": ""}); err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("runCheckout() unsupported input error = %v", err)
 	}
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "occupied"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "empty workspace") {
 		t.Fatalf("nonempty workspace error = %v", err)
 	}
 	job.Event.Provider = "other"
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event") {
 		t.Fatalf("invalid event error = %v", err)
 	}
 }
@@ -361,6 +362,25 @@ func TestCheckoutRefOutput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := checkoutRefOutput(test.inputs, eventRef); got != test.want {
 				t.Fatalf("checkoutRefOutput() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		commit string
+		want   map[string]string
+	}{
+		{name: "v3.7.0", commit: actionintegration.CheckoutV3Commit, want: map[string]string{"ref": "refs/heads/main"}},
+		{name: "v4 and later", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			outputs := map[string]string{}
+			setCheckoutOutputs(outputs, test.commit, "refs/heads/main", strings.Repeat("a", 40))
+			if !maps.Equal(outputs, test.want) {
+				t.Fatalf("checkout outputs = %#v, want %#v", outputs, test.want)
 			}
 		})
 	}
@@ -797,7 +817,7 @@ func TestCheckoutRejectsInvalidRepositoryBeforeInspectingWorkspace(t *testing.T)
 	}
 	job := plan.Job{Event: plan.Event{Provider: "github", Repository: "owner/..", SHA: strings.Repeat("a", 40)}}
 	processor := newCommandProcessor(io.Discard, io.Discard)
-	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
+	if _, err := (Runner{}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "valid GitHub or Origin event repository") {
 		t.Fatalf("checkout repository validation error = %v", err)
 	}
 }
@@ -943,7 +963,7 @@ printf '%s|%s\n' "$PWD" "$*" >> ` + shellTestQuote(gitLog) + `
 	for name := range proxyEnvironment {
 		t.Setenv(name, "http://late-workflow-value.invalid")
 	}
-	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, map[string]string{"path": "test-catalog"})
+	result, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, map[string]string{"path": "test-catalog"})
 	if err != nil {
 		t.Fatalf("runCheckout() error = %v, logs = %q", err, logs.String())
 	}
@@ -1091,7 +1111,7 @@ esac
 	credentials := &AgentRepositoryCredentials{Agent: agent, JobID: testCacheJobID, JobToken: "job-secret"}
 	var logs bytes.Buffer
 	processor := newCommandProcessor(&logs, &logs)
-	if _, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, nil); err == nil {
+	if _, err := (Runner{Git: git, RepositoryCredentials: credentials, Stdout: &logs, Stderr: &logs}).runCheckout(context.Background(), processor, workspace, job, actionintegration.CheckoutV7Commit, nil); err == nil {
 		t.Fatal("runCheckout() succeeded after repository-provider helper denial")
 	}
 	if strings.Contains(logs.String(), "job-secret") || !strings.Contains(logs.String(), "***") {
@@ -1272,7 +1292,7 @@ func TestRepositoryProviderCheckoutRequiresPreResolvedGit(t *testing.T) {
 		RequiredCapabilities: []string{"provider-token-read"},
 	}
 	credentials := &AgentRepositoryCredentials{Agent: "/usr/bin/buildkite-agent", JobID: testCacheJobID, JobToken: "job-secret"}
-	if _, err := (Runner{Git: "git", RepositoryCredentials: credentials}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
+	if _, err := (Runner{Git: "git", RepositoryCredentials: credentials}).runCheckout(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), job, actionintegration.CheckoutV7Commit, nil); err == nil || !strings.Contains(err.Error(), "resolved before workflow execution") {
 		t.Fatalf("runCheckout() unresolved Git error = %v", err)
 	}
 }

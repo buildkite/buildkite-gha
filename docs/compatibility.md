@@ -533,17 +533,18 @@ Pre, main, and post phases; inputs; outputs; state; and LIFO post ordering are s
 
 ### Checkout action
 
-**🟡 Supported subset.** Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
+**🟡 Supported subset.** The final v3.7.0 release commit is admitted exactly. Resolved commits in the v4-and-later range of the static [`actions/checkout` upstream `main` snapshot](https://github.com/actions/checkout/tree/f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a) are also admitted. The following known releases remain admitted even when their commits aren't reachable from that snapshot:
 
 | Release | Commit |
 | --- | --- |
+| v3.7.0 | [`a37ce9120846195fa4ece8f58b268e6043cb2f26`](https://github.com/actions/checkout/tree/a37ce9120846195fa4ece8f58b268e6043cb2f26) |
 | v4 | [`11d5960a326750d5838078e36cf38b85af677262`](https://github.com/actions/checkout/tree/11d5960a326750d5838078e36cf38b85af677262) |
 | v5 | [`fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09`](https://github.com/actions/checkout/tree/fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09) |
 | v6 | [`d23441a48e516b6c34aea4fa41551a30e30af803`](https://github.com/actions/checkout/tree/d23441a48e516b6c34aea4fa41551a30e30af803) |
 | v7.0.0 corpus pin | [`9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0`](https://github.com/actions/checkout/tree/9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0) |
 | v7.0.1 | [`3d3c42e5aac5ba805825da76410c181273ba90b1`](https://github.com/actions/checkout/tree/3d3c42e5aac5ba805825da76410c181273ba90b1) |
 
-Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the current adapter contract; the upstream JavaScript doesn't run. v1 through v3 and unknown commits are unsupported. Maintainers can update the snapshot with `go generate ./internal/action/integration`.
+Mutable refs work only while they resolve to the upstream `main` snapshot or a known release above. Every admitted commit uses the native adapter; the upstream JavaScript doesn't run. v1, v2, pre-v3.7.0 commits, and unknown commits are unsupported. Maintainers can update the v4-and-later snapshot with `go generate ./internal/action/integration`; this doesn't widen v3 admission.
 
 The adapter checks out a detached commit or static branch from the event repository at the workspace root or a clean top-level directory. It uses Buildkite repository-provider Git credentials when the job provides them; otherwise, it fetches anonymously. Credentials are scoped to each fetch command and verified submodule fetch command and are never persisted.
 
@@ -554,19 +555,23 @@ The adapter checks out a detached commit or static branch from the event reposit
 | `token` | Omitted only. |
 | `ssh-key`, `ssh-known-hosts` | Omitted or empty. |
 | `ssh-strict` | Omitted or `true`. |
-| `ssh-user` | Omitted or `git`. |
+| `ssh-user` | v4 and later: omitted or `git`. v3.7.0: omitted. |
 | `persist-credentials` | Omitted or `false`. |
 | `path` | Omitted, empty, or one clean non-`.git` top-level workspace directory. |
 | `clean` | Omitted or `true`; the root workspace or selected path must be empty or absent. |
-| `filter`, `sparse-checkout` | Omitted or empty. |
+| `filter` | v4 and later: omitted or empty. v3.7.0: omitted. |
+| `sparse-checkout` | Omitted or empty. |
 | `sparse-checkout-cone-mode` | Omitted or `true`. |
 | `fetch-depth` | Omitted or a nonnegative integer; `0` fetches full history. |
-| `fetch-tags`, `show-progress` | Omitted, `true`, or `false`. |
+| `fetch-tags` | Omitted, `true`, or `false`. |
+| `show-progress` | v4 and later: omitted, `true`, or `false`. v3.7.0: omitted. |
 | `lfs` | Omitted or `false`. |
 | `submodules` | Omitted, `false`, `true`, or `recursive`; whitespace is trimmed and casing is ignored. |
 | `set-safe-directory` | Omitted or `true`. |
 | `github-server-url` | Omitted, empty, or `https://github.com`. |
 | `allow-unsafe-pr-checkout` | Omitted or `false`. |
+
+The adapter preserves the v3.7.0 runtime `ref` output, which upstream set without declaring in `action.yml`. The `commit` output is available only for v4 and later because upstream added it in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 
