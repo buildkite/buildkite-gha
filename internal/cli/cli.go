@@ -46,19 +46,21 @@ const usage = `Usage:
   buildkite-gha --version
 
 Commands:
-  validate  Validate the supported static workflow subset
-  compile   Compile a workflow to deterministic Buildkite pipeline YAML
-  upload    Compile and upload a Buildkite pipeline
-  run-job   Run a compiled job plan
+  validate                    Validate the supported static workflow subset
+  compile                     Compile a workflow to deterministic Buildkite pipeline YAML
+  upload                      Compile and upload a Buildkite pipeline
+  migrate-secrets             Prepare or run an OIDC-authenticated secrets migration
+  run-job                     Run a compiled job plan
 
 Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted] [--format text|json] <workflow>\n",
-	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
-	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
+	"validate":        "Usage: buildkite-gha validate [--event-path <path>] [--profile hosted] [--format text|json] <workflow>\n",
+	"compile":         "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
+	"upload":          "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
+	"migrate-secrets": "Usage:\n  buildkite-gha migrate-secrets prepare [--organization <slug>] [--cluster <id>] [--pipeline <slug>] [--policy-file <path>] [--secret <name>]... [--match <glob>]... [--output <path>]\n  buildkite-gha migrate-secrets run --workflow <path>\n",
+	"run-job":         "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {
@@ -70,6 +72,8 @@ func writeCommandHelp(stdout io.Writer, command string) {
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
 		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, unmapped macos-latest targets the hosted macos-medium queue, and every other macOS label requires an explicit queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The experimental --experimental-runner-user option provisions and uses a non-root Linux runner identity; it does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+	case "migrate-secrets":
+		_, _ = fmt.Fprint(stdout, "\nPrepare discovers names through gh and destinations through bk, then writes reviewable workflow YAML. Run creates a short-lived one-use Buildkite grant and dispatches the committed default-branch workflow. Neither command commits, pushes, merges, or deletes repository files.\n")
 	}
 }
 
@@ -114,11 +118,15 @@ func repositoryProviderGitCredentialsEnabled(getenv func(string) string) bool {
 }
 
 // Run executes the command and returns its process exit code.
-func Run(args []string, stdout, stderr io.Writer, version string) int {
-	return run(args, stdout, stderr, version, transport.CommandRunner{Stderr: stderr})
+func Run(args []string, stdout, stderr io.Writer, clientVersion string) int {
+	return runWithInput(args, os.Stdin, stdout, stderr, clientVersion, transport.CommandRunner{Stderr: stderr})
 }
 
 func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRunner transport.Runner) int {
+	return runWithInput(args, strings.NewReader(""), stdout, stderr, clientVersion, agentRunner)
+}
+
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer, clientVersion string, agentRunner transport.Runner) int {
 	if len(args) == 0 {
 		_, _ = fmt.Fprint(stderr, usage)
 		return 2
@@ -155,6 +163,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 				return compile(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "upload":
 				return upload(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+			case "migrate-secrets":
+				return migrateSecrets(args[1:], stdin, stdout, stderr, agentRunner)
 			case "run-job":
 				return runJob(args[1:], stdout, stderr, version, clientVersion, transport.Agent{Runner: agentRunner})
 			default:
