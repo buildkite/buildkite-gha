@@ -46,11 +46,10 @@ Node. Admission does not execute action code or prove that a generic action is
 independent of GitHub-only artifact, cache, token, or OIDC services.
 The exact audited `actions/upload-artifact` and exact-name
 `actions/download-artifact` commits are admitted through bounded native
-adapters. The exact audited `actions/cache` v4.3.0, v5.0.3, v5.1.0, and v6.1.0 commits
-are also admitted by this profile. This compile/admission evidence does not
-change the public compatibility contract, which remains v6-only pending hosted
-runtime proof. Other cache commits, artifact merge and broad download modes,
-and unsupported artifact commits remain rejected. The profile leaves unknown
+adapters. The exact audited cache-v2-capable `actions/cache` release commits are
+also admitted by this profile. This compile/admission evidence does not prove a
+hosted cache roundtrip. Unpublished, withdrawn, older cache-v1, artifact merge,
+broad download, and unsupported artifact commits remain rejected. The profile leaves unknown
 generic service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are
 deliberately not marked for this profile: their execution is proven separately,

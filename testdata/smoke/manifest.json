@@ -155,12 +155,12 @@
       "action_preflight": "hosted"
     },
     {
-      "id": "cache-v4",
-      "workflow": "testdata/smoke/.github/workflows/cache-v4.yml",
+      "id": "cache-v2-compatibility",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-compatibility.yml",
       "event": "testdata/smoke/events/push.json",
       "expectation": "compile-pass",
-      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit only the audited actions/cache v4.3.0 commit; lifecycle coverage verifies managed Node 24 and isolated cache-v2 credentials.",
-      "note": "This build-unique producer-to-consumer roundtrip remains compile-only until the exact v4.3.0 commit passes against the hosted Buildkite Results service.",
+      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit the audited cache-v2 release commits and preserve isolated per-phase credentials.",
+      "note": "This build-unique v3.4.0 producer to v6.1.0 consumer proves the oldest and newest admitted archive lifecycle at compile time. It remains compile-only until the cross-generation roundtrip passes against the hosted Buildkite Results service.",
       "action_preflight": "hosted"
     },
     {

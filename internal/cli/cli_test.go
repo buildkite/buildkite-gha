@@ -3680,7 +3680,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	workflowDirectory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
 	workflowPaths := []string{
 		filepath.Join(workflowDirectory, "artifact-multi-prefix.yml"),
-		filepath.Join(workflowDirectory, "cache-v4.yml"),
+		filepath.Join(workflowDirectory, "cache-v2-compatibility.yml"),
 		filepath.Join(workflowDirectory, "cache-v5.yml"),
 		filepath.Join(workflowDirectory, "cache-v6.yml"),
 		filepath.Join(workflowDirectory, "concurrent.yml"),
@@ -3730,7 +3730,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	wantLabels := []string{"bounded multi-prefix artifact selection", "actions/cache v4 proof", "actions/cache v5 proof", "actions/cache v6 proof", "buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
+	wantLabels := []string{"bounded multi-prefix artifact selection", "actions/cache v2 compatibility proof", "actions/cache v5 proof", "actions/cache v6 proof", "buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
 	seenKeys := make(map[string]bool)
 	seenCheckNames := make(map[string]bool)
 	for i, group := range pipeline.Steps {
@@ -6584,7 +6584,7 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 }
 
 func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
-	for _, commit := range []string{actionintegration.CacheV4Commit, actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+	for _, commit := range actionintegration.CacheCommits() {
 		for _, path := range []string{"", "restore", "save"} {
 			action := plan.ActionLock{Source: "github", Repository: "actions/cache", Path: path, Commit: commit}
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
@@ -6619,7 +6619,7 @@ func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 	}
 
 	locks := []plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}}
-	for _, commit := range []string{actionintegration.CacheV4Commit, actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+	for _, commit := range actionintegration.CacheCommits() {
 		locks = append(locks[:1], plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore", Commit: commit})
 		required, err = cacheServiceRequired(locks)
 		if err != nil || !required {
