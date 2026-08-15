@@ -6,7 +6,7 @@ Follow the Buildkite [writing style guide](https://github.com/buildkite/docs/blo
 
 - Use the fewest words that preserve meaning. Prefer examples and tables to long explanations.
 - Write directly, in active voice, with sentence-case headings.
-- Describe current behavior. Keep plans and remaining work in Linear.
+- Describe current behavior in product documentation. Durable engineering plans may live in `docs/plans/`; keep task tracking and remaining work in Linear.
 - State each fact once, then link to its source of truth. `README.md` is the overview; `docs/compatibility.md` owns supported behavior; the CLI, security, and development guides own their respective details.
 - Remove repetition, not behavior, boundaries, limits, warnings, or useful examples.
 
