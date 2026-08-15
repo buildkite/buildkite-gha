@@ -149,8 +149,20 @@ type Container struct {
 // Service is a named service container. Services are sorted by Name because
 // actionlint v1.7.12 exposes them as a map and does not retain source order.
 type Service struct {
-	Name      string    `json:"name"`
-	Container Container `json:"container"`
+	Name      string           `json:"name"`
+	Container ServiceContainer `json:"container"`
+}
+
+// ServiceContainer is the GitHub Actions service-container definition.
+type ServiceContainer struct {
+	Image      string            `json:"image"`
+	Env        map[string]string `json:"env,omitempty"`
+	Ports      []string          `json:"ports,omitempty"`
+	Volumes    []string          `json:"volumes,omitempty"`
+	Options    string            `json:"options,omitempty"`
+	Command    string            `json:"command,omitempty"`
+	Entrypoint string            `json:"entrypoint,omitempty"`
+	Span       Span              `json:"span"`
 }
 
 // ReusableWorkflowCall is a job-level invocation of another workflow.

@@ -218,6 +218,7 @@ func Validate(path string, source []byte) (Report, error) {
 		Payload: map[string]any{},
 	}
 	context := compileContext(event, nil, path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
 	context.GitHub["head_ref"] = "validation"
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
@@ -264,6 +265,7 @@ func ValidateEventWithOptions(path string, source, eventSource []byte, options O
 	}
 	event.Trust = options.EventTrust
 	context := compileContext(event, options.Vars.snapshot(), path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
 	_, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -578,7 +580,11 @@ instances:
 				job.Services = make(map[string]plan.Container, len(instance.Services))
 			}
 			for _, service := range instance.Services {
-				job.Services[service.Name] = plan.Container{Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...)}
+				job.Services[service.Name] = plan.Container{
+					Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...),
+					Volumes: append([]string(nil), service.Container.Volumes...), Options: service.Container.Options,
+					Command: service.Container.Command, Entrypoint: service.Container.Entrypoint,
+				}
 			}
 			if err := job.Validate(); err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -701,6 +707,7 @@ func compile(path string, source, eventSource []byte, options Options) (IR, erro
 	event.Trust = options.EventTrust
 	vars := options.Vars.snapshot()
 	context := compileContext(event, vars, path, parsed.Name)
+	context.Inputs = workflowDispatchInputs(parsed, event)
 	workflowConcurrencyGroup, concurrencyErr := resolveConcurrency(path, "", parsed.Concurrency, context, nil)
 	concurrencyErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", concurrencyErr)
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
@@ -832,6 +839,47 @@ func compileContext(event Event, vars map[string]string, workflowPath, workflowN
 		Event: event.Payload,
 		Vars:  vars,
 	}
+}
+
+func workflowDispatchInputs(parsed *workflow.Workflow, event Event) map[string]any {
+	if event.Event != "workflow_dispatch" && event.Event != "validation" {
+		return nil
+	}
+	var declarations []workflow.DispatchInput
+	for _, trigger := range parsed.Triggers {
+		if trigger.Event == "workflow_dispatch" && trigger.Dispatch != nil {
+			declarations = trigger.Dispatch.Inputs
+			break
+		}
+	}
+	provided, _ := event.Payload["inputs"].(map[string]any)
+	result := make(map[string]any, len(declarations))
+	for _, declaration := range declarations {
+		value, ok := provided[declaration.Name]
+		if !ok {
+			if declaration.Default != "" {
+				value = declaration.Default
+			} else {
+				value = zeroInputValue(declaration.Type)
+			}
+		}
+		switch declaration.Type {
+		case "boolean":
+			if text, isString := value.(string); isString {
+				if parsed, err := strconv.ParseBool(text); err == nil {
+					value = parsed
+				}
+			}
+		case "number":
+			if text, isString := value.(string); isString {
+				if parsed, err := strconv.ParseFloat(text, 64); err == nil {
+					value = parsed
+				}
+			}
+		}
+		result[declaration.Name] = value
+	}
+	return result
 }
 
 func eventHeadRef(event Event) string {
@@ -970,7 +1018,17 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		jobFailed := failedJobs[id]
 		matrices := matricesByJob[id]
 		concurrencyGroups := make(map[string]struct{}, len(matrices))
-		for _, matrix := range matrices {
+		for matrixIndex, matrix := range matrices {
+			strategy := map[string]any{"job-index": matrixIndex, "job-total": len(matrices), "fail-fast": true, "max-parallel": len(matrices)}
+			if job.FailFast != nil {
+				strategy["fail-fast"] = *job.FailFast
+			}
+			if job.MaxParallel != nil {
+				strategy["max-parallel"] = *job.MaxParallel
+			}
+			instanceContext := context
+			instanceContext.Matrix = matrix
+			instanceContext.Strategy = strategy
 			compileConditionErr := supportedCompileTimeConditions(jobPath, job, context, matrix)
 			instanceJob := resolveCompileTimeConditions(job, context, matrix)
 			conditionValidationJob := instanceJob
@@ -992,6 +1050,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				continue
 			}
 			instanceKeys[key] = job.ID
+			resolvedServices, serviceErr := resolveCompileServices(instanceJob.Services, instanceContext)
 			candidate := JobInstance{
 				Key:                     key,
 				LogicalJobID:            job.ID,
@@ -1008,7 +1067,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				DefaultWorkingDirectory: job.DefaultWorkingDirectory,
 				Outputs:                 cloneMap(job.Outputs),
 				Container:               job.Container,
-				Services:                append([]workflow.Service(nil), job.Services...),
+				Services:                resolvedServices,
 				SourcePath:              jobPath,
 				SourceDigest:            sourceDigests[id],
 				RepositoryRoot:          sourceRoots[id],
@@ -1018,7 +1077,10 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 			result.candidates = append(result.candidates, candidate)
 
 			valid := true
-			if compileConditionErr != nil {
+			if serviceErr != nil {
+				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, job.Span.Start.Line, job.Span.Start.Column, job.ID, key, "", 0, jobError(jobPath, job, fmt.Sprintf("resolve service containers: %v", serviceErr))))
+				valid = false
+			} else if compileConditionErr != nil {
 				diagnostics = append(diagnostics, attributedProcessingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", jobPath, 0, 0, job.ID, key, "", 0, compileConditionErr))
 				valid = false
 			} else if err := supportedConditions(jobPath, conditionValidationJob, matrix, true); err != nil {
@@ -1147,6 +1209,59 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	}
 	result.instances = instances
 	return result, errors.Join(diagnostics...)
+}
+
+func resolveCompileServices(services []workflow.Service, context expression.CompileContext) ([]workflow.Service, error) {
+	resolved := make([]workflow.Service, 0, len(services))
+	for _, service := range services {
+		container := service.Container
+		container.Env = cloneMap(container.Env)
+		container.Ports = append([]string(nil), container.Ports...)
+		container.Volumes = append([]string(nil), container.Volumes...)
+		fields := []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint}
+		for _, field := range fields {
+			value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+			if err != nil {
+				return nil, fmt.Errorf("service %q: %w", service.Name, err)
+			}
+			*field = value
+		}
+		if container.Image == "" {
+			continue
+		}
+		for key, value := range container.Env {
+			resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+			if err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", service.Name, key, err)
+			}
+			container.Env[key] = resolvedValue
+		}
+		for _, values := range [][]string{container.Ports, container.Volumes} {
+			for j, value := range values {
+				resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
+				if err != nil {
+					return nil, fmt.Errorf("service %q: %w", service.Name, err)
+				}
+				values[j] = resolvedValue
+			}
+		}
+		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
+			if strings.Contains(value, "${{") {
+				return nil, fmt.Errorf("service %q contains a runtime expression, which is not supported in this delivery slice", service.Name)
+			}
+		}
+		service.Container = container
+		resolved = append(resolved, service)
+	}
+	return resolved, nil
+}
+
+func mapValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
 }
 
 func resolveConcurrency(path, jobID string, concurrency *workflow.Concurrency, context expression.CompileContext, matrix map[string]any) (string, error) {

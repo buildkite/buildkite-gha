@@ -2,6 +2,7 @@ package compiler
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -2561,5 +2563,132 @@ func TestCompilePlansEmitV8ForContainers(t *testing.T) {
 	}
 	if len(plans) != 1 || plans[0].Schema != plan.Schema || plans[0].Container == nil || len(plans[0].Services) != 1 || !slices.Equal(plans[0].RequiredCapabilities, []string{"docker", "network"}) {
 		t.Fatalf("container plan = %#v", plans)
+	}
+}
+
+func TestCompilePlansResolveStaticServiceContainerFields(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        postgres: ['16', '17']
+    services:
+      database:
+        image: postgres:${{ matrix.postgres }}
+        env: {INSTANCE: '${{ strategy.job-index }}'}
+        ports: ['${{ vars.SERVICE_PORT }}']
+        volumes: ['database:/var/lib/postgresql/data']
+        options: --health-retries 5
+        command: postgres -c fsync=off
+        entrypoint: docker-entrypoint.sh
+    steps: [{run: true}]
+`)
+	options := defaultOptions()
+	options.Vars.Buildkite = map[string]string{"SERVICE_PORT": "5432"}
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want 2", len(plans))
+	}
+	for i, image := range []string{"postgres:16", "postgres:17"} {
+		service := plans[i].Services["database"]
+		if service.Image != image || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
+			t.Fatalf("compiled service %d = %#v", i, service)
+		}
+	}
+	plans[0].Services["database"].Env["INSTANCE"] = "changed"
+	if plans[1].Services["database"].Env["INSTANCE"] != "1" {
+		t.Fatal("matrix service environments share mutable state")
+	}
+}
+
+func TestCompilePlansSkipEmptyStaticServiceImage(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ['redis:7', '']
+    services:
+      cache:
+        image: ${{ matrix.image }}
+    steps: [{run: true}]
+`)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 2 || plans[0].Services["cache"].Image != "redis:7" || len(plans[1].Services) != 0 {
+		t.Fatalf("compiled services = %#v, %#v", plans[0].Services, plans[1].Services)
+	}
+}
+
+func TestCompilePlansResolveWorkflowDispatchInputsAndStrategyDefaultsInServices(t *testing.T) {
+	workflowSource := []byte(`on:
+  workflow_dispatch:
+    inputs:
+      image:
+        type: string
+        default: redis:7
+      enabled:
+        type: boolean
+      replicas:
+        type: number
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      cache:
+        image: ${{ inputs.image }}
+        env:
+          FAIL_FAST: ${{ strategy.fail-fast }}
+          MAX_PARALLEL: ${{ strategy.max-parallel }}
+          ENABLED: ${{ inputs.enabled }}
+          REPLICAS: ${{ inputs.replicas }}
+    steps: [{run: true}]
+`)
+	var event map[string]any
+	if err := json.Unmarshal(readFile(t, smokePath("events", "push.json")), &event); err != nil {
+		t.Fatal(err)
+	}
+	event["event"] = "workflow_dispatch"
+	event["payload"] = map[string]any{"inputs": map[string]any{"image": "valkey:8"}}
+	eventSource, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, eventSource, "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := plans[0].Services["cache"]
+	if service.Image != "valkey:8" || service.Env["FAIL_FAST"] != "true" || service.Env["MAX_PARALLEL"] != "1" || service.Env["ENABLED"] != "false" || service.Env["REPLICAS"] != "0" {
+		t.Fatalf("compiled service = %#v", service)
+	}
+}
+
+func TestCompilePlansRejectRuntimeServiceExpressionInStaticSlice(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs: {image: '${{ steps.image.outputs.value }}'}
+    steps: [{id: image, run: true}]
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    services:
+      cache:
+        image: ${{ needs.producer.outputs.image }}
+    steps: [{run: true}]
+`)
+	_, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err == nil || !strings.Contains(err.Error(), "contains a runtime expression") {
+		t.Fatalf("error = %v", err)
 	}
 }

@@ -125,6 +125,32 @@ func TestParseOwnsLiteralContainersAndSortsServices(t *testing.T) {
 	}
 }
 
+func TestParseOwnsCompleteStaticServiceContainer(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: postgres:16
+        env: {POSTGRES_PASSWORD: test}
+        ports: ['127.0.0.1::5432/tcp']
+        volumes: ['database:/var/lib/postgresql/data:ro']
+        options: --health-cmd "pg_isready -U postgres" --health-retries 5
+        command: postgres -c fsync=off
+        entrypoint: docker-entrypoint.sh
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := parsed.Jobs[0].Services[0].Container
+	if service.Image != "postgres:16" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
+		t.Fatalf("service container = %#v", service)
+	}
+}
+
 func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
 	for name, body := range map[string]string{
 		"credentials": "credentials: {username: me, password: secret}",

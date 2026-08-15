@@ -15,10 +15,12 @@ import (
 // a workflow graph. Values are snapshots supplied by the compiler; evaluation
 // never reads the process environment or a secret provider.
 type CompileContext struct {
-	GitHub map[string]any
-	Event  map[string]any
-	Vars   map[string]string
-	Matrix map[string]any
+	GitHub   map[string]any
+	Event    map[string]any
+	Vars     map[string]string
+	Inputs   map[string]any
+	Matrix   map[string]any
+	Strategy map[string]any
 }
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
@@ -319,8 +321,12 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 		current = context.Event
 	case strings.EqualFold(root, "vars"):
 		current = context.Vars
+	case strings.EqualFold(root, "inputs"):
+		current = context.Inputs
 	case strings.EqualFold(root, "matrix"):
 		current = context.Matrix
+	case strings.EqualFold(root, "strategy"):
+		current = context.Strategy
 	default:
 		return nil, fmt.Errorf("unsupported compile-time context %q", root)
 	}

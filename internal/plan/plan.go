@@ -191,10 +191,16 @@ type Step struct {
 }
 
 type Container struct {
-	Image string            `json:"image"`
-	Env   map[string]string `json:"env,omitempty"`
-	Ports []string          `json:"ports,omitempty"`
+	Image      string            `json:"image"`
+	Env        map[string]string `json:"env,omitempty"`
+	Ports      []string          `json:"ports,omitempty"`
+	Volumes    []string          `json:"volumes,omitempty"`
+	Options    string            `json:"options,omitempty"`
+	Command    string            `json:"command,omitempty"`
+	Entrypoint string            `json:"entrypoint,omitempty"`
 }
+
+type ServiceContainer = Container
 
 // GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Permissions
 // are API-normalized and compiler-owned; the repository always comes from Event.
@@ -422,6 +428,9 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
+			if len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
+				return fmt.Errorf("job container contains service-only fields")
+			}
 			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
 				return fmt.Errorf("job container: %w", err)
 			}
@@ -433,7 +442,7 @@ func (job Job) Validate() error {
 			if !serviceNamePattern.MatchString(name) {
 				return fmt.Errorf("service name %q must be lowercase and valid", name)
 			}
-			if err := validateContainer(service.Image, service.Env, service.Ports); err != nil {
+			if err := validateServiceContainer(service); err != nil {
 				return fmt.Errorf("service %q: %w", name, err)
 			}
 		}
@@ -614,6 +623,30 @@ func (job Job) Validate() error {
 	return nil
 }
 
+func validateServiceContainer(service ServiceContainer) error {
+	if err := validateContainerImageEnv(service.Image, service.Env); err != nil {
+		return err
+	}
+	if len(service.Ports) > 128 || len(service.Volumes) > 128 || len(service.Options) > 65536 || len(service.Command) > 65536 || len(service.Entrypoint) > 4096 {
+		return fmt.Errorf("service container fields exceed their size limit")
+	}
+	for _, values := range [][]string{service.Ports, service.Volumes} {
+		seen := map[string]bool{}
+		for _, value := range values {
+			if value == "" || len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") || seen[value] {
+				return fmt.Errorf("service container has invalid or repeated value %q", value)
+			}
+			seen[value] = true
+		}
+	}
+	for _, value := range []string{service.Options, service.Command, service.Entrypoint} {
+		if strings.ContainsAny(value, "\x00\r") {
+			return fmt.Errorf("service container field contains a control character")
+		}
+	}
+	return nil
+}
+
 func validGitHubRepository(repository string) bool {
 	if len(repository) > 140 || !githubRepositoryPattern.MatchString(repository) {
 		return false
@@ -686,6 +719,26 @@ func compareNeedOutput(left, right NeedOutput) int {
 }
 
 func validateContainer(image string, env map[string]string, ports []string) error {
+	if err := validateContainerImageEnv(image, env); err != nil {
+		return err
+	}
+	if len(ports) > 128 {
+		return fmt.Errorf("more than 128 ports")
+	}
+	seen := map[string]bool{}
+	for _, port := range ports {
+		if seen[port] {
+			return fmt.Errorf("repeated port %q", port)
+		}
+		seen[port] = true
+		if !containerPortPattern.MatchString(port) {
+			return fmt.Errorf("invalid port %q", port)
+		}
+	}
+	return nil
+}
+
+func validateContainerImageEnv(image string, env map[string]string) error {
 	if len(image) == 0 || len(image) > 512 || !containerImagePattern.MatchString(image) {
 		return fmt.Errorf("invalid image reference")
 	}
@@ -701,19 +754,6 @@ func validateContainer(image string, env map[string]string, ports []string) erro
 	}
 	if total > 1048576 {
 		return fmt.Errorf("environment exceeds 1048576 bytes")
-	}
-	if len(ports) > 128 {
-		return fmt.Errorf("more than 128 ports")
-	}
-	seen := map[string]bool{}
-	for _, port := range ports {
-		if seen[port] {
-			return fmt.Errorf("repeated port %q", port)
-		}
-		seen[port] = true
-		if !containerPortPattern.MatchString(port) {
-			return fmt.Errorf("invalid port %q", port)
-		}
 	}
 	return nil
 }
