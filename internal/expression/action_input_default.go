@@ -6,8 +6,6 @@ package expression
 import (
 	"encoding/json"
 	"fmt"
-	"math/big"
-	"reflect"
 	"strings"
 
 	"github.com/rhysd/actionlint"
@@ -48,9 +46,6 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
 	}
 	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
-		if !kind.IsEqualityOp() {
-			return fmt.Errorf("action input default comparison %s is unsupported", kind)
-		}
 		return nil
 	}
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
@@ -137,17 +132,9 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		}
 		return resolveRuntimeReference(root, path, context)
 	}
-	evaluator.truthy = actionInputDefaultTruthy
+	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
-		equal := actionInputDefaultEqual(left, right)
-		switch kind {
-		case actionlint.CompareOpNodeKindEq:
-			return equal, nil
-		case actionlint.CompareOpNodeKindNotEq:
-			return !equal, nil
-		default:
-			return nil, fmt.Errorf("action input default comparison %s is unsupported", kind)
-		}
+		return githubCompare(kind, left, right)
 	}
 	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
 	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
@@ -168,82 +155,4 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 		return string(value), nil
 	}
 	return evaluator.evaluate(node)
-}
-
-// The actionInputDefault* helpers are the loose coercion family that mirrors
-// GitHub's expression semantics for action input defaults: nil and empty
-// strings coerce to zero, booleans coerce to numbers, and same-typed
-// aggregates compare by identity. Runtime conditions deliberately use the
-// strict condition* family instead; keep the two separate.
-func actionInputDefaultTruthy(value any) bool {
-	switch value := value.(type) {
-	case nil:
-		return false
-	case bool:
-		return value
-	case string:
-		return value != ""
-	}
-	if number, ok := conditionNumber(value); ok {
-		return number.Sign() != 0
-	}
-	return true
-}
-
-func actionInputDefaultEqual(left, right any) bool {
-	if left == nil && right == nil {
-		return true
-	}
-	if leftNumber, leftOK := conditionNumber(left); leftOK {
-		if rightNumber, rightOK := conditionNumber(right); rightOK {
-			return leftNumber.Cmp(rightNumber) == 0
-		}
-	}
-	switch left := left.(type) {
-	case string:
-		if right, ok := right.(string); ok {
-			return strings.EqualFold(left, right)
-		}
-	case bool:
-		if right, ok := right.(bool); ok {
-			return left == right
-		}
-	}
-	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
-		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
-		switch leftValue.Kind() {
-		case reflect.Map, reflect.Pointer, reflect.Slice:
-			return leftValue.Pointer() == rightValue.Pointer()
-		}
-	}
-	leftNumber, leftOK := actionInputDefaultNumber(left)
-	rightNumber, rightOK := actionInputDefaultNumber(right)
-	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
-}
-
-func actionInputDefaultNumber(value any) (*big.Rat, bool) {
-	switch value := value.(type) {
-	case nil:
-		return new(big.Rat), true
-	case bool:
-		if value {
-			return big.NewRat(1, 1), true
-		}
-		return new(big.Rat), true
-	case string:
-		if strings.TrimSpace(value) == "" {
-			return new(big.Rat), true
-		}
-		decoded, err := decodeJSONValue(value)
-		if err != nil {
-			return nil, false
-		}
-		number, ok := decoded.(json.Number)
-		if !ok {
-			return nil, false
-		}
-		return conditionNumber(number)
-	default:
-		return conditionNumber(value)
-	}
 }

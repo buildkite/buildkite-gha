@@ -45,7 +45,7 @@ func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
 	case compileTimeSurface:
 		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case conditionSurface:
-		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true, logicalBool: true}
+		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case actionInputDefaultSurface:
 		policy = evaluationPolicy{allowLiterals: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case runtimeReferenceSurface:

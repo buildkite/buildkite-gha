@@ -51,7 +51,7 @@ func EvaluateCompileCondition(source string, context CompileContext) (bool, erro
 	if err != nil {
 		return false, err
 	}
-	return actionInputDefaultTruthy(value), nil
+	return githubTruthy(value), nil
 }
 
 // ReduceCompileCondition replaces every compile-time scalar subtree in a
@@ -259,19 +259,12 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveCompileReference(root, path, context)
 	}
-	evaluator.truthy = actionInputDefaultTruthy
+	evaluator.truthy = githubTruthy
 	evaluator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
-		if !kind.IsEqualityOp() {
-			return fmt.Errorf("unsupported compile-time comparison %s", kind)
-		}
 		return nil
 	}
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
-		equal := actionInputDefaultEqual(left, right)
-		if kind == actionlint.CompareOpNodeKindNotEq {
-			return !equal, nil
-		}
-		return equal, nil
+		return githubCompare(kind, left, right)
 	}
 	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported compile-time expression") }
 	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
@@ -320,21 +313,27 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 }
 
 func resolveCompileReference(root string, path []string, context CompileContext) (any, error) {
-	var current any
-	eventReference := strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
+	var (
+		current   any
+		available bool
+	)
 	switch {
 	case strings.EqualFold(root, "github"):
-		current = context.GitHub
+		current, available = context.GitHub, context.GitHub != nil
 	case strings.EqualFold(root, "event"):
-		current = context.Event
+		current, available = context.Event, context.Event != nil
 	case strings.EqualFold(root, "vars"):
-		current = context.Vars
+		current, available = context.Vars, context.Vars != nil
 	case strings.EqualFold(root, "matrix"):
-		current = context.Matrix
+		current, available = context.Matrix, context.Matrix != nil
 	default:
 		return nil, fmt.Errorf("unsupported compile-time context %q", root)
 	}
+	missing := false
 	for _, part := range path {
+		if missing {
+			continue
+		}
 		var (
 			ok  bool
 			err error
@@ -344,8 +343,9 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 			return nil, err
 		}
 		if !ok {
-			if eventReference {
+			if available {
 				current = nil
+				missing = true
 				continue
 			}
 			return nil, fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))

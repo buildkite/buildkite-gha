@@ -205,7 +205,10 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 	case runtimeReferenceGitHub:
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
+			if context.GitHub == nil || strings.EqualFold(path[0], "token") {
+				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
+			}
+			return nil, nil
 		}
 		return value, nil
 	case runtimeReferenceInput:
@@ -216,7 +219,10 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 				return value, nil
 			}
 		}
-		return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
+		if context.Matrix == nil {
+			return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
+		}
+		return nil, nil
 	case runtimeReferenceSecret:
 		return findString(context.Secrets, path[0]), nil
 	case runtimeReferenceVar:

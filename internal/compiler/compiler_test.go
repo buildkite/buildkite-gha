@@ -211,18 +211,6 @@ func TestCompilePreflightsUnsupportedConditionsWithLocation(t *testing.T) {
 		want   string
 	}{
 		{
-			name: "job event payload",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    if: github.event.action == 'opened'
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible null and string operands`,
-		},
-		{
 			name: "job hash function",
 			source: `on: push
 jobs:
@@ -245,78 +233,6 @@ jobs:
         run: true
 `,
 			want: `conditions.yml:6:13: job "test": step 1 condition: condition context "secrets" is unsupported`,
-		},
-		{
-			name: "mixed equality",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    if: vars.ENABLED == true
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible string and boolean operands`,
-		},
-		{
-			name: "parallel member condition location",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - parallel:
-          - if:  vars.ENABLED == true
-            run: true
-`,
-			want: `conditions.yml:7:18: job "test": step "__parallel_6_9_1" condition: condition equality compares incompatible string and boolean operands`,
-		},
-		{
-			name: "concrete matrix type",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: [12, "14"]
-    if: matrix.version == 12
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:8:9: job "test": job condition: condition equality compares incompatible string and number operands`,
-		},
-		{
-			name: "concrete matrix step type",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: [12, "14"]
-    steps:
-      - if: matrix.version == 12
-        run: true
-`,
-			want: `conditions.yml:9:13: job "test": step 1 condition: condition equality compares incompatible string and number operands`,
-		},
-		{
-			name: "missing concrete matrix value",
-			source: `on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - version: 12
-          - os: ubuntu-latest
-    if: matrix.version == 12
-    steps:
-      - run: true
-`,
-			want: `conditions.yml:10:9: job "test": job condition: condition reference "matrix.version" is unavailable in this matrix instance`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -342,6 +258,27 @@ jobs:
 				})
 			}
 		})
+	}
+}
+
+func TestCompileAcceptsGitHubConditionCoercionAndMissingMembers(t *testing.T) {
+	eventSource := readFile(t, smokePath("events", "push.json"))
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - version: 12
+          - os: ubuntu-latest
+    if: github.event.action == 'opened' || vars.ENABLED == true || matrix.version >= 12
+    steps:
+      - if: matrix.version == 12
+        run: true
+`)
+	if _, err := Compile("conditions.yml", source, eventSource); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1146,7 +1083,7 @@ jobs:
 	}
 }
 
-func TestCompilePreflightsConditionsInReusableWorkflows(t *testing.T) {
+func TestCompileAllowsMissingEventMembersInReusableWorkflowConditions(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1163,10 +1100,8 @@ jobs:
         run: true
 `)
 
-	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
-	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition equality compares incompatible null and string operands`
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("compileUntrustedPlans() error = %v, want callee condition diagnostic %q", err, want)
+	if _, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1840,21 +1775,6 @@ jobs:
       - run: echo draft
 `,
 			want: `ci.yml:5:9: job "configure": job condition: condition function "hashFiles" is unsupported`,
-		},
-		{
-			name: "step matrix type after false event operand",
-			workflow: `on: pull_request
-jobs:
-  configure:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        version: ["14"]
-    steps:
-      - if: github.event.pull_request.draft && matrix.version == 12
-        run: echo draft
-`,
-			want: `ci.yml:9:13: job "configure": step 1 condition: condition equality compares incompatible string and number operands`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

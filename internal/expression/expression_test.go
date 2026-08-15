@@ -2,6 +2,7 @@ package expression
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -159,12 +160,13 @@ func TestValidateActionInputDefaultSupportsRestrictedCompoundExpressions(t *test
 		"${{ job.status }}",
 		"${{ toJSON(matrix) }}",
 		"${{ true && 'quoted }} braces' || '' }}",
+		"${{ 1 > 0 }}",
 	} {
 		if err := ValidateActionInputDefault(template); err != nil {
 			t.Errorf("ValidateActionInputDefault(%q) error = %v", template, err)
 		}
 	}
-	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ toJSON(matrix.value) }}", "${{ 1 > 0 }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
+	for _, template := range []string{"${{ secrets.TOKEN }}", "${{ hashFiles('go.sum') }}", "${{ toJSON(secrets) }}", "${{ toJSON(matrix.value) }}", "${{ github[env.NAME] }}", "${{ job.status == 'success' }}", "status-${{ job.status }}"} {
 		if err := ValidateActionInputDefault(template); err == nil {
 			t.Errorf("ValidateActionInputDefault(%q) unexpectedly succeeded", template)
 		}
@@ -268,13 +270,22 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 		want     string
 	}{
 		{name: "quoted closing delimiter", template: "${{ true && 'quoted }} braces' || '' }}", want: "quoted }} braces"},
-		{name: "numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
+		{name: "matrix numeric string", template: "${{ matrix.version == '20' && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{"version": 20}}, want: "yes"},
 		{name: "null and zero", template: "${{ null == 0 && 'yes' || 'no' }}", want: "yes"},
 		{name: "false and zero", template: "${{ false == 0 && 'yes' || 'no' }}", want: "yes"},
 		{name: "empty string and zero", template: "${{ '' == 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "numeric string", template: "${{ '12' == 12 && 'yes' || 'no' }}", want: "yes"},
+		{name: "same-type strings are not numerically coerced", template: "${{ '01' == '1' && 'yes' || 'no' }}", want: "no"},
+		{name: "case-insensitive string equality", template: "${{ 'Release' == 'release' && 'yes' || 'no' }}", want: "yes"},
 		{name: "not equal", template: "${{ 'not-a-number' != 0 && 'yes' || 'no' }}", want: "yes"},
+		{name: "ordered numeric strings", template: "${{ '12' > 2 && 'yes' || 'no' }}", want: "yes"},
+		{name: "case-insensitive string ordering", template: "${{ 'Beta' > 'alpha' && 'yes' || 'no' }}", want: "yes"},
+		{name: "NaN ordering is false", template: "${{ 'not-a-number' > 0 && 'yes' || 'no' }}", want: "no"},
 		{name: "falsy zero", template: "${{ 0 && 'yes' || 'no' }}", want: "no"},
+		{name: "and returns selected operand", template: "${{ 'left' && 'right' }}", want: "right"},
+		{name: "or returns selected operand", template: "${{ '' || 'fallback' }}", want: "fallback"},
 		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
+		{name: "falsy short circuit", template: "${{ false && github.missing || 'fallback' }}", want: "fallback"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := EvaluateActionInputDefault(test.template, test.context)
@@ -455,6 +466,9 @@ func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 		{name: "compatible integer and float", source: "1 == 1.0", scope: JobCondition},
 		{name: "runtime-dependent matrix value", source: "matrix.enabled == true", scope: JobCondition},
 		{name: "runner identity", source: "runner.os == 'Linux' && runner.arch == 'X64'", scope: JobCondition},
+		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition},
+		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition},
+		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := ValidateCondition(test.source, test.scope); err != nil {
@@ -475,7 +489,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "hashFiles unavailable in jobs", source: "hashFiles('go.sum')", scope: JobCondition, want: `condition function "hashFiles" is unavailable in job conditions`},
 		{name: "unsupported function", source: "contains('a', 'b')", scope: StepCondition, want: `condition function "contains" is unsupported`},
 		{name: "function arguments", source: "always(true)", scope: StepCondition, want: `condition function "always" arguments are unsupported`},
-		{name: "ordered comparison", source: "matrix.count > 1", scope: JobCondition, want: "condition comparison > is unsupported"},
 		{name: "runtime event payload", source: "github.event.pull_request.draft", scope: JobCondition, want: `condition reference "github.event.pull_request.draft" is unavailable at runtime`},
 		{name: "unsupported github property", source: "github.run_id", scope: StepCondition, want: `condition reference "github.run_id" is unavailable at runtime`},
 		{name: "step context in job", source: "steps.build.outcome", scope: JobCondition, want: `condition context "steps" is unavailable in job conditions`},
@@ -483,8 +496,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
 		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
 		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
-		{name: "string and boolean equality", source: "vars.ENABLED == true", scope: JobCondition, want: "condition equality compares incompatible string and boolean operands"},
-		{name: "boolean and number equality", source: "success() != 1", scope: JobCondition, want: "condition equality compares incompatible boolean and number operands"},
 		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -548,9 +559,9 @@ func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
 		{name: "numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": 14.0}},
 		{name: "json numeric value", source: "matrix.version == 12", matrix: map[string]any{"version": json.Number("14")}},
 		{name: "boolean value", source: "matrix.experimental == true", matrix: map[string]any{"experimental": false}},
-		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}, want: "condition equality compares incompatible string and number operands"},
-		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}, want: "condition equality compares incompatible null and number operands"},
-		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}, want: `condition reference "matrix.version" is unavailable in this matrix instance`},
+		{name: "string and number", source: "matrix.version == 12", matrix: map[string]any{"version": "14"}},
+		{name: "null and number", source: "matrix.version == 12", matrix: map[string]any{"version": nil}},
+		{name: "missing value", source: "matrix.version == 12", matrix: map[string]any{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := ValidateConditionWithMatrix(test.source, JobCondition, test.matrix)
@@ -720,15 +731,43 @@ func TestEvaluateConditionSupportsJSONNumbers(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionMatchesGitHubCoercionAndOrdering(t *testing.T) {
+	tests := []struct {
+		condition string
+		context   ConditionContext
+		want      bool
+	}{
+		{condition: "null == 0", want: true},
+		{condition: "false == 0", want: true},
+		{condition: "'' == 0", want: true},
+		{condition: "'12' == 12", want: true},
+		{condition: "'01' == '1'", want: false},
+		{condition: "'Release' == 'release'", want: true},
+		{condition: "'12' > 2", want: true},
+		{condition: "'Beta' > 'alpha'", want: true},
+		{condition: "'not-a-number' > 0", want: false},
+		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.NaN()}}, want: false},
+		{condition: "matrix.missing == null", context: ConditionContext{Matrix: map[string]any{}}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.condition, func(t *testing.T) {
+			got, err := EvaluateCondition(test.condition, test.context)
+			if err != nil || got != test.want {
+				t.Fatalf("EvaluateCondition(%q) = %v, %v, want %v", test.condition, got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
-	if _, err := EvaluateCondition("1 < 2", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted unsupported ordered comparison")
+	if got, err := EvaluateCondition("1 < 2", ConditionContext{}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() ordered comparison = %v, %v", got, err)
 	}
-	if _, err := EvaluateCondition("true == 'true'", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() silently coerced mixed equality operands")
+	if got, err := EvaluateCondition("true == 'true'", ConditionContext{}); err != nil || got {
+		t.Fatalf("EvaluateCondition() NaN equality = %v, %v", got, err)
 	}
-	if _, err := EvaluateCondition("null == true", ConditionContext{}); err == nil {
-		t.Fatal("EvaluateCondition() accepted mixed null equality operands")
+	if got, err := EvaluateCondition("null == false", ConditionContext{}); err != nil || !got {
+		t.Fatalf("EvaluateCondition() null coercion = %v, %v", got, err)
 	}
 	if got, err := EvaluateCondition("", ConditionContext{Unsuccessful: true}); err != nil || got {
 		t.Fatalf("default condition after skipped prerequisite = %v, %v, want false", got, err)
@@ -763,6 +802,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ github.event.action }}", want: "opened"},
 		{expression: "${{ event.action }}", want: "opened"},
 		{expression: "${{ matrix.os }}", want: "ubuntu-24.04"},
+		{expression: "${{ vars.MISSING }}", want: nil},
 		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
 		{expression: "${{ github.ref == 'refs/pull/42/merge' }}", want: true},
 		{expression: "${{ startsWith(github.ref, 'REFS/PULL/') }}", want: true},
@@ -943,7 +983,6 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		want       string
 	}{
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
-		{expression: "${{ vars.MISSING }}", want: `unavailable value "vars.missing"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
 		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
 		{expression: "${{ contains(github.ref) }}", want: `unsupported compile-time function "contains"`},

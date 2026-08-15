@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"reflect"
 	"strconv"
@@ -123,6 +124,122 @@ func conditionNumber(value any) (*big.Rat, bool) {
 	}
 	number, ok := new(big.Rat).SetString(source)
 	return number, ok
+}
+
+func githubTruthy(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	case string:
+		return value != ""
+	case float32:
+		return !math.IsNaN(float64(value)) && value != 0
+	case float64:
+		return !math.IsNaN(value) && value != 0
+	}
+	if number, ok := conditionNumber(value); ok {
+		return number.Sign() != 0
+	}
+	return true
+}
+
+func githubEqual(left, right any) bool {
+	if left == nil && right == nil {
+		return true
+	}
+	if leftNumber, leftOK := conditionNumber(left); leftOK {
+		if rightNumber, rightOK := conditionNumber(right); rightOK {
+			return leftNumber.Cmp(rightNumber) == 0
+		}
+	}
+	switch left := left.(type) {
+	case string:
+		if right, ok := right.(string); ok {
+			return strings.EqualFold(left, right)
+		}
+	case bool:
+		if right, ok := right.(bool); ok {
+			return left == right
+		}
+	}
+	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
+		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
+		switch leftValue.Kind() {
+		case reflect.Map, reflect.Pointer, reflect.Slice:
+			return leftValue.Pointer() == rightValue.Pointer()
+		}
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+}
+
+func githubOrderedCompare(left, right any) (int, bool) {
+	leftString, leftIsString := left.(string)
+	rightString, rightIsString := right.(string)
+	if leftIsString && rightIsString {
+		return strings.Compare(strings.ToLower(leftString), strings.ToLower(rightString)), true
+	}
+	leftNumber, leftOK := githubNumber(left)
+	rightNumber, rightOK := githubNumber(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	return leftNumber.Cmp(rightNumber), true
+}
+
+func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, error) {
+	switch kind {
+	case actionlint.CompareOpNodeKindEq:
+		return githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindNotEq:
+		return !githubEqual(left, right), nil
+	}
+	comparison, ok := githubOrderedCompare(left, right)
+	if !ok {
+		return false, nil
+	}
+	switch kind {
+	case actionlint.CompareOpNodeKindLess:
+		return comparison < 0, nil
+	case actionlint.CompareOpNodeKindLessEq:
+		return comparison <= 0, nil
+	case actionlint.CompareOpNodeKindGreater:
+		return comparison > 0, nil
+	case actionlint.CompareOpNodeKindGreaterEq:
+		return comparison >= 0, nil
+	default:
+		return false, fmt.Errorf("unsupported comparison %s", kind)
+	}
+}
+
+func githubNumber(value any) (*big.Rat, bool) {
+	switch value := value.(type) {
+	case nil:
+		return new(big.Rat), true
+	case bool:
+		if value {
+			return big.NewRat(1, 1), true
+		}
+		return new(big.Rat), true
+	case string:
+		if strings.TrimSpace(value) == "" {
+			return new(big.Rat), true
+		}
+		decoded, err := decodeJSONValue(value)
+		if err != nil {
+			return nil, false
+		}
+		number, ok := decoded.(json.Number)
+		if !ok {
+			return nil, false
+		}
+		return conditionNumber(number)
+	default:
+		return conditionNumber(value)
+	}
 }
 
 func containsStatusFunction(node actionlint.ExprNode) bool {
