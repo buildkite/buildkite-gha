@@ -133,7 +133,7 @@ Before upload, the importer compares the pull request merge base with its head u
 | A matching added, modified, deleted, or type-changed path | No local match |
 | A copied destination that matches | A rename, or a diff containing both additions and deletions |
 | At most 300 changed files from complete local history | Missing or shallow history, multiple merge bases, or more than 300 files |
-| A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, invalid pattern, or malformed Git output |
+| A mergeable pull request with matching webhook and workflow data | A conflict, stale data, changed merge workflow, path or pattern containing a backslash, invalid pattern, or malformed Git output |
 
 A local non-match fails closed because GitHub does not report whether its diff timed out and ran the workflow anyway. Unfiltered `closed` workflows remain supported; filtered `closed` workflows fail closed when GitHub supplies an actual merge, squash, or rebase commit instead of a synthetic merge.
 
