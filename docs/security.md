@@ -16,7 +16,7 @@ Dockerfile actions add packaging, not a security boundary. Use a queue with:
 
 On a persistent self-hosted agent, workflow code can access exposed host resources and leave state that affects later jobs.
 
-Job and service containers also share the job's Docker daemon and host resource budget. Their private bridge network, loopback-only published ports, and labeled cleanup reduce accidental exposure and residue; they do not isolate hostile code or enforce CPU, memory, or disk limits. The queue must provide those boundaries around the whole job.
+Job and service containers also share the job's Docker daemon and host resource budget. Service options can grant privileges, mount host paths, and publish ports on Docker-selected interfaces. Their private bridge network, ownership labels, and verified cleanup reduce accidental residue; they do not isolate hostile code or enforce network, CPU, memory, or disk limits. The queue and VM firewall must provide those boundaries around the whole job.
 
 ## Repository data is not authority
 
@@ -32,6 +32,7 @@ Digests and immutable action locks detect changed code. They do not make code tr
 | `GITHUB_TOKEN` | Supported static uses receive one short-lived token for the event repository and compiler-resolved permissions. Omitted workflow permissions mean exactly `contents: read`; GitHub repository and organization settings are not inherited. Buildkite verifies the pipeline repository, immutable commit, workflow policy, and build provenance. Pull requests are limited to `contents: read`; merge queues are denied. The token is not ambient. |
 | Cache token | When caching is configured, every JavaScript or Docker action lifecycle receives a fresh job-bound token. This includes compatible clients such as `actions/setup-go`, not only `actions/cache`. Shell steps do not receive it. |
 | Ordinary workflow secrets | Static names are resolved with `buildkite-agent secret get` in the destination job. The job's Buildkite identity and Secret access policies are the sole authorization boundary. Values are registered with Agent and local redaction before use. |
+| Service registry credentials | Explicit credentials can be literal or use ordinary workflow secrets and the same destination-job policy. Secret-derived values stay out of plans and generated pipeline YAML; authored literal values do not. Passwords pass to Docker through standard input. Authentication uses a private per-job Docker configuration that cleanup verifies is removed. Ambient Docker configuration and implicit GHCR authentication are unavailable. |
 | GitHub-compatible OIDC | Unsupported. |
 
 An action that receives a credential can use or exfiltrate it. It can also export `GITHUB_TOKEN` to later steps through `GITHUB_ENV`. Log masking reduces accidental disclosure, but it is not access control and does not catch transformed values.

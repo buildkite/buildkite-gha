@@ -2523,7 +2523,7 @@ func admittedDockerProvenance(job plan.Job, sources []string) bool {
 	if job.Container != nil {
 		expected = append(expected, "job-containers")
 	}
-	if len(job.Services) != 0 {
+	if len(job.Services) != 0 || job.ServicesExpression != "" {
 		expected = append(expected, "service-containers")
 	}
 	return slices.Equal(sources, expected)

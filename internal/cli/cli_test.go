@@ -6591,11 +6591,12 @@ func TestUnprivilegedUploadAdmitsCompilerVerifiedContainerProvenance(t *testing.
 	}{
 		{name: "job", job: plan.Job{Container: &plan.Container{Image: "node:24"}}, sources: []string{"job-containers"}},
 		{name: "service", job: plan.Job{Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"service-containers"}},
+		{name: "dynamic services", job: plan.Job{ServicesExpression: "${{ fromJSON(needs.build.outputs.services) }}"}, sources: []string{"service-containers"}},
 		{name: "all", job: plan.Job{Container: &plan.Container{Image: "node:24"}, Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"dockerfile-actions", "job-containers", "service-containers"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-				Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"}, Container: test.job.Container, Services: test.job.Services,
+				Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"}, Container: test.job.Container, Services: test.job.Services, ServicesExpression: test.job.ServicesExpression,
 			}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: test.sources}}}}
 			if err := validateUnprivilegedBundle(bundle); err != nil {
 				t.Fatalf("validateUnprivilegedBundle(%v) error = %v", test.sources, err)

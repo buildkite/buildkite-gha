@@ -92,7 +92,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
 | Scoped `GITHUB_TOKEN` use allowed by Buildkite policy | Ambient or workflow-authored `github.token` use |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |
-| Background, wait, cancellation, and parallel step controls; bounded Linux job and service containers | Private container images, custom container options, or any Docker use on macOS |
+| Background, wait, cancellation, and parallel step controls; Linux job and service containers | Implicit private-registry authentication, container hooks, or any Docker use on macOS |
 
 Some features support a limited subset or behave differently on Buildkite. Check the matrix before migrating a workflow.
 

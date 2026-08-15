@@ -13,6 +13,10 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,7 +77,7 @@ func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := testFileLock(file, true); err != nil {
 		t.Fatal(err)
 	}
@@ -2378,6 +2382,18 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 		if !slices.Equal(artifact.Authorization.DockerCapabilitySources, wantSources) {
 			t.Fatalf("compiled %s Docker provenance = %#v, want %#v", job.Workflow.LogicalJobID, artifact.Authorization.DockerCapabilitySources, wantSources)
 		}
+		if job.Workflow.LogicalJobID == "container-runtime" {
+			reader, exists := job.Services["reader"]
+			if len(job.Services) != 3 || !exists || job.Services["writer"].Command == "" || !slices.Equal(reader.Volumes, []string{"parity-data:/shared:ro"}) {
+				t.Fatalf("compiled service parity fixture = %#v", job.Services)
+			}
+		}
+		if job.Workflow.LogicalJobID == "host-runtime" {
+			_, optionalExists := job.Services["optional"]
+			if len(job.Services) != 1 || optionalExists {
+				t.Fatalf("compiled conditional services = %#v", job.Services)
+			}
+		}
 	}
 	docker := requireDocker(t)
 	node24 := requireNode24(t)
@@ -2418,6 +2434,69 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
 		t.Fatalf("container runtime leaked owned Docker resources: before=%#v after=%#v", before, after)
 	}
+}
+
+func TestLiveAuthenticatedServiceRegistry(t *testing.T) {
+	docker := requireDocker(t)
+	registryName := "buildkite-gha-test-registry-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	registryID := strings.TrimSpace(runLiveDocker(t, docker, "run", "--detach", "--name", registryName, "--publish", "127.0.0.1::5000", "registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"))
+	t.Cleanup(func() { _ = exec.Command(docker, "rm", "--force", registryID).Run() })
+	registryAddress := strings.TrimSpace(runLiveDocker(t, docker, "port", registryID, "5000/tcp"))
+	registryURL, err := url.Parse("http://" + registryAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(registryURL)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		username, password, ok := request.BasicAuth()
+		if !ok || username != "service-user" || password != "service-password" {
+			response.Header().Set("WWW-Authenticate", `Basic realm="buildkite-gha-test"`)
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		proxy.ServeHTTP(response, request)
+	}))
+	defer server.Close()
+	privateRegistry := strings.TrimPrefix(server.URL, "http://")
+	privateImage := privateRegistry + "/private/busybox:parity"
+	runLiveDocker(t, docker, "pull", "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028")
+	runLiveDocker(t, docker, "tag", "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", privateImage)
+	t.Cleanup(func() { _ = exec.Command(docker, "image", "rm", "--force", privateImage).Run() })
+	config := t.TempDir()
+	login := exec.Command(docker, "--config", config, "login", privateRegistry, "--username", "service-user", "--password-stdin")
+	login.Stdin = strings.NewReader("service-password\n")
+	if output, loginErr := login.CombinedOutput(); loginErr != nil {
+		t.Fatalf("login to temporary registry: %v: %s", loginErr, output)
+	}
+	runLiveDocker(t, docker, "--config", config, "push", privateImage)
+
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/authenticated.yml", "name: authenticated service\n")
+	job := runtimePlan(t, workspace, ".github/workflows/authenticated.yml", []plan.Step{{ID: "verify", Kind: "run", Shell: "sh", Command: "true"}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Services = map[string]plan.Container{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
+	before := liveDockerOwnedResources(t, docker)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	result, runErr := (Runner{Docker: docker}).RunJob(ctx, job, workspace)
+	if runErr != nil || result.Conclusion != "success" {
+		t.Fatalf("authenticated service result = %#v, error = %v", result, runErr)
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("authenticated service leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func runLiveDocker(t *testing.T, docker string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, docker, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
 }
 
 func TestLiveManifestContainerFixtures(t *testing.T) {

@@ -1,17 +1,16 @@
 # GitHub Actions service container parity
 
-## Problem
+## Outcome
 
-`buildkite-gha` supports a bounded Linux service-container path with literal
-images, environment variables, and ports. It rejects registry credentials,
-volumes, Docker options, commands, entrypoints, expression-valued services,
-and expression-valued container fields. The runtime also differs from GitHub
-Actions in readiness timing, port publication, service context, pull retries,
-and registry authentication.
+`buildkite-gha` supports Linux service containers with the GitHub Actions
+fields, expression phases, Docker option behavior, networking, readiness,
+service context, explicit registry authentication, and bounded cleanup
+described below. Implicit GHCR authentication remains unsupported because no
+policy-scoped workflow-token backend is available for registry login.
 
-The goal is broad compatibility with GitHub Actions service containers while
-retaining the existing immutable plan boundary, compiler-owned capability
-provenance, bounded inputs, secret isolation, and deterministic cleanup.
+The implementation retains the immutable plan boundary, compiler-owned
+capability provenance, bounded inputs, secret isolation, and deterministic
+cleanup.
 
 ## Compatibility target
 
