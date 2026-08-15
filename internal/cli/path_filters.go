@@ -30,6 +30,9 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		}
 		return
 	}
+	if nestedString(event.Payload, "action") == "closed" && !workflowsUsePathFilters(workflows, event.Event) {
+		return
+	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
 	if err != nil || pullRequestNumber <= 0 {
 		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request number")

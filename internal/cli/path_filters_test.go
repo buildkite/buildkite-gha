@@ -190,14 +190,33 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 		t.Fatalf("unfiltered custom workflow result = %#v, %v", workflowErrors, err)
 	}
 	pullRequest := event.Payload["pull_request"].(map[string]any)
-	pullRequest["mergeable"] = false
 	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
 	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	event.Payload["action"] = "closed"
+	pullRequest["merge_commit_sha"] = head
+	closedWorkflows := []workflowInput{{
+		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
+		Triggers: []workflow.Trigger{{Event: "pull_request"}},
+	}}
+	context := buildkitepipeline.TriggerConditionContext{}
+	populateChangedPaths(&context, event, effectiveEventFromWebhook, closedWorkflows)
+	if closedWorkflows[0].PathFiltersError != "" {
+		t.Fatalf("unfiltered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
+	}
+	closedWorkflows[0].Triggers[0].Paths = []string{"src/**"}
+	context = buildkitepipeline.TriggerConditionContext{}
+	populateChangedPaths(&context, event, effectiveEventFromWebhook, closedWorkflows)
+	if !strings.Contains(closedWorkflows[0].PathFiltersError, "does not bind the event base and head") {
+		t.Fatalf("filtered closed workflow provenance error = %q", closedWorkflows[0].PathFiltersError)
+	}
+	delete(event.Payload, "action")
+	pullRequest["merge_commit_sha"] = merge
+	pullRequest["mergeable"] = false
 	customWorkflows := []workflowInput{{
 		Path: customPath, CanonicalPath: customPath,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
-	context := buildkitepipeline.TriggerConditionContext{}
+	context = buildkitepipeline.TriggerConditionContext{}
 	populateChangedPaths(&context, event, effectiveEventFromWebhook, customWorkflows)
 	if customWorkflows[0].PathFiltersError != "" {
 		t.Fatalf("unfiltered custom workflow provenance error = %q", customWorkflows[0].PathFiltersError)
