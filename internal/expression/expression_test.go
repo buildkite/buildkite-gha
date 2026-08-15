@@ -500,7 +500,6 @@ func TestValidateConditionRejectsUnsupportedRuntimeExpressions(t *testing.T) {
 		{name: "environment in job", source: "env.ENABLED", scope: JobCondition, want: `condition context "env" is unavailable in job conditions`},
 		{name: "unsupported context", source: "secrets.TOKEN", scope: StepCondition, want: `condition context "secrets" is unsupported`},
 		{name: "unsupported need shape", source: "needs.build.status", scope: JobCondition, want: `expected needs.<job>.result`},
-		{name: "dynamic index", source: "steps[env.STEP].outcome", scope: StepCondition, want: "expression index must be a string literal"},
 		{name: "malformed", source: "${{ github.ref == }}", scope: JobCondition, want: "parse condition"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -674,7 +673,7 @@ func TestEvaluateActionLifecycleCondition(t *testing.T) {
 
 func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 	context := ConditionContext{
-		Inputs:      map[string]string{"enabled": "true"},
+		Inputs:      map[string]any{"enabled": "true"},
 		Needs:       map[string]map[string]string{"build": {"gate": "yes"}},
 		NeedResults: map[string]string{"build": "failure"},
 		Steps:       map[string]StepStatus{"soft": {Outcome: "failure", Conclusion: "success", Outputs: map[string]string{"ready": "true"}}},
@@ -700,10 +699,12 @@ func TestEvaluateConditionStatusOutputsAndTruthiness(t *testing.T) {
 }
 
 func TestEvaluateConditionInputsMatchNormalExpressionSemantics(t *testing.T) {
-	context := ConditionContext{Inputs: map[string]string{"enabled": "true"}}
+	context := ConditionContext{Inputs: map[string]any{"enabled": "true", "deploy": true, "retries": json.Number("2")}}
 	for condition, want := range map[string]bool{
 		"inputs.enabled == 'true'": true,
 		"INPUTS.ENABLED == 'true'": true,
+		"inputs.deploy":            true,
+		"inputs.retries == 2":      true,
 		"inputs.missing":           false,
 	} {
 		got, err := EvaluateCondition(condition, context)
@@ -797,6 +798,44 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 	}
 }
 
+func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
+	context := ConditionContext{
+		Vars:        map[string]string{"KEY": "target"},
+		Matrix:      map[string]any{"target": "selected"},
+		Needs:       map[string]map[string]string{"build": {}, "lint": {}},
+		NeedResults: map[string]string{"build": "success", "lint": "failure"},
+		Env:         map[string]string{"STEP": "build"},
+		Steps: map[string]StepStatus{
+			"build": {Outcome: "success", Conclusion: "success"},
+			"lint":  {Outcome: "failure", Conclusion: "success"},
+		},
+	}
+	for _, condition := range []string{
+		"matrix[vars.KEY] == 'selected'",
+		"fromJSON('[\"zero\",\"one\"]')[1] == 'one'",
+		"fromJSON('[1]')[4] == null",
+		"contains(needs.*.result, 'FAILURE')",
+		"steps[env.STEP].outcome == 'success'",
+		"contains(steps.*.outcome, 'success') && contains(steps.*.outcome, 'failure')",
+		"toJSON(matrix) == '{\n  \"target\": \"selected\"\n}'",
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, context)
+		if err != nil || !got {
+			t.Errorf("EvaluateCondition(%q) = %v, %v", condition, got, err)
+		}
+	}
+	if err := ValidateCondition("github[vars.KEY]", StepCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed dynamic github access")
+	}
+	if err := ValidateCondition("steps.*.outcome", JobCondition); err == nil {
+		t.Fatal("ValidateCondition() allowed step projection in a job condition")
+	}
+}
+
 func TestEvaluateConditionFailsClosed(t *testing.T) {
 	if got, err := EvaluateCondition("1 < 2", ConditionContext{}); err != nil || !got {
 		t.Fatalf("EvaluateCondition() ordered comparison = %v, %v", got, err)
@@ -882,6 +921,39 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	runners, ok := got.([]any)
 	if !ok || len(runners) != 2 || runners[0] != "ubuntu-24.04" {
 		t.Fatalf("fromJSON runners = %#v", got)
+	}
+}
+
+func TestEvaluateCompileSupportsIndexesAndFilters(t *testing.T) {
+	context := CompileContext{
+		GitHub: map[string]any{"event": map[string]any{
+			"items": []any{
+				map[string]any{"name": "one", "groups": []any{map[string]any{"id": 1}, map[string]any{"id": 2}}},
+				map[string]any{"groups": []any{map[string]any{"id": 3}}},
+				map[string]any{"name": "three"},
+			},
+		}},
+		Vars:   map[string]string{"KEY": "target"},
+		Matrix: map[string]any{"target": "selected"},
+	}
+	for _, test := range []struct {
+		expression string
+		want       any
+	}{
+		{expression: "${{ matrix[vars.KEY] }}", want: "selected"},
+		{expression: "${{ fromJSON('[\"zero\",\"one\"]')[1] }}", want: "one"},
+		{expression: "${{ fromJSON('[1]')[4] }}", want: nil},
+		{expression: "${{ join(github.event.items.*.name, ',') }}", want: "one,three"},
+		{expression: "${{ join(github.event.items.*.groups.*.id, ',') }}", want: "1,2,3"},
+	} {
+		expr, err := Parse(test.expression, 1, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := EvaluateCompile(expr, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateCompile(%q) = %#v, %v, want %#v", test.expression, got, err, test.want)
+		}
 	}
 }
 
@@ -1031,6 +1103,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
 		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
+		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
 		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" received an unsupported number of arguments`},
 		{expression: "${{ contains(github.ref) }}", want: `function "contains" received an unsupported number of arguments`},

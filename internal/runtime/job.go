@@ -1672,7 +1672,11 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		// rebuilding the map so a child's declared env cannot leak to siblings.
 		eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
 		id := strings.ToLower(step.ID)
-		condition := expression.ConditionContext{Inputs: eval.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
+		inputs := make(map[string]any, len(eval.Inputs))
+		for name, value := range eval.Inputs {
+			inputs[name] = value
+		}
+		condition := expression.ConditionContext{Inputs: inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: eval.Env, Vars: eval.Vars, Matrix: eval.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: failure, Unsuccessful: unsuccessful, Cancelled: cancelled}
 		run, err := expression.EvaluateCondition(step.If, condition)
 		if err != nil {
 			runErr = errors.Join(runErr, fmt.Errorf("composite action step %d condition: %w", i+1, err))

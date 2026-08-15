@@ -64,6 +64,9 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 		}
 		return fmt.Errorf("unsupported compile-time reference %q", reference)
 	}
+	validator.validateAccess = func(node actionlint.ExprNode) error {
+		return validateCompileAccessNode(&validator, node)
+	}
 	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
 	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
 	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
@@ -74,6 +77,57 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 	}
 	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported compile-time expression") }
 	return validator.validate(node)
+}
+
+func validateCompileAccessNode(validator *semanticValidator, node actionlint.ExprNode) error {
+	switch node := node.(type) {
+	case *actionlint.VariableNode:
+		switch strings.ToLower(node.Name) {
+		case "vars", "matrix":
+			return nil
+		case "event":
+			return fmt.Errorf("whole event access is unsupported")
+		case "github":
+			return fmt.Errorf("whole github access is unsupported")
+		default:
+			return fmt.Errorf("unsupported compile-time context %q", node.Name)
+		}
+	case *actionlint.ObjectDerefNode:
+		if variable, ok := node.Receiver.(*actionlint.VariableNode); ok && strings.EqualFold(variable.Name, "event") {
+			return nil
+		}
+		if variable, ok := node.Receiver.(*actionlint.VariableNode); ok && strings.EqualFold(variable.Name, "github") {
+			if strings.EqualFold(node.Property, "event") {
+				return nil
+			}
+			return fmt.Errorf("compile-time expression references unavailable value %q", "github."+node.Property)
+		}
+		return validateCompileAccessNode(validator, node.Receiver)
+	case *actionlint.ArrayDerefNode:
+		return validateCompileAccessNode(validator, node.Receiver)
+	case *actionlint.IndexAccessNode:
+		if variable, ok := node.Operand.(*actionlint.VariableNode); ok {
+			if strings.EqualFold(variable.Name, "github") {
+				return fmt.Errorf("dynamic github access is unsupported")
+			}
+			if strings.EqualFold(variable.Name, "event") {
+				return validator.validate(node.Index)
+			}
+		}
+		var err error
+		switch node.Operand.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
+			err = validateCompileAccessNode(validator, node.Operand)
+		default:
+			err = validator.validate(node.Operand)
+		}
+		if err != nil {
+			return err
+		}
+		return validator.validate(node.Index)
+	default:
+		return fmt.Errorf("unsupported compile-time access expression")
+	}
 }
 
 // EvaluateCompileCondition evaluates a condition whose entire value is known
@@ -298,6 +352,32 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 	evaluator := newSemanticEvaluator(compileTimeSurface)
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveCompileReference(root, path, context)
+	}
+	evaluator.resolveRoot = func(root string) (any, error) {
+		switch strings.ToLower(root) {
+		case "github":
+			if context.GitHub == nil {
+				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+			}
+			return context.GitHub, nil
+		case "event":
+			if context.Event == nil {
+				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+			}
+			return context.Event, nil
+		case "vars":
+			if context.Vars == nil {
+				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+			}
+			return context.Vars, nil
+		case "matrix":
+			if context.Matrix == nil {
+				return nil, fmt.Errorf("compile-time context %q is unavailable", root)
+			}
+			return context.Matrix, nil
+		default:
+			return nil, fmt.Errorf("unsupported compile-time context %q", root)
+		}
 	}
 	evaluator.truthy = githubTruthy
 	evaluator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {

@@ -13,6 +13,7 @@ import (
 type semanticEvaluator struct {
 	policy          evaluationPolicy
 	resolve         func(string, []string) (any, error)
+	resolveRoot     func(string) (any, error)
 	truthy          func(any) bool
 	validateCompare func(actionlint.CompareOpNodeKind) error
 	compare         func(actionlint.CompareOpNodeKind, any, any) (any, error)
@@ -56,6 +57,7 @@ func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
 type semanticValidator struct {
 	policy            evaluationPolicy
 	validateReference func(actionlint.ExprNode, string, []string) error
+	validateAccess    func(actionlint.ExprNode) error
 	referenceError    func(error) error
 	validateCompare   func(actionlint.CompareOpNodeKind) error
 	afterCompare      func(*actionlint.CompareOpNode) error
@@ -78,10 +80,21 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 		}
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		if err != nil {
-			return v.referenceError(err)
+		if err == nil {
+			if _, whole := node.(*actionlint.VariableNode); whole && v.validateAccess != nil {
+				return v.validateAccess(node)
+			}
+			return v.validateReference(node, root, path)
 		}
-		return v.validateReference(node, root, path)
+		if v.validateAccess != nil {
+			return v.validateAccess(node)
+		}
+		return v.referenceError(err)
+	case *actionlint.ArrayDerefNode:
+		if v.validateAccess != nil {
+			return v.validateAccess(node)
+		}
+		return v.unsupported(node)
 	case *actionlint.NotOpNode:
 		if v.policy.allowNot {
 			return v.validate(node.Operand)
@@ -138,10 +151,21 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 		}
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			if _, whole := node.(*actionlint.VariableNode); whole && e.resolveRoot != nil {
+				return e.resolveRoot(root)
+			}
+			return e.resolve(root, path)
 		}
-		return e.resolve(root, path)
+		if e.resolveRoot != nil {
+			return e.evaluateAccess(node)
+		}
+		return nil, err
+	case *actionlint.ArrayDerefNode:
+		if e.resolveRoot != nil {
+			return e.evaluateAccess(node)
+		}
+		return nil, e.unsupported(node)
 	case *actionlint.NotOpNode:
 		if e.policy.allowNot {
 			value, err := e.evaluate(node.Operand)
@@ -207,6 +231,110 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 		}
 	}
 	return nil, e.unsupported(node)
+}
+
+type expressionProjection []any
+
+func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error) {
+	switch node := node.(type) {
+	case *actionlint.VariableNode:
+		return e.resolveRoot(node.Name)
+	case *actionlint.ObjectDerefNode:
+		receiver, err := e.evaluateAccess(node.Receiver)
+		if err != nil {
+			return nil, err
+		}
+		if projection, ok := receiver.(expressionProjection); ok {
+			result := make(expressionProjection, 0, len(projection))
+			for _, item := range projection {
+				value, found, err := objectValue(item, node.Property)
+				if err != nil {
+					return nil, err
+				}
+				if found {
+					result = append(result, value)
+				}
+			}
+			return result, nil
+		}
+		value, found, err := objectValue(receiver, node.Property)
+		if err != nil || found {
+			return value, err
+		}
+		return nil, nil
+	case *actionlint.IndexAccessNode:
+		operand, err := e.evaluateAccess(node.Operand)
+		if err != nil {
+			return nil, err
+		}
+		index, err := e.evaluate(node.Index)
+		if err != nil {
+			return nil, err
+		}
+		return expressionIndex(operand, index)
+	case *actionlint.ArrayDerefNode:
+		receiver, err := e.evaluateAccess(node.Receiver)
+		if err != nil {
+			return nil, err
+		}
+		if projection, ok := receiver.(expressionProjection); ok {
+			result := expressionProjection{}
+			for _, item := range projection {
+				if values, ok := expressionChildren(item); ok {
+					result = append(result, values...)
+				}
+			}
+			return result, nil
+		}
+		values, ok := expressionChildren(receiver)
+		if !ok {
+			return expressionProjection{}, nil
+		}
+		return expressionProjection(values), nil
+	default:
+		return e.evaluate(node)
+	}
+}
+
+func expressionChildren(value any) ([]any, bool) {
+	if values, ok := expressionCollection(value); ok {
+		return values, true
+	}
+	switch value := value.(type) {
+	case map[string]any:
+		values := make([]any, 0, len(value))
+		for _, item := range value {
+			values = append(values, item)
+		}
+		return values, true
+	case map[string]string:
+		values := make([]any, 0, len(value))
+		for _, item := range value {
+			values = append(values, item)
+		}
+		return values, true
+	default:
+		return nil, false
+	}
+}
+
+func expressionIndex(value, index any) (any, error) {
+	if text, ok := index.(string); ok {
+		item, found, err := objectValue(value, text)
+		if err != nil || found {
+			return item, err
+		}
+		return nil, nil
+	}
+	number, ok := githubNumber(index)
+	if !ok || number < 0 || number != float64(int(number)) {
+		return nil, nil
+	}
+	items, ok := expressionCollection(value)
+	if !ok || int(number) >= len(items) {
+		return nil, nil
+	}
+	return items[int(number)], nil
 }
 
 func unsupportedReference(node actionlint.ExprNode) error {

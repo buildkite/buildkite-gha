@@ -462,6 +462,8 @@ Three expression modes intentionally support different syntax.
 
 Job and step `if` conditions support literals and the syntax listed above. Values use GitHub's truthiness, loose numeric coercion, case-insensitive string comparison, and operand-returning `&&` and `||` semantics. String functions convert primitive arguments; `contains()` also searches arrays. `case()` takes 3–255 odd-numbered arguments, requires Boolean predicates, and evaluates values lazily through the first match. Missing properties in an available `github` or matrix context evaluate to null; unavailable contexts still fail closed. Other functions are unsupported. `hashFiles()` accepts 1–255 literal or direct-reference arguments in step conditions only.
 
+Conditions support computed object indexes, numeric array indexes, whole `matrix`, `needs`, and step-scoped `steps` objects, typed inputs when the caller supplies them, and `.*` projections. Missing and out-of-range indexes evaluate to null. Projections omit missing children; a later wildcard flattens one collection level. The equivalent `[*]` spelling is unsupported by the current expression parser. Whole or dynamic `github` access and the `strategy` context remain unsupported.
+
 | Context | Job `if` | Step `if` |
 | --- | --- | --- |
 | `github.actor`, `github.event_name`, `github.head_ref`, `github.ref`, `github.repository`, `github.sha` | ✅ Yes | ✅ Yes |
@@ -505,7 +507,7 @@ Patterns cannot be absolute, contain a `..` path segment, or contain ASCII contr
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above where the complete expression resolves during compilation. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above, computed indexes, numeric array indexes, and `.*` projections where the complete expression resolves during compilation. Whole or dynamic `github` access and whole-event serialization remain unsupported. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
 
 ## Actions
 
