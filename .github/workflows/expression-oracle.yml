@@ -1,0 +1,56 @@
+name: Expression differential oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      labels:
+        description: JSON labels used to verify object filters
+        required: true
+        default: '[{"name":"bug"},{"name":"help wanted"}]'
+      invalid_json:
+        description: Invalid JSON in the unselected case branch
+        required: true
+        default: invalid
+
+permissions:
+  contents: read
+
+jobs:
+  expressions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify expression semantics
+        shell: bash
+        env:
+          NULL_EQUALS_ZERO: ${{ null == 0 }}
+          ORDERED_COMPARISON: ${{ fromJSON('2') > 1 }}
+          LOGICAL_RESULT: ${{ '' || 'fallback' }}
+          STRING_CAST: ${{ startsWith(123, '12') }}
+          ARRAY_CONTAINS: ${{ contains(fromJSON('["push","pull_request"]'), 'PULL_REQUEST') }}
+          FORMATTED: ${{ format('{{Hello {0}!}}', 'Mona') }}
+          JOINED: ${{ join(fromJSON('["one","two"]'), '|') }}
+          FILTERED: ${{ join(fromJSON(inputs.labels).*.name, ',') }}
+          MISSING: ${{ github.event.missing }}
+          LAZY_CASE: ${{ case(false, fromJSON(inputs.invalid_json), true, 'matched', 'default') }}
+        run: |
+          test "$NULL_EQUALS_ZERO" = "true"
+          test "$ORDERED_COMPARISON" = "true"
+          test "$LOGICAL_RESULT" = "fallback"
+          test "$STRING_CAST" = "true"
+          test "$ARRAY_CONTAINS" = "true"
+          test "$FORMATTED" = "{Hello Mona!}"
+          test "$JOINED" = "one|two"
+          test "$FILTERED" = "bug,help wanted"
+          test -z "$MISSING"
+          test "$LAZY_CASE" = "matched"
+          printf '%s\n' \
+            "NULL_EQUALS_ZERO=$NULL_EQUALS_ZERO" \
+            "ORDERED_COMPARISON=$ORDERED_COMPARISON" \
+            "LOGICAL_RESULT=$LOGICAL_RESULT" \
+            "STRING_CAST=$STRING_CAST" \
+            "ARRAY_CONTAINS=$ARRAY_CONTAINS" \
+            "FORMATTED=$FORMATTED" \
+            "JOINED=$JOINED" \
+            "FILTERED=$FILTERED" \
+            "MISSING=$MISSING" \
+            "LAZY_CASE=$LAZY_CASE"
