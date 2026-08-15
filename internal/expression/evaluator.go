@@ -98,7 +98,7 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
 		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
-		if err == nil && (v.validateAccess == nil || staticAuthority || len(path) == 1 || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		if err == nil && (v.validateAccess == nil || staticAuthority || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return v.validateReference(node, root, path)
 		}
 		if v.validateAccess != nil {

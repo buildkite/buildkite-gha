@@ -240,6 +240,13 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
 		t.Fatalf("composite metadata hashFiles error = %v", err)
 	}
+
+	writeFixtureFile(t, workspace, ".github/actions/child/action.yml", "inputs:\n  value:\n    required: false\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - uses: ./.github/actions/child\n      with:\n        value: ${{ false && hashFiles('value') || 'ok' }}\n")
+	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+		t.Fatalf("nested composite input hashFiles error = %v", err)
+	}
 }
 
 func TestHashWorkspaceFilesEnforcesEveryBound(t *testing.T) {

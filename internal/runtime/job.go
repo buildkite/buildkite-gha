@@ -1698,9 +1698,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 		childJobEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 		childJobEnv["GITHUB_ACTION_PATH"] = actionPath
 		if step.Uses != "" {
-			// runActionStep owns template evaluation for an action invocation.
-			// Passing env (the evaluated map) here would evaluate expressions twice.
-			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: step.With, Env: step.Env}
+			// Composite metadata remains direct-reference-only. Resolve its child
+			// fields before entering workflow-authored action evaluation.
+			var childEnv map[string]string
+			childEnv, childErr = evaluateMap(step.Env, eval)
+			var childWith map[string]string
+			if childErr == nil {
+				childWith, childErr = evaluateMap(step.With, eval)
+			}
+			child := plan.Step{ID: step.ID, Name: step.Name, Kind: "uses", Uses: step.Uses, With: childWith, Env: childEnv}
 			if actionLock != nil {
 				selector, ok := actionLock.Children[step.Uses]
 				if !ok {
@@ -1710,7 +1716,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				}
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, nil, eval, posts, actions, prepared, actionStack)
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, childEnv, eval, posts, actions, prepared, actionStack)
 			}
 		} else if strings.TrimSpace(step.Run) == "" {
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)

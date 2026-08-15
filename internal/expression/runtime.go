@@ -156,9 +156,21 @@ func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, er
 		case "steps", "needs":
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
 		case "matrix", "vars", "inputs", "env", "runner":
-			return nil
 		default:
 			return fmt.Errorf("unsupported runtime context %q", root)
+		}
+		switch access := access.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(access.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(access.Operand); err != nil {
+				return err
+			}
+			return validator.validate(access.Index)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(access.Receiver)
+		default:
+			return nil
 		}
 	}
 	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }

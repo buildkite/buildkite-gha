@@ -557,6 +557,8 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 		"${{ false && secrets[env.KEY] || '' }}",
 		"${{ steps[env.KEY].outputs.image }}",
 		"${{ toJSON(needs) }}",
+		"${{ matrix[steps[env.KEY].outputs.image] || 'fallback' }}",
+		"${{ matrix[toJSON(needs)] }}",
 	} {
 		if _, err := EvaluateStep(template, context); err == nil {
 			t.Errorf("EvaluateStep(%q) allowed prohibited access", template)
