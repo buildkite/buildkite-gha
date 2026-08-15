@@ -581,9 +581,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			runErr = fmt.Errorf("hydrate prerequisite results: %w", runErr)
 		}
 	}
-	ranJob := false
 	if runErr == nil {
-		ranJob = true
 		result, runErr = runner.RunJob(ctx, job, "")
 		if runErr != nil {
 			details.setFailurePhase(telemetry.FailurePhaseExecution)
@@ -599,7 +597,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 			result.Conclusion = terminalErrorConclusion(ctx)
 		}
 	}
-	if publish && runErr != nil && !ranJob {
+	if publish && runErr != nil && !result.FailureVisible() {
 		_, _ = fmt.Fprintln(stdout, "+++ :warning: Prepare GitHub Actions job failed")
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: %v\n", runErr)
 	}

@@ -6314,6 +6314,9 @@ func TestRunJobPublishesFailureWhenExplicitRuntimeMiseIsInvalid(t *testing.T) {
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "prepare action runtime: resolve runtime mise executable") {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "+++ :warning: Prepare GitHub Actions job failed\n~~~ :package: Publish GitHub Actions result\n") {
+		t.Fatalf("stdout = %q, want visible runner setup failure before collapsed publication", stdout.String())
+	}
 	if manifest := publishedCLIManifest(t, runner, job, planDigest); manifest.Result != "failure" {
 		t.Fatalf("published result = %q, want failure", manifest.Result)
 	}
@@ -7051,6 +7054,9 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 			}
 			if !test.wantWarning && test.wantCode == 0 && strings.Contains(stdout.String(), "^^^ +++\n") {
 				t.Fatalf("stdout = %q, want successful publication group collapsed", stdout.String())
+			}
+			if test.wantCode != 0 && strings.Contains(stdout.String(), "Prepare GitHub Actions job failed") {
+				t.Fatalf("stdout = %q, want action failure owned by its existing section", stdout.String())
 			}
 			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != test.wantResult {
 				t.Fatalf("published result = %q, want %q", result.Result, test.wantResult)
