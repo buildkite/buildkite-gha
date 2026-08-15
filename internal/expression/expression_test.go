@@ -586,8 +586,9 @@ func TestEvaluateStepControlReturnsTypedValuesWithoutHashFiles(t *testing.T) {
 			t.Errorf("EvaluateStepControl(%q) = %#v, %v; want %#v", test.expression, got, err, test.want)
 		}
 	}
-	if _, err := EvaluateStepControl("${{ false && hashFiles('go.sum') || 1 }}", context); err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
-		t.Fatalf("EvaluateStepControl() hashFiles error = %v", err)
+	context.HashFiles = func(patterns []string) (string, error) { return strings.Join(patterns, ","), nil }
+	if got, err := EvaluateStepControl("${{ hashFiles('go.sum') }}", context); err != nil || got != "go.sum" {
+		t.Fatalf("EvaluateStepControl() hashFiles = %#v, %v", got, err)
 	}
 }
 

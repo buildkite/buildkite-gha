@@ -83,7 +83,7 @@ func EvaluateStep(template string, context Context) (string, error) {
 }
 
 // EvaluateStepControl evaluates one complete expression for a typed workflow
-// step control. Filesystem access is unavailable on these surfaces.
+// step control.
 func EvaluateStepControl(expression string, context Context) (any, error) {
 	body, err := expressionBody(expression)
 	if err != nil {
@@ -93,7 +93,7 @@ func EvaluateStepControl(expression string, context Context) (any, error) {
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
-	return evaluateStepRuntimeExpression(node, context, false)
+	return evaluateStepRuntimeExpression(node, context, true)
 }
 
 func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
