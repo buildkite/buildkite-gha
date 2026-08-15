@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/release
+source "$root/scripts/release"
+
+run_success() {
+  local current="$1" bump="$2" expected="$3" actual
+  actual="$(next_release_version "$current" "$bump")"
+  [[ "$actual" == "$expected" ]] || die "unexpected result: $actual"
+}
+
+run_failure() {
+  local current="$1" bump="$2" expected_error="$3" output
+  if output="$(next_release_version "$current" "$bump" 2>&1)"; then
+    die "expected failure for $current $bump"
+  fi
+  [[ "$output" == *"$expected_error"* ]] || die "unexpected failure: $output"
+}
+
+run_success v0.13.15 minor v0.14.0
+run_success v0.13.15 patch v0.13.16
+run_success v0.9.9 minor v0.10.0
+run_failure 0.13.15 patch 'invalid current pre-1.0 version'
+run_failure v0.13.15 major 'invalid bump'
+
+git() {
+  [[ "$1" == rev-parse ]]
+  if [[ "$2" == HEAD ]]; then
+    printf '%s\n' "$TEST_HEAD"
+  else
+    printf '%s\n' "$TEST_TAG"
+  fi
+}
+
+TEST_HEAD=head TEST_TAG=tag require_release_changes v0.13.15
+if output="$(TEST_HEAD=same TEST_TAG=same require_release_changes v0.13.15 2>&1)"; then
+  die 'expected failure when the current release points at HEAD'
+fi
+[[ "$output" == *'no changes since v0.13.15'* ]] || die "unexpected failure: $output"
+
+printf '%s\n' 'release tests passed'
