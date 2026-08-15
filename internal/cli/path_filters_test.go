@@ -151,6 +151,14 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("merge-added path filter result = %#v, %v", workflowErrors, err)
 	}
+	customPath := filepath.Join(t.TempDir(), "custom.yml")
+	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{{
+		Path: customPath, CanonicalPath: customPath,
+		Triggers: []workflow.Trigger{{Event: "pull_request"}},
+	}})
+	if err != nil || len(workflowErrors) != 0 {
+		t.Fatalf("unfiltered custom workflow result = %#v, %v", workflowErrors, err)
+	}
 	event.Payload["pull_request"].(map[string]any)["merge_commit_sha"] = ""
 	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
 	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")

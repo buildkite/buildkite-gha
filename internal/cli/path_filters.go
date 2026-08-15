@@ -124,6 +124,12 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		if !workflowUsesEvent(input, event.Event) {
 			continue
 		}
+		if !gitTracksWorkflow(root, input) {
+			if workflowUsesPathFilters(input, event.Event) {
+				workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is not provider-backed and cannot use pull request path filters", input.CanonicalPath)
+			}
+			continue
+		}
 		mergeSource, err := gitCommand(root, "cat-file", "blob", mergeSHA+":"+input.CanonicalPath).Output()
 		if err != nil {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is unavailable in the event merge commit", input.CanonicalPath)
@@ -167,6 +173,19 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, err.Error()), nil
 	}
 	return paths, workflowErrors, nil
+}
+
+func gitTracksWorkflow(root string, input workflowInput) bool {
+	relative, err := filepath.Rel(root, input.Path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return false
+	}
+	canonical := filepath.ToSlash(filepath.Clean(relative))
+	if canonical != input.CanonicalPath {
+		return false
+	}
+	output, err := gitCommand(root, "ls-files", "-z", "--", ":(top,literal)"+canonical).Output()
+	return err == nil && bytes.Equal(output, append([]byte(canonical), 0))
 }
 
 func pathEvaluationErrors(workflows []workflowInput, event string, errors map[string]string, reason string) map[string]string {
