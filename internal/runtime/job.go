@@ -36,7 +36,11 @@ type JobResult struct {
 	summaryTruncated  bool
 	warningsTruncated bool
 	errorsTruncated   bool
+	failureVisible    bool
 }
+
+// FailureVisible reports whether the runtime expanded a section containing the failure.
+func (r JobResult) FailureVisible() bool { return r.failureVisible }
 
 const maxJobOutputBytes = 1024
 
@@ -719,6 +723,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		cancelStep()
 		if execution.outcome == "failure" {
 			processor.expandCurrentSection()
+			jobResult.failureVisible = true
 		}
 		runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 	}
