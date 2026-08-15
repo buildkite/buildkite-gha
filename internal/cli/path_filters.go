@@ -31,7 +31,7 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		return
 	}
 	pullRequest, _ := event.Payload["pull_request"].(map[string]any)
-	if !workflowsUsePathFilters(workflows, event.Event) && nestedString(pullRequest, "merge_commit_sha") == "" {
+	if !workflowsUsePathFilters(workflows, event.Event) && nestedString(pullRequest, "base", "sha") == "" && nestedString(pullRequest, "head", "sha") == "" {
 		return
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
@@ -144,26 +144,38 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	}
 	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
 	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
-		return nil, nil, fmt.Errorf("pull request path filters require a complete non-shallow checkout")
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, "pull request path filters require a complete non-shallow checkout"), nil
 	}
 	baseTipBytes, err := gitCommand(root, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}").Output()
 	if err != nil || strings.TrimSpace(string(baseTipBytes)) != baseSHA {
-		return nil, nil, fmt.Errorf("webhook pull request base commit does not match the local origin base branch")
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, "webhook pull request base commit does not match the local origin base branch"), nil
 	}
 	mergeBaseBytes, err := gitCommand(root, "merge-base", "--all", baseSHA, headSHA).Output()
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolve pull request merge base: %w", err)
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, fmt.Sprintf("resolve pull request merge base: %v", err)), nil
 	}
 	mergeBase, err := singleGitCommit(mergeBaseBytes, "pull request merge base")
 	if err != nil {
-		return nil, nil, err
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, err.Error()), nil
 	}
 	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list pull request changed paths: %w", err)
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, fmt.Sprintf("list pull request changed paths: %v", err)), nil
 	}
 	paths, err := parseChangedPaths(output)
-	return paths, workflowErrors, err
+	if err != nil {
+		return nil, pathEvaluationErrors(workflows, event.Event, workflowErrors, err.Error()), nil
+	}
+	return paths, workflowErrors, nil
+}
+
+func pathEvaluationErrors(workflows []workflowInput, event string, errors map[string]string, reason string) map[string]string {
+	for _, input := range workflows {
+		if workflowUsesPathFilters(input, event) {
+			errors[input.CanonicalPath] = reason
+		}
+	}
+	return errors
 }
 
 func workflowUsesPathFilters(input workflowInput, event string) bool {

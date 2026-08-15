@@ -151,6 +151,29 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	if err != nil || !strings.Contains(workflowErrors["ci.yml"], "does not match the event merge commit") {
 		t.Fatalf("merge-added path filter result = %#v, %v", workflowErrors, err)
 	}
+	event.Payload["pull_request"].(map[string]any)["merge_commit_sha"] = ""
+	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	workflows := []workflowInput{{
+		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
+		Triggers: []workflow.Trigger{{Event: "pull_request"}},
+	}}
+	context := buildkitepipeline.TriggerConditionContext{}
+	populateChangedPaths(&context, event, effectiveEventFromWebhook, workflows)
+	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
+		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
+	}
+}
+
+func TestPathEvaluationErrorsApplyOnlyToFilteredWorkflows(t *testing.T) {
+	workflows := []workflowInput{
+		{CanonicalPath: "filtered.yml", Triggers: []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}}},
+		{CanonicalPath: "unfiltered.yml", Triggers: []workflow.Trigger{{Event: "pull_request"}}},
+	}
+	errors := pathEvaluationErrors(workflows, "pull_request", map[string]string{}, "diff unavailable")
+	if !reflect.DeepEqual(errors, map[string]string{"filtered.yml": "diff unavailable"}) {
+		t.Fatalf("path evaluation errors = %#v", errors)
+	}
 }
 
 func TestSingleGitCommitRejectsMultipleMergeBases(t *testing.T) {
