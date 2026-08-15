@@ -751,6 +751,7 @@ func TestEvaluateConditionMatchesGitHubCoercionAndOrdering(t *testing.T) {
 		{condition: "'1e-400' == 0", want: true},
 		{condition: "'1e309' == matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.Inf(1)}}, want: true},
 		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.NaN()}}, want: false},
+		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": json.Number("1e-400")}}, want: false},
 		{condition: "matrix.missing == null", context: ConditionContext{Matrix: map[string]any{}}, want: true},
 	}
 	for _, test := range tests {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/big"
 	"reflect"
 	"strconv"
 	"strings"
@@ -100,32 +99,6 @@ func visitTemplateExpressions(template string, visit func(actionlint.ExprNode) e
 	}
 }
 
-// conditionNumber converts native numeric representations to a rational.
-// It is shared infrastructure for both the strict condition family and the
-// loose actionInputDefault family and does not by itself imply coercion:
-// callers decide whether non-numeric values become numbers.
-func conditionNumber(value any) (*big.Rat, bool) {
-	var source string
-	switch value := value.(type) {
-	case json.Number:
-		source = value.String()
-	default:
-		reflected := reflect.ValueOf(value)
-		switch reflected.Kind() {
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			source = strconv.FormatInt(reflected.Int(), 10)
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			source = strconv.FormatUint(reflected.Uint(), 10)
-		case reflect.Float32, reflect.Float64:
-			source = strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits())
-		default:
-			return nil, false
-		}
-	}
-	number, ok := new(big.Rat).SetString(source)
-	return number, ok
-}
-
 func githubTruthy(value any) bool {
 	switch value := value.(type) {
 	case nil:
@@ -139,8 +112,8 @@ func githubTruthy(value any) bool {
 	case float64:
 		return !math.IsNaN(value) && value != 0
 	}
-	if number, ok := conditionNumber(value); ok {
-		return number.Sign() != 0
+	if number, ok := githubNumber(value); ok {
+		return !math.IsNaN(number) && number != 0
 	}
 	return true
 }
@@ -148,13 +121,6 @@ func githubTruthy(value any) bool {
 func githubEqual(left, right any) bool {
 	if left == nil && right == nil {
 		return true
-	}
-	if _, leftOK := conditionNumber(left); leftOK {
-		if _, rightOK := conditionNumber(right); rightOK {
-			leftNumber, _ := githubNumber(left)
-			rightNumber, _ := githubNumber(right)
-			return !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber
-		}
 	}
 	switch left := left.(type) {
 	case string:
