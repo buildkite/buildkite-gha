@@ -768,11 +768,13 @@ hosted-toolchains images provide. macOS images are unsupported.
 
 ## Validation
 
-Check syntax and static graph construction without an event:
+Check syntax, static graph construction, and every declared trigger without an event:
 
 ```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
+
+This result is event-independent and does not claim hosted admission.
 
 Apply the same profile as production upload:
 
@@ -783,9 +785,11 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
+Use `--event push`, `--event pull_request`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. Generated snapshots are compatibility test inputs, not equivalents to real payloads. The options are mutually exclusive.
+
 The results mean:
 
-- **Compilable**: Syntax and the static job graph can be translated.
+- **Compilable**: Syntax, declared triggers, and the static job graph can be translated.
 - **Not applicable**: The workflow does not declare the selected event, so upload would skip it without compiling it.
 - **Admitted**: Resolved actions and generated plans pass production policy.
 - **Runtime-proven**: Repository tests or hosted evidence have executed the behavior.

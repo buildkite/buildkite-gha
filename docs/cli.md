@@ -20,11 +20,13 @@ Managed Node binaries require glibc 2.28 or newer. The Go CLI has no glibc requi
 
 ## Validate a workflow
 
-Validate syntax and the static graph:
+Validate syntax, the static graph, and every declared trigger without an event:
 
 ```sh
 buildkite-gha validate .github/workflows/ci.yml
 ```
+
+This event-independent check rejects unsupported events, path filters, branch and tag filter combinations, and pull request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
 
 Resolve actions and apply production policy:
 
@@ -34,6 +36,19 @@ buildkite-gha validate \
   --event-path .buildkite/events/current.json \
   .github/workflows/ci.yml
 ```
+
+For a quick compatibility check, generate a minimal supported event snapshot:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --event pull_request \
+  .github/workflows/ci.yml
+```
+
+`--event` supports `push`, `pull_request`, `workflow_dispatch`, and `schedule`. It is available only with `--profile hosted` and is mutually exclusive with `--event-path`. The generated snapshot uses example repository identity and minimal event fields. It can expose payload-dependent incompatibilities, but it is not equivalent to a real payload and cannot prove behavior for every payload shape. Use `--event-path` when exact refs, activity, repository identity, or payload fields matter.
+
+Validation produces one processing report for one event. There is no `--all-events` option: combining generated evaluations under the current single-report contract would overstate admission when behavior depends on payload fields. Run `--event` once per event you need to inspect, and use exact snapshots for payload-dependent workflows.
 
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 
@@ -49,7 +64,7 @@ Validation may use the public network to resolve actions. Apart from annotation 
 
 ## Provide an event snapshot
 
-`compile` and profile validation need a bounded event snapshot:
+`compile` and profile validation with `--event-path` need a bounded event snapshot:
 
 ```json
 {

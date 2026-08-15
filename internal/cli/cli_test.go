@@ -1178,6 +1178,42 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
+	t.Run("validate checks every trigger without an event", func(t *testing.T) {
+		tests := []struct {
+			name, trigger, want string
+		}{
+			{name: "unsupported event", trigger: "issues", want: `unsupported GitHub trigger event "issues"`},
+			{name: "path filter", trigger: "push:\n    paths: [src/**]", want: "path filters are unsupported"},
+			{name: "mixed branch filters", trigger: "push:\n    branches: [main]\n    branches-ignore: [release]", want: "include and ignore filters cannot be combined"},
+			{name: "pull request tag filter", trigger: "pull_request:\n    tags: [v1]", want: "pull_request tag filters are unsupported"},
+			{name: "pull request activity", trigger: "pull_request:\n    types: [auto_merge_enabled, submitted]", want: `activity type "submitted" cannot be mapped exactly`},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				workflow := filepath.Join(t.TempDir(), "trigger.yml")
+				source := "on:\n  " + test.trigger + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+				if err := os.WriteFile(workflow, []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := Run([]string{"validate", "--format", "json", workflow}, &stdout, &stderr, "dev"); code != 1 {
+					t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+				}
+				var report compatibility.ProcessingReport
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				pipelineFailed := false
+				for _, stage := range report.Stages {
+					pipelineFailed = pipelineFailed || stage.ID == string(compiler.StagePipeline) && stage.Result == compatibility.Failed
+				}
+				if report.Result != "incompatible" || !pipelineFailed || len(report.Diagnostics) != 1 || report.Diagnostics[0].Stage != string(compiler.StagePipeline) || !strings.Contains(report.Diagnostics[0].Message+report.Diagnostics[0].Detail, test.want) {
+					t.Fatalf("report = %#v, want trigger failure containing %q", report, test.want)
+				}
+			})
+		}
+	})
+
 	t.Run("validate json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		if code := Run([]string{"validate", "--format", "json", workflowPath}, &stdout, &stderr, "dev"); code != 0 {
@@ -1239,6 +1275,29 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 		if report.Result != "admitted" || report.Profile != "hosted" || report.Compile.Instances != 3 || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
 			t.Fatalf("profile report = %#v", report)
+		}
+	})
+
+	t.Run("validate hosted profile with generated events", func(t *testing.T) {
+		workflow := filepath.Join(t.TempDir(), "events.yml")
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+			t.Run(event, func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				args := []string{"validate", "--profile", "hosted", "--event", event, "--format", "json", workflow}
+				if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+					t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+				}
+				var report compatibility.ProcessingReport
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+					t.Fatal(err)
+				}
+				if report.Result != "admitted" || report.Profile != "hosted" || report.Admission.Result != "admitted" {
+					t.Fatalf("profile report = %#v", report)
+				}
+			})
 		}
 	})
 
@@ -1320,7 +1379,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate profile requires event", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		if code := Run([]string{"validate", "--profile", "hosted", workflowPath}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "--event-path is required with --profile") {
+		if code := Run([]string{"validate", "--profile", "hosted", workflowPath}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "use bare validate <workflow> for event-independent syntax and trigger compatibility validation") {
 			t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 		}
 	})
@@ -7544,17 +7603,26 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	if _, _, err := workflowArgs([]string{"--event-path", "one", "--event-path", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("workflowArgs() error = %v, want duplicate option error", err)
 	}
-	if _, _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, _, _, err := validateArgs([]string{"--format", "json", "--format", "text", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("validateArgs() error = %v, want duplicate format error", err)
 	}
-	if _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--profile", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+	if _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--profile", "hosted", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("validateArgs() error = %v, want duplicate profile error", err)
 	}
-	if _, _, _, profile, err := validateArgs([]string{"--profile", "hosted-tokenless", "workflow.yml"}); err != nil || profile != "hosted" {
+	if _, _, _, _, profile, err := validateArgs([]string{"--profile", "hosted-tokenless", "workflow.yml"}); err != nil || profile != "hosted" {
 		t.Fatalf("validateArgs() legacy profile = %q, %v", profile, err)
 	}
-	if _, _, _, _, err := validateArgs([]string{"--profile", "unknown", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
+	if _, _, _, _, _, err := validateArgs([]string{"--profile", "unknown", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), `must be "hosted"`) {
 		t.Fatalf("validateArgs() error = %v, want unknown profile error", err)
+	}
+	if _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "push", "--event-path", "event.json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("validateArgs() error = %v, want mutually exclusive event inputs", err)
+	}
+	if _, _, _, _, _, err := validateArgs([]string{"--event", "push", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "requires --profile hosted") {
+		t.Fatalf("validateArgs() error = %v, want profile requirement", err)
+	}
+	if _, _, _, _, _, err := validateArgs([]string{"--profile", "hosted", "--event", "issues", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "supported events") {
+		t.Fatalf("validateArgs() error = %v, want supported event list", err)
 	}
 	if _, _, _, err := compileArgs([]string{"--format", "pipeline", "--format", "ir-json", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("compileArgs() error = %v, want duplicate format error", err)
