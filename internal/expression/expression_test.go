@@ -572,6 +572,67 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	}
 }
 
+func TestEvaluateJobSurfacesSupportAuthorizedCompoundExpressions(t *testing.T) {
+	context := Context{
+		GitHub:      map[string]any{"ref": "refs/heads/main"},
+		Inputs:      map[string]string{"suffix": "prod"},
+		Matrix:      map[string]any{"os": "linux"},
+		Needs:       map[string]map[string]string{"build": {"tag": "v1"}},
+		NeedResults: map[string]string{"build": "success"},
+		Secrets:     map[string]string{"TOKEN": "secret"},
+		Steps:       map[string]map[string]string{"build": {"image": "app:v1"}},
+		Vars:        map[string]string{"PREFIX": "release"},
+		Env:         map[string]string{"ROOT": "src"},
+	}
+
+	jobEnv := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix.os, inputs.suffix) }}:${{ needs.build.outputs.tag }}"
+	if got, err := EvaluateJobEnvironment(jobEnv, context); err != nil || got != "release-linux-prod:v1" {
+		t.Fatalf("EvaluateJobEnvironment() = %q, %v", got, err)
+	}
+	jobDefault := "${{ format('{0}/{1}', env.ROOT, matrix.os) }}-${{ github.ref }}"
+	if got, err := EvaluateJobDefault(jobDefault, context); err != nil || got != "src/linux-refs/heads/main" {
+		t.Fatalf("EvaluateJobDefault() = %q, %v", got, err)
+	}
+	jobOutput := "${{ steps.build.outputs.image }}-${{ needs.build.result }}-${{ matrix.os }}"
+	if got, err := EvaluateJobOutput(jobOutput, context); err != nil || got != "app:v1-success-linux" {
+		t.Fatalf("EvaluateJobOutput() = %q, %v", got, err)
+	}
+	if got, err := EvaluateJobEnvironment("${{ secrets.TOKEN }}", context); err != nil || got != "secret" {
+		t.Fatalf("EvaluateJobEnvironment() secret = %q, %v", got, err)
+	}
+}
+
+func TestEvaluateJobSurfacesFailClosed(t *testing.T) {
+	context := Context{
+		GitHub: map[string]any{"token": "secret"},
+		Env:    map[string]string{"KEY": "TOKEN"},
+		Steps:  map[string]map[string]string{"build": {"value": "ok"}},
+	}
+	tests := []struct {
+		name     string
+		evaluate func(string, Context) (string, error)
+		template string
+	}{
+		{name: "job env excludes env", evaluate: EvaluateJobEnvironment, template: "${{ false && env.KEY || 'ok' }}"},
+		{name: "job env excludes steps", evaluate: EvaluateJobEnvironment, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
+		{name: "job default excludes steps", evaluate: EvaluateJobDefault, template: "${{ false && steps.build.outputs.value || 'ok' }}"},
+		{name: "dynamic secret", evaluate: EvaluateJobEnvironment, template: "${{ false && secrets[env.KEY] || 'ok' }}"},
+		{name: "aggregate needs", evaluate: EvaluateJobDefault, template: "${{ false && toJSON(needs) || 'ok' }}"},
+		{name: "aggregate steps", evaluate: EvaluateJobOutput, template: "${{ false && toJSON(steps) || 'ok' }}"},
+		{name: "hash files", evaluate: EvaluateJobDefault, template: "${{ false && hashFiles('go.sum') || 'ok' }}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := test.evaluate(test.template, context); err == nil {
+				t.Fatalf("evaluation accepted %q", test.template)
+			}
+		})
+	}
+	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
+		t.Fatal("Evaluate() broadened general runtime interpolation")
+	}
+}
+
 func TestEvaluateStepControlReturnsTypedValuesWithoutHashFiles(t *testing.T) {
 	context := Context{Matrix: map[string]any{"experimental": true, "timeout": 1.5}}
 	for _, test := range []struct {

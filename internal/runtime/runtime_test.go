@@ -2276,6 +2276,40 @@ func TestJobConditionConsumesNeedResultAndOutput(t *testing.T) {
 	}
 }
 
+func TestJobRuntimeFieldsEvaluateCompoundExpressions(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	if err := os.Mkdir(filepath.Join(workspace, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID:      "run",
+		Kind:    "run",
+		Env:     map[string]string{"SCOPE": "step"},
+		Command: `test "$VALUE" = "release-linux-v1" && printf 'value=done\n' >> "$GITHUB_OUTPUT"`,
+	}})
+	job.Matrix = map[string]any{"os": "linux", "directory": "src"}
+	job.Vars = map[string]string{"PREFIX": "release"}
+	job.Needs = map[string]plan.Need{"producer": {Result: "success", Outputs: map[string]string{"tag": "v1"}}}
+	job.Env = map[string]string{
+		"ROOT":  workspace,
+		"SCOPE": "job",
+		"VALUE": "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix.os, needs.producer.outputs.tag) }}",
+	}
+	job.DefaultShell = "${{ format('{0}', 'sh') }}"
+	job.DefaultWorkingDirectory = "${{ format('{0}/{1}', env.ROOT, matrix.directory) }}"
+	job.Outputs = map[string]string{
+		"environment": "${{ format('{0}', env.SCOPE) }}",
+		"result":      "${{ format('{0}-{1}', steps.run.outputs.value, needs.producer.result) }}",
+	}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" || result.Outputs["result"] != "done-success" || result.Outputs["environment"] != "job" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
 func TestDecodedPlanMatrixNumbersDriveRuntimeConditions(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

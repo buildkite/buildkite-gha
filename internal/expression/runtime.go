@@ -93,7 +93,28 @@ func EvaluateStepControl(expression string, context Context) (any, error) {
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
-	return evaluateStepRuntimeExpression(node, context, true)
+	return evaluateStepRuntimeExpression(node, context, true, nil)
+}
+
+// EvaluateJobEnvironment evaluates a job-level environment template.
+func EvaluateJobEnvironment(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "vars": true, "secrets": true, "inputs": true})
+	})
+}
+
+// EvaluateJobDefault evaluates a job-level run default template.
+func EvaluateJobDefault(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "env": true, "vars": true, "inputs": true})
+	})
+}
+
+// EvaluateJobOutput evaluates a job output template after all steps settle.
+func EvaluateJobOutput(template string, context Context) (string, error) {
+	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
+		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "runner": true, "env": true, "vars": true, "secrets": true, "steps": true, "inputs": true})
+	})
 }
 
 func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
@@ -144,12 +165,15 @@ func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, 
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	return evaluateStepRuntimeExpression(node, context, true)
+	return evaluateStepRuntimeExpression(node, context, true, nil)
 }
 
-func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles bool) (any, error) {
+func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles bool, allowedContexts map[string]bool) (any, error) {
 	validator := newSemanticValidator(stepRuntimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
+			return fmt.Errorf("runtime context %q is unavailable in this field", root)
+		}
 		if strings.EqualFold(root, "github") {
 			if len(path) != 1 {
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
@@ -168,6 +192,9 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 	}
 	validator.validateAccess = func(access actionlint.ExprNode) error {
 		root := strings.ToLower(referenceRoot(access))
+		if allowedContexts != nil && !allowedContexts[root] {
+			return fmt.Errorf("runtime context %q is unavailable in this field", root)
+		}
 		switch root {
 		case "github", "secrets":
 			return fmt.Errorf("dynamic or whole %s access is unsupported", root)

@@ -453,9 +453,9 @@ Three expression modes intentionally support different syntax.
 
 | Syntax | Conditions | Runtime interpolation | Other compile-time expressions |
 | --- | --- | --- | --- |
-| `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Workflow step fields | 🟡 When the result resolves fully |
+| `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
-| `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Workflow step fields | 🟡 When the result resolves fully |
+| `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Listed workflow fields | 🟡 When the result resolves fully |
 | `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
@@ -483,17 +483,23 @@ An event-backed condition is reduced from the immutable event snapshot before ru
 
 Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported so unavailable background outputs fail closed.
 
-These workflow step fields support `hashFiles()`. General runtime interpolation, job fields, job outputs, job defaults, and action metadata keep the direct-reference-only rule.
+Job-level expressions support the same operators and pure functions with these field-specific contexts:
+
+| Field | Contexts |
+| --- | --- |
+| `env` | `github`, `needs`, `matrix`, `vars`, `secrets`, `inputs` |
+| `defaults.run` | `github`, `needs`, `matrix`, `env`, `vars`, `inputs` |
+| `outputs` | `github`, `needs`, `matrix`, `runner`, `env`, `vars`, `secrets`, `steps`, `inputs` |
+
+These workflow step fields support `hashFiles()`; job-level fields do not. General runtime interpolation and action metadata keep the direct-reference-only rule. The GitHub-authorized `strategy` context, and `job` in job outputs, remain unsupported because the runtime does not carry equivalent context values. Computed, whole, and projected `steps` and `needs` access also remains unsupported in job-level fields.
 
 Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360.
 
 Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 
 The only runner references are `runner.os` and `runner.arch`. They resolve to
-`Linux`/`X64` or `macOS`/`ARM64`. Runtime interpolation does not evaluate
-operators or functions; use the supported condition syntax in job or step
-`if`. Other runner fields and compile-time positions that require runner
-identity are unsupported.
+`Linux`/`X64` or `macOS`/`ARM64`. Other runner fields and compile-time positions
+that require runner identity are unsupported.
 
 A runtime interpolation can read a verified upstream output directly:
 

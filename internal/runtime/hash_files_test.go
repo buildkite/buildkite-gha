@@ -224,7 +224,7 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
 			test.change(&job)
-			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+			if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `unsupported runtime function "hashFiles"`) {
 				t.Fatalf("RunJob() default hashFiles error = %v", err)
 			}
 		})

@@ -434,7 +434,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}()
 		}
 	}
-	jobEnv, err := evaluateMap(job.Env, eval)
+	jobEnv, err := evaluateJobEnvironmentMap(job.Env, eval)
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
@@ -804,9 +804,10 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}
 	}
+	eval.Env = jobResult.Env
 	for _, name := range sortedKeys(job.Outputs) {
 		template := job.Outputs[name]
-		value, err := expression.Evaluate(template, eval)
+		value, err := expression.EvaluateJobOutput(template, eval)
 		if err != nil {
 			return scrubJobResult(jobResult, sensitiveValues), errors.Join(runErr, fmt.Errorf("job output %q: %w", name, err))
 		}
@@ -1539,7 +1540,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		shell := step.Shell
 		if shell == "" {
 			shell = job.DefaultShell
-			shell, err = expression.Evaluate(shell, eval)
+			shell, err = expression.EvaluateJobDefault(shell, eval)
 		} else {
 			shell, err = expression.EvaluateStep(shell, eval)
 		}
@@ -1556,7 +1557,7 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		workingDirectory := step.WorkingDirectory
 		if workingDirectory == "" {
 			workingDirectory = job.DefaultWorkingDirectory
-			workingDirectory, err = expression.Evaluate(workingDirectory, eval)
+			workingDirectory, err = expression.EvaluateJobDefault(workingDirectory, eval)
 		} else {
 			workingDirectory, err = expression.EvaluateStep(workingDirectory, eval)
 		}
@@ -1885,6 +1886,18 @@ func evaluateMap(values map[string]string, context expression.Context) (map[stri
 	for _, name := range sortedKeys(values) {
 		value := values[name]
 		resolved, err := expression.Evaluate(value, context)
+		if err != nil {
+			return nil, fmt.Errorf("evaluate %q: %w", name, err)
+		}
+		out[name] = resolved
+	}
+	return out, nil
+}
+
+func evaluateJobEnvironmentMap(values map[string]string, context expression.Context) (map[string]string, error) {
+	out := make(map[string]string, len(values))
+	for _, name := range sortedKeys(values) {
+		resolved, err := expression.EvaluateJobEnvironment(values[name], context)
 		if err != nil {
 			return nil, fmt.Errorf("evaluate %q: %w", name, err)
 		}
