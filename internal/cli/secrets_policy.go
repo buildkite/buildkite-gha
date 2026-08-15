@@ -62,37 +62,45 @@ func validateSecretsPolicy(contents string) (string, error) {
 		return "", errors.New("policy must contain at least one rule")
 	}
 	claims := map[string]bool{
-		"pipeline_id": true, "build_source": true, "cluster_queue_id": true,
-		"cluster_queue_key": true, "pipeline_slug": true, "build_branch": true,
-		"build_creator": true, "build_creator_team": true,
+		"cluster_id": true, "cluster_queue_id": true, "pipeline_id": true,
+		"build_creator_team": true, "build_source": false, "cluster_queue_key": false,
+		"pipeline_slug": false, "build_branch": false, "build_creator": false,
 	}
 	for ruleIndex, rule := range rules {
 		if len(rule) == 0 {
 			return "", fmt.Errorf("policy rule %d must contain at least one claim", ruleIndex+1)
 		}
 		for claim, conditions := range rule {
-			if !claims[claim] {
+			requiresUUID, known := claims[claim]
+			if !known {
 				return "", fmt.Errorf("policy rule %d contains unknown claim %q", ruleIndex+1, claim)
 			}
-			if !validPolicyConditions(conditions) {
-				return "", fmt.Errorf("policy rule %d claim %q must be a non-empty string or list of non-empty strings", ruleIndex+1, claim)
+			if !validPolicyConditions(conditions, requiresUUID) {
+				expected := "non-empty string"
+				if requiresUUID {
+					expected = "UUID"
+				}
+				return "", fmt.Errorf("policy rule %d claim %q must be a %s or list of %ss", ruleIndex+1, claim, expected, expected)
 			}
 		}
 	}
 	return policy + "\n", nil
 }
 
-func validPolicyConditions(value any) bool {
+func validPolicyConditions(value any, requiresUUID bool) bool {
+	valid := func(value any) bool {
+		text, ok := value.(string)
+		return ok && text != "" && (!requiresUUID || clusterIDPattern.MatchString(text))
+	}
 	switch conditions := value.(type) {
 	case string:
-		return conditions != ""
+		return valid(conditions)
 	case []any:
 		if len(conditions) == 0 {
 			return false
 		}
 		for _, condition := range conditions {
-			text, ok := condition.(string)
-			if !ok || text == "" {
+			if !valid(condition) {
 				return false
 			}
 		}

@@ -83,6 +83,8 @@ func TestValidateSecretsPolicyRequiresRestrictedRules(t *testing.T) {
 		{name: "unknown claim", policy: "- imaginary: value", want: "unknown claim"},
 		{name: "empty condition", policy: "- pipeline_slug: ''", want: "non-empty string"},
 		{name: "non-string condition", policy: "- pipeline_slug: 7", want: "non-empty string"},
+		{name: "invalid UUID", policy: "- pipeline_id: nope", want: "must be a UUID"},
+		{name: "invalid UUID list", policy: "- cluster_queue_id: [11111111-2222-4333-8444-555555555555, nope]", want: "must be a UUID"},
 		{name: "GitHub expression", policy: "- pipeline_slug: ${{ secrets.OTHER }}", want: "must not contain GitHub expression syntax"},
 	}
 	for _, test := range tests {
@@ -92,6 +94,14 @@ func TestValidateSecretsPolicyRequiresRestrictedRules(t *testing.T) {
 				t.Fatalf("validateSecretsPolicy() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestValidateSecretsPolicyAcceptsBuildkiteClaimTypes(t *testing.T) {
+	policy := "- cluster_id: 11111111-2222-4333-8444-555555555555\n  pipeline_slug: widgets\n  build_branch: main\n"
+	got, err := validateSecretsPolicy(policy)
+	if err != nil || got != policy {
+		t.Fatalf("validateSecretsPolicy() = %q, %v", got, err)
 	}
 }
 
@@ -239,24 +249,25 @@ func TestGeneratedOIDCMigrationSendsOneInMemoryBatchWithoutLeakingValues(t *test
 	script = strings.Replace(script,
 		`migration_url_prefix = "https://api.buildkite.com/v2/organizations/acme/clusters/11111111-2222-4333-8444-555555555555/github-actions-secret-migrations/"`,
 		`migration_url_prefix = "`+server.URL+`/"`, 1)
+	firstValue := strings.Repeat("x", 8192)
 	command := exec.Command("bash", "-c", script)
 	command.Env = append(command.Environ(),
 		"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
 		"ACTIONS_ID_TOKEN_REQUEST_URL="+server.URL+"/oidc?request=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
-		"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001=second-secret-value",
+		"MIGRATION_SECRET_000="+firstValue, "MIGRATION_SECRET_001=second-secret-value",
 	)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("generated script failed: %v: %s", err, output)
 	}
-	for _, value := range []string{"first-secret-value", "second-secret-value", "github-request-token", "github-oidc-token"} {
+	for _, value := range []string{firstValue, "second-secret-value", "github-request-token", "github-oidc-token"} {
 		if strings.Contains(string(output), value) {
 			t.Fatalf("generated script leaked %q in %q", value, output)
 		}
 	}
 	body := <-requestBody
 	secrets, ok := body["secrets"].(map[string]any)
-	if !ok || len(body) != 1 || len(secrets) != 2 || secrets["API_KEY"] != "first-secret-value" || secrets["DEPLOY_TOKEN"] != "second-secret-value" {
+	if !ok || len(body) != 1 || len(secrets) != 2 || secrets["API_KEY"] != firstValue || secrets["DEPLOY_TOKEN"] != "second-secret-value" {
 		t.Fatalf("request body = %#v", body)
 	}
 }
