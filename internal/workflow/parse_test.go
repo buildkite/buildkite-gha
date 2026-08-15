@@ -56,6 +56,32 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
+func TestParseKeepsWorkflowAndJobExpressionSurfacesSeparate(t *testing.T) {
+	jobSource := []byte("on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    env:\n      VALUE: ${{ format('{0}', vars.VALUE) }}\n    defaults:\n      run:\n        shell: ${{ format('{0}', 'sh') }}\n    steps: [{run: true}]\n")
+	parsed, err := Parse("job.yml", jobSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Jobs[0].Env["VALUE"] == "" || parsed.Jobs[0].DefaultShell == "" {
+		t.Fatalf("Parse() dropped job expressions: %#v", parsed.Jobs[0])
+	}
+
+	for _, test := range []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{name: "workflow env", source: "on: push\nenv:\n  VALUE: ${{ format('{0}', vars.VALUE) }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n", want: `workflow env "VALUE"`},
+		{name: "workflow default", source: "on: push\ndefaults:\n  run:\n    shell: ${{ format('{0}', 'sh') }}\njobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: true}]}\n", want: "workflow default shell"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse("workflow.yml", []byte(test.source)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestParseRejectsGitHubEnvironment(t *testing.T) {
 	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
 	if err == nil || !strings.Contains(err.Error(), "GitHub environments and environment secrets are unsupported") {

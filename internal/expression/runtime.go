@@ -47,11 +47,11 @@ const (
 	runtimeReferenceRunner
 )
 
-// validateRuntimeTemplate verifies that every expression in a runtime template
+// ValidateRuntimeTemplate verifies that every expression in a runtime template
 // is one direct reference supported by Evaluate. Runtime values are
 // deliberately not resolved because many contexts do not exist until a job or
 // step runs.
-func validateRuntimeTemplate(template string) error {
+func ValidateRuntimeTemplate(template string) error {
 	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
 		validator := newSemanticValidator(runtimeReferenceSurface)
 		validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
@@ -93,27 +93,27 @@ func EvaluateStepControl(expression string, context Context) (any, error) {
 	if parseErr != nil {
 		return nil, fmt.Errorf("invalid expression: %w", parseErr)
 	}
-	return evaluateStepRuntimeExpression(node, context, true, nil)
+	return evaluateStepRuntimeExpression(node, context, true, true, nil)
 }
 
 // EvaluateJobEnvironment evaluates a job-level environment template.
 func EvaluateJobEnvironment(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
-		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "vars": true, "secrets": true, "inputs": true})
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "vars": true, "secrets": true, "inputs": true})
 	})
 }
 
 // EvaluateJobDefault evaluates a job-level run default template.
 func EvaluateJobDefault(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
-		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "env": true, "vars": true, "inputs": true})
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "env": true, "vars": true, "inputs": true})
 	})
 }
 
 // EvaluateJobOutput evaluates a job output template after all steps settle.
 func EvaluateJobOutput(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
-		return evaluateStepRuntimeExpression(node, context, false, map[string]bool{"github": true, "needs": true, "matrix": true, "runner": true, "env": true, "vars": true, "secrets": true, "steps": true, "inputs": true})
+		return evaluateStepRuntimeExpression(node, context, false, false, map[string]bool{"github": true, "needs": true, "matrix": true, "runner": true, "env": true, "vars": true, "secrets": true, "steps": true, "inputs": true})
 	})
 }
 
@@ -165,10 +165,10 @@ func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, 
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	return evaluateStepRuntimeExpression(node, context, true, nil)
+	return evaluateStepRuntimeExpression(node, context, true, true, nil)
 }
 
-func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles bool, allowedContexts map[string]bool) (any, error) {
+func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles, allowGitHubToken bool, allowedContexts map[string]bool) (any, error) {
 	validator := newSemanticValidator(stepRuntimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
@@ -179,7 +179,12 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
 			}
 			switch strings.ToLower(path[0]) {
-			case "actor", "event_name", "head_ref", "ref", "repository", "server_url", "sha", "token":
+			case "token":
+				if !allowGitHubToken {
+					return fmt.Errorf("github.token is unavailable in this field")
+				}
+				return nil
+			case "actor", "event_name", "head_ref", "ref", "repository", "server_url", "sha":
 				return nil
 			default:
 				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))

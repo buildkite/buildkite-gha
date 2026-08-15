@@ -110,7 +110,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		"prefix-${{ github.actor }}-${{ matrix.version }}",
 	} {
 		t.Run(template, func(t *testing.T) {
-			if err := validateRuntimeTemplate(template); err != nil {
+			if err := ValidateRuntimeTemplate(template); err != nil {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v", template, err)
 			}
 		})
@@ -128,7 +128,7 @@ func TestValidateRuntimeTemplateMatchesEvaluateReferenceGrammar(t *testing.T) {
 		{template: "${{ true || }}", want: "invalid expression"},
 	} {
 		t.Run(test.template, func(t *testing.T) {
-			err := validateRuntimeTemplate(test.template)
+			err := ValidateRuntimeTemplate(test.template)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validateRuntimeTemplate(%q) error = %v, want %q", test.template, err, test.want)
 			}
@@ -148,7 +148,7 @@ func TestRunnerDirectReferencesWorkAcrossRuntimeEvaluationSurfaces(t *testing.T)
 		t.Fatalf("EvaluateActionInputDefault() = %q, %v", got, err)
 	}
 	for _, reference := range []string{"runner.name", "runner.os.extra", "runner"} {
-		if err := validateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
+		if err := ValidateRuntimeTemplate("${{ " + reference + " }}"); err == nil {
 			t.Errorf("validateRuntimeTemplate(%q) unexpectedly succeeded", reference)
 		}
 	}
@@ -630,6 +630,20 @@ func TestEvaluateJobSurfacesFailClosed(t *testing.T) {
 	}
 	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
 		t.Fatal("Evaluate() broadened general runtime interpolation")
+	}
+}
+
+func TestEvaluateJobSurfacesRejectGitHubToken(t *testing.T) {
+	context := Context{GitHub: map[string]any{"token": "secret"}}
+	for _, evaluate := range []func(string, Context) (string, error){EvaluateJobEnvironment, EvaluateJobDefault, EvaluateJobOutput} {
+		for _, template := range []string{"${{ github.token }}", "${{ false && github.token || 'ok' }}"} {
+			if _, err := evaluate(template, context); err == nil || !strings.Contains(err.Error(), "github.token is unavailable in this field") {
+				t.Errorf("job evaluation of %q error = %v", template, err)
+			}
+		}
+	}
+	if got, err := EvaluateStep("${{ github.token }}", context); err != nil || got != "secret" {
+		t.Fatalf("EvaluateStep() token = %q, %v", got, err)
 	}
 }
 

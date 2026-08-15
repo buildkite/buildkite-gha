@@ -80,12 +80,28 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, locatedError(path, parsed.Env.Expression.Pos, "workflow", "expression-valued workflow env is unsupported")
 	}
 	owned.Env = adaptEnv(parsed.Env)
+	envNames := make([]string, 0, len(owned.Env))
+	for name := range owned.Env {
+		envNames = append(envNames, name)
+	}
+	sort.Strings(envNames)
+	for _, name := range envNames {
+		if err := expression.ValidateRuntimeTemplate(owned.Env[name]); err != nil {
+			return nil, fmt.Errorf("%s: workflow env %q: %w", path, name, err)
+		}
+	}
 	if parsed.Defaults != nil && parsed.Defaults.Run != nil {
 		if parsed.Defaults.Run.Shell != nil {
 			owned.DefaultShell = parsed.Defaults.Run.Shell.Value
 		}
 		if parsed.Defaults.Run.WorkingDirectory != nil {
 			owned.DefaultWorkingDirectory = parsed.Defaults.Run.WorkingDirectory.Value
+		}
+		if err := expression.ValidateRuntimeTemplate(owned.DefaultShell); err != nil {
+			return nil, fmt.Errorf("%s: workflow default shell: %w", path, err)
+		}
+		if err := expression.ValidateRuntimeTemplate(owned.DefaultWorkingDirectory); err != nil {
+			return nil, fmt.Errorf("%s: workflow default working-directory: %w", path, err)
 		}
 	}
 	if call, ok := parsed.FindWorkflowCallEvent(); ok {
