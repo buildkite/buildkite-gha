@@ -17,6 +17,12 @@ type commandTelemetryDetails struct {
 	seen         map[string]int
 }
 
+func (d *commandTelemetryDetails) setFailurePhase(phase telemetry.FailurePhase) {
+	if d.failurePhase == "" {
+		d.failurePhase = phase
+	}
+}
+
 // addReportDiagnostics records a report's diagnostics. Errors a command
 // handles, such as workflows emitted as failing pipeline steps, belong here so
 // they never attribute an unrelated later failure.

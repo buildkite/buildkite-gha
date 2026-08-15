@@ -230,6 +230,12 @@ func TestCommandCompletionTelemetryFailureDoesNotChangeExit(t *testing.T) {
 	}
 }
 
+func TestRevisionedDevelopmentVersionKeepsPlanCompatibilityVersion(t *testing.T) {
+	if got := commandVersion("dev+0123456789ab"); got != "dev" {
+		t.Fatalf("commandVersion() = %q, want dev", got)
+	}
+}
+
 func TestCommandTelemetryDetailsCollectTypedDiagnostics(t *testing.T) {
 	details := &commandTelemetryDetails{}
 	details.observe(compatibility.ProcessingReport{Diagnostics: []compatibility.Diagnostic{
@@ -295,6 +301,16 @@ func TestHandledReportErrorsDoNotAttributeCommandFailure(t *testing.T) {
 	want := []telemetry.Diagnostic{{Code: compiler.CodeExpressionInvalid, Severity: telemetry.SeverityError}}
 	if !reflect.DeepEqual(got.Diagnostics, want) {
 		t.Fatalf("diagnostics = %#v, want %#v", got.Diagnostics, want)
+	}
+}
+
+func TestCommandTelemetryDetailsPreservesFirstFailurePhase(t *testing.T) {
+	details := &commandTelemetryDetails{}
+	details.setFailurePhase(telemetry.FailurePhaseExecution)
+	details.setFailurePhase(telemetry.FailurePhaseResultPublication)
+	got := details.forOutcome(telemetry.OutcomeFailure)
+	if got.FailurePhase != telemetry.FailurePhaseExecution || got.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("failure details = %#v", got)
 	}
 }
 
@@ -7192,7 +7208,7 @@ func TestRunJobPublishesEveryTerminalResultAfterCancellation(t *testing.T) {
 				ctx = cancelled
 			}
 			var stdout, stderr bytes.Buffer
-			if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", transport.Agent{Runner: runner}); code != test.wantCode {
+			if code := runJobContext(ctx, []string{"--plan", planPath}, &stdout, &stderr, "dev", "dev", transport.Agent{Runner: runner}); code != test.wantCode {
 				t.Fatalf("runJobContext() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
 			}
 			manifest := publishedCLIManifest(t, runner, job, planDigest)
@@ -7324,10 +7340,29 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	job := cliRunJobPlan()
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
 	runner := &cliCaptureRunner{failAt: 1}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "publish terminal result") {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if event := <-events; event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("telemetry = %#v", event)
+	}
+}
+
+func TestRunJobTelemetryClassifiesExecutionFailure(t *testing.T) {
+	job := cliRunJobPlan()
+	job.Steps[0].Command = "exit 7"
+	planPath, planDigest := writeCLIJobPlan(t, job)
+	setCLIJobIdentity(t, job, planDigest)
+	events := captureCommandTelemetry(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", &cliCaptureRunner{}); code != 1 {
+		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if event := <-events; event.FailurePhase != telemetry.FailurePhaseExecution || event.FailureCode != telemetry.FailureCodeUnknown {
+		t.Fatalf("telemetry = %#v", event)
 	}
 }
 
@@ -7676,6 +7711,26 @@ func setCLIJobIdentity(t *testing.T, job plan.Job, planDigest string) {
 	t.Setenv("BUILDKITE_STEP_KEY", job.Target.StepKey)
 	t.Setenv("BUILDKITE_AGENT_META_DATA_QUEUE", job.Target.Queue)
 	t.Setenv("BUILDKITE_GHA_PLAN_DIGEST", planDigest)
+}
+
+func captureCommandTelemetry(t *testing.T) <-chan telemetry.Properties {
+	t.Helper()
+	events := make(chan telemetry.Properties, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var received struct {
+			Properties telemetry.Properties `json:"properties"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decode telemetry event: %v", err)
+		}
+		events <- received.Properties
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("BUILDKITE_AGENT_ENDPOINT", server.URL)
+	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "telemetry-token")
+	t.Setenv("BUILDKITE_GHA_TELEMETRY_DISABLED", "")
+	return events
 }
 
 func clearCLIJobIdentity(t *testing.T) {
