@@ -358,6 +358,10 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 				path = containerPath(name)
 				nameFiltered = true
 			}
+			if strings.HasPrefix(arg, "id=docker-id-buildkite-gha-service-") {
+				path = containerPath(strings.TrimPrefix(arg, "id="))
+				nameFiltered = true
+			}
 		}
 		if isAction {
 			path = actionContainer
@@ -400,13 +404,22 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "stop":
+		if scenario == "service-auto-remove" {
+			_ = os.Remove(containerPath(args[len(args)-1]))
+		}
 		os.Exit(0)
 	case "rm":
 		joined := strings.Join(args, " ")
+		path := containerPath(args[len(args)-1])
+		if scenario == "service-auto-remove" && strings.Contains(args[len(args)-1], "buildkite-gha-service-") {
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				os.Exit(1)
+			}
+		}
 		if strings.Contains(joined, "buildkite-gha-container-") {
 			_ = os.Remove(actionContainer)
 		} else {
-			_ = os.Remove(containerPath(args[len(args)-1]))
+			_ = os.Remove(path)
 		}
 		os.Exit(0)
 	case "image":
@@ -733,6 +746,32 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	jobrm, netrm := strings.Index(joined, "rm --force --volumes "+creates[2].Args[2]), strings.Index(joined, "network rm")
 	if jobrm < 0 || jobrm >= arm || arm >= zrm || zrm >= netrm {
 		t.Fatalf("cleanup order: %s", joined)
+	}
+}
+
+func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
+	f := newJobDocker(t, "service-auto-remove")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	createdWithAutoRemove, queriedByID := false, false
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "create" && slices.Contains(call.Args, "--rm") {
+			createdWithAutoRemove = true
+		}
+		if len(call.Args) != 0 && call.Args[0] == "ps" && slices.ContainsFunc(call.Args, func(arg string) bool { return strings.HasPrefix(arg, "id=docker-id-buildkite-gha-service-") }) {
+			queriedByID = true
+		}
+		if len(call.Args) != 0 && call.Args[0] == "rm" && strings.Contains(call.Args[len(call.Args)-1], "buildkite-gha-service-") {
+			t.Fatalf("cleanup removed auto-removed service: %#v", call.Args)
+		}
+	}
+	if !createdWithAutoRemove || !queriedByID {
+		t.Fatalf("created with --rm = %t, queried by ID = %t", createdWithAutoRemove, queriedByID)
 	}
 }
 

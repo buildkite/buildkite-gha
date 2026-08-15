@@ -759,8 +759,14 @@ func (b *jobContainerBackend) cleanup() error {
 			if _, e := boundedDockerOutput(ctx, b.env, b.docker, "stop", "--time", "2", name); e != nil {
 				err = errors.Join(err, fmt.Errorf("stop service container: %w", e))
 			}
-			if _, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", name); e != nil {
-				err = errors.Join(err, fmt.Errorf("remove service container: %w", e))
+			out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "id="+name)
+			if queryErr != nil {
+				err = errors.Join(err, fmt.Errorf("query service container: %w", queryErr))
+			}
+			if queryErr != nil || strings.TrimSpace(out) != "" {
+				if _, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", name); e != nil {
+					err = errors.Join(err, fmt.Errorf("remove service container: %w", e))
+				}
 			}
 		}
 	}

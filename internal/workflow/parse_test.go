@@ -175,6 +175,18 @@ jobs:
 	}
 }
 
+func TestParsePreservesPartialServiceContainerCredentials(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: registry-user\n    steps: [{run: true}]\n")
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := parsed.Jobs[0].Services[0].Container.Credentials
+	if credentials == nil || credentials.Username != "registry-user" || credentials.Password != "" {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+}
+
 func TestParseRejectsUnsupportedContainerControls(t *testing.T) {
 	for name, body := range map[string]string{
 		"credentials": "credentials: {username: me, password: secret}",

@@ -373,10 +373,21 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 					return extra, nil, rawError(path, credentials, "invalid service container credentials")
 				}
 				username, password := mappingValue(credentials, "username"), mappingValue(credentials, "password")
-				if username == nil || password == nil || username.Kind != yaml.ScalarNode || password.Kind != yaml.ScalarNode || len(username.Value) > 65536 || len(password.Value) > 65536 || strings.ContainsAny(username.Value, "\x00\r\n") || strings.ContainsAny(password.Value, "\x00\r\n") {
-					return extra, nil, rawError(path, credentials, "invalid service container credentials")
+				for _, value := range []*yaml.Node{username, password} {
+					if value != nil && (value.Kind != yaml.ScalarNode || len(value.Value) > 65536 || strings.ContainsAny(value.Value, "\x00\r\n")) {
+						return extra, nil, rawError(path, credentials, "invalid service container credentials")
+					}
 				}
-				extra.Credentials = &ContainerCredentials{Username: username.Value, Password: password.Value}
+				extra.Credentials = &ContainerCredentials{}
+				if username != nil {
+					extra.Credentials.Username = username.Value
+				}
+				if password != nil {
+					extra.Credentials.Password = password.Value
+				}
+				if (username == nil) != (password == nil) {
+					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(mappingKey(node, "credentials")), Prefix: "both \"username\" and \"password\" must be specified"})
+				}
 			}
 			for _, field := range []struct {
 				name  string
