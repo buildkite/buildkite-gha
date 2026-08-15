@@ -352,6 +352,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		isAction := strings.Contains(joined, "buildkite-gha-container-") || (len(owner) != 0 && strings.Contains(joined, string(owner)))
 		path := container
 		nameFiltered := false
+		idFiltered := false
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "name=^/buildkite-gha-service-") {
 				name := strings.TrimSuffix(strings.TrimPrefix(arg, "name=^/"), "$")
@@ -361,6 +362,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			if strings.HasPrefix(arg, "id=docker-id-buildkite-gha-service-") {
 				path = containerPath(strings.TrimPrefix(arg, "id="))
 				nameFiltered = true
+				idFiltered = true
 			}
 		}
 		if isAction {
@@ -380,6 +382,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		if _, err := os.Stat(path); err == nil {
 			fmt.Print("container-id")
+			if scenario == "service-auto-remove-before-stop" && idFiltered {
+				_ = os.Remove(path)
+			}
 		}
 		os.Exit(0)
 	case "run":
@@ -404,6 +409,11 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "stop":
+		if scenario == "service-auto-remove-before-stop" {
+			if _, err := os.Stat(containerPath(args[len(args)-1])); errors.Is(err, os.ErrNotExist) {
+				os.Exit(1)
+			}
+		}
 		if scenario == "service-auto-remove" {
 			_ = os.Remove(containerPath(args[len(args)-1]))
 		}
@@ -772,6 +782,41 @@ func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
 	}
 	if !createdWithAutoRemove || !queriedByID {
 		t.Fatalf("created with --rm = %t, queried by ID = %t", createdWithAutoRemove, queriedByID)
+	}
+}
+
+func TestRunServiceContainerAlreadyAutoRemovedCleanup(t *testing.T) {
+	f := newJobDocker(t, "")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceID := b.services[0].name
+	path := filepath.Join(f.root, "service-"+strings.TrimPrefix(serviceID, "docker-id-"))
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "stop" && call.Args[len(call.Args)-1] == serviceID {
+			t.Fatalf("cleanup stopped already removed service: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunServiceContainerAutoRemoveBetweenQueryAndStop(t *testing.T) {
+	f := newJobDocker(t, "service-auto-remove-before-stop")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if jobDockerCallIndex(f.calls(t), "stop", "--time", "2", b.services[0].name) < 0 {
+		t.Fatal("cleanup did not exercise stop race")
 	}
 }
 

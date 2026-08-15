@@ -756,16 +756,31 @@ func (b *jobContainerBackend) cleanup() error {
 		service := b.services[i]
 		if service.created {
 			name := service.name
-			if _, e := boundedDockerOutput(ctx, b.env, b.docker, "stop", "--time", "2", name); e != nil {
-				err = errors.Join(err, fmt.Errorf("stop service container: %w", e))
-			}
-			out, queryErr = boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "id="+name)
+			exists, queryErr := b.serviceContainerExists(ctx, name)
 			if queryErr != nil {
-				err = errors.Join(err, fmt.Errorf("query service container: %w", queryErr))
+				err = errors.Join(err, fmt.Errorf("query service container before stop: %w", queryErr))
 			}
-			if queryErr != nil || strings.TrimSpace(out) != "" {
-				if _, e := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", name); e != nil {
-					err = errors.Join(err, fmt.Errorf("remove service container: %w", e))
+			if queryErr == nil && !exists {
+				continue
+			}
+			_, stopErr := boundedDockerOutput(ctx, b.env, b.docker, "stop", "--time", "2", name)
+			exists, queryErr = b.serviceContainerExists(ctx, name)
+			if queryErr != nil {
+				err = errors.Join(err, fmt.Errorf("query service container after stop: %w", queryErr))
+			}
+			if stopErr != nil && (queryErr != nil || exists) {
+				err = errors.Join(err, fmt.Errorf("stop service container: %w", stopErr))
+			}
+			if queryErr == nil && !exists {
+				continue
+			}
+			if _, removeErr := boundedDockerOutput(ctx, b.env, b.docker, "rm", "--force", "--volumes", name); removeErr != nil {
+				exists, queryErr = b.serviceContainerExists(ctx, name)
+				if queryErr != nil {
+					err = errors.Join(err, fmt.Errorf("query service container after remove: %w", queryErr))
+				}
+				if queryErr != nil || exists {
+					err = errors.Join(err, fmt.Errorf("remove service container: %w", removeErr))
 				}
 			}
 		}
@@ -808,6 +823,11 @@ func (b *jobContainerBackend) cleanup() error {
 		err = errors.Join(err, e)
 	}
 	return err
+}
+
+func (b *jobContainerBackend) serviceContainerExists(ctx context.Context, id string) (bool, error) {
+	out, err := boundedDockerOutput(ctx, b.env, b.docker, "ps", "--all", "--quiet", "--filter", "label="+b.owner, "--filter", "id="+id)
+	return strings.TrimSpace(out) != "", err
 }
 
 func removeDockerConfig(path string) error {
