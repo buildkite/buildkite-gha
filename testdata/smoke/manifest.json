@@ -164,6 +164,15 @@
       "action_preflight": "hosted"
     },
     {
+      "id": "cache-v2-admission",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-admission.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "The hosted profile resolves and admits the restore entry point from every supported immutable actions/cache release commit.",
+      "note": "This fixture is compile and admission coverage only. It does not execute cache restores or prove a Buildkite Results roundtrip.",
+      "action_preflight": "hosted"
+    },
+    {
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",

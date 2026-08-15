@@ -1,0 +1,125 @@
+name: actions/cache v2 release admission
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  cache-v2-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: v3.4.0
+        uses: actions/cache/restore@f4b3439a656ba812b8cb417d2d49f9c810103092
+        with:
+          path: cache-data
+          key: cache-v2-admission-v3.4.0
+
+      - name: v3.4.2
+        uses: actions/cache/restore@387e18722e6ff315b24a3b8b071feddd27b7bf7e
+        with:
+          path: cache-data
+          key: cache-v2-admission-v3.4.2
+
+      - name: v3.4.3
+        uses: actions/cache/restore@2f8e54208210a422b2efd51efaa6bd6d7ca8920f
+        with:
+          path: cache-data
+          key: cache-v2-admission-v3.4.3
+
+      - name: v3.5.0
+        uses: actions/cache/restore@6f8efc29b200d32929f49075959781ed54ec270c
+        with:
+          path: cache-data
+          key: cache-v2-admission-v3.5.0
+
+      - name: v4.2.0
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.2.0
+
+      - name: v4.2.1
+        uses: actions/cache/restore@0c907a75c2c80ebcb7f088228285e798b750cf8f
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.2.1
+
+      - name: v4.2.2
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.2.2
+
+      - name: v4.2.3
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.2.3
+
+      - name: v4.2.4
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.2.4
+
+      - name: v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: cache-data
+          key: cache-v2-admission-v4.3.0
+
+      - name: v5.0.0
+        uses: actions/cache/restore@a7833574556fa59680c1b7cb190c1735db73ebf0
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.0
+
+      - name: v5.0.1
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.1
+
+      - name: v5.0.2
+        uses: actions/cache/restore@8b402f58fbc84540c8b491a91e594a4576fec3d7
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.2
+
+      - name: v5.0.3
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.3
+
+      - name: v5.0.4
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.4
+
+      - name: v5.0.5
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.0.5
+
+      - name: v5.1.0
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
+        with:
+          path: cache-data
+          key: cache-v2-admission-v5.1.0
+
+      - name: v6.0.0
+        uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8
+        with:
+          path: cache-data
+          key: cache-v2-admission-v6.0.0
+
+      - name: v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: cache-data
+          key: cache-v2-admission-v6.1.0
