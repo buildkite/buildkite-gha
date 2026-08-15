@@ -88,6 +88,7 @@ func TestValidateSecretsPolicyRequiresRestrictedRules(t *testing.T) {
 		{name: "invalid UUID", policy: "- pipeline_id: nope", want: "must be a UUID"},
 		{name: "invalid UUID list", policy: "- cluster_queue_id: [11111111-2222-4333-8444-555555555555, nope]", want: "must be a UUID"},
 		{name: "YAML alias", policy: "- pipeline_id: &id 11111111-2222-4333-8444-555555555555\n- pipeline_id: *id", want: "must not contain YAML aliases"},
+		{name: "custom YAML tag", policy: "- pipeline_slug: !foo widgets", want: "must not contain custom YAML tags"},
 		{name: "YAML 1.1 boolean", policy: "- build_branch: on", want: `value "on" must be quoted`},
 		{name: "GitHub expression", policy: "- pipeline_slug: ${{ secrets.OTHER }}", want: "must not contain GitHub expression syntax"},
 	}
@@ -206,8 +207,8 @@ func TestRejectExistingBuildkiteSecretsBeforeWorkflowGeneration(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "API_KEY") || !strings.Contains(err.Error(), "will not be overwritten") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error = %v", err)
 	}
-	if command := runner.commands[0]; command.name != "bk" || !slices.Equal(command.args, []string{
-		"api", "/organizations/acme/clusters/" + testMigrationCluster + "/secrets?per_page=100&page=1", "--no-input",
+	if command := runner.commands[0]; command.name != "env" || !slices.Equal(command.args, []string{
+		"BUILDKITE_ORGANIZATION_SLUG=acme", "bk", "api", "/clusters/" + testMigrationCluster + "/secrets?per_page=100&page=1", "--no-input",
 	}) {
 		t.Fatalf("list command = %#v", command)
 	}
@@ -227,7 +228,7 @@ func TestRejectExistingBuildkiteSecretsPaginates(t *testing.T) {
 		{output: []byte(`[{"key":"API_KEY"}]`)},
 	}}
 	err = rejectExistingBuildkiteSecrets(context.Background(), runner, "acme", testMigrationCluster, []string{"API_KEY"})
-	if err == nil || !strings.Contains(err.Error(), "API_KEY") || len(runner.commands) != 2 || !strings.Contains(runner.commands[1].args[1], "page=2") {
+	if err == nil || !strings.Contains(err.Error(), "API_KEY") || len(runner.commands) != 2 || !strings.Contains(strings.Join(runner.commands[1].args, " "), "page=2") {
 		t.Fatalf("rejectExistingBuildkiteSecrets() error/commands = %v/%#v", err, runner.commands)
 	}
 }
@@ -402,7 +403,7 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 	}
 	grantCommand := runner.commands[3]
 	dataIndex := slices.Index(grantCommand.args, "--data")
-	if grantCommand.name != "bk" || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) {
+	if grantCommand.name != "env" || !slices.Contains(grantCommand.args, "BUILDKITE_ORGANIZATION_SLUG=acme") || dataIndex < 0 || dataIndex+1 >= len(grantCommand.args) {
 		t.Fatalf("grant command = %#v", grantCommand)
 	}
 	var grantRequest map[string]any

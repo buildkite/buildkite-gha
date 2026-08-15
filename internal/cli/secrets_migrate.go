@@ -425,8 +425,8 @@ func rejectExistingBuildkiteSecrets(ctx context.Context, runner transport.Runner
 		Key string `json:"key"`
 	}
 	for page := 1; ; page++ {
-		endpoint := fmt.Sprintf("/organizations/%s/clusters/%s/secrets?per_page=100&page=%d", organization, cluster, page)
-		output, err := runner.Run(ctx, "", "bk", []string{"api", endpoint, "--no-input"}, nil)
+		endpoint := fmt.Sprintf("/clusters/%s/secrets?per_page=100&page=%d", cluster, page)
+		output, err := runBuildkiteAPI(ctx, runner, organization, endpoint, nil, nil)
 		if err != nil {
 			return fmt.Errorf("list Buildkite secrets with bk: %w", err)
 		}
@@ -455,6 +455,13 @@ func rejectExistingBuildkiteSecrets(ctx context.Context, runner transport.Runner
 		return fmt.Errorf("destination keys already exist and will not be overwritten: %s", strings.Join(conflicts, ", "))
 	}
 	return nil
+}
+
+func runBuildkiteAPI(ctx context.Context, runner transport.Runner, organization, endpoint string, args []string, stdin []byte) ([]byte, error) {
+	commandArgs := []string{"BUILDKITE_ORGANIZATION_SLUG=" + organization, "bk", "api", endpoint}
+	commandArgs = append(commandArgs, args...)
+	commandArgs = append(commandArgs, "--no-input")
+	return runner.Run(ctx, "", "env", commandArgs, stdin)
 }
 
 func validateMigrationWorkflowPath(workflowPath string) error {
@@ -703,8 +710,8 @@ func runSecretsMigration(ctx context.Context, workflowPath string, stdout io.Wri
 	if err != nil {
 		return fmt.Errorf("encode migration grant: %w", err)
 	}
-	endpoint := fmt.Sprintf("/organizations/%s/clusters/%s/github-actions-secret-migrations", manifest.Organization, manifest.Cluster)
-	output, err := runner.Run(ctx, "", "bk", []string{"api", endpoint, "--method", "POST", "--data", string(data), "--no-input"}, nil)
+	endpoint := fmt.Sprintf("/clusters/%s/github-actions-secret-migrations", manifest.Cluster)
+	output, err := runBuildkiteAPI(ctx, runner, manifest.Organization, endpoint, []string{"--method", "POST", "--data", string(data)}, nil)
 	if err != nil {
 		return fmt.Errorf("create Buildkite migration grant with bk: %w", err)
 	}

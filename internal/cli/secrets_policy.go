@@ -64,6 +64,9 @@ func validateSecretsPolicy(contents string) (string, error) {
 		if node.Kind == yaml.AliasNode {
 			return "", errors.New("policy must not contain YAML aliases")
 		}
+		if strings.HasPrefix(node.Tag, "!") && !strings.HasPrefix(node.Tag, "!!") {
+			return "", errors.New("policy must not contain custom YAML tags")
+		}
 		if node.Kind == yaml.ScalarNode && node.Style == 0 {
 			switch strings.ToLower(node.Value) {
 			case "yes", "no", "on", "off":
