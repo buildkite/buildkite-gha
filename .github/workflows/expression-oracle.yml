@@ -2,15 +2,6 @@ name: Expression differential oracle
 
 on:
   workflow_dispatch:
-    inputs:
-      labels:
-        description: JSON labels used to verify object filters
-        required: true
-        default: '[{"name":"bug"},{"name":"help wanted"}]'
-      invalid_json:
-        description: Invalid JSON in the unselected case branch
-        required: true
-        default: invalid
 
 permissions:
   contents: read
@@ -26,12 +17,12 @@ jobs:
           ORDERED_COMPARISON: ${{ fromJSON('2') > 1 }}
           LOGICAL_RESULT: ${{ '' || 'fallback' }}
           STRING_CAST: ${{ startsWith(123, '12') }}
-          ARRAY_CONTAINS: ${{ contains(fromJSON('["push","pull_request"]'), 'PULL_REQUEST') }}
+          ARRAY_CONTAINS: ${{ contains(fromJSON(format('[{0}, {1}]', toJSON('push'), toJSON('pull_request'))), 'PULL_REQUEST') }}
           FORMATTED: ${{ format('{{Hello {0}!}}', 'Mona') }}
-          JOINED: ${{ join(fromJSON('["one","two"]'), '|') }}
-          FILTERED: ${{ join(fromJSON(inputs.labels).*.name, ',') }}
+          JOINED: ${{ join(fromJSON(format('[{0}, {1}]', toJSON('one'), toJSON('two'))), '|') }}
+          FILTERED: ${{ join(fromJSON(format('[{{{0}:{1}}}, {{{0}:{2}}}]', toJSON('name'), toJSON('bug'), toJSON('help wanted'))).*.name, ',') }}
           MISSING: ${{ github.event.missing }}
-          LAZY_CASE: ${{ case(false, fromJSON(inputs.invalid_json), true, 'matched', 'default') }}
+          LAZY_CASE: ${{ case(false, fromJSON(format('invalid-{0}', github.run_id)), true, 'matched', fromJSON(format('invalid-{0}', github.run_id)) == null, 'late', 'default') }}
         run: |
           test "$NULL_EQUALS_ZERO" = "true"
           test "$ORDERED_COMPARISON" = "true"
