@@ -337,17 +337,28 @@ func dockerLogin(ctx context.Context, env map[string]string, docker, registry, u
 		args = append(args, registry)
 	}
 	args = append(args, "--username", username, "--password-stdin")
-	cmd := exec.CommandContext(ctx, docker, args...)
-	cmd.Env = processEnv(env)
-	cmd.Stdin = strings.NewReader(password + "\n")
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-	if err := cmd.Run(); err != nil {
+	for attempt := 0; attempt < 3; attempt++ {
+		cmd := exec.CommandContext(ctx, docker, args...)
+		cmd.Env = processEnv(env)
+		cmd.Stdin = strings.NewReader(password + "\n")
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return errors.New("docker login failed")
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
 	}
-	return nil
+	return errors.New("docker login failed")
 }
 
 func (r Runner) pullContainerImage(ctx context.Context, processor *commandProcessor, env map[string]string, docker, image string) error {

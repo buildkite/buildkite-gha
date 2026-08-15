@@ -165,6 +165,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	if scenario == "fail-pull" && key == "pull" {
 		os.Exit(42)
 	}
+	if scenario == "block-login" && key == "login" {
+		select {}
+	}
 	container, network := filepath.Join(root, "container"), filepath.Join(root, "network")
 	actionContainer, actionImage := filepath.Join(root, "action-container"), filepath.Join(root, "action-image")
 	containerName := func(reference string) string {
@@ -202,6 +205,13 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 			status = "ok"
 		}
 		_ = os.WriteFile(filepath.Join(root, "login-stdin"), []byte(status), 0o600)
+		if scenario == "fail-login-once" {
+			marker := filepath.Join(root, "failed-login")
+			if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+				_ = os.WriteFile(marker, nil, 0o600)
+				os.Exit(42)
+			}
+		}
 		os.Exit(0)
 	case "logout":
 		os.Exit(0)
@@ -803,7 +813,7 @@ func TestRunServiceContainerCompleteArguments(t *testing.T) {
 }
 
 func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
-	f := newJobDocker(t, "")
+	f := newJobDocker(t, "fail-login-once")
 	service := plan.Container{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
 	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": service})
 	if err != nil {
@@ -816,14 +826,32 @@ func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
 	if login < 0 || pull < login {
 		t.Fatalf("login/pull order = %#v", calls)
 	}
+	logins := 0
 	for _, call := range calls {
+		if len(call.Args) != 0 && call.Args[0] == "login" {
+			logins++
+		}
 		if slices.Contains(call.Args, "registry-password") {
 			t.Fatalf("password appeared in Docker argv: %#v", call.Args)
 		}
 	}
+	if logins != 2 {
+		t.Fatalf("login attempts = %d, calls = %#v", logins, calls)
+	}
 	status, err := os.ReadFile(filepath.Join(f.root, "login-stdin"))
 	if err != nil || string(status) != "ok" {
 		t.Fatalf("password stdin status = %q, %v", status, err)
+	}
+}
+
+func TestDockerLoginCancellationStopsRetry(t *testing.T) {
+	f := newJobDocker(t, "block-login")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := dockerLogin(ctx, map[string]string{"DOCKER_CONFIG": t.TempDir()}, f.path, "registry.example.test", "registry-user", "registry-password")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("error = %v, elapsed = %s", err, time.Since(start))
 	}
 }
 
