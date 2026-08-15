@@ -97,6 +97,28 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	}
 }
 
+func TestGitTracksWorkflowResolvesRepositoryPathAliases(t *testing.T) {
+	repository := t.TempDir()
+	command := exec.Command("git", "-C", repository, "init", "-q")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "ci.yml"), []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.Command("git", "-C", repository, "add", "ci.yml")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v: %s", err, output)
+	}
+	alias := filepath.Join(t.TempDir(), "repository")
+	if err := os.Symlink(repository, alias); err != nil {
+		t.Skipf("create repository path alias: %v", err)
+	}
+	if !gitTracksWorkflow(repository, workflowInput{Path: filepath.Join(alias, "ci.yml"), CanonicalPath: "ci.yml"}) {
+		t.Fatal("tracked workflow was not recognized through a repository path alias")
+	}
+}
+
 func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	jobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	filtered := []byte("name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\n" + jobs)

@@ -176,7 +176,15 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 }
 
 func gitTracksWorkflow(root string, input workflowInput) bool {
-	relative, err := filepath.Rel(root, input.Path)
+	physicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	physicalPath, err := filepath.EvalSymlinks(input.Path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(physicalRoot, physicalPath)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return false
 	}
