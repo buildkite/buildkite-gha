@@ -681,10 +681,10 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"service.yml": "name: Service\non: push\njobs:\n  service:\n    runs-on: ubuntu-latest\n    services:\n      postgres:\n        image: postgres:17\n    steps: [{run: true}]\n",
+		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
-	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/service.yml"})
+	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/secret.yml"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,12 +701,12 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 	diagnostic := strings.Index(output, "x [E_PROFILE]")
 	summary := strings.Index(output, "Compilation: compilable. Admission: not-admitted.")
 	if !strings.HasPrefix(output, "^^^ +++\n") || diagnostic == -1 || summary <= diagnostic ||
-		!strings.Contains(output, "workflow=.github/workflows/service.yml") ||
+		!strings.Contains(output, "workflow=.github/workflows/secret.yml") ||
 		!strings.Contains(output, "stage=hosted-profile-admission") ||
-		!strings.Contains(output, "job=service") {
+		!strings.Contains(output, "job=secret") {
 		t.Fatalf("plugin failure output = %q", output)
 	}
-	for _, verbose := range []string{"Schema:", "- Workflow parsing:", "  job service:"} {
+	for _, verbose := range []string{"Schema:", "- Workflow parsing:", "  job secret:"} {
 		if strings.Contains(output, verbose) {
 			t.Fatalf("plugin failure output contains verbose inventory %q: %q", verbose, output)
 		}
@@ -717,8 +717,8 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 			annotation = &runner.commands[i]
 		}
 	}
-	if annotation == nil || !strings.Contains(string(annotation.stdin), "uses service container") ||
-		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/service.yml#L`) {
+	if annotation == nil || !strings.Contains(string(annotation.stdin), "needs GITHUB_TOKEN") ||
+		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/secret.yml#L`) {
 		t.Fatalf("admission failure annotation = %#v", annotation)
 	}
 }
