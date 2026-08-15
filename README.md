@@ -90,7 +90,7 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 | Static matrices, `needs`, outputs, and local reusable workflows | Dynamic matrices and expressions outside the documented subset |
 | Exact-commit checkout, including managed private repository access | GitHub environment secrets, GitHub-compatible OIDC, or protected queues |
 | Static Buildkite job-accessible secrets | Dynamic or reusable-workflow secret forwarding |
-| Scoped `GITHUB_TOKEN` use allowed by Buildkite policy | Ambient or workflow-authored `github.token` use |
+| Scoped `GITHUB_TOKEN` and step `github.token` use allowed by Buildkite policy | Ambient token injection or dynamic token access |
 | Audited artifact action versions and cache v6 integration | Other artifact and cache modes or general GitHub service emulation |
 | Background, wait, cancellation, and parallel step controls | Job and service containers through the production plugin path; all Docker use on macOS |
 

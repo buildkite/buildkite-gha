@@ -2284,7 +2284,7 @@ func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
 	}
 }
 
-func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.T) {
+func TestResolveActionInputsExposesScopedTokenToMetadataDefaults(t *testing.T) {
 	tokenDefault := "${{ github.token }}"
 	conditionalTokenDefault := "${{ github.server_url == 'https://github.com' && github.token || '' }}"
 	actorDefault := "${{ github.actor }}"
@@ -2335,6 +2335,21 @@ func TestResolveActionInputsExposesScopedTokenOnlyToMetadataDefaults(t *testing.
 	}
 }
 
+func TestStepExpressionContextExposesScopedTokenWithoutMutatingJobContext(t *testing.T) {
+	eval := expression.Context{
+		GitHub:  map[string]any{"actor": "octocat"},
+		Secrets: map[string]string{"GITHUB_TOKEN": "ghs_scoped_step"},
+	}
+	stepEval := stepExpressionContext(eval)
+	value, err := expression.Evaluate("${{ github.token }}", stepEval)
+	if err != nil || value != "ghs_scoped_step" {
+		t.Fatalf("step github.token = %q, %v", value, err)
+	}
+	if _, leaked := eval.GitHub["token"]; leaked {
+		t.Fatalf("step evaluation mutated job context: %#v", eval.GitHub)
+	}
+}
+
 func TestOriginUsesProviderServerURLWithoutGitHubToken(t *testing.T) {
 	job := plan.Job{Event: plan.Event{Provider: "cursor-origin"}}
 	github := githubContext(job)
@@ -2382,10 +2397,12 @@ jobs:
 
       - if: env.GITHUB_SHA == 'action-sha' && env.RUNNER_TEMP == '/action-temp'
         env:
+          DIRECT_GITHUB_TOKEN: ${{ github.token }}
           ENV_GITHUB_SHA: ${{ env.GITHUB_SHA }}
           ENV_RUNNER_TEMP: ${{ env.RUNNER_TEMP }}
         run: |
           test "$GITHUB_TOKEN" = "ghs_scoped_action_default"
+          test "$DIRECT_GITHUB_TOKEN" = "ghs_scoped_action_default"
           test "$GITHUB_SHA" = "1111111111111111111111111111111111111111"
           test "$RUNNER_TEMP" = "$EXPECTED_RUNNER_TEMP"
           test "$ENV_GITHUB_SHA" = "action-sha"

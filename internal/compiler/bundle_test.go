@@ -955,6 +955,44 @@ func TestCompileBundleRejectsDynamicSecretIndex(t *testing.T) {
 	}
 }
 
+func TestCompileBundleScansRetainedExpressionsForAuthority(t *testing.T) {
+	source := []byte(`on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ secrets.NAME_SECRET }}
+        run: echo '${{ github.token }}'
+`)
+	bundle, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"NAME_SECRET"}) {
+		t.Fatalf("retained field secrets = %#v", job.RequiredSecrets)
+	}
+	if job.GitHubToken == nil || !job.HasCapability("provider-token-write") {
+		t.Fatalf("github.token authority = %#v, capabilities %#v", job.GitHubToken, job.RequiredCapabilities)
+	}
+}
+
+func TestCompileBundleRejectsRetainedGitHubEventPayload(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ github.event.action }}'
+`)
+	_, err := CompileBundle("workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err == nil || !strings.Contains(err.Error(), "github.event cannot be retained in a job plan") {
+		t.Fatalf("CompileBundle() error = %v, want retained event rejection", err)
+	}
+}
+
 func encodeGoldenPlans(t *testing.T, artifacts []PlanArtifact) []byte {
 	t.Helper()
 	plans := make([]json.RawMessage, len(artifacts))

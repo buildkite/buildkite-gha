@@ -54,6 +54,53 @@ func EvaluateCompileCondition(source string, context CompileContext) (bool, erro
 	return actionInputDefaultTruthy(value), nil
 }
 
+// ReduceCompileCondition replaces every compile-time scalar subtree in a
+// condition while preserving runtime-dependent subtrees for later evaluation.
+func ReduceCompileCondition(source string, context CompileContext) (string, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return source, err
+	}
+	return reduceCompileNode(node, context), nil
+}
+
+func reduceCompileNode(node actionlint.ExprNode, context CompileContext) string {
+	if value, err := evaluateCompileNode(node, context); err == nil {
+		if literal, ok := compileScalarLiteral(value); ok {
+			return literal
+		}
+	}
+	switch node := node.(type) {
+	case *actionlint.VariableNode:
+		return node.Name
+	case *actionlint.ObjectDerefNode:
+		return reduceCompileNode(node.Receiver, context) + "." + node.Property
+	case *actionlint.ArrayDerefNode:
+		return reduceCompileNode(node.Receiver, context) + ".*"
+	case *actionlint.IndexAccessNode:
+		return reduceCompileNode(node.Operand, context) + "[" + reduceCompileNode(node.Index, context) + "]"
+	case *actionlint.NotOpNode:
+		return "!(" + reduceCompileNode(node.Operand, context) + ")"
+	case *actionlint.CompareOpNode:
+		return "(" + reduceCompileNode(node.Left, context) + " " + node.Kind.String() + " " + reduceCompileNode(node.Right, context) + ")"
+	case *actionlint.LogicalOpNode:
+		return "(" + reduceCompileNode(node.Left, context) + " " + node.Kind.String() + " " + reduceCompileNode(node.Right, context) + ")"
+	case *actionlint.FuncCallNode:
+		arguments := make([]string, len(node.Args))
+		for i, argument := range node.Args {
+			arguments[i] = reduceCompileNode(argument, context)
+		}
+		return node.Callee + "(" + strings.Join(arguments, ", ") + ")"
+	default:
+		return ""
+	}
+}
+
+func compileScalarLiteral(value any) (string, bool) {
+	literal, err := compileInputLiteral(value)
+	return literal, err == nil
+}
+
 // EvaluateCompileTemplate substitutes supported graph-time expressions once.
 func EvaluateCompileTemplate(template string, context CompileContext) (string, error) {
 	const open, close = "${{", "}}"

@@ -178,7 +178,7 @@ jobs:
 
 ### Permissions
 
-**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN`, or an effective action input default can reach `github.token` for the event provider.
+**🟡 Supported subset.** Permissions matter only when a job statically references `secrets.GITHUB_TOKEN` or `github.token`, or an effective action input default can reach `github.token` for the event provider.
 
 A workflow-level permissions map can request repository access:
 
@@ -475,11 +475,13 @@ Job and step `if` conditions support literals and the syntax listed above. Order
 | `github.event.*`, including `github.event.pull_request.*` | 🟡 Compile time only | 🟡 Compile time only |
 | `secrets` and other contexts | ❌ No | ❌ No |
 
-An event-backed condition is evaluated from the immutable event snapshot before runtime validation. Every branch is validated before evaluation, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A condition that cannot be fully resolved at compile time cannot carry `github.event` into the runtime.
+An event-backed condition is reduced from the immutable event snapshot before runtime validation. Resolvable `github.event` subtrees become literals; supported runtime-dependent subtrees remain for job or step evaluation. Every branch is validated before reduction, so short-circuiting cannot hide an unsupported function, context, or concrete matrix type error. A residual condition cannot carry `github.event` into the runtime.
 
 ### Runtime interpolation
 
 Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. Top-level workflow step `run`, `env`, `with`, explicit `shell`, and explicit `working-directory` fields also support `hashFiles()` with literal or direct-reference arguments. Job fields, job outputs, job defaults, step names, and action metadata keep the direct-reference-only rule.
+
+Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 
 The only runner references are `runner.os` and `runner.arch`. They resolve to
 `Linux`/`X64` or `macOS`/`ARM64`. Runtime interpolation does not evaluate
@@ -503,7 +505,7 @@ Patterns cannot be absolute, contain a `..` path segment, or contain ASCII contr
 
 ### Compile-time expressions
 
-Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above where the complete expression resolves during compilation. Values derived from runtime `needs` or `steps` are unsupported.
+Matrices, runner labels, names, concurrency groups, and event-backed conditions may use statically known `github`, `event`, `vars`, and matrix values. They support the compile-time syntax listed above where the complete expression resolves during compilation. Event-backed conditions may also combine reducible event subtrees with supported runtime condition values such as `needs` and status functions.
 
 ## Actions
 
@@ -679,7 +681,7 @@ jobs:
 
 The server restricts pull requests, merge queues, and their descendants. For other builds, job binding does not establish that an arbitrary commit is trusted. Restrict who can create builds and enable write tokens only when branch builds run trusted code.
 
-The token is not added to the initial job environment. The `github.token` value is available only while evaluating an effective action metadata input default. Workflow-authored `github.token` and automatic ambient `GITHUB_TOKEN` are unsupported.
+The token is not added to the initial job environment. Direct workflow-authored `github.token` references are available during step execution and use the same scoped token as `secrets.GITHUB_TOKEN`. Effective action metadata input defaults can also use `github.token`. Automatic ambient `GITHUB_TOKEN` is unsupported.
 
 ### Other secrets and OIDC
 

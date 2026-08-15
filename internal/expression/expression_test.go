@@ -412,6 +412,11 @@ func TestReferencesGitHubTokenUsesExpressionAST(t *testing.T) {
 	if _, err := ReferencesGitHubToken("${{ github.token.extra }}"); err == nil || !strings.Contains(err.Error(), "must name exactly github.token") {
 		t.Fatalf("ReferencesGitHubToken() token dereference error = %v", err)
 	}
+	for _, template := range []string{"${{ github }}", "${{ github.* }}", "${{ github.event.*.token }}"} {
+		if _, err := ReferencesGitHubToken(template); err == nil || !strings.Contains(err.Error(), "must name one static property") {
+			t.Fatalf("ReferencesGitHubToken(%q) error = %v, want fail-closed static-property rejection", template, err)
+		}
+	}
 }
 
 func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
@@ -817,6 +822,23 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	}
 	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
 		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestReduceCompileConditionPreservesRuntimeSubtrees(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"event": map[string]any{"pull_request": map[string]any{"draft": true, "title": "It's ready"}},
+	}}
+	got, err := ReduceCompileCondition("github.event.pull_request.draft && (failure() || github.event.pull_request.title == needs.build.outputs.title)", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "(true && (failure() || ('It''s ready' == needs.build.outputs.title)))"
+	if got != want {
+		t.Fatalf("ReduceCompileCondition() = %q, want %q", got, want)
+	}
+	if usesEvent, err := ReferencesGitHubEvent(got); err != nil || usesEvent {
+		t.Fatalf("reduced condition retains github.event: %q, %v", got, err)
 	}
 }
 

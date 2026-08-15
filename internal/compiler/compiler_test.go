@@ -1738,6 +1738,52 @@ jobs:
 	}
 }
 
+func TestCompilePartiallyReducesEventBackedConditionsBeforeRuntime(t *testing.T) {
+	workflow := []byte(`on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: true
+  configure:
+    needs: build
+    if: github.event.pull_request.draft && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.pull_request.draft && failure()
+        run: echo draft failure
+`)
+	event := []byte(`{
+  "provider": "github",
+  "event": "pull_request",
+  "repository": {"owner": "buildkite", "name": "kafka"},
+  "ref": "refs/pull/42/merge",
+  "sha": "1111111111111111111111111111111111111111",
+  "actor": "buildkite-gha",
+  "payload": {"pull_request": {"draft": true}}
+}`)
+	result, err := Compile("ci.yml", workflow, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	var configure *JobInstance
+	for i := range ir.Jobs {
+		if ir.Jobs[i].LogicalJobID == "configure" {
+			configure = &ir.Jobs[i]
+		}
+	}
+	if configure == nil || configure.If != "(true && (needs.build.result == 'success'))" || len(configure.Steps) != 1 || configure.Steps[0].If != "(true && failure())" {
+		t.Fatalf("partially reduced conditions = %#v", configure)
+	}
+	if strings.Contains(strings.ToLower(configure.If), "github.event") {
+		t.Fatalf("job condition retains github.event: %q", configure.If)
+	}
+}
+
 func TestCompilePreservesStatusFunctionsWhenFoldingEventConditions(t *testing.T) {
 	workflow := []byte(`on: pull_request
 jobs:

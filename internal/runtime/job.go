@@ -674,7 +674,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
-		stepEval := cloneExpressionContext(eval)
+		stepEval := stepExpressionContext(eval)
 		bindHashFilesContext(stepCtx, &stepEval)
 		stepEnv, err := evaluateStepMap(step.Env, stepEval)
 		if err != nil {
@@ -819,6 +819,14 @@ func stepDisplayName(step plan.Step, eval expression.Context) string {
 		return step.Uses
 	}
 	return step.ID
+}
+
+func stepExpressionContext(context expression.Context) expression.Context {
+	context = cloneExpressionContext(context)
+	if token, ok := context.Secrets["GITHUB_TOKEN"]; ok {
+		context.GitHub["token"] = token
+	}
+	return context
 }
 
 func scrubJobResult(result JobResult, sensitiveValues []string) JobResult {

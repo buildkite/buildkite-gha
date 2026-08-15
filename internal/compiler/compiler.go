@@ -618,6 +618,13 @@ func planConstructionFinding(instance JobInstance, err error) error {
 func requiredSecrets(instance JobInstance, actionRequired []string, actionInputsInspected bool) ([]string, error) {
 	found := map[string]string{}
 	collect := func(value string) error {
+		referencesEvent, err := expression.TemplateReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		if referencesEvent {
+			return fmt.Errorf("github.event cannot be retained in a job plan")
+		}
 		names, err := expression.SecretReferences(value)
 		if err != nil {
 			return err
@@ -625,7 +632,27 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		for _, name := range names {
 			found[name] = name
 		}
+		referencesToken, err := expression.ReferencesGitHubToken(value)
+		if err != nil {
+			return err
+		}
+		if referencesToken {
+			found["GITHUB_TOKEN"] = "GITHUB_TOKEN"
+		}
 		return nil
+	}
+	checkCondition := func(value string) error {
+		referencesEvent, err := expression.ReferencesGitHubEvent(value)
+		if err != nil {
+			return err
+		}
+		if referencesEvent {
+			return fmt.Errorf("github.event cannot be retained in a job plan")
+		}
+		return nil
+	}
+	if err := checkCondition(instance.If); err != nil {
+		return nil, err
 	}
 	for _, value := range []string{instance.If, instance.DefaultShell, instance.DefaultWorkingDirectory} {
 		if err := collect(value); err != nil {
@@ -640,7 +667,10 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		}
 	}
 	for _, step := range instance.Steps {
-		for _, value := range []string{step.Run, step.If, step.Shell, step.WorkingDirectory} {
+		if err := checkCondition(step.If); err != nil {
+			return nil, err
+		}
+		for _, value := range []string{step.Name, step.Run, step.Uses, step.If, step.Shell, step.WorkingDirectory} {
 			if err := collect(value); err != nil {
 				return nil, err
 			}
@@ -654,6 +684,30 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 				if err := collect(values[name]); err != nil {
 					return nil, err
 				}
+			}
+		}
+	}
+	if instance.Container != nil {
+		for _, value := range append([]string{instance.Container.Image}, instance.Container.Ports...) {
+			if err := collect(value); err != nil {
+				return nil, err
+			}
+		}
+		for _, name := range sortedValueKeys(instance.Container.Env) {
+			if err := collect(instance.Container.Env[name]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, service := range instance.Services {
+		for _, value := range append([]string{service.Container.Image}, service.Container.Ports...) {
+			if err := collect(value); err != nil {
+				return nil, err
+			}
+		}
+		for _, name := range sortedValueKeys(service.Container.Env) {
+			if err := collect(service.Container.Env[name]); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -1248,16 +1302,20 @@ func resolveCompileTimeCondition(source string, context expression.CompileContex
 		return source, false
 	}
 	resolved, err := expression.EvaluateCompileCondition(source, context)
+	if err == nil {
+		if resolved {
+			referencesStatus, _ := expression.ReferencesStatusFunction(source)
+			if referencesStatus {
+				return "always()", true
+			}
+		}
+		return strconv.FormatBool(resolved), true
+	}
+	reduced, err := expression.ReduceCompileCondition(source, context)
 	if err != nil {
 		return source, false
 	}
-	if resolved {
-		referencesStatus, _ := expression.ReferencesStatusFunction(source)
-		if referencesStatus {
-			return "always()", true
-		}
-	}
-	return strconv.FormatBool(resolved), true
+	return reduced, true
 }
 
 func supportedConditions(path string, job workflow.Job, matrix map[string]any, matrixKnown bool) error {

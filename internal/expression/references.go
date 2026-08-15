@@ -86,8 +86,12 @@ func SecretReferences(template string) ([]string, error) {
 				return
 			}
 			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
 			default:
+				return
+			}
+			if _, ok := node.(*actionlint.ArrayDerefNode); ok && strings.EqualFold(referenceRoot(node), "secrets") {
+				referenceErr = fmt.Errorf("secret reference must name exactly one secret")
 				return
 			}
 			root, path, err := referencePath(node)
@@ -143,19 +147,30 @@ func ReferencesGitHubToken(template string) (bool, error) {
 				return
 			}
 			switch node.(type) {
-			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
 			default:
 				return
 			}
-			root, path, err := referencePath(node)
-			if !strings.EqualFold(root, "github") {
+			if !strings.EqualFold(referenceRoot(node), "github") {
 				return
 			}
+			if referenceHasArrayDeref(node) {
+				referenceErr = fmt.Errorf("github reference must name one static property")
+				return
+			}
+			_, path, err := referencePath(node)
 			if err != nil {
 				referenceErr = fmt.Errorf("github reference: %w", err)
 				return
 			}
-			if len(path) == 0 || !strings.EqualFold(path[0], "token") {
+			if len(path) == 0 {
+				if referenceReceiver(node, parent) {
+					return
+				}
+				referenceErr = fmt.Errorf("github reference must name one static property")
+				return
+			}
+			if !strings.EqualFold(path[0], "token") {
 				return
 			}
 			if len(path) != 1 {
@@ -177,6 +192,47 @@ func ReferencesGitHubToken(template string) (bool, error) {
 		return referenceErr
 	})
 	return found, err
+}
+
+func referenceRoot(node actionlint.ExprNode) string {
+	switch node := node.(type) {
+	case *actionlint.VariableNode:
+		return node.Name
+	case *actionlint.ObjectDerefNode:
+		return referenceRoot(node.Receiver)
+	case *actionlint.ArrayDerefNode:
+		return referenceRoot(node.Receiver)
+	case *actionlint.IndexAccessNode:
+		return referenceRoot(node.Operand)
+	default:
+		return ""
+	}
+}
+
+func referenceHasArrayDeref(node actionlint.ExprNode) bool {
+	switch node := node.(type) {
+	case *actionlint.ObjectDerefNode:
+		return referenceHasArrayDeref(node.Receiver)
+	case *actionlint.ArrayDerefNode:
+		return true
+	case *actionlint.IndexAccessNode:
+		return referenceHasArrayDeref(node.Operand)
+	default:
+		return false
+	}
+}
+
+func referenceReceiver(node, parent actionlint.ExprNode) bool {
+	switch parent := parent.(type) {
+	case *actionlint.ObjectDerefNode:
+		return parent.Receiver == node
+	case *actionlint.ArrayDerefNode:
+		return parent.Receiver == node
+	case *actionlint.IndexAccessNode:
+		return parent.Operand == node
+	default:
+		return false
+	}
 }
 
 // ReferencesJobStatus reports whether a template statically references
@@ -211,6 +267,21 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 	if err != nil || empty {
 		return false, err
 	}
+	return nodeReferencesGitHubEvent(node), nil
+}
+
+// TemplateReferencesGitHubEvent reports whether an interpolated template
+// retains the compile-time-only event payload.
+func TemplateReferencesGitHubEvent(template string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		found = found || nodeReferencesGitHubEvent(node)
+		return nil
+	})
+	return found, err
+}
+
+func nodeReferencesGitHubEvent(node actionlint.ExprNode) bool {
 	found := false
 	actionlint.VisitExprNode(node, func(node, _ actionlint.ExprNode, entering bool) {
 		if !entering || found {
@@ -224,7 +295,7 @@ func ReferencesGitHubEvent(source string) (bool, error) {
 		root, path, pathErr := referencePath(node)
 		found = pathErr == nil && strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
 	})
-	return found, nil
+	return found
 }
 
 // ReferencesStatusFunction reports whether a condition explicitly names one of
