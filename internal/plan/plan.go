@@ -272,13 +272,15 @@ func Decode(source []byte) (Job, error) {
 	for i, step := range presence.Steps {
 		controls := make(map[string]bool, 4)
 		for name := range step {
-			name = strings.ToLower(name)
-			switch name {
-			case "continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression":
-				if controls[name] {
-					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, name)
+			for _, canonical := range []string{"continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression"} {
+				if !strings.EqualFold(name, canonical) {
+					continue
 				}
-				controls[name] = true
+				if controls[canonical] {
+					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, canonical)
+				}
+				controls[canonical] = true
+				break
 			}
 		}
 		if controls["continue_on_error"] && controls["continue_on_error_expression"] {

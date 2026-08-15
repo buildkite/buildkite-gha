@@ -158,6 +158,7 @@ func TestDecodeRejectsBothStepControlWireKeysAtZeroValues(t *testing.T) {
 		{literal: "timeout_minutes", expression: "timeout_minutes_expression", value: 0},
 		{literal: "continue_on_error", expression: "CONTINUE_ON_ERROR_EXPRESSION", value: false},
 		{literal: "timeout_minutes", expression: "TIMEOUT_MINUTES_EXPRESSION", value: 0},
+		{literal: "continue_on_error", expression: "continue_on_error_expreſſion", value: false},
 	} {
 		job := validJob()
 		encoded, err := json.Marshal(job)
