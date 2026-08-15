@@ -616,9 +616,7 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 		{name: "fail fast", snippet: "    strategy:\n      fail-fast: ${{ inputs.flag }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix fail-fast is unsupported"},
 		{name: "max parallel", snippet: "    strategy:\n      max-parallel: ${{ inputs.count }}\n      matrix:\n        os: [ubuntu-latest]\n    steps:\n      - run: true\n", want: "expression-valued matrix max-parallel is unsupported"},
 		{name: "job continue on error", snippet: "    continue-on-error: ${{ matrix.experimental }}\n    steps:\n      - run: true\n", want: "expression-valued job continue-on-error is unsupported"},
-		{name: "continue on error", snippet: "    steps:\n      - run: true\n        continue-on-error: ${{ matrix.experimental }}\n", want: "expression-valued step continue-on-error is unsupported"},
 		{name: "job timeout", snippet: "    timeout-minutes: ${{ inputs.timeout }}\n    steps:\n      - run: true\n", want: "expression-valued job timeout-minutes is unsupported"},
-		{name: "timeout", snippet: "    steps:\n      - run: true\n        timeout-minutes: ${{ inputs.timeout }}\n", want: "expression-valued step timeout-minutes is unsupported"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -628,5 +626,17 @@ func TestParseRejectsExpressionValuedExecutionScalars(t *testing.T) {
 				t.Fatalf("Parse() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestParseRetainsExpressionValuedStepControls(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n        continue-on-error: ${{ matrix.experimental }}\n        timeout-minutes: ${{ matrix.timeout }}\n")
+	parsed, err := Parse("expressions.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := parsed.Jobs[0].Steps[0]
+	if step.ContinueOnErrorExpression != "${{ matrix.experimental }}" || step.TimeoutMinutesExpression != "${{ matrix.timeout }}" {
+		t.Fatalf("step controls = %#v", step)
 	}
 }

@@ -172,22 +172,24 @@ type Span struct {
 }
 
 type Step struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name,omitempty"`
-	Kind             string            `json:"kind"`
-	Background       bool              `json:"background,omitempty"`
-	Targets          []string          `json:"targets,omitempty"`
-	Command          string            `json:"command,omitempty"`
-	Uses             string            `json:"uses,omitempty"`
-	Action           *ActionSelector   `json:"action,omitempty"`
-	Shell            string            `json:"shell,omitempty"`
-	WorkingDirectory string            `json:"working_directory,omitempty"`
-	Env              map[string]string `json:"env,omitempty"`
-	With             map[string]string `json:"with,omitempty"`
-	Condition        string            `json:"condition,omitempty"`
-	ContinueOnError  bool              `json:"continue_on_error,omitempty"`
-	TimeoutMinutes   float64           `json:"timeout_minutes,omitempty"`
-	Source           *Span             `json:"source,omitempty"`
+	ID                        string            `json:"id"`
+	Name                      string            `json:"name,omitempty"`
+	Kind                      string            `json:"kind"`
+	Background                bool              `json:"background,omitempty"`
+	Targets                   []string          `json:"targets,omitempty"`
+	Command                   string            `json:"command,omitempty"`
+	Uses                      string            `json:"uses,omitempty"`
+	Action                    *ActionSelector   `json:"action,omitempty"`
+	Shell                     string            `json:"shell,omitempty"`
+	WorkingDirectory          string            `json:"working_directory,omitempty"`
+	Env                       map[string]string `json:"env,omitempty"`
+	With                      map[string]string `json:"with,omitempty"`
+	Condition                 string            `json:"condition,omitempty"`
+	ContinueOnError           bool              `json:"continue_on_error,omitempty"`
+	ContinueOnErrorExpression string            `json:"continue_on_error_expression,omitempty"`
+	TimeoutMinutes            float64           `json:"timeout_minutes,omitempty"`
+	TimeoutMinutesExpression  string            `json:"timeout_minutes_expression,omitempty"`
+	Source                    *Span             `json:"source,omitempty"`
 }
 
 type Container struct {
@@ -571,6 +573,15 @@ func (job Job) Validate() error {
 		if step.TimeoutMinutes < 0 || step.TimeoutMinutes > 360 {
 			return fmt.Errorf("job plan step %q timeout_minutes must be between 0 and 360", step.ID)
 		}
+		if step.TimeoutMinutesExpression != "" && step.TimeoutMinutes != 0 {
+			return fmt.Errorf("job plan step %q has both literal and expression timeout_minutes", step.ID)
+		}
+		if step.ContinueOnErrorExpression != "" && step.ContinueOnError {
+			return fmt.Errorf("job plan step %q has both literal and expression continue_on_error", step.ID)
+		}
+		if len(step.TimeoutMinutesExpression) > 65536 || len(step.ContinueOnErrorExpression) > 65536 {
+			return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", step.ID)
+		}
 		if len(step.Condition) > 65536 {
 			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
 		}
@@ -896,7 +907,7 @@ func hasControl(value string) bool {
 }
 
 func validateControlStep(step Step, backgroundIDs map[string]struct{}) error {
-	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.TimeoutMinutes != 0 {
+	if step.Background || step.Command != "" || step.Uses != "" || step.Action != nil || step.Shell != "" || step.WorkingDirectory != "" || len(step.Env) != 0 || len(step.With) != 0 || step.Condition != "" || step.ContinueOnError || step.ContinueOnErrorExpression != "" || step.TimeoutMinutes != 0 || step.TimeoutMinutesExpression != "" {
 		return fmt.Errorf("control step %q contains incompatible execution fields", step.ID)
 	}
 	switch step.Kind {

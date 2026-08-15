@@ -481,9 +481,11 @@ An event-backed condition is reduced from the immutable event snapshot before ru
 
 ### Runtime interpolation
 
-Workflow step `run`, `env`, `with`, `name`, explicit `shell`, and explicit `working-directory` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported so unavailable background outputs fail closed.
+Workflow step `run`, `env`, `with`, `name`, explicit `shell`, explicit `working-directory`, `continue-on-error`, and `timeout-minutes` fields support the operators and pure functions listed above. They also support computed indexes and projections over available `matrix`, `vars`, `inputs`, `env`, and `runner` values. Computed, whole, and projected `steps` and `needs` access remains unsupported so unavailable background outputs fail closed.
 
-These workflow step fields support `hashFiles()`. General runtime interpolation, job fields, job outputs, job defaults, and action metadata keep the direct-reference-only rule.
+The string-valued workflow step fields support `hashFiles()`. General runtime interpolation, job fields, job outputs, job defaults, and action metadata keep the direct-reference-only rule.
+
+Expression-valued `continue-on-error` must produce a Boolean. Expression-valued `timeout-minutes` must produce a number greater than 0 and at most 360. These typed fields do not support `hashFiles()`.
 
 Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 

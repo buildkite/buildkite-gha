@@ -113,7 +113,7 @@
         "id": {"type": "string", "minLength": 1, "maxLength": 255}, "name": {"type": "string"}, "kind": {"enum": ["run", "uses", "wait", "wait-all", "cancel"]}, "background": {"type": "boolean"},
         "targets": {"type": "array", "minItems": 1, "maxItems": 256, "uniqueItems": true, "items": {"$ref": "#/$defs/buildkiteName"}},
         "command": {"type": "string", "maxLength": 1048576}, "uses": {"type": "string", "maxLength": 1024}, "action": {"$ref": "#/$defs/selector"}, "shell": {"type": "string"}, "working_directory": {"type": "string"},
-        "env": {"$ref": "#/$defs/stringMap"}, "with": {"$ref": "#/$defs/stringMap"}, "condition": {"type": "string", "maxLength": 65536}, "continue_on_error": {"type": "boolean"}, "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360}, "source": {"$ref": "#/$defs/span"}
+        "env": {"$ref": "#/$defs/stringMap"}, "with": {"$ref": "#/$defs/stringMap"}, "condition": {"type": "string", "maxLength": 65536}, "continue_on_error": {"type": "boolean"}, "continue_on_error_expression": {"type": "string", "minLength": 1, "maxLength": 65536}, "timeout_minutes": {"type": "number", "exclusiveMinimum": 0, "maximum": 360}, "timeout_minutes_expression": {"type": "string", "minLength": 1, "maxLength": 65536}, "source": {"$ref": "#/$defs/span"}
       },
       "allOf": [
         {"if": {"properties": {"kind": {"const": "run"}}, "required": ["kind"]}, "then": {"required": ["command"], "not": {"anyOf": [{"required": ["uses"]}, {"required": ["targets"]}, {"required": ["action"]}]}}},
@@ -121,7 +121,7 @@
         {"if": {"properties": {"kind": {"const": "wait"}}, "required": ["kind"]}, "then": {"required": ["targets"], "not": {"required": ["action"]}}},
         {"if": {"properties": {"kind": {"const": "wait-all"}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["targets"]}, {"required": ["action"]}]}}},
         {"if": {"properties": {"kind": {"const": "cancel"}}, "required": ["kind"]}, "then": {"required": ["targets"], "properties": {"targets": {"maxItems": 1}}, "not": {"required": ["action"]}}},
-        {"if": {"properties": {"kind": {"enum": ["wait", "wait-all", "cancel"]}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["background"]}, {"required": ["command"]}, {"required": ["uses"]}, {"required": ["shell"]}, {"required": ["working_directory"]}, {"required": ["env"]}, {"required": ["with"]}, {"required": ["condition"]}, {"required": ["continue_on_error"]}, {"required": ["timeout_minutes"]}, {"required": ["action"]}]}}}
+        {"if": {"properties": {"kind": {"enum": ["wait", "wait-all", "cancel"]}}, "required": ["kind"]}, "then": {"not": {"anyOf": [{"required": ["background"]}, {"required": ["command"]}, {"required": ["uses"]}, {"required": ["shell"]}, {"required": ["working_directory"]}, {"required": ["env"]}, {"required": ["with"]}, {"required": ["condition"]}, {"required": ["continue_on_error"]}, {"required": ["continue_on_error_expression"]}, {"required": ["timeout_minutes"]}, {"required": ["timeout_minutes_expression"]}, {"required": ["action"]}]}}}
       ]
     }
   }

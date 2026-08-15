@@ -569,15 +569,17 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 		}
 		if step.ContinueOnError != nil {
 			if step.ContinueOnError.Expression != nil {
-				return Job{}, locatedError(path, step.ContinueOnError.Expression.Pos, in.ID.Value, "expression-valued step continue-on-error is unsupported")
+				owned.ContinueOnErrorExpression = step.ContinueOnError.Expression.Value
+			} else {
+				owned.ContinueOnError = step.ContinueOnError.Value
 			}
-			owned.ContinueOnError = step.ContinueOnError.Value
 		}
 		if step.TimeoutMinutes != nil {
 			if step.TimeoutMinutes.Expression != nil {
-				return Job{}, locatedError(path, step.TimeoutMinutes.Expression.Pos, in.ID.Value, "expression-valued step timeout-minutes is unsupported")
+				owned.TimeoutMinutesExpression = step.TimeoutMinutes.Expression.Value
+			} else {
+				owned.TimeoutMinutes = step.TimeoutMinutes.Value
 			}
-			owned.TimeoutMinutes = step.TimeoutMinutes.Value
 		}
 		if step.Env != nil && step.Env.Expression != nil {
 			return Job{}, locatedError(path, step.Env.Expression.Pos, in.ID.Value, "expression-valued step env is unsupported")

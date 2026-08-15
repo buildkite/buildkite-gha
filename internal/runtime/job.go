@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
@@ -673,6 +674,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
+		step, err = evaluateStepControls(step, stepExpressionContext(eval))
+		if err != nil {
+			execution := classifyStepExecution(ctx, runCtx, step, newResult(), fmt.Errorf("controls: %w", err))
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
+		}
 		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
 		stepEval := stepExpressionContext(eval)
 		bindHashFilesContext(stepCtx, &stepEval)
@@ -956,6 +963,38 @@ func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandProc
 
 func durationMinutes(minutes float64) time.Duration {
 	return time.Duration(minutes * float64(time.Minute))
+}
+
+func evaluateStepControls(step plan.Step, context expression.Context) (plan.Step, error) {
+	if step.ContinueOnErrorExpression != "" {
+		value, err := expression.EvaluateStepControl(step.ContinueOnErrorExpression, context)
+		if err != nil {
+			return step, fmt.Errorf("continue-on-error: %w", err)
+		}
+		continueOnError, ok := value.(bool)
+		if !ok {
+			return step, fmt.Errorf("continue-on-error expression produced %T, want boolean", value)
+		}
+		step.ContinueOnError = continueOnError
+	}
+	if step.TimeoutMinutesExpression != "" {
+		value, err := expression.EvaluateStepControl(step.TimeoutMinutesExpression, context)
+		if err != nil {
+			return step, fmt.Errorf("timeout-minutes: %w", err)
+		}
+		switch value := value.(type) {
+		case int:
+			step.TimeoutMinutes = float64(value)
+		case float64:
+			step.TimeoutMinutes = value
+		default:
+			return step, fmt.Errorf("timeout-minutes expression produced %T, want number", value)
+		}
+		if math.IsNaN(step.TimeoutMinutes) || math.IsInf(step.TimeoutMinutes, 0) || step.TimeoutMinutes <= 0 || step.TimeoutMinutes > 360 {
+			return step, fmt.Errorf("timeout-minutes expression must produce a number greater than 0 and at most 360")
+		}
+	}
+	return step, nil
 }
 
 func applyPaths(env map[string]string, paths []string) {

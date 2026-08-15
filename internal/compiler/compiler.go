@@ -358,7 +358,8 @@ instances:
 					ID: id, Name: step.Name, Kind: step.Kind, Background: step.Background, Targets: append([]string(nil), step.Targets...), Command: step.Run, Uses: step.Uses,
 					Shell: step.Shell, WorkingDirectory: step.WorkingDirectory,
 					Env: cloneMap(step.Env), With: cloneMap(step.With), Condition: step.If,
-					ContinueOnError: step.ContinueOnError, TimeoutMinutes: step.TimeoutMinutes, Source: &span,
+					ContinueOnError: step.ContinueOnError, ContinueOnErrorExpression: step.ContinueOnErrorExpression,
+					TimeoutMinutes: step.TimeoutMinutes, TimeoutMinutesExpression: step.TimeoutMinutesExpression, Source: &span,
 				}
 				if step.Kind == "uses" {
 					actionIndexes = append(actionIndexes, i)
@@ -684,7 +685,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		if err := checkCondition(step.If); err != nil {
 			return nil, err
 		}
-		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory} {
+		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression} {
 			if err := collect(value); err != nil {
 				return nil, err
 			}

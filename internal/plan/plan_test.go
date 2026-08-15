@@ -120,6 +120,30 @@ func TestJobContinueOnErrorContract(t *testing.T) {
 	validateJobPlanSchema(t, encoded)
 }
 
+func TestStepControlExpressionContract(t *testing.T) {
+	job := validJob()
+	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental }}"
+	job.Steps[0].TimeoutMinutesExpression = "${{ matrix.timeout }}"
+	encoded, err := Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := decoded.Steps[0]
+	if step.ContinueOnErrorExpression != "${{ matrix.experimental }}" || step.TimeoutMinutesExpression != "${{ matrix.timeout }}" {
+		t.Fatalf("decoded step = %#v", step)
+	}
+	validateJobPlanSchema(t, encoded)
+
+	job.Steps[0].ContinueOnError = true
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "both literal and expression continue_on_error") {
+		t.Fatalf("Validate() mixed continue-on-error error = %v", err)
+	}
+}
+
 func TestValidateConcurrentStepTopology(t *testing.T) {
 	job := validJob()
 	job.Steps = []Step{

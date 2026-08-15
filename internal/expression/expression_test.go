@@ -572,6 +572,25 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	}
 }
 
+func TestEvaluateStepControlReturnsTypedValuesWithoutHashFiles(t *testing.T) {
+	context := Context{Matrix: map[string]any{"experimental": true, "timeout": 1.5}}
+	for _, test := range []struct {
+		expression string
+		want       any
+	}{
+		{expression: "${{ matrix.experimental && true }}", want: true},
+		{expression: "${{ matrix.timeout }}", want: 1.5},
+	} {
+		got, err := EvaluateStepControl(test.expression, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateStepControl(%q) = %#v, %v; want %#v", test.expression, got, err, test.want)
+		}
+	}
+	if _, err := EvaluateStepControl("${{ false && hashFiles('go.sum') || 1 }}", context); err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
+		t.Fatalf("EvaluateStepControl() hashFiles error = %v", err)
+	}
+}
+
 func TestCompileConditionValidationAdmitsRuntimeHashFilesWithoutFilesystemAccess(t *testing.T) {
 	context := CompileContext{GitHub: map[string]any{"event": map[string]any{"pull_request": map[string]any{"draft": false}}}}
 	source := "github.event.pull_request.draft && hashFiles('go.sum') != ''"

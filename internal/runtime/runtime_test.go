@@ -1702,6 +1702,40 @@ func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
 	}
 }
 
+func TestExpressionValuedStepControls(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: expression controls\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "soft", Kind: "run", Command: "exit 7", ContinueOnErrorExpression: "${{ matrix.experimental }}", TimeoutMinutesExpression: "${{ matrix.timeout }}"},
+		{ID: "verify", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Command: "true"},
+	})
+	job.Matrix = map[string]any{"experimental": true, "timeout": 1.0}
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestExpressionValuedStepControlsRequireTypedBoundedResults(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		step plan.Step
+		want string
+	}{
+		{name: "boolean", step: plan.Step{ContinueOnErrorExpression: "${{ 'true' }}"}, want: "want boolean"},
+		{name: "number", step: plan.Step{TimeoutMinutesExpression: "${{ '1' }}"}, want: "want number"},
+		{name: "range", step: plan.Step{TimeoutMinutesExpression: "${{ 361 }}"}, want: "at most 360"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := evaluateStepControls(test.step, expression.Context{}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("evaluateStepControls() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

@@ -82,6 +82,20 @@ func EvaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
 
+// EvaluateStepControl evaluates one complete expression for a typed workflow
+// step control. Filesystem access is unavailable on these surfaces.
+func EvaluateStepControl(expression string, context Context) (any, error) {
+	body, err := expressionBody(expression)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	return evaluateStepRuntimeExpression(node, context, false)
+}
+
 func evaluateRuntimeTemplate(template string, context Context, evaluate func(actionlint.ExprNode, Context) (any, error)) (string, error) {
 	const open = "${{"
 	var evaluated strings.Builder
@@ -130,6 +144,10 @@ func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, 
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
+	return evaluateStepRuntimeExpression(node, context, true)
+}
+
+func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles bool) (any, error) {
 	validator := newSemanticValidator(stepRuntimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") {
@@ -179,7 +197,7 @@ func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, er
 		if recognized, err := validatePureFunction(validator, call); recognized {
 			return err
 		}
-		if !strings.EqualFold(call.Callee, "hashFiles") || len(call.Args) == 0 || len(call.Args) > 255 {
+		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") || len(call.Args) == 0 || len(call.Args) > 255 {
 			return fmt.Errorf("unsupported runtime function %q", call.Callee)
 		}
 		for _, argument := range call.Args {
@@ -211,7 +229,7 @@ func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, er
 		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
 			return value, err
 		}
-		if !strings.EqualFold(call.Callee, "hashFiles") {
+		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") {
 			return nil, fmt.Errorf("unsupported runtime function %q", call.Callee)
 		}
 		if context.HashFiles == nil {

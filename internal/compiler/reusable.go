@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
@@ -709,6 +710,18 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		step.Uses = replaceStaticInputs(step.Uses, inputs)
 		step.Shell = replaceStaticInputs(step.Shell, inputs)
 		step.WorkingDirectory = replaceStaticInputs(step.WorkingDirectory, inputs)
+		if step.ContinueOnErrorExpression != "" {
+			resolved := replaceStaticInputs(step.ContinueOnErrorExpression, inputs)
+			if value, err := strconv.ParseBool(resolved); err == nil {
+				step.ContinueOnError, step.ContinueOnErrorExpression = value, ""
+			}
+		}
+		if step.TimeoutMinutesExpression != "" {
+			resolved := replaceStaticInputs(step.TimeoutMinutesExpression, inputs)
+			if value, err := strconv.ParseFloat(resolved, 64); err == nil {
+				step.TimeoutMinutes, step.TimeoutMinutesExpression = value, ""
+			}
+		}
 		step.If = replaceStaticInputCondition(step.If, inputs)
 		step.Env = replaceMapInputs(step.Env, inputs)
 		step.With = replaceMapInputs(step.With, inputs)
@@ -767,7 +780,7 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		} else if usesInputs {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 		}
-		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory}
+		stepValues := []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {

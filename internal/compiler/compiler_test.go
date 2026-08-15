@@ -338,6 +338,34 @@ jobs:
 	}
 }
 
+func TestCompileRetainsExpressionValuedStepControls(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    strategy:
+      matrix:
+        experimental: [true]
+        timeout: [5]
+    runs-on: ubuntu-latest
+    steps:
+      - run: exit 1
+        continue-on-error: ${{ matrix.experimental }}
+        timeout-minutes: ${{ matrix.timeout }}
+`)
+	encoded, err := Compile("controls.yml", source, readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result IR
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	step := result.Jobs[0].Steps[0]
+	if step.ContinueOnErrorExpression != "${{ matrix.experimental }}" || step.TimeoutMinutesExpression != "${{ matrix.timeout }}" {
+		t.Fatalf("compiled step controls = %#v", step)
+	}
+}
+
 func TestCompileRetainsSupportedRuntimeDependentConditions(t *testing.T) {
 	source := []byte(`on: push
 jobs:
