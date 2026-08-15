@@ -891,3 +891,39 @@ func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 		})
 	}
 }
+
+func TestContainerImageGrammarMatchesSchema(t *testing.T) {
+	schema := compileJobPlanSchema(t)
+	for _, test := range []struct {
+		image string
+		valid bool
+	}{
+		{"redis:7", true},
+		{"ghcr.io/example/service:latest", true},
+		{"localhost:5000/private/service:latest", true},
+		{"127.0.0.1:65535/private/service", true},
+		{"[::1]:5000/private/service", true},
+		{"localhost:0/private/service", false},
+		{"localhost:65536/private/service", false},
+		{"LOCALHOST:5000/private/service", false},
+	} {
+		t.Run(test.image, func(t *testing.T) {
+			job := validJob()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &Container{Image: test.image}
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			goValid := job.Validate() == nil
+			schemaValid := schema.Validate(document) == nil
+			if goValid != test.valid || schemaValid != test.valid {
+				t.Fatalf("Go valid = %t, schema valid = %t, want %t", goValid, schemaValid, test.valid)
+			}
+		})
+	}
+}
