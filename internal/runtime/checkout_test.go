@@ -373,7 +373,7 @@ func TestCheckoutOutputsMatchReleaseContract(t *testing.T) {
 		commit string
 		want   map[string]string
 	}{
-		{name: "v3.7.0", commit: actionintegration.CheckoutV3Commit, want: map[string]string{"ref": "refs/heads/main"}},
+		{name: "v3.7.0", commit: actionintegration.CheckoutV3Commit, want: map[string]string{}},
 		{name: "v4 and later", commit: actionintegration.CheckoutV4Commit, want: map[string]string{"ref": "refs/heads/main", "commit": strings.Repeat("a", 40)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

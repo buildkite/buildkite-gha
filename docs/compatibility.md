@@ -571,7 +571,7 @@ The adapter checks out a detached commit or static branch from the event reposit
 | `github-server-url` | Omitted, empty, or `https://github.com`. |
 | `allow-unsafe-pr-checkout` | Omitted or `false`. |
 
-The adapter preserves the v3.7.0 runtime `ref` output, which upstream set without declaring in `action.yml`. The `commit` output is available only for v4 and later because upstream added it in v4.2.0.
+The `ref` and `commit` outputs are unavailable for v3.7.0. Upstream added them in v4.2.0.
 
 The `false` value and omission do not run submodule commands. The `true` value runs native Git for direct children, and `recursive` includes nested children. Relative URLs and `fetch-depth` follow native Git behavior. Public and private GitHub submodules are supported under the job's repository access; external HTTPS submodules are anonymous. `git@github.com:` URLs are rewritten to HTTPS. Other SSH and non-HTTPS transports are unsupported.
 

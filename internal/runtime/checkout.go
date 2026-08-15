@@ -145,12 +145,12 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 }
 
 func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {
-	// v3.7.0 set ref at runtime despite not declaring it in action.yml. The
-	// commit output was added in v4.2.0 and is not part of the v3 contract.
-	outputs["ref"] = ref
-	if commit != actionintegration.CheckoutV3Commit {
-		outputs["commit"] = headSHA
+	// Checkout outputs were added in v4.2.0 and aren't part of the v3 contract.
+	if commit == actionintegration.CheckoutV3Commit {
+		return
 	}
+	outputs["ref"] = ref
+	outputs["commit"] = headSHA
 }
 
 func checkoutRepositoryURL(provider, repository string) (url, credentialHost string, ok bool) {
