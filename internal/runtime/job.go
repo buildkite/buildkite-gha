@@ -966,26 +966,30 @@ func normalizeServiceScalars(raw any) error {
 		}
 	}
 	if rawEnv, exists := service["env"]; exists {
-		if env, ok := rawEnv.(map[string]any); ok {
-			for key, value := range env {
-				normalized, err := serviceScalarString(value)
-				if err != nil {
-					return fmt.Errorf("environment %q: %w", key, err)
-				}
-				env[key] = normalized
+		env, ok := rawEnv.(map[string]any)
+		if !ok {
+			return fmt.Errorf("field %q: got %T, want an object", "env", rawEnv)
+		}
+		for key, value := range env {
+			normalized, err := serviceScalarString(value)
+			if err != nil {
+				return fmt.Errorf("environment %q: %w", key, err)
 			}
+			env[key] = normalized
 		}
 	}
 	for _, field := range []string{"ports", "volumes"} {
 		if rawValues, exists := service[field]; exists {
-			if values, ok := rawValues.([]any); ok {
-				for i, value := range values {
-					normalized, err := serviceScalarString(value)
-					if err != nil {
-						return fmt.Errorf("field %q entry %d: %w", field, i, err)
-					}
-					values[i] = normalized
+			values, ok := rawValues.([]any)
+			if !ok {
+				return fmt.Errorf("field %q: got %T, want an array", field, rawValues)
+			}
+			for i, value := range values {
+				normalized, err := serviceScalarString(value)
+				if err != nil {
+					return fmt.Errorf("field %q entry %d: %w", field, i, err)
 				}
+				values[i] = normalized
 			}
 		}
 	}
