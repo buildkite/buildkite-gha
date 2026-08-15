@@ -821,6 +821,8 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 		"fromJSON('[1]')[4] == null",
 		"matrix.array['1'] == 'one'",
 		"matrix.array[1.9] == 'one'",
+		"matrix.array['1e309'] == null",
+		"matrix.array['2147483648'] == null",
 		"matrix.object[true] == 'boolean'",
 		"matrix.object[2] == 'number'",
 		"join(matrix.items.*[0], ',') == 'first,'",

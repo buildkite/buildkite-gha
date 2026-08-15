@@ -376,11 +376,11 @@ func expressionIndex(value, index any) (any, error) {
 func expressionIndexValue(value, index any) (any, bool, error) {
 	if items, ok := expressionCollection(value); ok {
 		number, numeric := githubNumber(index)
-		if !numeric || math.IsNaN(number) || number < 0 {
+		if !numeric || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number > math.MaxInt32 {
 			return nil, false, nil
 		}
 		position := int(math.Floor(number))
-		if position >= len(items) {
+		if position < 0 || position >= len(items) {
 			return nil, false, nil
 		}
 		return items[position], true, nil
