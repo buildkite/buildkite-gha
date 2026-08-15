@@ -1077,12 +1077,13 @@ func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
 }
 
 func TestEvaluateServiceMapExpression(t *testing.T) {
-	eval := expression.Context{Needs: map[string]map[string]string{"build": {"services": `{"database":{"image":"postgres:16","env":{"MODE":"test"},"ports":["5432"]},"cache":"redis:7"}`}}}
+	eval := expression.Context{Needs: map[string]map[string]string{"build": {"services": `{"database":{"image":"postgres:16","env":{"MODE":"test","RETRIES":3.0,"NEGATIVE_ZERO":-0,"ENABLED":true},"ports":[5.432e3],"volumes":[2],"options":1e20,"command":1e2,"entrypoint":false},"cache":"redis:7"}`}}}
 	got, order, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got["database"].Image != "postgres:16" || got["database"].Env["MODE"] != "test" || got["cache"].Image != "redis:7" || !slices.Equal(order, []string{"database", "cache"}) {
+	database := got["database"]
+	if len(got) != 2 || database.Image != "postgres:16" || database.Env["MODE"] != "test" || database.Env["RETRIES"] != "3" || database.Env["NEGATIVE_ZERO"] != "0" || database.Env["ENABLED"] != "true" || database.Ports[0] != "5432" || database.Volumes[0] != "2" || database.Options != "1E+20" || database.Command != "100" || database.Entrypoint != "false" || got["cache"].Image != "redis:7" || !slices.Equal(order, []string{"database", "cache"}) {
 		t.Fatalf("evaluated services = %#v, order = %#v", got, order)
 	}
 }
@@ -1093,9 +1094,11 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 	}{
 		{name: "array", value: `[]`, want: "want an object"},
 		{name: "unknown field", value: `{"db":{"image":"postgres:16","privileged":true}}`, want: "unknown field"},
+		{name: "uppercase field", value: `{"db":{"Image":"postgres:16"}}`, want: "unknown field"},
 		{name: "invalid service name", value: `{"UPPER":"postgres:16"}`, want: "service name"},
 		{name: "invalid image", value: `{"db":"BAD IMAGE"}`, want: "invalid image"},
 		{name: "credentials", value: `{"db":{"image":"postgres:16","credentials":{"username":"user","password":"secret"}}}`, want: "cannot introduce registry credentials"},
+		{name: "null credentials", value: `{"db":{"image":"postgres:16","credentials":null}}`, want: "cannot introduce registry credentials"},
 		{name: "nested expression", value: `{"db":{"image":"redis:7","options":"--label token=${{ secrets.TOKEN }}"}}`, want: "retains a runtime template"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

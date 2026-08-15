@@ -913,6 +913,9 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 		if image, ok := raw.(string); ok {
 			service.Image = image
 		} else {
+			if err := normalizeServiceScalars(raw); err != nil {
+				return nil, nil, fmt.Errorf("decode service %q: %w", name, err)
+			}
 			encoded, err := json.Marshal(raw)
 			if err != nil {
 				return nil, nil, fmt.Errorf("encode service %q: %w", name, err)
@@ -922,9 +925,6 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 			if err := decoder.Decode(&service); err != nil {
 				return nil, nil, fmt.Errorf("decode service %q: %w", name, err)
 			}
-		}
-		if service.Credentials != nil {
-			return nil, nil, fmt.Errorf("service %q expression cannot introduce registry credentials", name)
 		}
 		validationService := service
 		if validationService.Image == "" {
@@ -940,6 +940,78 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 		order = append(order, name)
 	}
 	return services, order, nil
+}
+
+func normalizeServiceScalars(raw any) error {
+	service, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for field := range service {
+		switch field {
+		case "credentials":
+			return errors.New("expression cannot introduce registry credentials")
+		case "image", "env", "ports", "volumes", "options", "command", "entrypoint":
+		default:
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+	for _, field := range []string{"image", "options", "command", "entrypoint"} {
+		if value, exists := service[field]; exists {
+			normalized, err := serviceScalarString(value)
+			if err != nil {
+				return fmt.Errorf("field %q: %w", field, err)
+			}
+			service[field] = normalized
+		}
+	}
+	if rawEnv, exists := service["env"]; exists {
+		if env, ok := rawEnv.(map[string]any); ok {
+			for key, value := range env {
+				normalized, err := serviceScalarString(value)
+				if err != nil {
+					return fmt.Errorf("environment %q: %w", key, err)
+				}
+				env[key] = normalized
+			}
+		}
+	}
+	for _, field := range []string{"ports", "volumes"} {
+		if rawValues, exists := service[field]; exists {
+			if values, ok := rawValues.([]any); ok {
+				for i, value := range values {
+					normalized, err := serviceScalarString(value)
+					if err != nil {
+						return fmt.Errorf("field %q entry %d: %w", field, i, err)
+					}
+					values[i] = normalized
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func serviceScalarString(value any) (string, error) {
+	switch value := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case bool:
+		return strconv.FormatBool(value), nil
+	case json.Number:
+		number, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil {
+			return "", fmt.Errorf("invalid number %q", value)
+		}
+		if number == 0 {
+			return "0", nil
+		}
+		return strconv.FormatFloat(number, 'G', 15, 64), nil
+	default:
+		return "", fmt.Errorf("got %T, want a scalar", value)
+	}
 }
 
 func stepDisplayName(step plan.Step, eval expression.Context) string {
