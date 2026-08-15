@@ -52,9 +52,8 @@ hosted cache roundtrip. Unpublished, withdrawn, older cache-v1, artifact merge,
 broad download, and unsupported artifact commits remain rejected. The profile leaves unknown
 generic service dependencies as an explicit warning rather than guessing from
 arbitrary action source. Runtime-pass job and service container fixtures are
-deliberately not marked for this profile: their execution is proven separately,
-while production hosted admission continues to reject their container
-provenance.
+also marked for this profile, which verifies production admission separately
+from their runtime evidence.
 
 `events/push.json` is deterministic and its repository SHA is intentionally
 synthetic. End-to-end runs involving checkout must bind the event to the real

@@ -2454,13 +2454,8 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			if capability == "secrets" {
 				continue
 			}
-			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
-				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					message, detail := hostedContainerDiagnostic(artifact.Job)
-					addFailure(artifact, message, detail, errors.New("hosted container unsupported"))
-					continue
-				}
-				message := fmt.Sprintf("Job %q requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.", artifact.Job.Workflow.LogicalJobID)
+			if capability == "docker" && !admittedDockerProvenance(artifact.Job, artifact.Authorization.DockerCapabilitySources) {
+				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
 				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
 				continue
 			}
@@ -2517,6 +2512,23 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	return errors.Join(diagnostics...)
 }
 
+func admittedDockerProvenance(job plan.Job, sources []string) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	expected := make([]string, 0, 3)
+	if slices.Contains(sources, "dockerfile-actions") {
+		expected = append(expected, "dockerfile-actions")
+	}
+	if job.Container != nil {
+		expected = append(expected, "job-containers")
+	}
+	if len(job.Services) != 0 {
+		expected = append(expected, "service-containers")
+	}
+	return slices.Equal(sources, expected)
+}
+
 func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason string) (message, detail string) {
 	limitation := reason
 	fix := "Use a supported workflow-level permissions map or remove the GITHUB_TOKEN dependency."
@@ -2571,27 +2583,6 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 	}
 	message = fmt.Sprintf("Job %q needs GITHUB_TOKEN, but %s. %s", artifact.Job.Workflow.LogicalJobID, limitation, fix)
 	detail = fmt.Sprintf("Cause: %s. Effective permissions: %s.", strings.Join(causes, "; "), permissions)
-	return message, detail
-}
-
-func hostedContainerDiagnostic(job plan.Job) (message, detail string) {
-	var constructs []string
-	if job.Container != nil {
-		constructs = append(constructs, fmt.Sprintf("job container %q", job.Container.Image))
-	}
-	serviceNames := make([]string, 0, len(job.Services))
-	for name := range job.Services {
-		serviceNames = append(serviceNames, name)
-	}
-	sort.Strings(serviceNames)
-	for _, name := range serviceNames {
-		constructs = append(constructs, fmt.Sprintf("service container %q (image %q)", name, job.Services[name].Image))
-	}
-	if len(constructs) == 0 {
-		constructs = append(constructs, "a job or service container")
-	}
-	message = fmt.Sprintf("Job %q uses %s, which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.", job.Workflow.LogicalJobID, strings.Join(constructs, " and "))
-	detail = "The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them."
 	return message, detail
 }
 

@@ -16,6 +16,8 @@ Dockerfile actions add packaging, not a security boundary. Use a queue with:
 
 On a persistent self-hosted agent, workflow code can access exposed host resources and leave state that affects later jobs.
 
+Job and service containers also share the job's Docker daemon and host resource budget. Their private bridge network, loopback-only published ports, and labeled cleanup reduce accidental exposure and residue; they do not isolate hostile code or enforce CPU, memory, or disk limits. The queue must provide those boundaries around the whole job.
+
 ## Repository data is not authority
 
 Workflow files, action metadata, event snapshots, and job plans are untrusted inputs. They may describe work and request permissions. Buildkite configuration and server-side policy choose the queue and decide what authority is available.

@@ -17,6 +17,11 @@ runtime="$work/buildkite-gha"
 CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false -o "$runtime" ./cmd/buildkite-gha
 node24="$(mise where node@24)/bin/node"
 
+"$runtime" validate --profile hosted --format json \
+  --event-path testdata/smoke/events/push.json \
+  testdata/container-runtime/.github/workflows/runtime.yml \
+  | jq -e '.result == "admitted" and .admission.result == "admitted"' >/dev/null
+
 readonly tests='^(TestLiveJobContainerPersistsAcrossShellSteps|TestLiveJobContainerDefaultNonRootUser|TestLiveJobContainerCancellationKillsProcessTree|TestLiveJobContainerJavaScriptCompositeAndPost|TestLiveCompiledContainerRuntime|TestLiveManifestContainerFixtures|TestLiveUnhealthyServiceDiagnostics)$'
 output="$work/live-tests.log"
 set +e

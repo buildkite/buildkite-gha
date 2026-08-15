@@ -37,7 +37,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Workflows containing reusable-workflow jobs cannot receive one. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
-| [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
+| [Job and service containers](#containers-and-services) | 🟡 Supported subset | Literal anonymously pullable Linux images with bounded environment and port configuration. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
@@ -349,9 +349,13 @@ A job may expand to at most 256 instances. Matrices derived from `needs` or `ste
 
 ### Containers and services
 
-**🚧 Not available in production.** The compiler and runtime support a bounded Linux subset for job `container` and `services`, but the `hosted` profile rejects it before upload.
+**🟡 Supported subset.** Linux jobs support job `container` and `services` with literal image names, environment maps, and ports. Credentials, volumes, options, dynamic values, and privileged containers are unsupported. A job can define at most 32 services; each container can define at most 256 environment entries and 128 ports.
 
-The underlying subset accepts literal public image names, environment maps, and ports. Credentials, volumes, options, private images, dynamic values, and privileged containers are unsupported.
+The runtime pulls each image with a new empty Docker configuration. Images must therefore be anonymously pullable; private-registry credentials and ambient Docker credentials are unavailable. Mutable tags are accepted and resolved by Docker at job start. Use a digest reference when image immutability matters. Job container images must provide `sh` and run the mounted self-contained Linux runtime executable.
+
+Each job uses a uniquely named, labeled Docker bridge network. Containers on that network reach services by service name. Declared host service ports bind only to `127.0.0.1`, use a dynamic host port when one is not specified, and populate `job.services.<service>.ports`. A service with a Docker health check must become healthy; a service without one is ready when Docker reports it running. Readiness waits for at most 30 one-second attempts and emits up to 200 log lines on failure.
+
+The runtime removes the job container, services, and network after every result and verifies that no labeled resources remain. Cleanup failures fail the job. These Docker resources do not create a security or resource-isolation boundary: the hosted queue must provide whole-job isolation and enforce host CPU, memory, and disk limits. See the [security model](security.md#isolate-the-whole-job).
 
 macOS jobs reject containers, services, Dockerfile actions, and Docker capability.
 
