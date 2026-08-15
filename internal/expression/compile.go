@@ -279,21 +279,29 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 				return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
 			}
 			return decodeJSONValue(text)
-		case strings.EqualFold(node.Callee, "startsWith") && len(node.Args) == 2:
+		case (strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
 			value, err := evaluateCompileNode(node.Args[0], context)
 			if err != nil {
 				return nil, err
 			}
-			prefix, err := evaluateCompileNode(node.Args[1], context)
+			search, err := evaluateCompileNode(node.Args[1], context)
 			if err != nil {
 				return nil, err
 			}
 			valueText, valueOK := value.(string)
-			prefixText, prefixOK := prefix.(string)
-			if !valueOK || !prefixOK {
-				return nil, fmt.Errorf("startsWith arguments resolved to %T and %T, want strings", value, prefix)
+			searchText, searchOK := search.(string)
+			if !valueOK || !searchOK {
+				return nil, fmt.Errorf("%s arguments resolved to %T and %T, want strings", node.Callee, value, search)
 			}
-			return strings.HasPrefix(strings.ToLower(valueText), strings.ToLower(prefixText)), nil
+			valueText, searchText = strings.ToLower(valueText), strings.ToLower(searchText)
+			switch {
+			case strings.EqualFold(node.Callee, "startsWith"):
+				return strings.HasPrefix(valueText, searchText), nil
+			case strings.EqualFold(node.Callee, "contains"):
+				return strings.Contains(valueText, searchText), nil
+			default:
+				return strings.HasSuffix(valueText, searchText), nil
+			}
 		default:
 			return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
 		}

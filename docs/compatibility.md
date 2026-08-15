@@ -225,7 +225,7 @@ defaults:
 
 ### Concurrency
 
-**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and case-insensitive `startsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
+**🟡 Supported subset with different queue behavior.** A static group becomes a repository-scoped, case-insensitive Buildkite concurrency group. Groups may use `vars`, supported `github` fields, static reusable-workflow inputs, and concrete matrix values at job level. Boolean and equality operators, `fromJSON`, and the case-insensitive string functions `startsWith`, `contains`, and `endsWith` are supported when the whole expression resolves during compilation. Runtime `needs` and `strategy` values remain unsupported.
 
 A workflow can set a group and cancellation expression while a job uses a matrix-derived group:
 
@@ -455,7 +455,7 @@ Three expression modes intentionally support different syntax.
 | --- | --- | --- | --- |
 | `!`, `&&`, `\|\|`, `==`, `!=` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
-| `fromJSON()`, case-insensitive `startsWith()` | 🟡 Compile time only | ❌ Unsupported | 🟡 When the result resolves fully |
+| `fromJSON()`, case-insensitive string `startsWith()`, `contains()`, `endsWith()` | 🟡 Compile time only | ❌ Unsupported | 🟡 When the result resolves fully |
 | `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
