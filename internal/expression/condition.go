@@ -198,7 +198,7 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
 			return nil
 		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1,
-			strings.EqualFold(node.Callee, "startsWith") && len(node.Args) == 2:
+			(strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
 			for _, argument := range node.Args {
 				if err := validateCompileConditionNode(argument, scope, context, matrix); err != nil {
 					return err

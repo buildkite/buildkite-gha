@@ -761,6 +761,10 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ github.event.number || github.ref }}", want: "refs/pull/42/merge"},
 		{expression: "${{ github.ref == 'refs/pull/42/merge' }}", want: true},
 		{expression: "${{ startsWith(github.ref, 'REFS/PULL/') }}", want: true},
+		{expression: "${{ contains(github.ref, 'PULL/42') }}", want: true},
+		{expression: "${{ contains(github.ref, 'ISSUES') }}", want: false},
+		{expression: "${{ endsWith(github.ref, '/MERGE') }}", want: true},
+		{expression: "${{ endsWith(github.ref, '/HEAD') }}", want: false},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -813,6 +817,19 @@ func TestEvaluateCompileConditionUsesEventSnapshot(t *testing.T) {
 	}
 	if usesEvent, err := ReferencesGitHubEvent("github.event_name == 'push'"); err != nil || usesEvent {
 		t.Fatalf("ReferencesGitHubEvent(event_name) = %v, %v", usesEvent, err)
+	}
+}
+
+func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{
+		"event": map[string]any{"pull_request": map[string]any{"title": "Release is READY"}},
+	}}
+	source := "contains(github.event.pull_request.title, 'release') && endsWith(github.event.pull_request.title, 'ready')"
+	if err := ValidateCompileConditionWithMatrix(source, JobCondition, context, nil); err != nil {
+		t.Fatalf("ValidateCompileConditionWithMatrix() = %v", err)
+	}
+	if resolved, err := EvaluateCompileCondition(source, context); err != nil || !resolved {
+		t.Fatalf("EvaluateCompileCondition() = %v, %v, want true", resolved, err)
 	}
 }
 
@@ -883,6 +900,9 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ vars.MISSING }}", want: `unavailable value "vars.missing"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
 		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
+		{expression: "${{ contains(github.ref) }}", want: `unsupported compile-time function "contains"`},
+		{expression: "${{ endsWith('ref', true) }}", want: "endsWith arguments resolved to string and bool, want strings"},
+		{expression: "${{ contains(fromJSON('[\"push\"]'), 'push') }}", want: "contains arguments resolved to []interface {} and string, want strings"},
 		{expression: "${{ fromJSON(vars.BAD) }}", want: "invalid JSON"},
 		{expression: "${{ event.Ref }}", want: "ambiguous properties"},
 	}
