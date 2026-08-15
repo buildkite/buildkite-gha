@@ -590,7 +590,7 @@ jobs:
           for key, variable in secrets:
               value = os.environ.get(variable, "")
               size = len(value.encode("utf-8"))
-              if size == 0:
+              if not value.strip():
                   sys.exit(f"GitHub secret {key} is missing or empty; no Buildkite secrets were created")
               if size >= 32 * 1024:
                   sys.exit(f"GitHub secret {key} is too large for the Buildkite API; no Buildkite secrets were created")

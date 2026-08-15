@@ -359,7 +359,7 @@ func TestGeneratedOIDCMigrationValidatesAllValuesBeforeRequests(t *testing.T) {
 	command.Env = append(command.Environ(),
 		"GITHUB_REF=refs/heads/main", "DEFAULT_BRANCH=main", "GRANT_ID=grant-identifier-123",
 		"ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:1/should-not-run", "ACTIONS_ID_TOKEN_REQUEST_TOKEN=github-request-token",
-		"MIGRATION_SECRET_000=first-secret-value",
+		"MIGRATION_SECRET_000=first-secret-value", "MIGRATION_SECRET_001=   ",
 	)
 	output, runErr := command.CombinedOutput()
 	if runErr == nil || !strings.Contains(string(output), "DEPLOY_TOKEN is missing or empty; no Buildkite secrets were created") {
