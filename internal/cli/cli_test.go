@@ -7325,6 +7325,9 @@ func TestRunJobPublishesHydrationFailureAndRejectsMissingIdentity(t *testing.T) 
 		if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "hydrate prerequisite results") {
 			t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 		}
+		if !strings.Contains(stdout.String(), "+++ :warning: Prepare GitHub Actions job failed\n~~~ :package: Publish GitHub Actions result\n") {
+			t.Fatalf("stdout = %q, want visible prerequisite failure before collapsed publication", stdout.String())
+		}
 		manifest := publishedCLIManifest(t, runner, job, planDigest)
 		if manifest.Result != "failure" {
 			t.Fatalf("published result = %q, want failure", manifest.Result)

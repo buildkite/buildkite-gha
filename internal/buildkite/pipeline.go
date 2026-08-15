@@ -357,9 +357,9 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		commands := []string{
 			"set -euo pipefail",
 			"echo '~~~ :package: Prepare GitHub Actions runtime'",
-			`trap 'bootstrap_status=$?; echo "^^^ +++"; exit "$bootstrap_status"' ERR`,
+			`bootstrap_exit() { bootstrap_status=$?; if [ "$bootstrap_status" -ne 0 ]; then echo "^^^ +++"; fi; if [ -n "${bootstrap_dir:-}" ]; then rm -rf -- "$bootstrap_dir" || true; fi; exit "$bootstrap_status"; }`,
+			"trap bootstrap_exit EXIT",
 			`bootstrap_dir="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha.XXXXXXXX")"`,
-			`trap 'rm -rf -- "$bootstrap_dir"' EXIT`,
 			"buildkite-agent artifact download " + shellQuote(distributionPath) + ` "$bootstrap_dir" --step ` + shellQuote(pipeline.CompilerStep),
 			"distribution=\"$bootstrap_dir/" + distributionPath + `"`,
 			`if command -v sha256sum >/dev/null 2>&1; then actual_distribution_digest="$(sha256sum "$distribution" | awk '{print "sha256:" $1}')"; elif command -v shasum >/dev/null 2>&1; then actual_distribution_digest="$(shasum -a 256 "$distribution" | awk '{print "sha256:" $1}')"; else echo 'buildkite-gha: no SHA-256 tool available' >&2; exit 1; fi`,
@@ -388,7 +388,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 		if experimentalRunnerUser {
 			runJob = experimentalRunnerUserCommand(runJob)
 		}
-		commands = append(commands, "trap - ERR", runJob)
+		commands = append(commands, `trap 'rm -rf -- "$bootstrap_dir"' EXIT`, "unset -f bootstrap_exit", runJob)
 		command := strings.Join(commands, "\n")
 		_, _ = fmt.Fprintf(out, "%scommand: %s\n", attributeIndent, yamlScalar(command))
 		if workflow.Aggregate {
