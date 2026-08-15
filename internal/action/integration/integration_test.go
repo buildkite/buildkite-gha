@@ -37,13 +37,55 @@ func TestLookupMatchesKnownCanonicalActions(t *testing.T) {
 	}
 }
 
+func TestAdmitEnforcesCatalogCommitPolicy(t *testing.T) {
+	invalidCommit := strings.Repeat("0", 40)
+	for _, test := range []struct {
+		name     string
+		identity Identity
+		commit   string
+		want     Descriptor
+	}{
+		{name: "checkout", identity: Identity{Source: "github", Repository: "actions/checkout"}, commit: CheckoutV7Commit, want: Descriptor{Adapter: AdapterCheckoutExactEventSHA}},
+		{name: "upload artifact", identity: Identity{Source: "github", Repository: "actions/upload-artifact"}, commit: UploadArtifactV7Commit, want: Descriptor{Adapter: AdapterUploadArtifactBuildkite}},
+		{name: "download artifact", identity: Identity{Source: "github", Repository: "actions/download-artifact"}, commit: DownloadArtifactV8Commit, want: Descriptor{Adapter: AdapterDownloadArtifactBuildkite}},
+		{name: "cache", identity: Identity{Source: "github", Repository: "actions/cache"}, commit: CacheV4Commit, want: Descriptor{Service: ServiceCache}},
+		{name: "cache restore", identity: Identity{Source: "github", Repository: "actions/cache", Path: "restore"}, commit: CacheV4Commit, want: Descriptor{Service: ServiceCache}},
+		{name: "cache save", identity: Identity{Source: "github", Repository: "actions/cache", Path: "save"}, commit: CacheV4Commit, want: Descriptor{Service: ServiceCache}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok, err := Admit(test.identity, test.commit)
+			if err != nil || !ok || got != test.want {
+				t.Fatalf("Admit(%#v, %q) = %#v, %t, %v, want %#v, true, nil", test.identity, test.commit, got, ok, err, test.want)
+			}
+			got, ok, err = Admit(test.identity, invalidCommit)
+			if err == nil || !ok || got != test.want {
+				t.Fatalf("Admit(%#v, invalid) = %#v, %t, %v, want %#v, true, error", test.identity, got, ok, err, test.want)
+			}
+		})
+	}
+}
+
+func TestAdmitAllowsCatalogEntriesWithoutCommitPolicy(t *testing.T) {
+	for _, identity := range []Identity{
+		{Source: "github", Repository: "actions/upload-artifact", Path: "merge"},
+		{Source: "github", Repository: "actions/setup-node"},
+	} {
+		if _, ok, err := Admit(identity, ""); err != nil || !ok {
+			t.Fatalf("Admit(%#v, empty) found = %t, error = %v, want true, nil", identity, ok, err)
+		}
+	}
+	if descriptor, ok, err := Admit(Identity{Source: "github", Repository: "owner/action"}, strings.Repeat("0", 40)); err != nil || ok || descriptor != (Descriptor{}) {
+		t.Fatalf("Admit(unknown) = %#v, %t, %v, want zero, false, nil", descriptor, ok, err)
+	}
+}
+
 func TestDownloadArtifactExactContract(t *testing.T) {
 	for _, commit := range DownloadArtifactCommits() {
-		if err := ValidateDownloadArtifactCommit(commit); err != nil {
+		if err := validateDownloadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateDownloadArtifactCommit(strings.Repeat("0", 40)); err == nil {
+	if err := validateDownloadArtifactCommit(strings.Repeat("0", 40)); err == nil {
 		t.Fatal("unrecognized commit accepted")
 	}
 	for _, commit := range DownloadArtifactCommits() {
@@ -151,12 +193,12 @@ func TestNormalizeDownloadArtifactPath(t *testing.T) {
 
 func TestUploadArtifactCommitsAreExact(t *testing.T) {
 	for _, commit := range []string{UploadArtifactCommit, UploadArtifactV5Commit, UploadArtifactV6Commit, UploadArtifactV7Commit} {
-		if err := ValidateUploadArtifactCommit(commit); err != nil {
+		if err := validateUploadArtifactCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
 	for _, commit := range []string{"bbbca2ddaa5d8feaa63e36b76fdaad77386f024f", strings.Repeat("0", 40)} {
-		if err := ValidateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV5Commit) || !strings.Contains(err.Error(), UploadArtifactV6Commit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
+		if err := validateUploadArtifactCommit(commit); err == nil || !strings.Contains(err.Error(), UploadArtifactCommit) || !strings.Contains(err.Error(), UploadArtifactV5Commit) || !strings.Contains(err.Error(), UploadArtifactV6Commit) || !strings.Contains(err.Error(), UploadArtifactV7Commit) {
 			t.Fatalf("unrecognized commit %s error = %v, want all audited commits", commit, err)
 		}
 	}
@@ -164,18 +206,18 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 
 func TestCheckoutCommitAdmission(t *testing.T) {
 	for _, commit := range []string{CheckoutV3Commit, CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
-		if err := ValidateCheckoutCommit(commit); err != nil {
+		if err := validateCheckoutCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateCheckoutCommit("de0fac2e4500dabe0009e67214ff5f5447ce83dd"); err != nil {
+	if err := validateCheckoutCommit("de0fac2e4500dabe0009e67214ff5f5447ce83dd"); err != nil {
 		t.Fatalf("upstream main commit rejected: %v", err)
 	}
 	for _, commit := range []string{
 		"f43a0e5ff2bd294095638e18286ca9a3d1956744", // v3.6.0 is an ancestor of upstream main.
 		strings.Repeat("0", 40),
 	} {
-		if err := ValidateCheckoutCommit(commit); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) || !strings.Contains(err.Error(), checkoutMainSnapshotCommit) {
+		if err := validateCheckoutCommit(commit); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) || !strings.Contains(err.Error(), checkoutMainSnapshotCommit) {
 			t.Fatalf("unrecognized checkout commit %s error = %v", commit, err)
 		}
 	}
@@ -186,14 +228,14 @@ func TestCacheCommitsAreExact(t *testing.T) {
 		t.Fatalf("CacheCommits() has %d commits, want 19", len(CacheCommits()))
 	}
 	for _, commit := range CacheCommits() {
-		if err := ValidateCacheCommit(commit); err != nil {
+		if err := validateCacheCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
 	}
-	if err := ValidateCacheCommit("58c1e461ab4154b5b12d40cb0e84792b845ab8ba"); err == nil {
+	if err := validateCacheCommit("58c1e461ab4154b5b12d40cb0e84792b845ab8ba"); err == nil {
 		t.Fatal("upstream-withdrawn v3.4.1 commit accepted")
 	}
-	if err := ValidateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v3.4.0") || !strings.Contains(err.Error(), "v3.5.0") || !strings.Contains(err.Error(), CacheV3Commit) || !strings.Contains(err.Error(), "v4.3.0") || !strings.Contains(err.Error(), CacheV4Commit) || !strings.Contains(err.Error(), "v5.0.3") || !strings.Contains(err.Error(), CacheV503Commit) || !strings.Contains(err.Error(), "v5.1.0") || !strings.Contains(err.Error(), CacheV5Commit) || !strings.Contains(err.Error(), "v6.0.0") || !strings.Contains(err.Error(), "v6.1.0") || !strings.Contains(err.Error(), CacheCommit) {
+	if err := validateCacheCommit(strings.Repeat("0", 40)); err == nil || !strings.Contains(err.Error(), "v3.4.0") || !strings.Contains(err.Error(), "v3.5.0") || !strings.Contains(err.Error(), CacheV3Commit) || !strings.Contains(err.Error(), "v4.3.0") || !strings.Contains(err.Error(), CacheV4Commit) || !strings.Contains(err.Error(), "v5.0.3") || !strings.Contains(err.Error(), CacheV503Commit) || !strings.Contains(err.Error(), "v5.1.0") || !strings.Contains(err.Error(), CacheV5Commit) || !strings.Contains(err.Error(), "v6.0.0") || !strings.Contains(err.Error(), "v6.1.0") || !strings.Contains(err.Error(), CacheCommit) {
 		t.Fatalf("unrecognized cache commit error = %v", err)
 	}
 }
@@ -207,10 +249,10 @@ func TestUnsupportedActionVersionsSeparateGuidanceFromAdmissionDetail(t *testing
 		wantDocs  string
 		wantBound string
 	}{
-		{name: "checkout", reference: "actions/checkout@v3", validate: ValidateCheckoutCommit, wantDocs: "#checkout-action", wantBound: "native adapter"},
-		{name: "upload artifact", reference: "actions/upload-artifact@v6.0.2", validate: ValidateUploadArtifactCommit, wantDocs: "#upload-artifact-action", wantBound: "native adapter"},
-		{name: "download artifact", reference: "actions/download-artifact@v9", validate: ValidateDownloadArtifactCommit, wantDocs: "#download-artifact-action", wantBound: "native adapter"},
-		{name: "cache", reference: "actions/cache@v6.0.0", validate: ValidateCacheCommit, wantDocs: "#cache-action", wantBound: "cache-v2 service"},
+		{name: "checkout", reference: "actions/checkout@v3", validate: validateCheckoutCommit, wantDocs: "#checkout-action", wantBound: "native adapter"},
+		{name: "upload artifact", reference: "actions/upload-artifact@v6.0.2", validate: validateUploadArtifactCommit, wantDocs: "#upload-artifact-action", wantBound: "native adapter"},
+		{name: "download artifact", reference: "actions/download-artifact@v9", validate: validateDownloadArtifactCommit, wantDocs: "#download-artifact-action", wantBound: "native adapter"},
+		{name: "cache", reference: "actions/cache@v6.0.0", validate: validateCacheCommit, wantDocs: "#cache-action", wantBound: "cache-v2 service"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
