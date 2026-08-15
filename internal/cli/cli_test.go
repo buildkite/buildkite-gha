@@ -681,7 +681,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps: [{run: true}]\n",
+		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/secret.yml"})
@@ -717,7 +717,7 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 			annotation = &runner.commands[i]
 		}
 	}
-	if annotation == nil || !strings.Contains(string(annotation.stdin), "uses GitHub Actions secrets") ||
+	if annotation == nil || !strings.Contains(string(annotation.stdin), "needs GITHUB_TOKEN") ||
 		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/secret.yml#L`) {
 		t.Fatalf("admission failure annotation = %#v", annotation)
 	}
