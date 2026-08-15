@@ -1137,7 +1137,7 @@ func isRuntimeContextEnvironment(name string) bool {
 }
 
 func (r Runner) runJobStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) (Result, error) {
-	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared, nil)
+	return r.runActionStep(ctx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, nil, eval, posts, actions, prepared, nil)
 }
 
 // verifyRemoteActionTree materializes and verifies every remote subtree before
@@ -1425,7 +1425,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 	}
 }
 
-func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
+func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv, evaluatedWith map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, actionStack []string) (Result, error) {
 	if stepEnv == nil {
 		var err error
 		stepEnv, err = evaluateStepMap(step.Env, eval)
@@ -1492,9 +1492,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		}
 		action, actionLock = resolvedAction, &lock
 		if usesCheckoutAdapter(lock) {
-			inputs, err := evaluateStepMap(step.With, eval)
-			if err != nil {
-				return result, err
+			inputs := evaluatedWith
+			if inputs == nil {
+				inputs, err = evaluateStepMap(step.With, eval)
+				if err != nil {
+					return result, err
+				}
 			}
 			if err := validateCheckoutRefProvenance(step.With, inputs, job.Event.SHA); err != nil {
 				return result, err
@@ -1502,16 +1505,22 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 			return r.runCheckout(ctx, processor, workspace, job, inputs)
 		}
 		if usesUploadArtifactAdapter(lock) {
-			inputs, err := evaluateStepMap(step.With, eval)
-			if err != nil {
-				return result, err
+			inputs := evaluatedWith
+			if inputs == nil {
+				inputs, err = evaluateStepMap(step.With, eval)
+				if err != nil {
+					return result, err
+				}
 			}
 			return r.runUploadArtifactCommit(ctx, processor, workspace, lock.Commit, inputs)
 		}
 		if usesDownloadArtifactAdapter(lock) {
-			inputs, err := evaluateStepMap(step.With, eval)
-			if err != nil {
-				return result, err
+			inputs := evaluatedWith
+			if inputs == nil {
+				inputs, err = evaluateStepMap(step.With, eval)
+				if err != nil {
+					return result, err
+				}
 			}
 			return r.runDownloadArtifact(ctx, processor, workspace, job.Needs, lock.Commit, inputs)
 		}
@@ -1549,9 +1558,12 @@ func (r Runner) runActionStep(ctx context.Context, processor *commandProcessor, 
 		return result, fmt.Errorf("local action nesting exceeds maximum depth %d at %q", metadata.MaxNestedActionDepth, actionPath)
 	}
 	actionStack = append(append([]string(nil), actionStack...), actionIdentity)
-	inputs, err := evaluateStepMap(step.With, eval)
-	if err != nil {
-		return result, err
+	inputs := evaluatedWith
+	if inputs == nil {
+		inputs, err = evaluateStepMap(step.With, eval)
+		if err != nil {
+			return result, err
+		}
 	}
 	jobStatusInputs, err := actionJobStatusInputs(action, inputs)
 	if err != nil {
@@ -1716,7 +1728,7 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 				}
 			}
 			if childErr == nil {
-				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, childEnv, eval, posts, actions, prepared, actionStack)
+				stepResult, childErr = r.runActionStep(ctx, processor, workspace, job, child, fmt.Sprintf("%s/%d", invocationID, i), childJobEnv, childEnv, childWith, eval, posts, actions, prepared, actionStack)
 			}
 		} else if strings.TrimSpace(step.Run) == "" {
 			childErr = fmt.Errorf("composite action step %d has no run command", i+1)
