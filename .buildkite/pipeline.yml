@@ -85,7 +85,7 @@ steps:
       - label: ":test_tube: Go tests %n/%t"
         key: "go-tests"
         if: build.env("DEMO_SUITE") != "plugin"
-        parallelism: 2
+        parallelism: 1
         cache: ".buildkite/cache-volume"
         plugins:
           - setup-go#v0.1.0:

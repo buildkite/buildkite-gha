@@ -158,9 +158,9 @@
       "id": "cache-v2-compatibility",
       "workflow": "testdata/smoke/.github/workflows/cache-v2-compatibility.yml",
       "event": "testdata/smoke/events/push.json",
-      "expectation": "compile-pass",
-      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit the audited cache-v2 release commits and preserve isolated per-phase credentials.",
-      "note": "This build-unique v3.4.0 producer to v6.1.0 consumer proves the oldest and newest admitted archive lifecycle at compile time. It remains compile-only until the cross-generation roundtrip passes against the hosted Buildkite Results service.",
+      "expectation": "runtime-pass",
+      "evidence": "Exact-source Buildkite build 1173 saved a build-unique v3.4.0 archive to Buildkite Results, restored it with v6.1.0, and verified the payload.",
+      "note": "Build 1173 used implementation commit 9691b3a48bf3cf6e7eee313374ab7941f16c82f7; producer job 01a00574-e0f4-4c9d-88ff-21acce7b6152 and consumer job 01a00574-e10f-4811-803d-0043acb022df passed.",
       "action_preflight": "hosted"
     },
     {
