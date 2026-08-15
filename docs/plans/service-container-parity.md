@@ -99,7 +99,7 @@ exactly:
 | Field | Expression contexts |
 |---|---|
 | Service fields | `github`, `inputs`, `vars`, `needs`, `strategy`, `matrix` |
-| Credential values | `github`, `inputs`, `vars`, `secrets`, `env` |
+| Credential values | `github`, `vars`, `secrets`, `env` |
 
 Empty resolved images skip that service.
 

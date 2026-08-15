@@ -42,6 +42,7 @@ type rawServiceContainer struct {
 	Options     string
 	Command     string
 	Entrypoint  string
+	Order       int
 }
 
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
@@ -302,6 +303,7 @@ func validateRawContainers(path string, document *yaml.Node) (map[string]rawServ
 			if err != nil {
 				return nil, nil, err
 			}
+			extra.Order = j / 2
 			serviceContainers[jobID+"\x00"+name.Value] = extra
 			diagnostics = append(diagnostics, expected...)
 		}
@@ -532,7 +534,14 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 			for name := range in.Services.Value {
 				names = append(names, name)
 			}
-			sort.Strings(names)
+			sort.Slice(names, func(i, j int) bool {
+				left := serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+names[i]].Order
+				right := serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+names[j]].Order
+				if left != right {
+					return left < right
+				}
+				return names[i] < names[j]
+			})
 			for _, name := range names {
 				service := in.Services.Value[name]
 				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {

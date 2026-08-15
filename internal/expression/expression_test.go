@@ -900,6 +900,19 @@ func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.
 	}
 }
 
+func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err != nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
+		}
+	}
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err == nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
+		}
+	}
+}
+
 func TestEvaluateAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
 	for _, test := range []struct {
 		template string

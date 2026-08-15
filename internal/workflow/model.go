@@ -147,8 +147,8 @@ type Container struct {
 	Span  Span              `json:"span"`
 }
 
-// Service is a named service container. Services are sorted by Name because
-// actionlint v1.7.12 exposes them as a map and does not retain source order.
+// Service is a named service container. Services retain workflow declaration
+// order even though actionlint exposes them as a map.
 type Service struct {
 	Name      string           `json:"name"`
 	Container ServiceContainer `json:"container"`

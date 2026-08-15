@@ -524,7 +524,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, services, containerMounts...)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, serviceOrder(services, job.ServiceOrder), containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -537,7 +537,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 		}()
 	} else if len(services) != 0 {
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, services)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, serviceOrder(services, job.ServiceOrder))
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -871,6 +871,23 @@ func evaluateServices(services map[string]plan.Container, eval expression.Contex
 		result[name] = service
 	}
 	return result, nil
+}
+
+func serviceOrder(services map[string]plan.Container, preferred []string) []string {
+	result := make([]string, 0, len(services))
+	seen := make(map[string]bool, len(services))
+	for _, name := range preferred {
+		if _, ok := services[name]; ok && !seen[name] {
+			result = append(result, name)
+			seen[name] = true
+		}
+	}
+	for _, name := range sortedKeys(services) {
+		if !seen[name] {
+			result = append(result, name)
+		}
+	}
+	return result
 }
 
 func evaluateServiceMap(static map[string]plan.Container, source string, eval expression.Context) (map[string]plan.Container, error) {

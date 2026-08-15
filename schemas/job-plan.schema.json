@@ -32,6 +32,7 @@
     "requires_mise": {"type": "boolean"},
     "container": {"$ref": "#/$defs/container"},
     "services": {"type": "object", "maxProperties": 32, "propertyNames": {"pattern": "^[a-z_][a-z0-9_-]{0,254}$"}, "additionalProperties": {"$ref": "#/$defs/serviceContainer"}},
+    "service_order": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z_][a-z0-9_-]{0,254}$"}},
     "services_expression": {"type": "string", "minLength": 1, "maxLength": 65536}
   },
   "allOf": [

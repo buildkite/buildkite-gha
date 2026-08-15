@@ -580,6 +580,7 @@ instances:
 			}
 			if len(instance.Services) != 0 {
 				job.Services = make(map[string]plan.Container, len(instance.Services))
+				job.ServiceOrder = make([]string, 0, len(instance.Services))
 			}
 			for _, service := range instance.Services {
 				container := plan.Container{
@@ -591,6 +592,7 @@ instances:
 					container.Credentials = &plan.ContainerCredentials{Username: service.Container.Credentials.Username, Password: service.Container.Credentials.Password}
 				}
 				job.Services[service.Name] = container
+				job.ServiceOrder = append(job.ServiceOrder, service.Name)
 			}
 			if err := job.Validate(); err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -1240,6 +1242,9 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			credentials := *container.Credentials
 			container.Credentials = &credentials
 			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
+				if err := expression.ValidateServiceCredentialTemplate(*field); err != nil {
+					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
+				}
 				value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
 				if err != nil {
 					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)

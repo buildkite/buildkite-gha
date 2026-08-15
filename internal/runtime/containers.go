@@ -38,10 +38,12 @@ type containerMount struct {
 type serviceContainer struct {
 	id, name string
 	created  bool
+	ready    bool
 }
 
 type jobContainerBackend struct {
 	runner                    Runner
+	processor                 *commandProcessor
 	docker                    string
 	env                       map[string]string
 	config                    string
@@ -78,6 +80,10 @@ func privateDocker(r Runner) (string, string, map[string]string, error) {
 }
 
 func (r Runner) startJobContainer(ctx context.Context, processor *commandProcessor, workspace, temp string, spec plan.Container, services map[string]plan.Container, extra ...containerMount) (_ *jobContainerBackend, err error) {
+	return r.startJobContainerOrdered(ctx, processor, workspace, temp, spec, services, sortedKeys(services), extra...)
+}
+
+func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec plan.Container, services map[string]plan.Container, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
 	docker, config, env, err := privateDocker(r)
 	if err != nil {
 		return nil, err
@@ -88,7 +94,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		return nil, err
 	}
 	id := hex.EncodeToString(nonce[:])
-	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner." + id + "=true", network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]expression.ServiceContext)}
+	b := &jobContainerBackend{runner: r, processor: processor, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner." + id + "=true", network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]expression.ServiceContext)}
 	if spec.Image != "" {
 		b.container = "buildkite-gha-job-" + id
 	}
@@ -163,7 +169,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		}
 	}
 	activeCredential := map[string][sha256.Size]byte{}
-	for _, serviceID := range sortedKeys(services) {
+	for _, serviceID := range serviceOrder {
 		service := services[serviceID]
 		image := service.Image
 		if service.Credentials != nil && service.Credentials.Username != "" && service.Credentials.Password != "" {
@@ -205,7 +211,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 	if _, err = boundedDockerOutput(ctx, env, docker, "network", "create", "--label", "com.buildkite.gha=true", "--label", b.owner, b.network); err != nil {
 		return nil, fmt.Errorf("create job container network: %w", err)
 	}
-	for _, serviceID := range sortedKeys(services) {
+	for _, serviceID := range serviceOrder {
 		service := services[serviceID]
 		serviceNonce, randomErr := randomHex()
 		if randomErr != nil {
@@ -273,10 +279,12 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		}
 		b.servicePorts[service.id] = expression.ServiceContext{ID: service.name, Network: b.network, Ports: ports}
 	}
-	for _, service := range b.services {
+	for i := range b.services {
+		service := &b.services[i]
 		if err = b.waitForService(ctx, processor, service.id, service.name); err != nil {
 			return nil, err
 		}
+		service.ready = true
 	}
 	if spec.Image != "" {
 		args := []string{"create", "--name", b.container, "--label", "com.buildkite.gha=true", "--label", b.owner, "--network", b.network,
@@ -762,6 +770,9 @@ func (b *jobContainerBackend) cleanup() error {
 			}
 			if queryErr == nil && !exists {
 				continue
+			}
+			if service.ready {
+				b.serviceDiagnostics(b.processor, name)
 			}
 			_, stopErr := boundedDockerOutput(ctx, b.env, b.docker, "stop", "--time", "2", name)
 			exists, queryErr = b.serviceContainerExists(ctx, name)

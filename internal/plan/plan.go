@@ -253,6 +253,7 @@ type Job struct {
 	RequiresMise       *bool                `json:"requires_mise,omitempty"`
 	Container          *Container           `json:"container,omitempty"`
 	Services           map[string]Container `json:"services,omitempty"`
+	ServiceOrder       []string             `json:"service_order,omitempty"`
 	ServicesExpression string               `json:"services_expression,omitempty"`
 }
 
@@ -434,6 +435,9 @@ func (job Job) Validate() error {
 		}
 		capabilities[capability] = struct{}{}
 	}
+	if len(job.ServiceOrder) != 0 && len(job.Services) == 0 {
+		return fmt.Errorf("job plan service order requires static services")
+	}
 	if job.Container != nil || len(job.Services) != 0 || job.ServicesExpression != "" {
 		if _, ok := capabilities["docker"]; !ok {
 			return fmt.Errorf("job containers and services require docker capability")
@@ -451,6 +455,18 @@ func (job Job) Validate() error {
 		}
 		if len(job.Services) > 32 {
 			return fmt.Errorf("job plan has more than 32 services")
+		}
+		if len(job.ServiceOrder) != 0 {
+			if len(job.ServiceOrder) != len(job.Services) {
+				return fmt.Errorf("job plan service order must name every static service")
+			}
+			seen := make(map[string]bool, len(job.ServiceOrder))
+			for _, name := range job.ServiceOrder {
+				if _, ok := job.Services[name]; !ok || seen[name] {
+					return fmt.Errorf("job plan service order contains unknown or repeated service %q", name)
+				}
+				seen[name] = true
+			}
 		}
 		for name, service := range job.Services {
 			if !serviceNamePattern.MatchString(name) {
@@ -686,7 +702,7 @@ func validateServiceContainer(service ServiceContainer, templates bool) error {
 		if service.Credentials != nil {
 			for _, value := range []string{service.Credentials.Username, service.Credentials.Password} {
 				if strings.Contains(value, "${{") {
-					if err := expression.ValidateRuntimeTemplate(value); err != nil {
+					if err := expression.ValidateServiceCredentialTemplate(value); err != nil {
 						return fmt.Errorf("service container has invalid credential template: %w", err)
 					}
 				}

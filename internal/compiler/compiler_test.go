@@ -2603,6 +2603,9 @@ jobs:
 		if service.Image != image || service.Credentials == nil || service.Credentials.Username != "registry-user" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["INSTANCE"] != strconv.Itoa(i) || !slices.Equal(service.Ports, []string{"5432"}) || len(service.Volumes) != 1 || service.Options == "" || service.Command == "" || service.Entrypoint == "" {
 			t.Fatalf("compiled service %d = %#v", i, service)
 		}
+		if !slices.Equal(plans[i].ServiceOrder, []string{"database"}) {
+			t.Fatalf("service order = %#v", plans[i].ServiceOrder)
+		}
 		if !slices.Equal(plans[i].RequiredSecrets, []string{"REGISTRY_PASSWORD"}) || !plans[i].HasCapability("secrets") {
 			t.Fatalf("service credential provenance = %#v, %#v", plans[i].RequiredSecrets, plans[i].RequiredCapabilities)
 		}
@@ -2613,20 +2616,31 @@ jobs:
 	}
 }
 
-func TestResolveCompileServicesRejectsInputIntroducedExpressionSyntax(t *testing.T) {
+func TestResolveCompileServicesRejectsVariableIntroducedExpressionSyntax(t *testing.T) {
 	services := []workflow.Service{{
 		Name: "database",
 		Container: workflow.ServiceContainer{
 			Image: "postgres:16",
 			Credentials: &workflow.ContainerCredentials{
 				Username: "registry-user",
-				Password: "${{ inputs.password }}",
+				Password: "${{ vars.password }}",
 			},
 		},
 	}}
-	_, err := resolveCompileServices(services, expression.CompileContext{Inputs: map[string]any{"password": "${{ secrets.ADMIN }}"}})
+	_, err := resolveCompileServices(services, expression.CompileContext{Vars: map[string]string{"password": "${{ secrets.ADMIN }}"}})
 	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
 		t.Fatalf("resolveCompileServices() error = %v", err)
+	}
+}
+
+func TestResolveCompileServicesRejectsUnsupportedCredentialContexts(t *testing.T) {
+	for _, value := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}"} {
+		services := []workflow.Service{{Name: "database", Container: workflow.ServiceContainer{
+			Image: "postgres:16", Credentials: &workflow.ContainerCredentials{Username: value, Password: "literal"},
+		}}}
+		if _, err := resolveCompileServices(services, expression.CompileContext{}); err == nil || !strings.Contains(err.Error(), "credential expression context") {
+			t.Errorf("resolveCompileServices() credential %q error = %v", value, err)
+		}
 	}
 }
 

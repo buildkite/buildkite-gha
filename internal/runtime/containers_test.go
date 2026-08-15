@@ -896,6 +896,36 @@ func TestRunServiceContainerCompleteArguments(t *testing.T) {
 	t.Fatal("service create call not found")
 }
 
+func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T) {
+	f := newJobDocker(t, "")
+	var output bytes.Buffer
+	b, err := (Runner{Docker: f.path}).startJobContainerOrdered(
+		context.Background(), newCommandProcessor(&output, &output), t.TempDir(), t.TempDir(), plan.Container{},
+		map[string]plan.Container{"alpha": {Image: "one"}, "zed": {Image: "two"}}, []string{"zed", "alpha"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	var aliases, removed []string
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "create" {
+			aliases = append(aliases, call.Args[slices.Index(call.Args, "--network-alias")+1])
+		}
+		if len(call.Args) != 0 && call.Args[0] == "rm" && strings.Contains(call.Args[len(call.Args)-1], "docker-id-buildkite-gha-service-") {
+			removed = append(removed, call.Args[len(call.Args)-1])
+		}
+	}
+	if !slices.Equal(aliases, []string{"zed", "alpha"}) || len(removed) != 2 || removed[0] != b.services[0].name || removed[1] != b.services[1].name {
+		t.Fatalf("aliases = %#v, removed = %#v, services = %#v", aliases, removed, b.services)
+	}
+	if calls := f.calls(t); jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[0].name) < 0 || jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[1].name) < 0 {
+		t.Fatalf("successful service logs were not emitted: %#v", calls)
+	}
+}
+
 func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
 	f := newJobDocker(t, "fail-login-once")
 	service := plan.Container{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
