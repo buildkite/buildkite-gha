@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/transport"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
@@ -2609,6 +2610,23 @@ jobs:
 	plans[0].Services["database"].Env["INSTANCE"] = "changed"
 	if plans[1].Services["database"].Env["INSTANCE"] != "1" {
 		t.Fatal("matrix service environments share mutable state")
+	}
+}
+
+func TestResolveCompileServicesRejectsInputIntroducedExpressionSyntax(t *testing.T) {
+	services := []workflow.Service{{
+		Name: "database",
+		Container: workflow.ServiceContainer{
+			Image: "postgres:16",
+			Credentials: &workflow.ContainerCredentials{
+				Username: "registry-user",
+				Password: "${{ inputs.password }}",
+			},
+		},
+	}}
+	_, err := resolveCompileServices(services, expression.CompileContext{Inputs: map[string]any{"password": "${{ secrets.ADMIN }}"}})
+	if err == nil || !strings.Contains(err.Error(), "compile-time expression result contains expression syntax") {
+		t.Fatalf("resolveCompileServices() error = %v", err)
 	}
 }
 

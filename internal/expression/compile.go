@@ -114,18 +114,47 @@ func EvaluateAvailableCompileTemplate(template string, context CompileContext) (
 		if err != nil {
 			evaluated.WriteString(complete)
 		} else {
+			var replacement string
 			switch value := value.(type) {
 			case nil:
 			case string:
-				evaluated.WriteString(value)
+				replacement = value
 			case bool, json.Number, float64, int:
-				_, _ = fmt.Fprint(&evaluated, value)
+				replacement = fmt.Sprint(value)
 			default:
 				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
+			if introducesExpressionSyntax(evaluated.String(), replacement, source[consumed:]) {
+				return "", fmt.Errorf("compile-time expression result contains expression syntax")
+			}
+			evaluated.WriteString(replacement)
 		}
 		remaining = source[consumed:]
 	}
+}
+
+func introducesExpressionSyntax(before, replacement, after string) bool {
+	if len(before) > 2 {
+		before = before[len(before)-2:]
+	}
+	if len(after) > 2 {
+		after = after[:2]
+	}
+	boundary, replacementEnd := len(before), len(before)+len(replacement)
+	combined := before + replacement + after
+	for offset := 0; offset < len(combined); {
+		relative := strings.Index(combined[offset:], "${{")
+		if relative < 0 {
+			return false
+		}
+		start := offset + relative
+		end := start + len("${{")
+		if len(replacement) > 0 && start < replacementEnd && end > boundary || len(replacement) == 0 && start < boundary && end > boundary {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 // SubstituteCompileInputs replaces static inputs.<name> references inside

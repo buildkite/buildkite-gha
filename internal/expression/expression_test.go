@@ -900,6 +900,22 @@ func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.
 	}
 }
 
+func TestEvaluateAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		value    string
+	}{
+		{template: "${{ inputs.value }}", value: "${{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}", value: "{{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}{{ secrets.ADMIN }}", value: ""},
+	} {
+		_, err := EvaluateAvailableCompileTemplate(test.template, CompileContext{Inputs: map[string]any{"value": test.value}})
+		if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+			t.Errorf("EvaluateAvailableCompileTemplate(%q) error = %v", test.template, err)
+		}
+	}
+}
+
 func TestEvaluateCompileFailsClosed(t *testing.T) {
 	tests := []struct {
 		expression string
