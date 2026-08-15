@@ -688,6 +688,7 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 		writeAction(t, remote, path, "name: cache\nruns:\n  using: node24\n  main: index.js\n")
 	}
 	for version, commit := range map[string]string{
+		"v4.3.0": actionintegration.CacheV4Commit,
 		"v5.0.3": actionintegration.CacheV503Commit,
 		"v5.1.0": actionintegration.CacheV5Commit,
 		"v6.1.0": actionintegration.CacheCommit,
@@ -724,7 +725,7 @@ func TestCompileActionLocksAllowsOnlyAuditedCacheCommits(t *testing.T) {
 
 	resolved := strings.Repeat("a", 40)
 	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v6"})
-	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV503Commit) || !strings.Contains(err.Error(), actionintegration.CacheV5Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
+	if err == nil || !strings.Contains(err.Error(), "actions/cache@v6 resolved to commit "+resolved) || !strings.Contains(err.Error(), actionintegration.CacheV4Commit) || !strings.Contains(err.Error(), actionintegration.CacheV503Commit) || !strings.Contains(err.Error(), actionintegration.CacheV5Commit) || !strings.Contains(err.Error(), actionintegration.CacheCommit) {
 		t.Fatalf("unsupported actions/cache commit error = %v", err)
 	}
 	_, _, _, _, err = compileActionLocks(context.Background(), workspace, &fakeActionSource{root: remote, calls: map[string]int{}}, []string{"actions/cache@v5"})

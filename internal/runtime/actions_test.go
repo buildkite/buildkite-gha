@@ -144,6 +144,7 @@ func TestActionLockResolverAllowsOnlyAuditedCacheCommitsAndEntryPoints(t *testin
 	}
 	digest := digestTree(t, repo)
 	for version, commit := range map[string]string{
+		"v4.3.0": actionintegration.CacheV4Commit,
 		"v5.0.3": actionintegration.CacheV503Commit,
 		"v5.1.0": actionintegration.CacheV5Commit,
 		"v6.1.0": actionintegration.CacheCommit,

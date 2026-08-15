@@ -67,9 +67,10 @@ const (
 	DownloadArtifactV801Commit = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 	// DownloadArtifactCommit is retained as the original v4.3.0 spelling.
 	DownloadArtifactCommit = DownloadArtifactV4Commit
-	// CacheV503Commit, CacheV5Commit, and CacheCommit are the exact audited
+	// CacheV4Commit, CacheV503Commit, CacheV5Commit, and CacheCommit are the exact audited
 	// actions/cache implementations admitted to the Buildkite-backed cache-v2
 	// service. CacheCommit retains the original v6.1.0 spelling.
+	CacheV4Commit   = "0057852bfaa89a56745cba8c7296529d2fc39830"
 	CacheV503Commit = "cdf6c1fa76f9f475f3d7449005a359c84ca0f306"
 	CacheV5Commit   = "caa296126883cff596d87d8935842f9db880ef25"
 	CacheCommit     = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
@@ -140,6 +141,7 @@ var uploadArtifactCommits = map[string]string{
 }
 
 var cacheCommits = map[string]string{
+	CacheV4Commit:   "v4.3.0",
 	CacheV503Commit: "v5.0.3",
 	CacheV5Commit:   "v5.1.0",
 	CacheCommit:     "v6.1.0",

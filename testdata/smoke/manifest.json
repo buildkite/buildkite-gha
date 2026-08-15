@@ -155,6 +155,15 @@
       "action_preflight": "hosted"
     },
     {
+      "id": "cache-v4",
+      "workflow": "testdata/smoke/.github/workflows/cache-v4.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit only the audited actions/cache v4.3.0 commit; lifecycle coverage verifies managed Node 24 and isolated cache-v2 credentials.",
+      "note": "This build-unique producer-to-consumer roundtrip remains compile-only until the exact v4.3.0 commit passes against the hosted Buildkite Results service.",
+      "action_preflight": "hosted"
+    },
+    {
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",

@@ -220,10 +220,11 @@ func TestCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T) {
 	writeFixtureFile(t, workspace, workflowPath, "name: cache lifecycle\n")
 	remote := t.TempDir()
 	writeFixtureFile(t, remote, "package.json", `{"type":"module"}`)
-	writeFixtureFile(t, remote, "action.yml", "name: cache service fixture\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
+	writeFixtureFile(t, remote, "action.yml", "name: cache service fixture\nruns:\n  using: node20\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
 	for _, phase := range []string{"pre", "main", "post"} {
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
+if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache v4 did not use managed Node 24");
 const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
@@ -289,7 +290,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 			"ACTIONS_RESULTS_URL": "https://attacker.invalid", "ACTIONS_RUNTIME_TOKEN": "workflow-token", "ACTIONS_CACHE_SERVICE_V2": "false",
 			"ACTIONS_CACHE_URL": "https://legacy.invalid", "ACTIONS_RUNTIME_URL": "https://legacy.invalid",
 		}, Action: &plan.ActionSelector{Lock: ordinaryID}},
-		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheCommit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
+		{ID: "cache", Kind: "uses", Uses: "actions/cache@" + actionintegration.CacheV4Commit, Env: cacheEnv, Action: &plan.ActionSelector{Lock: cacheID}},
 		{ID: "shell-after", Kind: "run", Command: `test -z "${ACTIONS_RUNTIME_TOKEN:-}" && test -z "${ACTIONS_RESULTS_URL:-}" && test -z "${ACTIONS_CACHE_SERVICE_V2:-}"`},
 	})
 	job.Schema = plan.Schema
@@ -297,7 +298,7 @@ console.log("ordinary-credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
 	job.RequiredCapabilities = []string{"network"}
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle, "ATTACKER_BIN": attackerBin}
 	job.Actions = []plan.ActionLock{
-		{ID: cacheID, Source: "github", Repository: "actions/cache", RequestedRef: actionintegration.CacheCommit, Commit: actionintegration.CacheCommit, SourceDigest: digest},
+		{ID: cacheID, Source: "github", Repository: "actions/cache", RequestedRef: actionintegration.CacheV4Commit, Commit: actionintegration.CacheV4Commit, SourceDigest: digest},
 		{ID: ordinaryID, Source: "github", Repository: "owner/repo", RequestedRef: "v1", Commit: strings.Repeat("a", 40), Path: "ordinary", SourceDigest: digest},
 	}
 	provider := &sequenceCacheCredentials{tokens: []string{
