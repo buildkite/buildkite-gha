@@ -36,6 +36,27 @@ An action that receives a credential can use or exfiltrate it. It can also expor
 
 Ordinary workflow secrets are Buildkite job-accessible secrets, not GitHub event or fork-scoped secrets. Workflow syntax adds no authority: arbitrary workflow code already runs with the destination job's identity and can call `buildkite-agent secret get`. Restrict that identity with Buildkite Secret access policies. Plans and generated pipeline YAML contain secret names only, never values. `GITHUB_TOKEN` remains on its separate workflow-token boundary.
 
+### OIDC secrets migration
+
+`migrate-secrets` generates a reviewed GitHub Actions workflow with a static
+secret allowlist. After the workflow is committed to the default branch, the
+CLI creates a short-lived Buildkite migration grant bound to the immutable
+GitHub repository IDs, exact workflow path and commit, default branch,
+destination cluster, names, and non-empty access policy. The workflow proves
+its identity with a GitHub-signed OIDC token and consumes the grant once.
+
+GitHub OIDC authenticates the workflow; it does not choose its Buildkite
+authority. The authenticated Buildkite user fixes that authority when creating
+the grant. The workflow receives no Buildkite API token and cannot change the
+destination, policy, or allowlist. It sends values only in one in-memory HTTPS
+request, and Buildkite errors and audit data must never include them.
+
+Anyone who can change and run the default-branch workflow can read the selected
+GitHub secrets. Binding the grant to the reviewed commit prevents another
+workflow revision from using its authority. Remove the migration workflow
+after the run succeeds. This migration-specific OIDC path does not add OIDC
+support to imported Buildkite jobs.
+
 Workflow token issuance requires an organization feature and a default-off pipeline setting. Buildkite reads the top-level permission policy from the workflow at the build's immutable commit. Omitted permissions resolve to exactly `contents: read`; write permissions require an explicit top-level map. Explicit empty permissions, scopes resolving only to `none`, job-level permission maps, and reusable-workflow jobs cannot receive a token. It denies incomplete or cyclic trigger and rebuild provenance. Pull-request ancestry retains a `contents: read` ceiling, and merge-queue ancestry is denied.
 
 For other builds, a user with permission to create a build at an arbitrary commit may select code that requests the workflow's allowed permissions. Enable write tokens only when those build-creation paths and branch builds are trusted.

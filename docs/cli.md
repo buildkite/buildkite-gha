@@ -47,6 +47,69 @@ Profile validation applies the upload trigger policy before compilation. A `not-
 
 Validation may use the public network to resolve actions. Apart from annotation publication when it runs in a Buildkite job, it does not call Buildkite, install Node, or execute workflow code.
 
+## Migrate GitHub Actions secrets
+
+GitHub's API lists repository secret names but cannot export their values.
+`migrate-secrets` uses `gh` and `bk` to generate and run a reviewable,
+one-use workflow without storing a Buildkite API token in GitHub.
+
+Authenticate both CLIs, then prepare the workflow from the GitHub repository:
+
+```sh
+gh auth login
+bk auth login
+
+buildkite-gha migrate-secrets prepare \
+  --match 'DEPLOY_*' \
+  --secret API_KEY \
+  --output .github/workflows/migrate-buildkite-secrets.yml
+```
+
+The Buildkite API token used by `bk` needs `read_pipelines`,
+`read_secrets_details`, and `write_secrets`. Its user also needs
+`manage_cluster` permission for the destination cluster.
+
+Without `--secret` or `--match`, the command lists the repository's Actions
+secret names and prompts for a selection. It selects a Buildkite pipeline
+associated with the repository, uses that pipeline's cluster, and creates a
+pipeline-scoped secret access policy. Use `--organization`, `--pipeline`, and
+`--cluster` to make selection explicit. Use `--policy-file` for a different
+non-empty [Buildkite secret access policy](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies).
+
+Each workflow can migrate up to 40 secrets. Use multiple workflows for larger
+sets.
+
+The command checks destination names before writing the workflow and refuses
+to replace an existing workflow file. Review the generated static secret
+allowlist and policy, then commit and merge it into the repository's default
+branch. The command never commits or pushes it.
+
+Run the committed workflow:
+
+```sh
+buildkite-gha migrate-secrets run \
+  --workflow .github/workflows/migrate-buildkite-secrets.yml
+```
+
+`run` verifies that the local file exactly matches the workflow at a resolved
+default-branch commit. It creates a short-lived, one-use Buildkite migration
+grant bound to that commit, then dispatches the default branch through `gh`.
+The workflow obtains a GitHub-signed OIDC identity and sends all selected
+values to Buildkite in one in-memory HTTPS request. Values never enter local
+CLI output, workflow inputs, files, artifacts, or command arguments.
+
+The grant fixes the organization, cluster, access policy, names, immutable
+GitHub repository IDs, workflow path and commit, default branch, and
+`workflow_dispatch` event. Existing destination keys are never overwritten.
+Buildkite prevalidates the exact batch and atomically creates all visible
+secret records while consuming the grant. A rolled-back request can leave
+unreachable encrypted objects for normal storage lifecycle cleanup, but no
+usable partial keys. After a successful run, remove the workflow from the
+default branch.
+
+`GITHUB_TOKEN` cannot be migrated. `buildkite-gha` obtains it through its
+separate short-lived, permission-scoped workflow-token path.
+
 ## Provide an event snapshot
 
 `compile` and profile validation need a bounded event snapshot:
