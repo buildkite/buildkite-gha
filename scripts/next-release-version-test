@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf '[next-release-version-test] error: %s\n' "$*" >&2; exit 1; }
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+run_success() {
+  local current="$1" bump="$2" expected="$3" actual
+  actual="$("$root/scripts/next-release-version" "$current" "$bump")"
+  [[ "$actual" == "$expected" ]] || die "unexpected result: $actual"
+}
+
+run_failure() {
+  local current="$1" bump="$2" expected_error="$3" output
+  if output="$("$root/scripts/next-release-version" "$current" "$bump" 2>&1)"; then
+    die "expected failure for $current $bump"
+  fi
+  [[ "$output" == *"$expected_error"* ]] || die "unexpected failure: $output"
+}
+
+run_success v0.13.15 minor v0.14.0
+run_success v0.13.15 patch v0.13.16
+run_success v0.9.9 minor v0.10.0
+run_failure 0.13.15 patch 'invalid current pre-1.0 version'
+run_failure v0.13.15 major 'invalid bump'
+
+printf '%s\n' 'next-release-version tests passed'

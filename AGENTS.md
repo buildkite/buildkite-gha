@@ -49,3 +49,16 @@ CLI. Manual GUI testing does not apply.
   smoke:profile` and the hosted runtime proofs (`bk build create ...`) require
   network access / Buildkite SaaS and are **optional** — not needed for local
   dev, build, or the default check gate.
+
+### Releases
+
+- When explicitly asked to make a release, fetch `origin/main` and tags, then
+  inspect every commit and the complete diff from the latest stable tag to
+  `origin/main`. Do not infer the bump from commit-message prefixes.
+- Choose a minor bump for additive compatibility, features, or breaking
+  changes. This project is pre-1.0, so breaking changes also increment the
+  minor version. Choose a patch bump only for fixes and internal-only changes.
+- State the proposed version and the highest-impact reason for it. If no
+  release is warranted or the bump is ambiguous, stop and ask the user.
+- Run `mise run release -- <next-v0-tag>`. The task validates the proposed tag
+  and preserves the release safeguards before creating and pushing it.

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf '[next-release-version] error: %s\n' "$*" >&2; exit 1; }
+[[ $# -eq 2 ]] || die 'usage: next-release-version <current-v0-tag> <patch|minor>'
+current="$1"
+[[ "$current" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+  || die "invalid current pre-1.0 version: $current"
+minor="${BASH_REMATCH[1]}"
+patch="${BASH_REMATCH[2]}"
+
+case "$2" in
+  minor)
+    next="v0.$((10#$minor + 1)).0"
+    ;;
+  patch)
+    next="v0.${minor}.$((10#$patch + 1))"
+    ;;
+  *)
+    die "invalid bump: $2"
+    ;;
+esac
+
+printf '%s\n' "$next"

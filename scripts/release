@@ -2,7 +2,9 @@
 set -euo pipefail
 
 die() { printf '[release] error: %s\n' "$*" >&2; exit 1; }
-for command in amp git; do command -v "$command" >/dev/null 2>&1 || die "missing required command: $command"; done
+[[ $# -eq 1 ]] || die 'usage: mise run release -- <next-v0-tag>'
+next="$1"
+command -v git >/dev/null 2>&1 || die 'missing required command: git'
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
@@ -13,7 +15,7 @@ git fetch origin main --tags
 
 if [[ -z "$(git tag --list 'v*')" ]]; then
   current='no release'
-  next=v0.1.0
+  [[ "$next" == v0.1.0 ]] || die 'the first release must be v0.1.0'
 else
   current=''
   while IFS= read -r tag; do
@@ -24,30 +26,11 @@ else
   done < <(git tag --merged HEAD --list 'v0.*' --sort=-version:refname)
   [[ -n "$current" ]] || die 'no pre-1.0 release tag is reachable from main'
 
-  assessment="$({
-    printf 'COMMITS %s..HEAD\n' "$current"
-    git log --format='%H %s' "$current..HEAD"
-    printf '\nDIFF STAT %s..HEAD\n' "$current"
-    git diff --stat "$current..HEAD"
-    printf '\nDIFF %s..HEAD\n' "$current"
-    git diff --no-ext-diff "$current..HEAD"
-  } | scripts/select-release-version "$current")" || die 'release agent did not produce a usable version decision'
-
-  mapfile -t assessment_lines <<< "$assessment"
-  [[ ${#assessment_lines[@]} -eq 3 ]] || die 'release agent result has an invalid format'
-  [[ "${assessment_lines[0]}" =~ ^VERSION=(v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$ ]] \
-    || die 'release agent result has an invalid version'
-  next="${BASH_REMATCH[1]}"
-  [[ "${assessment_lines[1]}" =~ ^DECISION=(patch|minor)$ ]] \
-    || die 'release agent result has an invalid decision'
-  decision="${BASH_REMATCH[1]}"
-  [[ "${assessment_lines[2]}" =~ ^RATIONALE=(.+)$ ]] \
-    || die 'release agent result has no rationale'
-  rationale="${BASH_REMATCH[1]}"
-  printf 'Agent decision: %s\nRationale: %s\n' "$decision" "$rationale"
+  patch="$(scripts/next-release-version "$current" patch)"
+  minor="$(scripts/next-release-version "$current" minor)"
+  [[ "$next" == "$patch" || "$next" == "$minor" ]] \
+    || die "next release must be $patch or $minor, not $next"
 fi
-[[ "$next" =~ ^v0\.[0-9]+\.[0-9]+$ ]] || die "refusing non-v0 release: $next"
-[[ "$next" != "$current" ]] || die "no version bump detected (current: $current)"
 
 printf 'Releasing %s -> %s\n' "$current" "$next"
 read -r -p "Type ${next} to create and push this tag: " confirmation \

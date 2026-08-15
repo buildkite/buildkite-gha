@@ -101,12 +101,12 @@ The branch must be pushed, and its remote commit must match `HEAD`. Use `--githu
 From a clean, up-to-date `main`, run:
 
 ```sh
-mise run release
+mise run release -- <next-v0-tag>
 ```
 
-The task runs `check`, fetches `origin/main` and tags, and asks Amp in high mode to assess every commit and the complete diff since the latest release. The agent must classify the largest released change as a `minor` or `patch` bump and provide a short rationale. Additive compatibility and features require a minor bump. Because the project is pre-1.0, breaking changes also increment the minor version. Fixes and internal-only changes increment the patch version.
+Before running the task, inspect every commit and the complete diff since the latest release. Choose a minor bump for additive compatibility, features, or breaking changes. Because the project is pre-1.0, breaking changes increment the minor version rather than creating v1. Choose a patch bump only for fixes and internal-only changes. Do not derive the bump from commit-message prefixes.
 
-The release stops without tagging when Amp is unavailable, the evidence is ambiguous, no release-worthy change exists, or the response does not match the bounded format. Amp receives the release evidence with tools disabled and needs an authenticated CLI session or `AMP_API_KEY`. Review the printed decision and rationale, then type the exact proposed tag to create and push it.
+The task runs `check`, fetches `origin/main` and tags, and accepts only the next pre-1.0 patch or minor tag. It then requires you to type the exact proposed tag before creating and pushing it. Stop without running the task when the changes do not warrant a release or the correct bump is ambiguous.
 
 The tag build reruns checks and publishes the GitHub release, paired Linux/amd64 and Darwin/arm64 archives, and checksum file. Published assets are immutable; a failed publication must not replace an existing archive for the same stable tag.
 
