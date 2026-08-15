@@ -24,6 +24,7 @@ import (
 const (
 	migrationManifestPrefix = "# buildkite-gha-migration: "
 	maxMigrationFileBytes   = 1 << 20
+	maxMigrationSecrets     = 40
 )
 
 var migrationGrantIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,200}$`)
@@ -334,6 +335,9 @@ func selectMigrationSecretNames(available, explicit, matches []string, input *bu
 		names = append(names, name)
 	}
 	slices.Sort(names)
+	if len(names) > maxMigrationSecrets {
+		return nil, fmt.Errorf("at most %d secrets can be migrated at once; use multiple workflows for larger sets", maxMigrationSecrets)
+	}
 	return names, nil
 }
 
@@ -458,7 +462,7 @@ func validateMigrationWorkflowPath(workflowPath string) error {
 	if clean != workflowPath || !strings.HasPrefix(clean, ".github/workflows/") || strings.Count(strings.TrimPrefix(clean, ".github/workflows/"), "/") != 0 {
 		return errors.New("workflow must be a clean path directly under .github/workflows")
 	}
-	extension := strings.ToLower(filepath.Ext(clean))
+	extension := filepath.Ext(clean)
 	if extension != ".yml" && extension != ".yaml" {
 		return errors.New("workflow must have a .yml or .yaml extension")
 	}

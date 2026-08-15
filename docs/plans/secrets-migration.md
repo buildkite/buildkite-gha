@@ -45,6 +45,8 @@ It contains:
 - `workflow_dispatch` with one required, non-secret migration grant ID input.
 - `permissions: { id-token: write }` and no repository write permission.
 - One static `${{ secrets.NAME }}` reference for every selected source.
+- At most 40 selected sources, keeping the worst-case environment below the
+  GitHub-hosted Ubuntu runner's process limit.
 - No dynamic secret-name input, enumeration, `secrets: inherit`, artifact, or
   output containing secret values.
 - A request for a GitHub OIDC token with a Buildkite migration-specific

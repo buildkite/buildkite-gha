@@ -61,6 +61,7 @@ func TestParseMigrateSecretsPrepareArgs(t *testing.T) {
 		{name: "invalid glob", args: []string{"--match", "["}, want: "invalid --match glob"},
 		{name: "stdin policy", args: []string{"--policy-file", "-"}, want: "file path, not stdin"},
 		{name: "unsafe output", args: []string{"--output", "workflow.yml"}, want: "directly under .github/workflows"},
+		{name: "uppercase extension", args: []string{"--output", ".github/workflows/migrate.YML"}, want: ".yml or .yaml"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -137,6 +138,20 @@ func TestSelectMigrationSecretNames(t *testing.T) {
 			bufio.NewReader(strings.NewReader("")), io.Discard,
 		)
 		if err == nil || !strings.Contains(err.Error(), "separate permission-scoped workflow-token path") {
+			t.Fatalf("selectMigrationSecretNames() error = %v", err)
+		}
+	})
+
+	t.Run("too many", func(t *testing.T) {
+		available := make([]string, maxMigrationSecrets+1)
+		for index := range available {
+			available[index] = fmt.Sprintf("SECRET_%d", index)
+		}
+		_, err := selectMigrationSecretNames(
+			available, nil, []string{"SECRET_*"},
+			bufio.NewReader(strings.NewReader("")), io.Discard,
+		)
+		if err == nil || !strings.Contains(err.Error(), "use multiple workflows") {
 			t.Fatalf("selectMigrationSecretNames() error = %v", err)
 		}
 	})

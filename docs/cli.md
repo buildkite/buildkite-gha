@@ -65,7 +65,8 @@ buildkite-gha migrate-secrets prepare \
   --output .github/workflows/migrate-buildkite-secrets.yml
 ```
 
-The Buildkite API token used by `bk` needs `write_secrets`, and its user needs
+The Buildkite API token used by `bk` needs `read_pipelines`,
+`read_secrets_details`, and `write_secrets`. Its user also needs
 `manage_cluster` permission for the destination cluster.
 
 Without `--secret` or `--match`, the command lists the repository's Actions
@@ -74,6 +75,9 @@ associated with the repository, uses that pipeline's cluster, and creates a
 pipeline-scoped secret access policy. Use `--organization`, `--pipeline`, and
 `--cluster` to make selection explicit. Use `--policy-file` for a different
 non-empty [Buildkite secret access policy](https://buildkite.com/docs/pipelines/security/secrets/buildkite-secrets/access-policies).
+
+Each workflow can migrate up to 40 secrets. Use multiple workflows for larger
+sets.
 
 The command checks destination names before writing the workflow and refuses
 to replace an existing workflow file. Review the generated static secret
