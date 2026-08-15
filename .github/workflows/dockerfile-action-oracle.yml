@@ -1,4 +1,4 @@
-name: Dockerfile action differential oracle
+name: Container differential oracle
 
 on:
   workflow_dispatch:
@@ -23,3 +23,61 @@ jobs:
         run: |
           test -n "$ACTION_TIME"
           printf '%s\n' 'DOCKERFILE_ACTION_OBSERVATION={"container":"ran","output":"propagated","source":"public-exact"}'
+
+  service-container:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        optional-service: [""]
+    services:
+      redis:
+        image: redis@sha256:c9d92d840fd011c908f040592857c724ae6d877f2aba5c40ad963276507386b2
+        ports:
+          - 6380
+        volumes:
+          - service-container-oracle:/data
+        options: >-
+          --health-cmd "redis-cli -p 6380 ping"
+          --health-interval 1s
+          --health-timeout 2s
+          --health-retries 10
+        entrypoint: sh
+        command: -c "sleep 3; exec redis-server --port 6380"
+      writer:
+        image: busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+        volumes:
+          - service-container-oracle:/shared
+        command: sh -c "printf volume-shared > /shared/marker; exec sleep 300"
+      reader:
+        image: busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+        ports:
+          - 8080
+        volumes:
+          - service-container-oracle:/shared:ro
+        entrypoint: sh
+        command: -c "while [ ! -f /shared/marker ]; do sleep .1; done; exec httpd -f -p 8080 -h /shared"
+        options: --health-cmd "wget -qO- http://127.0.0.1:8080/marker" --health-interval 1s --health-timeout 2s --health-retries 10
+      optional:
+        image: ${{ matrix.optional-service }}
+    steps:
+      - name: Record externally observable behavior
+        shell: bash
+        env:
+          SERVICE_ID: ${{ job.services.redis.id }}
+          SERVICE_NETWORK: ${{ job.services.redis.network }}
+          SERVICE_PORT: ${{ job.services.redis.ports[6380] }}
+          READER_PORT: ${{ job.services.reader.ports[8080] }}
+        run: |
+          test -n "$SERVICE_ID"
+          test -n "$SERVICE_NETWORK"
+          test -n "$SERVICE_PORT"
+          test -n "$READER_PORT"
+          exec 3<>"/dev/tcp/127.0.0.1/$SERVICE_PORT"
+          printf '*1\r\n$4\r\nPING\r\n' >&3
+          IFS= read -r -t 2 reply <&3
+          test "$reply" = $'+PONG\r'
+          exec 4<>"/dev/tcp/127.0.0.1/$READER_PORT"
+          printf 'GET /marker HTTP/1.0\r\nHost: localhost\r\n\r\n' >&4
+          response="$(cat <&4)"
+          test "${response##*$'\r\n\r\n'}" = volume-shared
+          printf '%s\n' 'SERVICE_CONTAINER_OBSERVATION={"selection":"empty-image-skipped","context":"id-network-ports","command_entrypoint":"verified","health":"gated","volume":"named"}'
