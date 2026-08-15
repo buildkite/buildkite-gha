@@ -30,37 +30,41 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		}
 		return
 	}
-	if nestedString(event.Payload, "action") == "closed" && !workflowsUsePathFilters(workflows, event.Event) {
+	closed := nestedString(event.Payload, "action") == "closed"
+	if closed && !workflowsUsePathFilters(workflows, event.Event) {
 		return
 	}
 	pullRequestNumber, err := strconv.Atoi(os.Getenv("BUILDKITE_PULL_REQUEST"))
 	if err != nil || pullRequestNumber <= 0 {
-		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request number")
+		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request number", closed)
 		return
 	}
 	baseRef := os.Getenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH")
 	if baseRef == "" {
-		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch")
+		setPathFiltersError(context, workflows, event.Event, "pull request path filters require the Buildkite pull request base branch", closed)
 		return
 	}
 	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows)
 	if err != nil {
-		setPathFiltersError(context, workflows, event.Event, err.Error())
+		setPathFiltersError(context, workflows, event.Event, err.Error(), closed)
 		return
 	}
 	context.ChangedPaths = paths
 	context.ChangedPathsKnown = true
 	for i := range workflows {
+		if closed && !workflowUsesPathFilters(workflows[i], event.Event) {
+			continue
+		}
 		workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
 	}
 }
 
-func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string) {
+func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string, filteredOnly bool) {
 	context.ChangedPathsError = reason
 	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	for i := range workflows {
-		if workflowUsesPathFilters(workflows[i], event) || rootErr == nil && gitTracksWorkflow(root, workflows[i]) {
+		if workflowUsesPathFilters(workflows[i], event) || !filteredOnly && rootErr == nil && gitTracksWorkflow(root, workflows[i]) {
 			workflows[i].PathFiltersError = reason
 		}
 	}
