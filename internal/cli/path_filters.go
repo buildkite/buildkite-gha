@@ -58,8 +58,10 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 
 func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, workflows []workflowInput, event, reason string) {
 	context.ChangedPathsError = reason
+	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	for i := range workflows {
-		if workflowUsesEvent(workflows[i], event) {
+		if workflowUsesEvent(workflows[i], event) && (workflowUsesPathFilters(workflows[i], event) || rootErr == nil && gitTracksWorkflow(root, workflows[i])) {
 			workflows[i].PathFiltersError = reason
 		}
 	}

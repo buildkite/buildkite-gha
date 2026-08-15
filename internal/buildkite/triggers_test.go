@@ -155,6 +155,9 @@ func TestPathFiltersMatchOrderedPatternsPerPath(t *testing.T) {
 			t.Fatalf("globstar path %q match = %t, %v", path, matched, err)
 		}
 	}
+	if matched, err = pathFiltersMatch([]string{"foobar"}, []string{"foo**/bar"}, nil); err != nil || matched {
+		t.Fatalf("non-segment globstar match = %t, %v", matched, err)
+	}
 	matched, err = pathFiltersMatch([]string{"docs/line\nbreak.md"}, []string{"docs/**"}, nil)
 	if err != nil || !matched {
 		t.Fatalf("newline path match = %t, %v", matched, err)

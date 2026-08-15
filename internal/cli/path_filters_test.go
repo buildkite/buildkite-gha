@@ -181,14 +181,26 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	if err != nil || len(workflowErrors) != 0 {
 		t.Fatalf("unfiltered custom workflow result = %#v, %v", workflowErrors, err)
 	}
-	event.Payload["pull_request"].(map[string]any)["merge_commit_sha"] = ""
+	pullRequest := event.Payload["pull_request"].(map[string]any)
+	pullRequest["mergeable"] = false
 	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
 	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	customWorkflows := []workflowInput{{
+		Path: customPath, CanonicalPath: customPath,
+		Triggers: []workflow.Trigger{{Event: "pull_request"}},
+	}}
+	context := buildkitepipeline.TriggerConditionContext{}
+	populateChangedPaths(&context, event, effectiveEventFromWebhook, customWorkflows)
+	if customWorkflows[0].PathFiltersError != "" {
+		t.Fatalf("unfiltered custom workflow provenance error = %q", customWorkflows[0].PathFiltersError)
+	}
+	pullRequest["mergeable"] = true
+	event.Payload["pull_request"].(map[string]any)["merge_commit_sha"] = ""
 	workflows := []workflowInput{{
 		Path: workflowPath, CanonicalPath: "ci.yml", Source: unfiltered,
 		Triggers: []workflow.Trigger{{Event: "pull_request"}},
 	}}
-	context := buildkitepipeline.TriggerConditionContext{}
+	context = buildkitepipeline.TriggerConditionContext{}
 	populateChangedPaths(&context, event, effectiveEventFromWebhook, workflows)
 	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
 		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
