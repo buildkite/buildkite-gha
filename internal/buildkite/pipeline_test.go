@@ -123,8 +123,8 @@ func TestEmitScopesBootstrapFailureExpansionBeforeRunJob(t *testing.T) {
 	}
 	command := document.Steps[0].Command
 	group := "echo '~~~ :package: Prepare GitHub Actions runtime'"
-	setTrap := `trap 'bootstrap_status=$?; echo "^^^ +++"; exit "$bootstrap_status"' ERR`
-	clearTrap := "trap - ERR"
+	setTrap := "trap bootstrap_exit EXIT"
+	clearTrap := `trap 'rm -rf -- "$bootstrap_dir"' EXIT`
 	runJob := `"$distribution" run-job`
 	if strings.Count(command, group) != 1 || strings.Count(command, setTrap) != 1 || strings.Count(command, clearTrap) != 1 ||
 		strings.Index(command, group) > strings.Index(command, setTrap) ||
@@ -134,13 +134,44 @@ func TestEmitScopesBootstrapFailureExpansionBeforeRunJob(t *testing.T) {
 		t.Fatalf("bootstrap group or trap is incorrectly scoped:\n%s", command)
 	}
 
-	bootstrapFailure := strings.Join([]string{"set -e", group, setTrap, "false"}, "\n")
-	bootstrapOutput, bootstrapErr := exec.Command("bash", "-c", bootstrapFailure).CombinedOutput()
-	if bootstrapErr == nil || !strings.Contains(string(bootstrapOutput), "~~~ :package: Prepare GitHub Actions runtime\n") || !strings.Contains(string(bootstrapOutput), "^^^ +++\n") {
-		t.Fatalf("bootstrap failure did not expand its collapsed group: err=%v output=%q", bootstrapErr, bootstrapOutput)
+	distributionPath, err := DistributionPath(testDigest("distribution"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapFailure := strings.Split(command, "\n")
+	for i, line := range bootstrapFailure {
+		if strings.Contains(line, "buildkite-agent artifact download") {
+			mkdir, err := exec.LookPath("mkdir")
+			if err != nil {
+				t.Fatal(err)
+			}
+			bootstrapFailure[i] = shellQuote(mkdir) + ` -p "$bootstrap_dir/` + filepath.Dir(distributionPath) + `"` + "\n" + `: > "$bootstrap_dir/` + distributionPath + `"`
+		}
+	}
+	path := t.TempDir()
+	for _, tool := range []string{"mktemp", "rm"} {
+		target, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(path, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bootstrapCommand := exec.Command("bash", "-c", strings.Join(bootstrapFailure, "\n"))
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "PATH=") {
+			bootstrapCommand.Env = append(bootstrapCommand.Env, value)
+		}
+	}
+	bootstrapCommand.Env = append(bootstrapCommand.Env, "PATH="+path)
+	bootstrapOutput, bootstrapErr := bootstrapCommand.CombinedOutput()
+	if bootstrapErr == nil || !strings.Contains(string(bootstrapOutput), "buildkite-gha: no SHA-256 tool available\n") || !strings.Contains(string(bootstrapOutput), "^^^ +++\n") {
+		t.Fatalf("explicit no-SHA bootstrap failure did not expand its collapsed group: err=%v output=%q", bootstrapErr, bootstrapOutput)
 	}
 
-	runtimeFailure := strings.Join([]string{"set -e", group, setTrap, clearTrap, "echo '--- Run action'", "false"}, "\n")
+	bootstrapExit := `bootstrap_exit() { bootstrap_status=$?; if [ "$bootstrap_status" -ne 0 ]; then echo "^^^ +++"; fi; exit "$bootstrap_status"; }`
+	runtimeFailure := strings.Join([]string{"set -e", group, bootstrapExit, setTrap, clearTrap, "unset -f bootstrap_exit", "echo '--- Run action'", "false"}, "\n")
 	runtimeOutput, runtimeErr := exec.Command("bash", "-c", runtimeFailure).CombinedOutput()
 	if runtimeErr == nil || strings.Contains(string(runtimeOutput), "^^^ +++") || !strings.Contains(string(runtimeOutput), "--- Run action\n") {
 		t.Fatalf("runtime failure was attributed to bootstrap: err=%v output=%q", runtimeErr, runtimeOutput)
