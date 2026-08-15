@@ -599,7 +599,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
-			preEval := cloneExpressionContext(eval)
+			preEval := stepExpressionContext(eval)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)

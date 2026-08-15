@@ -321,6 +321,7 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 
 func resolveCompileReference(root string, path []string, context CompileContext) (any, error) {
 	var current any
+	eventReference := strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
 	switch {
 	case strings.EqualFold(root, "github"):
 		current = context.GitHub
@@ -343,6 +344,10 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 			return nil, err
 		}
 		if !ok {
+			if eventReference {
+				current = nil
+				continue
+			}
 			return nil, fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))
 		}
 	}

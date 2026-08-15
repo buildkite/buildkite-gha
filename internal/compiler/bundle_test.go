@@ -993,6 +993,17 @@ jobs:
 	}
 }
 
+func TestRequiredSecretsDoesNotInterpretConditionLiteralsAsTemplates(t *testing.T) {
+	instance := JobInstance{If: "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"}
+	secrets, err := requiredSecrets(instance, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secrets) != 0 {
+		t.Fatalf("condition literal granted secret authority: %#v", secrets)
+	}
+}
+
 func encodeGoldenPlans(t *testing.T, artifacts []PlanArtifact) []byte {
 	t.Helper()
 	plans := make([]json.RawMessage, len(artifacts))

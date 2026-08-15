@@ -649,12 +649,26 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		if referencesEvent {
 			return fmt.Errorf("github.event cannot be retained in a job plan")
 		}
+		names, err := expression.ConditionSecretReferences(value)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			found[name] = name
+		}
+		referencesToken, err := expression.ConditionReferencesGitHubToken(value)
+		if err != nil {
+			return err
+		}
+		if referencesToken {
+			found["GITHUB_TOKEN"] = "GITHUB_TOKEN"
+		}
 		return nil
 	}
 	if err := checkCondition(instance.If); err != nil {
 		return nil, err
 	}
-	for _, value := range []string{instance.If, instance.DefaultShell, instance.DefaultWorkingDirectory} {
+	for _, value := range []string{instance.DefaultShell, instance.DefaultWorkingDirectory} {
 		if err := collect(value); err != nil {
 			return nil, err
 		}
@@ -670,7 +684,7 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 		if err := checkCondition(step.If); err != nil {
 			return nil, err
 		}
-		for _, value := range []string{step.Name, step.Run, step.Uses, step.If, step.Shell, step.WorkingDirectory} {
+		for _, value := range []string{step.Name, step.Run, step.Uses, step.Shell, step.WorkingDirectory} {
 			if err := collect(value); err != nil {
 				return nil, err
 			}

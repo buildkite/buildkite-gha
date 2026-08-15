@@ -220,7 +220,7 @@ jobs:
     steps:
       - run: true
 `,
-			want: `conditions.yml:5:9: job "test": job condition: condition reference "github.event.action" is unavailable at runtime`,
+			want: `conditions.yml:5:9: job "test": job condition: condition equality compares incompatible null and string operands`,
 		},
 		{
 			name: "job hash function",
@@ -1164,7 +1164,7 @@ jobs:
 `)
 
 	_, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
-	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition reference "github.event.action" is unavailable at runtime`
+	want := `./.github/workflows/reusable.yml:7:13: job "call.test": step "inspect" condition: condition equality compares incompatible null and string operands`
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("compileUntrustedPlans() error = %v, want callee condition diagnostic %q", err, want)
 	}

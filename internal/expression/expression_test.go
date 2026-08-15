@@ -842,6 +842,30 @@ func TestReduceCompileConditionPreservesRuntimeSubtrees(t *testing.T) {
 	}
 }
 
+func TestReduceCompileConditionConvertsMissingEventMembersToNull(t *testing.T) {
+	context := CompileContext{GitHub: map[string]any{"event": map[string]any{}}}
+	got, err := ReduceCompileCondition("github.event.pull_request.draft || needs.build.result == 'success'", context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "(null || (needs.build.result == 'success'))"; got != want {
+		t.Fatalf("ReduceCompileCondition() = %q, want %q", got, want)
+	}
+}
+
+func TestConditionAuthorityScanningIgnoresExpressionTextInLiterals(t *testing.T) {
+	source := "'${{ github.token }} ${{ secrets.DEPLOY }} ${{ github.event.action }}' == runner.os"
+	if names, err := ConditionSecretReferences(source); err != nil || len(names) != 0 {
+		t.Fatalf("ConditionSecretReferences() = %#v, %v", names, err)
+	}
+	if token, err := ConditionReferencesGitHubToken(source); err != nil || token {
+		t.Fatalf("ConditionReferencesGitHubToken() = %v, %v", token, err)
+	}
+	if event, err := ReferencesGitHubEvent(source); err != nil || event {
+		t.Fatalf("ReferencesGitHubEvent() = %v, %v", event, err)
+	}
+}
+
 func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
 	context := CompileContext{GitHub: map[string]any{
 		"event": map[string]any{"pull_request": map[string]any{"title": "Release is READY"}},
