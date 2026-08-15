@@ -4754,8 +4754,10 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 
 func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	requireImporterHost(t)
+	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"ci.yml": "name: CI\non:\n  pull_request:\n    paths: [\"src/**\"]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n",
+		"ci.yml":       "name: CI\n" + workflowSource,
+		"mismatch.yml": "name: Original\n" + workflowSource,
 	})
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -4780,11 +4782,17 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	runGit("add", "src/main.go")
 	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
+	merge := runGit("commit-tree", head+"^{tree}", "-p", base, "-p", head, "-m", "merge")
+	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\n"+workflowSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	webhook, err := json.Marshal(map[string]any{
 		"action": "opened", "number": 42,
 		"pull_request": map[string]any{
-			"base": map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
-			"head": map[string]any{"ref": "feature", "sha": head, "repo": map[string]any{"full_name": "contributor/buildkite-gha"}},
+			"base":             map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+			"head":             map[string]any{"ref": "feature", "sha": head, "repo": map[string]any{"full_name": "contributor/buildkite-gha"}},
+			"mergeable":        true,
+			"merge_commit_sha": merge,
 		},
 		"sender": map[string]any{"login": "octocat"},
 	})
@@ -4805,13 +4813,15 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
 	runner := &cliCaptureRunner{webhook: webhook}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", ".github/workflows/ci.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
 		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
 	}
 	var pipeline struct {
 		Steps []struct {
 			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
 			Condition string `yaml:"if"`
+			Command   string `yaml:"command"`
 			Steps     []any  `yaml:"steps"`
 		} `yaml:"steps"`
 	}
@@ -4819,8 +4829,11 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 2 || pipeline.Steps[0].Group != ":github: CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	if failure := pipeline.Steps[1]; failure.Label != ":github: Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 {
+		t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
 	}
 }
 

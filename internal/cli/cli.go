@@ -1609,7 +1609,12 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		if workflows[i].ReusableOnly {
 			continue
 		}
-		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
+		workflowEvent := effectiveEvent
+		if workflows[i].PathFiltersError != "" {
+			workflowEvent.TriggerContext.ChangedPathsKnown = false
+			workflowEvent.TriggerContext.ChangedPathsError = workflows[i].PathFiltersError
+		}
+		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, workflowEvent)
 		if triggerErr != nil {
 			workflows[i].Applicable = true
 			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
@@ -2115,6 +2120,7 @@ type workflowInput struct {
 	Source                                                []byte
 	Triggers                                              []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason        string
+	PathFiltersError                                      string
 	ReusableOnly, Applicable                              bool
 }
 

@@ -45,6 +45,7 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 	runGit("add", "src/main.go")
 	runGit("commit", "-qm", "head")
 	head := runGit("rev-parse", "HEAD")
+	merge := runGit("commit-tree", head+"^{tree}", "-p", base, "-p", head, "-m", "merge")
 	t.Chdir(repository)
 
 	event := compiler.Event{
@@ -54,17 +55,45 @@ func TestPullRequestChangedPathsUsesPayloadCommits(t *testing.T) {
 			Owner: "buildkite", Name: "buildkite-gha",
 		},
 		Payload: map[string]any{"number": 42, "pull_request": map[string]any{
-			"base": map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
-			"head": map[string]any{"sha": head},
+			"base":             map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+			"head":             map[string]any{"sha": head},
+			"mergeable":        true,
+			"merge_commit_sha": merge,
 		}},
 	}
-	paths, err := pullRequestChangedPaths(event, 42, "main")
+	paths, workflowErrors, err := pullRequestChangedPaths(event, 42, "main", nil)
 	if err != nil || !reflect.DeepEqual(paths, []string{"src/main.go"}) {
 		t.Fatalf("pullRequestChangedPaths() = %#v, %v", paths, err)
 	}
-	event.Payload["pull_request"].(map[string]any)["base"].(map[string]any)["sha"] = head
-	if _, err := pullRequestChangedPaths(event, 42, "main"); err == nil || !strings.Contains(err.Error(), "does not match the local origin base branch") {
+	if len(workflowErrors) != 0 {
+		t.Fatalf("workflow errors = %#v", workflowErrors)
+	}
+	pullRequest := event.Payload["pull_request"].(map[string]any)
+	pullRequest["mergeable"] = false
+	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "mergeable synthetic merge") {
+		t.Fatalf("conflicted pull request error = %v", err)
+	}
+	pullRequest["mergeable"] = true
+	workflow := workflowInput{
+		CanonicalPath: "README.md",
+		Source:        []byte("different\n"),
+		Triggers:      []workflow.Trigger{{Event: "pull_request", Paths: []string{"src/**"}}},
+	}
+	_, workflowErrors, err = pullRequestChangedPaths(event, 42, "main", []workflowInput{workflow})
+	if err != nil || !strings.Contains(workflowErrors["README.md"], "does not match the event merge commit") {
+		t.Fatalf("workflow merge source result = %#v, %v", workflowErrors, err)
+	}
+	pullRequest["base"].(map[string]any)["sha"] = head
+	if _, _, err := pullRequestChangedPaths(event, 42, "main", nil); err == nil || !strings.Contains(err.Error(), "does not match the local origin base branch") {
 		t.Fatalf("forged base SHA error = %v", err)
+	}
+}
+
+func TestSingleGitCommitRejectsMultipleMergeBases(t *testing.T) {
+	first := strings.Repeat("a", 40)
+	second := strings.Repeat("b", 40)
+	if _, err := singleGitCommit([]byte(first+"\n"+second+"\n"), "pull request merge base"); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("multiple merge bases error = %v", err)
 	}
 }
 

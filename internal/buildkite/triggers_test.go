@@ -159,6 +159,15 @@ func TestPathFiltersMatchOrderedPatternsPerPath(t *testing.T) {
 	if err != nil || !matched {
 		t.Fatalf("newline path match = %t, %v", matched, err)
 	}
+	if _, err := pathFiltersMatch([]string{"foobar"}, []string{`foo\bar`}, nil); err == nil || !strings.Contains(err.Error(), "unsupported backslash") {
+		t.Fatalf("backslash path glob error = %v", err)
+	}
+	if _, err := pathFiltersMatch([]string{"a/b"}, []string{`a[^x]b`}, nil); err == nil || !strings.Contains(err.Error(), "invalid character class") {
+		t.Fatalf("unsupported character class error = %v", err)
+	}
+	if matched, err := pathFiltersMatch([]string{"src/file7.go"}, []string{`src/file[0-9].go`}, nil); err != nil || !matched {
+		t.Fatalf("documented character class match = %t, %v", matched, err)
+	}
 }
 
 func TestTranslateEventTriggerConditionUsesSnapshotExpressions(t *testing.T) {

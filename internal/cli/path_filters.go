@@ -37,78 +37,124 @@ func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, ev
 		context.ChangedPathsError = "pull request path filters require the Buildkite pull request base branch"
 		return
 	}
-	paths, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef)
+	paths, workflowErrors, err := pullRequestChangedPaths(event, pullRequestNumber, baseRef, workflows)
 	if err != nil {
 		context.ChangedPathsError = err.Error()
 		return
 	}
 	context.ChangedPaths = paths
 	context.ChangedPathsKnown = true
+	for i := range workflows {
+		workflows[i].PathFiltersError = workflowErrors[workflows[i].CanonicalPath]
+	}
 }
 
 func workflowsUsePathFilters(workflows []workflowInput, event string) bool {
 	for _, input := range workflows {
-		for _, trigger := range input.Triggers {
-			if trigger.Event == event && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
-				return true
-			}
+		if workflowUsesPathFilters(input, event) {
+			return true
 		}
 	}
 	return false
 }
 
-func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRef string) ([]string, error) {
+func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRef string, workflows []workflowInput) ([]string, map[string]string, error) {
 	pullRequest, ok := event.Payload["pull_request"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("event snapshot requires payload.pull_request")
+		return nil, nil, fmt.Errorf("event snapshot requires payload.pull_request")
 	}
 	baseSHA := nestedString(pullRequest, "base", "sha")
 	headSHA := nestedString(pullRequest, "head", "sha")
+	mergeSHA := nestedString(pullRequest, "merge_commit_sha")
 	if nestedString(pullRequest, "base", "ref") != baseRef {
-		return nil, fmt.Errorf("webhook pull request base branch does not match the Buildkite build")
+		return nil, nil, fmt.Errorf("webhook pull request base branch does not match the Buildkite build")
 	}
 	if nestedString(pullRequest, "base", "repo", "full_name") != event.Repository.Owner+"/"+event.Repository.Name {
-		return nil, fmt.Errorf("webhook pull request base repository does not match the Buildkite build")
+		return nil, nil, fmt.Errorf("webhook pull request base repository does not match the Buildkite build")
 	}
 	if nestedInt(event.Payload, "number") != pullRequestNumber {
-		return nil, fmt.Errorf("webhook pull request number does not match the Buildkite build")
+		return nil, nil, fmt.Errorf("webhook pull request number does not match the Buildkite build")
 	}
-	if !validBuildkiteCommit(baseSHA) || !validBuildkiteCommit(headSHA) {
-		return nil, fmt.Errorf("event snapshot requires full lowercase payload.pull_request base and head SHAs")
+	mergeable, mergeabilityKnown := pullRequest["mergeable"].(bool)
+	if !mergeabilityKnown || !mergeable {
+		return nil, nil, fmt.Errorf("webhook pull request must report a mergeable synthetic merge")
+	}
+	if !validBuildkiteCommit(baseSHA) || !validBuildkiteCommit(headSHA) || !validBuildkiteCommit(mergeSHA) {
+		return nil, nil, fmt.Errorf("event snapshot requires full lowercase payload.pull_request base, head, and merge commit SHAs")
 	}
 	if headSHA != event.SHA {
-		return nil, fmt.Errorf("pull request head SHA does not match the checked-out event SHA")
+		return nil, nil, fmt.Errorf("pull request head SHA does not match the checked-out event SHA")
 	}
 	rootBytes, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
-		return nil, fmt.Errorf("locate checked-out git repository: %w", err)
+		return nil, nil, fmt.Errorf("locate checked-out git repository: %w", err)
 	}
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	if err := gitCommand(root, "check-ref-format", "refs/heads/"+baseRef).Run(); err != nil {
-		return nil, fmt.Errorf("buildkite pull request base branch is invalid")
+		return nil, nil, fmt.Errorf("buildkite pull request base branch is invalid")
 	}
-	for _, commit := range []struct{ label, sha string }{{"base", baseSHA}, {"head", headSHA}} {
+	shallowBytes, err := gitCommand(root, "rev-parse", "--is-shallow-repository").Output()
+	if err != nil || strings.TrimSpace(string(shallowBytes)) != "false" {
+		return nil, nil, fmt.Errorf("pull request path filters require a complete non-shallow checkout")
+	}
+	for _, commit := range []struct{ label, sha string }{{"base", baseSHA}, {"head", headSHA}, {"merge", mergeSHA}} {
 		if err := gitCommand(root, "cat-file", "-e", commit.sha+"^{commit}").Run(); err != nil {
-			return nil, fmt.Errorf("pull request %s commit is unavailable in the local checkout", commit.label)
+			return nil, nil, fmt.Errorf("pull request %s commit is unavailable in the local checkout", commit.label)
 		}
 	}
 	baseTipBytes, err := gitCommand(root, "rev-parse", "--verify", "refs/remotes/origin/"+baseRef+"^{commit}").Output()
 	if err != nil || strings.TrimSpace(string(baseTipBytes)) != baseSHA {
-		return nil, fmt.Errorf("webhook pull request base commit does not match the local origin base branch")
+		return nil, nil, fmt.Errorf("webhook pull request base commit does not match the local origin base branch")
 	}
-	mergeBaseBytes, err := gitCommand(root, "merge-base", baseSHA, headSHA).Output()
+	mergeParentsBytes, err := gitCommand(root, "rev-list", "--parents", "-n", "1", mergeSHA).Output()
+	mergeParents := strings.Fields(string(mergeParentsBytes))
+	if err != nil || len(mergeParents) != 3 || mergeParents[0] != mergeSHA || mergeParents[1] != baseSHA || mergeParents[2] != headSHA {
+		return nil, nil, fmt.Errorf("webhook pull request merge commit does not bind the event base and head")
+	}
+	workflowErrors := make(map[string]string)
+	for _, input := range workflows {
+		if !workflowUsesPathFilters(input, event.Event) {
+			continue
+		}
+		mergeSource, err := gitCommand(root, "cat-file", "blob", mergeSHA+":"+input.CanonicalPath).Output()
+		if err != nil || !bytes.Equal(mergeSource, input.Source) {
+			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the event merge commit", input.CanonicalPath)
+		}
+	}
+	mergeBaseBytes, err := gitCommand(root, "merge-base", "--all", baseSHA, headSHA).Output()
 	if err != nil {
-		return nil, fmt.Errorf("resolve pull request merge base: %w", err)
+		return nil, nil, fmt.Errorf("resolve pull request merge base: %w", err)
 	}
-	mergeBase := strings.TrimSpace(string(mergeBaseBytes))
-	if !validBuildkiteCommit(mergeBase) {
-		return nil, fmt.Errorf("git returned an invalid pull request merge base")
-	}
-	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--find-renames", "-l0", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)
+	mergeBase, err := singleGitCommit(mergeBaseBytes, "pull request merge base")
 	if err != nil {
-		return nil, fmt.Errorf("list pull request changed paths: %w", err)
+		return nil, nil, err
 	}
-	return parseChangedPaths(output)
+	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list pull request changed paths: %w", err)
+	}
+	paths, err := parseChangedPaths(output)
+	return paths, workflowErrors, err
+}
+
+func workflowUsesPathFilters(input workflowInput, event string) bool {
+	for _, trigger := range input.Triggers {
+		if trigger.Event == event && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func singleGitCommit(output []byte, label string) (string, error) {
+	commits := strings.Fields(string(output))
+	if len(commits) != 1 {
+		return "", fmt.Errorf("git returned %d candidates for %s; exactly one is required", len(commits), label)
+	}
+	if !validBuildkiteCommit(commits[0]) {
+		return "", fmt.Errorf("git returned an invalid %s", label)
+	}
+	return commits[0], nil
 }
 
 func gitCommand(root string, args ...string) *exec.Cmd {

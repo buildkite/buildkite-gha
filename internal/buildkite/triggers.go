@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"github.com/rhysd/actionlint"
 )
 
 const maxSkipReasonLength = 70
@@ -364,6 +365,12 @@ func pathFiltersMatch(paths, include, exclude []string) (bool, error) {
 		if negated && !positiveSeen {
 			return false, fmt.Errorf("negative pattern %q must follow a positive pattern", "!"+pattern)
 		}
+		if strings.Contains(pattern, `\`) {
+			return false, fmt.Errorf("path glob %q contains an unsupported backslash", pattern)
+		}
+		if invalid := actionlint.ValidatePathGlob(pattern); len(invalid) != 0 {
+			return false, fmt.Errorf("invalid path glob %q: %s", pattern, invalid[0].Message)
+		}
 		expression, err := githubPathGlob(pattern)
 		if err != nil {
 			return false, err
@@ -549,6 +556,9 @@ func githubGlob(glob string, pathPattern bool) (string, error) {
 			if j == len(runes) {
 				return "", fmt.Errorf("unterminated character class in glob %q", glob)
 			}
+			if pathPattern && !validGitHubPathCharacterClass(runes[i+1:j]) {
+				return "", fmt.Errorf("invalid character class in path glob %q", glob)
+			}
 			class := string(runes[i : j+1])
 			if _, err := regexp.Compile(class); err != nil {
 				return "", fmt.Errorf("invalid character class in glob %q", glob)
@@ -572,4 +582,27 @@ func githubGlob(glob string, pathPattern bool) (string, error) {
 	}
 	regex.WriteByte('$')
 	return regex.String(), nil
+}
+
+func validGitHubPathCharacterClass(class []rune) bool {
+	isASCIIAlphanumeric := func(value rune) bool {
+		return value >= '0' && value <= '9' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+	}
+	sameRange := func(left, right rune) bool {
+		return left >= '0' && left <= right && right <= '9' ||
+			left >= 'A' && left <= right && right <= 'Z' ||
+			left >= 'a' && left <= right && right <= 'z'
+	}
+	if len(class) == 0 {
+		return false
+	}
+	for i, value := range class {
+		if isASCIIAlphanumeric(value) {
+			continue
+		}
+		if value != '-' || i == 0 || i == len(class)-1 || !sameRange(class[i-1], class[i+1]) {
+			return false
+		}
+	}
+	return true
 }
