@@ -371,7 +371,7 @@ func TestGeneratedOIDCMigrationValidatesAllValuesBeforeRequests(t *testing.T) {
 
 func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *testing.T) {
 	t.Chdir(t.TempDir())
-	workflowPath := ".github/workflows/migrate-secrets.yml"
+	workflowPath := ".github/workflows/migrate#secrets.yml"
 	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestRunSecretsMigrationPinsCommittedWorkflowCreatesGrantAndDispatches(t *te
 	if err := runSecretsMigration(context.Background(), workflowPath, &stdout, runner); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.commands) != 5 || runner.commands[1].name != "gh" || !strings.Contains(strings.Join(runner.commands[2].args, " "), "ref="+testMigrationCommit) {
+	if len(runner.commands) != 5 || runner.commands[1].name != "gh" || !strings.Contains(strings.Join(runner.commands[2].args, " "), "migrate%23secrets.yml?ref="+testMigrationCommit) {
 		t.Fatalf("commands = %#v", runner.commands)
 	}
 	grantCommand := runner.commands[3]

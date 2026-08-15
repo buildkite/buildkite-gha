@@ -742,7 +742,8 @@ func readDefaultBranchWorkflow(ctx context.Context, runner transport.Runner, rep
 	if len(commitSHA) != 40 {
 		return nil, "", errors.New("GitHub returned an invalid default-branch commit")
 	}
-	endpoint := fmt.Sprintf("repos/%s/contents/%s?ref=%s", repository.FullName, workflowPath, url.QueryEscape(commitSHA))
+	workflowName := strings.TrimPrefix(workflowPath, ".github/workflows/")
+	endpoint := fmt.Sprintf("repos/%s/contents/.github/workflows/%s?ref=%s", repository.FullName, url.PathEscape(workflowName), url.QueryEscape(commitSHA))
 	output, err := runner.Run(ctx, "", "gh", []string{"api", endpoint}, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("read workflow from GitHub default branch with gh: %w", err)
