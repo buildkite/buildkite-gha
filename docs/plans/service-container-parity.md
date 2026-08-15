@@ -94,15 +94,24 @@ Update:
 
 ### Evaluate services at the same phase as GitHub Actions
 
-GitHub evaluates services during job initialization. Support its service
-contexts: `github`, `needs`, `strategy`, `matrix`, and `vars`; credential values
-also support `env` and `secrets`. Empty resolved images skip that service.
+GitHub evaluates services during job initialization. Match its context sets
+exactly:
+
+| Field | Expression contexts |
+|---|---|
+| Service fields | `github`, `inputs`, `vars`, `needs`, `strategy`, `matrix` |
+| Credential values | `github`, `inputs`, `vars`, `secrets`, `env` |
+
+Empty resolved images skip that service.
 
 Resolve compile-time values while expanding each matrix instance. Retain only
-the templates that require verified runtime `needs` values or secrets. Evaluate
-those after dependency result manifests and job secrets are loaded, but before
-any image pull or Docker resource creation. Validate the evaluated result again
-against the same bounds and grammar as a statically resolved service.
+the templates that require verified runtime `needs` values or secrets. This
+requires adding `strategy` to the compile context and applying reusable inputs
+to services, which the current field-by-field substitution pass omits. Evaluate
+remaining fields after dependency result manifests, job environment, and job
+secrets are loaded, but before any image pull or Docker resource creation.
+Validate the evaluated result again against the same bounds and grammar as a
+statically resolved service.
 
 Whole-map expressions such as `services: ${{ ... }}` require the expression
 engine to return and validate an object. Do not serialize raw JSON into a shell
@@ -123,21 +132,28 @@ Update:
 ### Pass Docker options broadly
 
 Match GitHub's service `options` contract instead of maintaining a resource-flag
-allowlist. Tokenize the evaluated option string without invoking a shell,
-environment expansion, command substitution, or backticks, then pass each token
-to `docker create` in GitHub runner order.
+allowlist. The pinned runner passes `options` and `command` as raw argument
+strings through .NET process invocation. Go requires an explicit argument
+slice, so implement one owned compatibility tokenizer shared by those fields;
+do not use POSIX shellword semantics. It must not invoke a shell, environment
+expansion, command substitution, or backticks. Cover double quotes, empty
+arguments, backslashes before quotes, literal single quotes, and unmatched
+quotes with differential tests against the pinned runner.
 
-Reject only service options documented as unsupported by GitHub Actions:
-`--network`, `--network=...`, `--net`, and `--net=...`. Keep the rejected set in
-one function with table-driven tests for long names, aliases, equals forms,
-quoting, and false positives. All other syntactically valid Docker create
-options pass through unchanged and Docker owns their version-specific
-validation. Promote the existing `github.com/mattn/go-shellwords` dependency to
-direct use rather than building a partial Docker argument parser.
+Reject the network override that GitHub Actions documents as unsupported:
+`--network`, `--network=...`, and Docker's equivalent `--net` alias forms. Keep
+the rejected set in one function with table-driven tests for long names,
+aliases, equals forms, quoting, and false positives. All other syntactically
+valid Docker create options pass through unchanged and Docker owns their
+version-specific validation.
 
 Runner-owned arguments must remain explicit and ordered consistently with
 GitHub Actions: generated name and label, job network and alias, declared ports,
 workflow options, environment, volumes, entrypoint, image, then command.
+Because later workflow options can override generated names and fixed label
+values, give each job an unguessable runtime nonce in the authoritative owner
+label key. Find containers by that key after ambiguous creates; treat the fixed
+`buildkite-gha` label as diagnostic only.
 
 Broad Docker options, bind mounts, and privileged modes do not create a new
 security boundary. They require a disposable whole-job host with no ambient
@@ -155,8 +171,9 @@ Update:
 ### Support commands, entrypoints, ports, and volumes
 
 Append `command` after the image and emit `entrypoint` as Docker's
-`--entrypoint` option. Preserve GitHub's string and quoting behavior without
-executing either value through a host shell.
+`--entrypoint` option. Parse command with the same .NET-compatible tokenizer as
+options. Pass entrypoint as one argument. Never execute either value through a
+host shell.
 
 Pass each declared port as one `--publish` value instead of implementing a
 smaller port grammar. Apply only size and control-character validation before
@@ -180,12 +197,14 @@ difference and document it.
 
 Support GitHub's volume forms: anonymous target, named source and target,
 absolute host source and target, and optional `ro`. Validate only the documented
-shape, bounded length, and control characters. Map each workflow named volume
-to one job-owned Docker volume so job and service containers can share it
-without leaking state across jobs. Label created volumes, remove anonymous
-volumes with their containers, remove named volumes during cleanup, and include
-volumes in leak verification. Absolute bind mounts retain their host meaning and
-therefore rely on whole-job host isolation.
+shape, bounded length, and control characters. Preserve literal named-volume
+names so job and service containers share the same Docker identity. Snapshot
+existing volumes before container creation, inspect owned container mounts, and
+remove only volume IDs created by the job. This inspection must also cover
+volumes introduced through `options`. Remove anonymous volumes with their
+containers and include all inspected mounts in leak verification; anonymous
+volumes cannot carry ownership labels. Absolute bind mounts retain their host
+meaning and therefore rely on whole-job host isolation.
 
 Update:
 
@@ -198,21 +217,25 @@ Update:
 
 Infer the registry using GitHub runner semantics. When explicit credentials are
 present, resolve their expressions after the ordinary job secret broker has
-registered masking and redaction. Require both username and password when
-either is non-empty.
+registered masking and redaction and the job environment is available. Match
+GitHub's partial-credential behavior: login only when both username and password
+resolve non-empty. A partial mapping neither errors nor enables hosted registry
+fallback.
 
-For each distinct registry credential:
+For each container independently:
 
 1. Create a mode `0700` temporary Docker configuration.
-1. Run `docker login --password-stdin` without putting the password in argv.
-1. Retry login up to three times with cancellation-aware jitter.
+1. When both credential values are non-empty, run `docker login
+   --password-stdin` without putting the password in argv and retry up to three
+   times with cancellation-aware jitter.
 1. Pull with that isolated configuration, retrying independently up to three
    times.
-1. Remove the configuration immediately after all associated pulls.
+1. Remove the configuration immediately after that pull.
 
-Deduplicate pulls by image and credential identity, not image alone. Scrub all
-Docker errors before returning them. Plans, artifacts, generated pipeline YAML,
-diagnostics, and command logs contain credential references only.
+Do not deduplicate pulls: repeated images can refer to mutable tags and GitHub
+pulls each container independently. Scrub all Docker errors before returning
+them. Plans, artifacts, generated pipeline YAML, diagnostics, and command logs
+contain credential references only.
 
 Match GitHub-hosted implicit GHCR authentication only after the Buildkite
 workflow-token backend confirms that its issued token is valid for registry
@@ -236,20 +259,23 @@ job timeout. A service without a Docker health check is ready after a successful
 start.
 
 On failure, print bounded status, health, port, and log diagnostics. On normal
-completion, keep logs available through ordinary Docker commands but do not
-dump every healthy service log by default unless hosted evidence shows that
-GitHub's end-of-job log behavior is important for compatibility.
+completion, emit bounded logs for each initialized service to match GitHub's
+end-of-job behavior.
 
-Register cleanup before the first pull. Track exact resource names before each
-create call so ambiguous Docker failures remain recoverable. Remove services in
-reverse order, then the job container, network, named volumes, and temporary
-Docker configurations. Keep the current bounded cleanup budget and fail the job
-when owned resources remain; this is intentionally stricter than GitHub's
-warning-only cleanup.
+Register cleanup before the first pull. Track requested names before each create
+call and query the unguessable owner-label key when workflow options override a
+name or a create returns an ambiguous failure. Match GitHub's teardown order:
+remove the job container first, then services in declaration order, followed by
+the network, newly created named volumes, and temporary Docker configurations.
+Keep the current bounded cleanup budget, truncate logs, and fail the job when
+owned resources remain; those are intentional stricter differences from
+GitHub's cleanup.
 
-Every container, network, and volume must carry both a globally recognizable
-`buildkite-gha` label and a random job owner label. Add build and job identifiers
-only as non-authoritative diagnostics. Never remove a resource based only on a
+Every container and network must carry a globally recognizable `buildkite-gha`
+label and the nonce-bearing owner-label key. Track volumes by pre-create
+snapshot and inspected volume ID because anonymous and create-on-use volumes
+cannot reliably carry labels. Add build and job identifiers only as
+non-authoritative diagnostics. Never remove a resource based only on a
 workflow-controlled name or broad global label.
 
 Update:
@@ -265,7 +291,8 @@ Update:
 Add statically resolvable `options`, `command`, `entrypoint`, and volumes. Pass
 all Docker options except the documented network options, adopt GitHub argument
 ordering, align health waiting, and extend cleanup to owned volumes. Include
-compile-time matrix and reusable-input interpolation for every non-secret field.
+compile-time `github`, `inputs`, `vars`, `strategy`, and `matrix` interpolation
+for every non-secret field, including compile-time empty-image skipping.
 
 This slice should run common public Postgres, MySQL, Redis, RabbitMQ, MinIO, and
 Elasticsearch service definitions without workflow rewrites.
@@ -274,14 +301,16 @@ Elasticsearch service definitions without workflow rewrites.
 
 Add credential references, secret capability provenance, isolated login and
 pull retries, masking, and authenticated local-registry runtime tests. Do not
-add ambient Docker credentials or arbitrary credential helpers.
+add ambient Docker credentials or arbitrary credential helpers. Evaluate
+credentials after the job environment and match GitHub's partial mapping
+behavior.
 
 ### 3. Runtime service expressions and complete context
 
 Evaluate `needs`-dependent fields and whole-map service expressions during job
-initialization. Add empty-image service skipping and the full service `id`,
-`network`, and `ports` context. Revalidate the evaluated object before Docker
-use.
+initialization. Add runtime empty-image service skipping and the full service
+`id`, `network`, and `ports` context. Revalidate the evaluated object before
+Docker use.
 
 ### 4. Hosted parity proof and rollout
 
@@ -307,7 +336,8 @@ Each slice must include:
 - Exact Docker argv tests for options and quoting, commands, entrypoints, ports,
   volumes, labels, registry login, retries, and argument order.
 - Runtime lifecycle tests for partial startup, cancellation, health transitions,
-  port context, reverse cleanup, ambiguous Docker failures, and leak detection.
+  port context, job-first cleanup, ambiguous Docker failures, and leak
+  detection.
 - Live Docker tests for host and container networking, common databases,
   unhealthy diagnostics, named-volume sharing, and an authenticated temporary
   registry.
