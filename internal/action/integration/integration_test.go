@@ -163,7 +163,7 @@ func TestUploadArtifactCommitsAreExact(t *testing.T) {
 }
 
 func TestCheckoutCommitAdmission(t *testing.T) {
-	for _, commit := range []string{CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
+	for _, commit := range []string{CheckoutV3Commit, CheckoutV4Commit, CheckoutV5Commit, CheckoutV6Commit, CheckoutV7InitialCommit, CheckoutV7Commit} {
 		if err := ValidateCheckoutCommit(commit); err != nil {
 			t.Fatalf("audited commit %s rejected: %v", commit, err)
 		}
@@ -173,7 +173,6 @@ func TestCheckoutCommitAdmission(t *testing.T) {
 	}
 	for _, commit := range []string{
 		"f43a0e5ff2bd294095638e18286ca9a3d1956744", // v3.6.0 is an ancestor of upstream main.
-		"a37ce9120846195fa4ece8f58b268e6043cb2f26", // v3.7.0 isn't on upstream main.
 		strings.Repeat("0", 40),
 	} {
 		if err := ValidateCheckoutCommit(commit); err == nil || !strings.Contains(err.Error(), "does not admit") || !strings.Contains(err.Error(), CheckoutV7Commit) || !strings.Contains(err.Error(), checkoutMainSnapshotCommit) {
@@ -344,7 +343,7 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		{"submodules": " TrUe "},
 		{"submodules": " ReCuRsIvE "},
 	} {
-		if err := ValidateCheckoutInputs(inputs, repository, sha); err != nil {
+		if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, sha); err != nil {
 			t.Fatalf("ValidateCheckoutInputs(%#v) = %v", inputs, err)
 		}
 	}
@@ -370,9 +369,29 @@ func TestValidateCheckoutInputs(t *testing.T) {
 		"git metadata path":    {"path": ".git"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := ValidateCheckoutInputs(inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+			if err := ValidateCheckoutInputs(CheckoutV7Commit, inputs, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
 				t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want unsupported-capability rejection", inputs, err)
 			}
 		})
+	}
+}
+
+func TestValidateCheckoutV3InputsRejectsLaterContract(t *testing.T) {
+	repository, sha := "buildkite/buildkite-gha", strings.Repeat("a", 40)
+	for _, input := range []map[string]string{
+		{"filter": ""},
+		{"show-progress": "true"},
+		{"ssh-user": "git"},
+	} {
+		if err := ValidateCheckoutInputs(CheckoutV3Commit, input, repository, sha); err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Fatalf("ValidateCheckoutInputs(%#v) = %v, want v3 contract rejection", input, err)
+		}
+	}
+	if err := ValidateCheckoutInputs(CheckoutV3Commit, map[string]string{
+		"repository": repository,
+		"ref":        sha,
+		"fetch-tags": "false",
+	}, repository, sha); err != nil {
+		t.Fatalf("ValidateCheckoutInputs() rejected v3 inputs: %v", err)
 	}
 }

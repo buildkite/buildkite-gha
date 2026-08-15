@@ -39,10 +39,13 @@ const (
 	// AdapterDownloadArtifactBuildkite extracts one producer-attributed native
 	// archive without using the GitHub Actions artifact service.
 	AdapterDownloadArtifactBuildkite Adapter = "download-artifact-buildkite-v1"
-	// CheckoutV4Commit through CheckoutV7Commit are the current audited major
-	// release implementations. CheckoutV7InitialCommit is retained because it
-	// is pinned by the OSS compatibility corpus; its later v7.0.1 changes do
-	// not affect the adapter's bounded exact-event-SHA operation.
+	// CheckoutV3Commit through CheckoutV7Commit are the current audited release
+	// implementations. CheckoutV3Commit is the final v3 release and is admitted
+	// exactly rather than extending the v4-and-later main-branch snapshot.
+	// CheckoutV7InitialCommit is retained because it is pinned by the OSS
+	// compatibility corpus; its later v7.0.1 changes do not affect the adapter's
+	// bounded exact-event-SHA operation.
+	CheckoutV3Commit        = "a37ce9120846195fa4ece8f58b268e6043cb2f26"
 	CheckoutV4Commit        = "11d5960a326750d5838078e36cf38b85af677262"
 	CheckoutV5Commit        = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
 	CheckoutV6Commit        = "d23441a48e516b6c34aea4fa41551a30e30af803"
@@ -125,6 +128,7 @@ var catalog = map[Identity]Descriptor{
 }
 
 var checkoutCommits = map[string]string{
+	CheckoutV3Commit:        "v3.7.0",
 	CheckoutV4Commit:        "v4",
 	CheckoutV5Commit:        "v5",
 	CheckoutV6Commit:        "v6",
@@ -615,9 +619,9 @@ func Lookup(identity Identity) (Descriptor, bool) {
 	return descriptor, ok
 }
 
-// ValidateCheckoutInputs enforces the input contract implemented by the
-// tokenless event-repository checkout adapter.
-func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) error {
+// ValidateCheckoutInputs enforces the release-specific input contract
+// implemented by the tokenless event-repository checkout adapter.
+func ValidateCheckoutInputs(commit string, inputs map[string]string, repository, sha string) error {
 	names := make([]string, 0, len(inputs))
 	for name := range inputs {
 		names = append(names, name)
@@ -661,16 +665,24 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 			case "", "false", "true", "recursive":
 				continue
 			}
-		case "fetch-tags", "show-progress":
+		case "fetch-tags":
 			if uploadArtifactBoolean(value) {
+				continue
+			}
+		case "show-progress":
+			if commit != CheckoutV3Commit && uploadArtifactBoolean(value) {
 				continue
 			}
 		case "path":
 			if value == "" || validCheckoutPath(value) {
 				continue
 			}
-		case "ssh-key", "ssh-known-hosts", "filter", "sparse-checkout":
+		case "ssh-key", "ssh-known-hosts", "sparse-checkout":
 			if value == "" {
+				continue
+			}
+		case "filter":
+			if commit != CheckoutV3Commit && value == "" {
 				continue
 			}
 		case "ssh-strict", "sparse-checkout-cone-mode":
@@ -678,7 +690,7 @@ func ValidateCheckoutInputs(inputs map[string]string, repository, sha string) er
 				continue
 			}
 		case "ssh-user":
-			if value == "git" {
+			if commit != CheckoutV3Commit && value == "git" {
 				continue
 			}
 		case "github-server-url":

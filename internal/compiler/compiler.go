@@ -420,7 +420,7 @@ instances:
 								checkoutInputs[name] = ir.Event.SHA
 							}
 						}
-						if err := actionintegration.ValidateCheckoutInputs(checkoutInputs, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
+						if err := actionintegration.ValidateCheckoutInputs(lock.Commit, checkoutInputs, ir.Event.Repository.Owner+"/"+ir.Event.Repository.Name, ir.Event.SHA); err != nil {
 							span := instance.Steps[stepIndex].Span.Start
 							return fmt.Errorf("%s:%d:%d: checkout adapter: %w", instance.SourcePath, span.Line, span.Column, err)
 						}

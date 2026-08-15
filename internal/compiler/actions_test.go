@@ -885,8 +885,8 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		ResolveActions: true,
 		ActionSource:   &fakeActionSource{root: remote, calls: map[string]int{}},
 	}
-	compile := func(with string) ([]plan.Job, error) {
-		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" + with)
+	compile := func(commit, with string) ([]plan.Job, error) {
+		workflow := []byte("on: push\njobs:\n  checkout:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@" + commit + "\n" + with)
 		if err := os.WriteFile(workflowPath, workflow, 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -904,7 +904,7 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 		"        with:\n          submodules: ' ReCuRsIvE '\n",
 	}
 	for _, with := range accepted {
-		plans, err := compile(with)
+		plans, err := compile(actionintegration.CheckoutV7Commit, with)
 		if err != nil {
 			t.Fatalf("checkout with %q: %v", with, err)
 		}
@@ -925,11 +925,15 @@ func TestCheckoutAdapterInputBoundary(t *testing.T) {
 	}
 	for name, input := range rejected {
 		t.Run(name, func(t *testing.T) {
-			_, err := compile("        with:\n" + input)
+			_, err := compile(actionintegration.CheckoutV7Commit, "        with:\n"+input)
 			if err == nil || !strings.Contains(err.Error(), "checkout.yml:") || !strings.Contains(err.Error(), "checkout adapter") {
 				t.Fatalf("compilePlansForTest() error = %v", err)
 			}
 		})
+	}
+
+	if _, err := compile(actionintegration.CheckoutV3Commit, "        with:\n          show-progress: false\n"); err == nil || !strings.Contains(err.Error(), "explicit input \"show-progress\" value is unsupported") {
+		t.Fatalf("v3.7.0 later-contract input error = %v", err)
 	}
 }
 
@@ -937,6 +941,7 @@ func TestCheckoutAdapterCommitBoundary(t *testing.T) {
 	workspace, remote := t.TempDir(), t.TempDir()
 	writeAction(t, remote, "", "name: checkout\nruns:\n  using: node24\n  main: index.js\n")
 	for version, commit := range map[string]string{
+		"v3.7.0":     actionintegration.CheckoutV3Commit,
 		"v4":         actionintegration.CheckoutV4Commit,
 		"v5":         actionintegration.CheckoutV5Commit,
 		"v6":         actionintegration.CheckoutV6Commit,

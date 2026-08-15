@@ -69,7 +69,7 @@ func validCheckoutRepository(repository string) bool {
 	return parts[0] != "." && parts[0] != ".." && parts[1] != "." && parts[1] != ".."
 }
 
-func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, inputs map[string]string) (Result, error) {
+func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, workspace string, job plan.Job, commit string, inputs map[string]string) (Result, error) {
 	result := newResult()
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
@@ -77,7 +77,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if !validProvider || !checkoutSHAPattern.MatchString(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
-	if err := actionintegration.ValidateCheckoutInputs(inputs, job.Event.Repository, job.Event.SHA); err != nil {
+	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
 		return result, fmt.Errorf("%s: %w", adapter, err)
 	}
 	checkoutDirectory, err := prepareCheckoutDirectory(workspace, inputs)
@@ -140,9 +140,17 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	if err != nil || !checkoutSHAPattern.MatchString(headSHA) || checkoutSHAPattern.MatchString(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
-	result.Outputs["ref"] = checkoutRefOutput(inputs, job.Event.Ref)
-	result.Outputs["commit"] = headSHA
+	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
 	return result, nil
+}
+
+func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {
+	// Checkout outputs were added in v4.2.0 and aren't part of the v3 contract.
+	if commit == actionintegration.CheckoutV3Commit {
+		return
+	}
+	outputs["ref"] = ref
+	outputs["commit"] = headSHA
 }
 
 func checkoutRepositoryURL(provider, repository string) (url, credentialHost string, ok bool) {
