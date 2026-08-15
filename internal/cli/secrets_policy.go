@@ -64,6 +64,12 @@ func validateSecretsPolicy(contents string) (string, error) {
 		if node.Kind == yaml.AliasNode {
 			return "", errors.New("policy must not contain YAML aliases")
 		}
+		if node.Kind == yaml.ScalarNode && node.Style == 0 {
+			switch strings.ToLower(node.Value) {
+			case "yes", "no", "on", "off":
+				return "", fmt.Errorf("policy value %q must be quoted", node.Value)
+			}
+		}
 		pending = append(pending, node.Content...)
 	}
 	var rules []map[string]any

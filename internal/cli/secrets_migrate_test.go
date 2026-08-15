@@ -88,6 +88,7 @@ func TestValidateSecretsPolicyRequiresRestrictedRules(t *testing.T) {
 		{name: "invalid UUID", policy: "- pipeline_id: nope", want: "must be a UUID"},
 		{name: "invalid UUID list", policy: "- cluster_queue_id: [11111111-2222-4333-8444-555555555555, nope]", want: "must be a UUID"},
 		{name: "YAML alias", policy: "- pipeline_id: &id 11111111-2222-4333-8444-555555555555\n- pipeline_id: *id", want: "must not contain YAML aliases"},
+		{name: "YAML 1.1 boolean", policy: "- build_branch: on", want: `value "on" must be quoted`},
 		{name: "GitHub expression", policy: "- pipeline_slug: ${{ secrets.OTHER }}", want: "must not contain GitHub expression syntax"},
 	}
 	for _, test := range tests {
