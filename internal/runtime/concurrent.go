@@ -172,7 +172,7 @@ func bindHashFilesContext(ctx context.Context, eval *expression.Context) {
 
 func (r Runner) executePlanStep(jobCtx, runCtx context.Context, processor *commandProcessor, workspace string, job plan.Job, step plan.Step, invocationID string, jobEnv, stepEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations) stepExecution {
 	result, err := r.runJobStep(runCtx, processor, workspace, job, step, invocationID, jobEnv, stepEnv, eval, posts, actions, prepared)
-	return classifyStepExecution(jobCtx, runCtx, step, result, err)
+	return classifyStepExecutionWithControls(jobCtx, runCtx, step, result, err, eval)
 }
 
 func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, result Result, err error) stepExecution {
@@ -189,6 +189,17 @@ func classifyStepExecution(jobCtx, runCtx context.Context, step plan.Step, resul
 		execution.conclusion = "success"
 	}
 	return execution
+}
+
+func classifyStepExecutionWithControls(jobCtx, runCtx context.Context, step plan.Step, result Result, err error, eval expression.Context) stepExecution {
+	if err != nil && step.ContinueOnErrorExpression != "" {
+		resolved, controlErr := evaluateStepContinueOnError(step, eval)
+		if controlErr != nil {
+			return classifyStepExecution(jobCtx, runCtx, step, result, errors.Join(err, fmt.Errorf("controls: %w", controlErr)))
+		}
+		step = resolved
+	}
+	return classifyStepExecution(jobCtx, runCtx, step, result, err)
 }
 
 func cancelledStepExecution(jobCtx, runCtx context.Context, step plan.Step) stepExecution {

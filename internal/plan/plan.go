@@ -582,6 +582,15 @@ func (job Job) Validate() error {
 		if len(step.TimeoutMinutesExpression) > 65536 || len(step.ContinueOnErrorExpression) > 65536 {
 			return fmt.Errorf("job plan step %q control expression exceeds 65536 bytes", step.ID)
 		}
+		for _, control := range []struct{ name, value string }{
+			{name: "continue_on_error", value: step.ContinueOnErrorExpression},
+			{name: "timeout_minutes", value: step.TimeoutMinutesExpression},
+		} {
+			trimmed := strings.TrimSpace(control.value)
+			if control.value != "" && (!strings.HasPrefix(trimmed, "${{") || !strings.HasSuffix(trimmed, "}}")) {
+				return fmt.Errorf("job plan step %q %s expression must be complete", step.ID, control.name)
+			}
+		}
 		if len(step.Condition) > 65536 {
 			return fmt.Errorf("job plan step %q condition exceeds 65536 bytes", step.ID)
 		}

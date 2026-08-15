@@ -1711,10 +1711,45 @@ func TestExpressionValuedStepControls(t *testing.T) {
 		{ID: "verify", Kind: "run", Condition: "steps.soft.outcome == 'failure' && steps.soft.conclusion == 'success'", Command: "true"},
 	})
 	job.Matrix = map[string]any{"experimental": true, "timeout": 1.0}
+	encoded, err := plan.Encode(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err = plan.Decode(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestSkippedStepDoesNotEvaluateTypedControls(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped controls\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "skipped", Kind: "run", Condition: "false", Command: "true", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
+	}})
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
+	}
+}
+
+func TestStepTimeoutExpressionUsesSameStepEnvironment(t *testing.T) {
+	step := plan.Step{Env: map[string]string{"MINUTES": "5"}, TimeoutMinutesExpression: "${{ fromJSON(env.MINUTES) }}"}
+	context := expression.Context{}
+	env, err := evaluateStepMap(step.Env, context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	context.Env = env
+	step, err = evaluateStepTimeout(step, context)
+	if err != nil || step.TimeoutMinutes != 5 {
+		t.Fatalf("evaluateStepTimeout() = %#v, %v", step, err)
 	}
 }
 
@@ -1733,6 +1768,14 @@ func TestExpressionValuedStepControlsRequireTypedBoundedResults(t *testing.T) {
 				t.Fatalf("evaluateStepControls() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestExpressionContinueOnErrorAppliesToPreparedActionFailure(t *testing.T) {
+	step := plan.Step{ID: "action", ContinueOnErrorExpression: "${{ true }}"}
+	execution := classifyStepExecutionWithControls(context.Background(), context.Background(), step, newResult(), errors.New("pre failed"), expression.Context{})
+	if execution.outcome != "failure" || execution.conclusion != "success" {
+		t.Fatalf("prepared action execution = %#v", execution)
 	}
 }
 

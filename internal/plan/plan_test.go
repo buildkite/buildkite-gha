@@ -142,6 +142,11 @@ func TestStepControlExpressionContract(t *testing.T) {
 	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "both literal and expression continue_on_error") {
 		t.Fatalf("Validate() mixed continue-on-error error = %v", err)
 	}
+	job = validJob()
+	job.Steps[0].TimeoutMinutesExpression = "5"
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "expression must be complete") {
+		t.Fatalf("Validate() incomplete expression error = %v", err)
+	}
 }
 
 func TestValidateConcurrentStepTopology(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -599,8 +600,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				continue
 			}
 			preEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
-			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			preEval := stepExpressionContext(eval)
+			step, err = evaluateStepTimeout(step, preEval)
+			if err != nil {
+				preFailures[stepIndex] = classifyStepExecutionWithControls(ctx, runCtx, step, newResult(), fmt.Errorf("controls: %w", err), preEval)
+				continue
+			}
+			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
 			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
@@ -609,7 +615,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
 			eval.Env = jobResult.Env
 			if preErr != nil {
-				execution := classifyStepExecution(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre: %w", step.Uses, preErr))
+				execution := classifyStepExecutionWithControls(ctx, preCtx, step, newResult(), fmt.Errorf("action %q pre: %w", step.Uses, preErr), preEval)
 				preFailures[stepIndex] = execution
 				if execution.conclusion != "success" {
 					preStatus.unsuccessful = true
@@ -674,40 +680,44 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
-		step, err = evaluateStepControls(step, stepExpressionContext(eval))
-		if err != nil {
-			execution := classifyStepExecution(ctx, runCtx, step, newResult(), fmt.Errorf("controls: %w", err))
-			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
-			continue
-		}
-		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
+		evaluationCtx, cancelEvaluation := stepContext(runCtx, step.TimeoutMinutes)
 		stepEval := stepExpressionContext(eval)
-		bindHashFilesContext(stepCtx, &stepEval)
+		bindHashFilesContext(evaluationCtx, &stepEval)
 		stepEnv, err := evaluateStepMap(step.Env, stepEval)
 		if err != nil {
-			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("environment: %w", err))
-			cancelStep()
+			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("environment: %w", err), stepEval)
+			cancelEvaluation()
 			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: stepCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
-			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("condition: %w", err))
-			cancelStep()
+			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)
+			cancelEvaluation()
 			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 			continue
 		}
 		if !run {
-			cancelStep()
+			cancelEvaluation()
 			statuses[strings.ToLower(step.ID)] = expression.StepStatus{Outcome: "skipped", Conclusion: "skipped", Outputs: map[string]string{}}
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
+		step, err = evaluateStepTimeout(step, stepEval)
+		if err != nil {
+			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("controls: %w", err), stepEval)
+			cancelEvaluation()
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
+		}
+		cancelEvaluation()
+		stepCtx, cancelStep := stepContext(runCtx, step.TimeoutMinutes)
+		bindHashFilesContext(stepCtx, &stepEval)
 		displayName, err := stepDisplayName(step, stepEval)
 		if err != nil {
-			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("name: %w", err))
+			execution := classifyStepExecutionWithControls(ctx, stepCtx, step, newResult(), fmt.Errorf("name: %w", err), stepEval)
 			cancelStep()
 			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
 			continue
@@ -966,6 +976,15 @@ func durationMinutes(minutes float64) time.Duration {
 }
 
 func evaluateStepControls(step plan.Step, context expression.Context) (plan.Step, error) {
+	var err error
+	step, err = evaluateStepContinueOnError(step, context)
+	if err != nil {
+		return step, err
+	}
+	return evaluateStepTimeout(step, context)
+}
+
+func evaluateStepContinueOnError(step plan.Step, context expression.Context) (plan.Step, error) {
 	if step.ContinueOnErrorExpression != "" {
 		value, err := expression.EvaluateStepControl(step.ContinueOnErrorExpression, context)
 		if err != nil {
@@ -977,6 +996,10 @@ func evaluateStepControls(step plan.Step, context expression.Context) (plan.Step
 		}
 		step.ContinueOnError = continueOnError
 	}
+	return step, nil
+}
+
+func evaluateStepTimeout(step plan.Step, context expression.Context) (plan.Step, error) {
 	if step.TimeoutMinutesExpression != "" {
 		value, err := expression.EvaluateStepControl(step.TimeoutMinutesExpression, context)
 		if err != nil {
@@ -985,8 +1008,33 @@ func evaluateStepControls(step plan.Step, context expression.Context) (plan.Step
 		switch value := value.(type) {
 		case int:
 			step.TimeoutMinutes = float64(value)
+		case int8:
+			step.TimeoutMinutes = float64(value)
+		case int16:
+			step.TimeoutMinutes = float64(value)
+		case int32:
+			step.TimeoutMinutes = float64(value)
+		case int64:
+			step.TimeoutMinutes = float64(value)
+		case uint:
+			step.TimeoutMinutes = float64(value)
+		case uint8:
+			step.TimeoutMinutes = float64(value)
+		case uint16:
+			step.TimeoutMinutes = float64(value)
+		case uint32:
+			step.TimeoutMinutes = float64(value)
+		case uint64:
+			step.TimeoutMinutes = float64(value)
+		case float32:
+			step.TimeoutMinutes = float64(value)
 		case float64:
 			step.TimeoutMinutes = value
+		case json.Number:
+			step.TimeoutMinutes, err = value.Float64()
+			if err != nil {
+				return step, fmt.Errorf("timeout-minutes expression produced invalid number %q", value)
+			}
 		default:
 			return step, fmt.Errorf("timeout-minutes expression produced %T, want number", value)
 		}

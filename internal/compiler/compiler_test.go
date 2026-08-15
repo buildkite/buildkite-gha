@@ -366,6 +366,16 @@ jobs:
 	}
 }
 
+func TestReusableStepTimeoutRejectsOutOfRangeStaticInput(t *testing.T) {
+	job := workflow.Job{ID: "callee", Steps: []workflow.Step{{
+		Kind: "run", Run: "true", TimeoutMinutesExpression: "${{ inputs.timeout }}",
+		Span: workflow.Span{Start: workflow.Position{Line: 7, Column: 7}},
+	}}}
+	if _, err := applyStaticInputs("callee.yml", job, map[string]any{"timeout": 0}); err == nil || !strings.Contains(err.Error(), "greater than 0 and at most 360") {
+		t.Fatalf("applyStaticInputs() error = %v", err)
+	}
+}
+
 func TestCompileRetainsSupportedRuntimeDependentConditions(t *testing.T) {
 	source := []byte(`on: push
 jobs:

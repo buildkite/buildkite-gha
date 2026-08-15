@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -180,7 +181,10 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	for _, id := range order {
 		job := jobs[id]
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
-		job = applyStaticInputs(job, inputs)
+		job, err = applyStaticInputs(path, job, inputs)
+		if err != nil {
+			return reusableResolution{}, err
+		}
 		if parsed.Callable {
 			if err := rejectUnresolvedInputExpressions(path, job); err != nil {
 				return reusableResolution{}, err
@@ -669,9 +673,9 @@ func inputTypeMatches(inputType string, value any) bool {
 	}
 }
 
-func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
+func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (workflow.Job, error) {
 	if len(inputs) == 0 {
-		return job
+		return job, nil
 	}
 	job.Name = replaceStaticInputs(job.Name, inputs)
 	job.If = replaceStaticInputCondition(job.If, inputs)
@@ -719,6 +723,9 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		if step.TimeoutMinutesExpression != "" {
 			resolved := replaceStaticInputs(step.TimeoutMinutesExpression, inputs)
 			if value, err := strconv.ParseFloat(resolved, 64); err == nil {
+				if value <= 0 || value > 360 || math.IsNaN(value) || math.IsInf(value, 0) {
+					return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "timeout-minutes expression must produce a number greater than 0 and at most 360")
+				}
 				step.TimeoutMinutes, step.TimeoutMinutesExpression = value, ""
 			}
 		}
@@ -726,7 +733,7 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 		step.Env = replaceMapInputs(step.Env, inputs)
 		step.With = replaceMapInputs(step.With, inputs)
 	}
-	return job
+	return job, nil
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
