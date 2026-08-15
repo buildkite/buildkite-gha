@@ -81,10 +81,79 @@ func TestTranslateEventTriggerConditionSelectsOnlyEffectiveEvent(t *testing.T) {
 func TestTranslateEventTriggerConditionValidatesInactiveTriggers(t *testing.T) {
 	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
 		{Event: "push"},
-		{Event: "pull_request", Paths: []string{"src/**"}},
+		{Event: "pull_request", Paths: []string{"!src/**"}},
 	}, "push", LiveTriggerConditionContext("true"))
-	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
+	if err == nil || !strings.Contains(err.Error(), "must follow a positive pattern") {
 		t.Fatalf("inactive path filter error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionRejectsInactivePushPathFilters(t *testing.T) {
+	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
+		{Event: "push", Paths: []string{"src/**"}},
+		{Event: "pull_request"},
+	}, "pull_request", TriggerConditionContext{EventPredicate: "true", PullRequestAction: `"opened"`})
+	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
+		t.Fatalf("inactive push path filter error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
+	context := TriggerConditionContext{
+		EventPredicate:        "true",
+		PullRequestBaseBranch: `"main"`,
+		PullRequestAction:     `"opened"`,
+		ChangedPaths:          []string{"docs/readme.md", "src/main.go"},
+		ChangedPathsKnown:     true,
+	}
+	for _, test := range []struct {
+		name    string
+		trigger workflow.Trigger
+		want    string
+	}{
+		{
+			name:    "ordered re-inclusion",
+			trigger: workflow.Trigger{Event: "pull_request", Paths: []string{"**", "!docs/**", "docs/required/**"}},
+			want:    "true",
+		},
+		{
+			name:    "include mismatch",
+			trigger: workflow.Trigger{Event: "pull_request", Paths: []string{"web/**"}},
+			want:    "false",
+		},
+		{
+			name:    "ignore runs for one unignored path",
+			trigger: workflow.Trigger{Event: "pull_request", PathsIgnore: []string{"docs/**"}},
+			want:    "true",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{test.trigger}, "pull_request", context)
+			if err != nil || !applicable || !strings.HasSuffix(condition, "&& "+test.want+")") {
+				t.Fatalf("condition/applicable/error = %q / %t / %v, want %q", condition, applicable, err, test.want)
+			}
+		})
+	}
+}
+
+func TestPathFiltersMatchOrderedPatternsPerPath(t *testing.T) {
+	matched, err := pathFiltersMatch(
+		[]string{"docs/required/release.md"},
+		[]string{"**", "!docs/**", "docs/required/**"},
+		nil,
+	)
+	if err != nil || !matched {
+		t.Fatalf("ordered path match = %t, %v", matched, err)
+	}
+	matched, err = pathFiltersMatch([]string{"docs/readme.md"}, nil, []string{"docs/**"})
+	if err != nil || matched {
+		t.Fatalf("ignored-only path match = %t, %v", matched, err)
+	}
+	for _, path := range []string{"README.md", "docs/README.md"} {
+		matched, err = pathFiltersMatch([]string{path}, []string{"**/README.md"}, nil)
+		if err != nil || !matched {
+			t.Fatalf("globstar path %q match = %t, %v", path, matched, err)
+		}
 	}
 }
 
@@ -236,6 +305,13 @@ func TestTriggerFilterMismatchReason(t *testing.T) {
 			trigger: workflow.Trigger{Event: "push", Branches: []string{"release/**", "!release/**-alpha", "release/special-alpha"}},
 			event:   "push",
 			context: TriggerConditionContext{BranchValue: value("release/special-alpha")},
+		},
+		{
+			name:    "pull request path mismatch",
+			trigger: workflow.Trigger{Event: "pull_request", Paths: []string{"src/**"}},
+			event:   "pull_request",
+			context: TriggerConditionContext{ChangedPathsKnown: true, ChangedPaths: []string{"docs/readme.md"}},
+			want:    "Changed paths do not match this workflow's pull_request path filters.",
 		},
 		{
 			name:    "push tag mismatch",
