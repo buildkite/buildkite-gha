@@ -114,14 +114,35 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 }
 
 func TestParseOwnsLiteralContainersAndSortsServices(t *testing.T) {
-	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: postgres:16, ports: ['5432:5432']}\n    steps:\n      - run: true\n")
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: 'registry.example:5000/team/postgres:16', ports: ['5432:5432']}\n    steps:\n      - run: true\n")
 	parsed, err := Parse("containers.yml", source)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := parsed.Jobs[0]
-	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "alpha" || job.Services[1].Name != "zed" {
+	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "alpha" || job.Services[0].Container.Image != "registry.example:5000/team/postgres:16" || job.Services[1].Name != "zed" {
 		t.Fatalf("owned containers = %#v / %#v", job.Container, job.Services)
+	}
+}
+
+func TestParseContainerImageRegistryPorts(t *testing.T) {
+	for _, test := range []struct {
+		image string
+		valid bool
+	}{
+		{"localhost:5000/private/service:latest", true},
+		{"127.0.0.1:65535/private/service", true},
+		{"[::1]:5000/private/service", true},
+		{"localhost:0/private/service", false},
+		{"localhost:65536/private/service", false},
+	} {
+		t.Run(test.image, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      service:\n        image: '" + test.image + "'\n    steps: [{run: true}]\n")
+			_, err := Parse("containers.yml", source)
+			if (err == nil) != test.valid {
+				t.Fatalf("Parse() error = %v, valid = %t", err, test.valid)
+			}
+		})
 	}
 }
 

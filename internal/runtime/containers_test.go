@@ -854,17 +854,20 @@ func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = b.cleanup() })
-	logins, pulls := 0, 0
+	logins, logouts, pulls := 0, 0, 0
 	for _, call := range f.calls(t) {
 		if len(call.Args) != 0 && call.Args[0] == "login" {
 			logins++
+		}
+		if slices.Equal(call.Args, []string{"logout", "registry.example"}) {
+			logouts++
 		}
 		if slices.Equal(call.Args, []string{"pull", image}) {
 			pulls++
 		}
 	}
-	if logins != 2 || pulls != 3 {
-		t.Fatalf("logins = %d, pulls = %d, calls = %#v", logins, pulls, f.calls(t))
+	if logins != 2 || logouts != 1 || pulls != 3 {
+		t.Fatalf("logins = %d, logouts = %d, pulls = %d, calls = %#v", logins, logouts, pulls, f.calls(t))
 	}
 }
 

@@ -169,7 +169,17 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		if service.Credentials != nil && service.Credentials.Username != "" && service.Credentials.Password != "" {
 			registry := dockerRegistry(image)
 			digest := sha256.Sum256([]byte(service.Credentials.Username + "\x00" + service.Credentials.Password))
-			if activeCredential[registry] != digest {
+			if previous, ok := activeCredential[registry]; !ok || previous != digest {
+				if ok {
+					args := []string{"logout"}
+					if registry != "" {
+						args = append(args, registry)
+					}
+					if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
+						return nil, fmt.Errorf("clear service %q registry authentication: %w", serviceID, err)
+					}
+					delete(activeCredential, registry)
+				}
 				if err = dockerLogin(ctx, env, docker, registry, service.Credentials.Username, service.Credentials.Password); err != nil {
 					return nil, fmt.Errorf("authenticate service %q registry %q: %w", serviceID, registry, err)
 				}

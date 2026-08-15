@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
 	"go.yaml.in/yaml/v4"
 )
@@ -260,7 +261,6 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 	return out
 }
 
-var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 
@@ -394,7 +394,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 			}
 		}
 	}
-	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || strings.ContainsAny(image.Value, "\x00\r\n") || !strings.Contains(image.Value, "${{") && !containerImagePattern.MatchString(image.Value) {
+	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || strings.ContainsAny(image.Value, "\x00\r\n") || !strings.Contains(image.Value, "${{") && !plan.ValidContainerImageReference(image.Value) {
 		if image == nil {
 			image = node
 		}

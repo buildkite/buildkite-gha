@@ -36,6 +36,12 @@ var serviceNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,254}$`)
 var githubRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var githubWorkflowFilenamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$`)
 
+// ValidContainerImageReference reports whether image is a supported literal
+// Docker image reference.
+func ValidContainerImageReference(image string) bool {
+	return containerImagePattern.MatchString(image)
+}
+
 var githubTokenPermissionAccess = map[string]map[string]bool{
 	"actions":             {"read": true, "write": true},
 	"artifact_metadata":   {"read": true, "write": true},
@@ -640,7 +646,7 @@ func (job Job) Validate() error {
 }
 
 func validateServiceContainer(service ServiceContainer, templates bool) error {
-	if !templates && !containerImagePattern.MatchString(service.Image) {
+	if !templates && !ValidContainerImageReference(service.Image) {
 		return fmt.Errorf("invalid image reference")
 	}
 	if err := validateContainerImageEnv(service.Image, service.Env); err != nil {
@@ -811,7 +817,7 @@ func validateContainer(image string, env map[string]string, ports []string) erro
 }
 
 func validateContainerImageEnv(image string, env map[string]string) error {
-	if len(image) == 0 || len(image) > 512 || !strings.Contains(image, "${{") && !containerImagePattern.MatchString(image) {
+	if len(image) == 0 || len(image) > 512 || !strings.Contains(image, "${{") && !ValidContainerImageReference(image) {
 		return fmt.Errorf("invalid image reference")
 	}
 	if len(env) > 256 {
