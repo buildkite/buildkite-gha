@@ -61,7 +61,7 @@ func setPathFiltersError(context *buildkitepipeline.TriggerConditionContext, wor
 	rootBytes, rootErr := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	root := filepath.Clean(strings.TrimSpace(string(rootBytes)))
 	for i := range workflows {
-		if workflowUsesEvent(workflows[i], event) && (workflowUsesPathFilters(workflows[i], event) || rootErr == nil && gitTracksWorkflow(root, workflows[i])) {
+		if workflowUsesPathFilters(workflows[i], event) || rootErr == nil && gitTracksWorkflow(root, workflows[i]) {
 			workflows[i].PathFiltersError = reason
 		}
 	}
@@ -123,11 +123,9 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	}
 	workflowErrors := make(map[string]string)
 	for _, input := range workflows {
-		if !workflowUsesEvent(input, event.Event) {
-			continue
-		}
+		usesEvent := workflowUsesEvent(input, event.Event)
 		if !gitTracksWorkflow(root, input) {
-			if workflowUsesPathFilters(input, event.Event) {
+			if usesEvent && workflowUsesPathFilters(input, event.Event) {
 				workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q is not provider-backed and cannot use pull request path filters", input.CanonicalPath)
 			}
 			continue
@@ -142,8 +140,12 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q cannot be parsed from the event merge commit", input.CanonicalPath)
 			continue
 		}
+		mergeUsesEvent := workflowUsesEvent(workflowInput{Triggers: mergeWorkflow.Triggers}, event.Event)
+		if !usesEvent && !mergeUsesEvent {
+			continue
+		}
 		mergeUsesPathFilters := workflowUsesPathFilters(workflowInput{Triggers: mergeWorkflow.Triggers}, event.Event)
-		if (workflowUsesPathFilters(input, event.Event) || mergeUsesPathFilters) && !bytes.Equal(mergeSource, input.Source) {
+		if (usesEvent != mergeUsesEvent || workflowUsesPathFilters(input, event.Event) || mergeUsesPathFilters) && !bytes.Equal(mergeSource, input.Source) {
 			workflowErrors[input.CanonicalPath] = fmt.Sprintf("workflow %q does not match the event merge commit", input.CanonicalPath)
 		}
 	}
