@@ -213,6 +213,15 @@ func TestPullRequestChangedPathsRejectsPathFiltersAddedByMerge(t *testing.T) {
 	if !strings.Contains(workflows[0].PathFiltersError, "merge commit SHAs") {
 		t.Fatalf("missing merge commit workflow error = %q", workflows[0].PathFiltersError)
 	}
+	pullRequest["merge_commit_sha"] = merge
+	pullRequest["base"].(map[string]any)["sha"] = ""
+	pullRequest["head"].(map[string]any)["sha"] = ""
+	workflows[0].PathFiltersError = ""
+	context = buildkitepipeline.TriggerConditionContext{}
+	populateChangedPaths(&context, event, effectiveEventFromWebhook, workflows)
+	if !strings.Contains(workflows[0].PathFiltersError, "base, head, and merge commit SHAs") {
+		t.Fatalf("missing base and head workflow error = %q", workflows[0].PathFiltersError)
+	}
 }
 
 func TestPathEvaluationErrorsApplyOnlyToFilteredWorkflows(t *testing.T) {
