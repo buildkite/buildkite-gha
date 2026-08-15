@@ -16,7 +16,7 @@ steps:
           set -euo pipefail
           proof="$${COMPATIBILITY_PROOF:?COMPATIBILITY_PROOF is required}"
           case "$$proof" in
-            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|upload-artifact|artifact-roundtrip|experimental-runner-user) ;;
+            shell-upload|concurrent-steps|public-actions|hosted-docker|dockerfile-action|container-runtime|summary-annotation|workflow-annotations|skipped-workflow-annotation|upload-artifact|artifact-roundtrip|cache-v2-roundtrip|experimental-runner-user) ;;
             *) echo "Unknown compatibility proof: $$proof" >&2; exit 2 ;;
           esac
           buildkite-agent pipeline upload ".buildkite/$$proof-proof.yml"
