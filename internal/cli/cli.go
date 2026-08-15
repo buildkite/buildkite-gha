@@ -1148,10 +1148,11 @@ func hasGitHubActionLocks(locks []plan.ActionLock) bool {
 func cacheServiceRequired(locks []plan.ActionLock) (bool, error) {
 	required := false
 	for _, lock := range locks {
-		descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
+		identity := actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}
+		descriptor, _ := actionintegration.Lookup(identity)
 		if descriptor.Service == actionintegration.ServiceCache {
 			required = true
-			if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
+			if _, _, err := actionintegration.Admit(identity, lock.Commit); err != nil {
 				return false, fmt.Errorf("unsupported cache action: %w", err)
 			}
 		}
@@ -2489,9 +2490,10 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			}
 		}
 		for _, action := range artifact.Job.Actions {
-			descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path})
+			identity := actionintegration.Identity{Source: action.Source, Repository: action.Repository, Path: action.Path}
+			descriptor, _ := actionintegration.Lookup(identity)
 			if descriptor.Service == actionintegration.ServiceCache {
-				if err := actionintegration.ValidateCacheCommit(action.Commit); err != nil {
+				if _, _, err := actionintegration.Admit(identity, action.Commit); err != nil {
 					reference := action.Repository
 					if action.Path != "" {
 						reference += "/" + action.Path

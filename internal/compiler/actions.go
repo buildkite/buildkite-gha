@@ -45,7 +45,7 @@ func (s PublicActionSource) Fetch(ctx context.Context, ref source.Reference) (so
 		Path:       ref.Path,
 	}
 	if descriptor, _ := actionintegration.Lookup(identity); descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
-		if err := actionintegration.ValidateCheckoutCommit(strings.ToLower(r.Commit)); err != nil {
+		if _, _, err := actionintegration.Admit(identity, strings.ToLower(r.Commit)); err != nil {
 			return source.Resolved{}, source.Materialized{}, err
 		}
 	}
@@ -467,30 +467,16 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 	}
 	commit := strings.ToLower(resolved.Commit)
 	lock := plan.ActionLock{Source: "github", Repository: canonical, RequestedRef: ref.Ref, Commit: commit, Path: ref.Path, SourceDigest: materialized.SourceDigest}
-	descriptor, _ := actionintegration.Lookup(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path})
-	if descriptor.Adapter == actionintegration.AdapterCheckoutExactEventSHA {
-		if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
-			return "", plan.ActionLock{}, "", "", err
-		}
-	}
-	if descriptor.Adapter == actionintegration.AdapterUploadArtifactBuildkite {
-		if err := actionintegration.ValidateUploadArtifactCommit(lock.Commit); err != nil {
-			return "", plan.ActionLock{}, "", "", err
-		}
-	}
-	if descriptor.Adapter == actionintegration.AdapterDownloadArtifactBuildkite {
-		if err := actionintegration.ValidateDownloadArtifactCommit(lock.Commit); err != nil {
-			return "", plan.ActionLock{}, "", "", err
-		}
-	}
-	if descriptor.Service == actionintegration.ServiceCache {
-		if err := actionintegration.ValidateCacheCommit(lock.Commit); err != nil {
+	descriptor, _, admitErr := actionintegration.Admit(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit)
+	if admitErr != nil {
+		if descriptor.Service == actionintegration.ServiceCache {
 			requested := lock.Repository
 			if lock.Path != "" {
 				requested += "/" + lock.Path
 			}
-			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted: %w", requested, lock.RequestedRef, lock.Commit, err)
+			return "", plan.ActionLock{}, "", "", fmt.Errorf("%s@%s resolved to commit %s, which is not admitted: %w", requested, lock.RequestedRef, lock.Commit, admitErr)
 		}
+		return "", plan.ActionLock{}, "", "", admitErr
 	}
 	b.caps["network"] = true
 	return key, lock, repositoryRoot, ref.Path, nil

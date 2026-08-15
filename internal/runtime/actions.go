@@ -66,7 +66,7 @@ func validateJobCheckoutAdapters(job plan.Job) (bool, error) {
 	locks := make(map[string]plan.ActionLock, len(job.Actions))
 	for _, lock := range job.Actions {
 		if usesCheckoutAdapter(lock) {
-			if err := actionintegration.ValidateCheckoutCommit(lock.Commit); err != nil {
+			if _, _, err := actionintegration.Admit(actionintegration.Identity{Source: lock.Source, Repository: lock.Repository, Path: lock.Path}, lock.Commit); err != nil {
 				return false, err
 			}
 		}
@@ -139,25 +139,8 @@ func (r *actionLockResolver) resolve(ctx context.Context, selector plan.ActionSe
 	if entry.duplicate || entry.lock.ID != selector.Lock {
 		return metadata.Metadata{}, plan.ActionLock{}, fmt.Errorf("resolve action lock %q: lock identity is ambiguous", selector.Lock)
 	}
-	if usesCheckoutAdapter(entry.lock) {
-		if err := actionintegration.ValidateCheckoutCommit(entry.lock.Commit); err != nil {
-			return metadata.Metadata{}, plan.ActionLock{}, err
-		}
-	}
-	if usesUploadArtifactAdapter(entry.lock) {
-		if err := actionintegration.ValidateUploadArtifactCommit(entry.lock.Commit); err != nil {
-			return metadata.Metadata{}, plan.ActionLock{}, err
-		}
-	}
-	if usesDownloadArtifactAdapter(entry.lock) {
-		if err := actionintegration.ValidateDownloadArtifactCommit(entry.lock.Commit); err != nil {
-			return metadata.Metadata{}, plan.ActionLock{}, err
-		}
-	}
-	if usesCacheService(entry.lock) {
-		if err := actionintegration.ValidateCacheCommit(entry.lock.Commit); err != nil {
-			return metadata.Metadata{}, plan.ActionLock{}, err
-		}
+	if _, _, err := actionintegration.Admit(actionintegration.Identity{Source: entry.lock.Source, Repository: entry.lock.Repository, Path: entry.lock.Path}, entry.lock.Commit); err != nil {
+		return metadata.Metadata{}, plan.ActionLock{}, err
 	}
 
 	var m metadata.Metadata
