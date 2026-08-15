@@ -198,6 +198,13 @@ interpolation. Runtime job names are out of scope because Buildkite labels are
 currently fixed during compilation; support them only with a separate label
 update design.
 
+Reusable-workflow caller inputs and defaults resolve only while constructing
+the graph. Caller expressions may use graph-time `github`, `vars`, matrix, and
+parent reusable-workflow inputs. Defaults may use graph-time `github` and
+`vars`. `needs`-dependent caller inputs, defaults that require original
+workflow-dispatch input values, and transformed workflow outputs remain
+unsupported because the compiler has no equivalent values or runtime call job.
+
 ## Validation
 
 Every delivery slice must run:

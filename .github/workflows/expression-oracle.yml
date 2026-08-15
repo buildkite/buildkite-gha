@@ -2,11 +2,18 @@ name: Expression differential oracle
 
 on:
   workflow_dispatch:
+    inputs:
+      oracle_prefix:
+        type: string
+        default: dispatch
 
 permissions:
   contents: read
 
 jobs:
+  reusable-defaults:
+    uses: ./.github/workflows/expression-oracle-reusable.yml
+
   expressions:
     runs-on: ubuntu-latest
     steps:

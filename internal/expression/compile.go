@@ -39,6 +39,67 @@ func EvaluateCompile(expr Expression, context CompileContext) (any, error) {
 	return evaluateCompileNode(node, context)
 }
 
+// ValidateReusableInputDefault validates an expression-valued workflow_call
+// input default without resolving its values.
+func ValidateReusableInputDefault(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		validator := newSemanticValidator(compileTimeSurface)
+		validator.validateReference = func(_ actionlint.ExprNode, root string, _ []string) error {
+			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
+				return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
+			}
+			return nil
+		}
+		validator.validateAccess = func(node actionlint.ExprNode) error {
+			root := referenceRoot(node)
+			if !strings.EqualFold(root, "github") && !strings.EqualFold(root, "vars") {
+				return fmt.Errorf("reusable-workflow input default context %q is unavailable", root)
+			}
+			switch node := node.(type) {
+			case *actionlint.ObjectDerefNode:
+				return validator.validate(node.Receiver)
+			case *actionlint.IndexAccessNode:
+				if err := validator.validate(node.Operand); err != nil {
+					return err
+				}
+				return validator.validate(node.Index)
+			case *actionlint.ArrayDerefNode:
+				return validator.validate(node.Receiver)
+			default:
+				return nil
+			}
+		}
+		validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+		validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+		validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
+			if recognized, err := validatePureFunction(validator, node); recognized {
+				return err
+			}
+			return fmt.Errorf("unsupported reusable-workflow input default function %q", node.Callee)
+		}
+		validator.unsupported = func(actionlint.ExprNode) error {
+			return fmt.Errorf("unsupported reusable-workflow input default expression")
+		}
+		if err := validator.validate(node); err != nil {
+			return err
+		}
+		return validateCompileExpressionNode(node)
+	})
+}
+
+// EvaluateReusableInputDefault evaluates a statically available workflow_call
+// input default. A complete expression preserves its type; a template renders
+// to a string.
+func EvaluateReusableInputDefault(template string, context CompileContext) (any, error) {
+	if err := ValidateReusableInputDefault(template); err != nil {
+		return nil, err
+	}
+	if expression, err := Parse(template, 1, 1); err == nil {
+		return EvaluateCompile(expression, context)
+	}
+	return EvaluateCompileTemplate(template, context)
+}
+
 func validateCompileExpressionNode(node actionlint.ExprNode) error {
 	validator := newSemanticValidator(compileTimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {

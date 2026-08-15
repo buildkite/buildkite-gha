@@ -126,7 +126,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 - Local `./.github/workflows/...` paths.
 - `boolean`, `number`, and `string` inputs.
-- Static input values and defaults.
+- Static input values. Caller values may use graph-time `github`, `vars`, matrix, and parent reusable-workflow inputs with the supported operators and pure functions.
+- Literal defaults and expression defaults over graph-time `github` and `vars` values.
 - Nested calls up to four levels.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
@@ -137,7 +138,8 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Call-level `if`.
 - Token requests from any direct or expanded job in a workflow containing a reusable-workflow call.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
-- Dynamic inputs or matrices.
+- `needs`-dependent inputs or dynamic matrices.
+- Input defaults that reference `inputs`; GitHub resolves these against the original workflow-dispatch inputs, which are not retained as typed compile-time values.
 - Literal or compound output expressions.
 - Top-level concurrency in the called workflow.
 

@@ -682,6 +682,42 @@ func TestCompileConditionValidationAdmitsRuntimeHashFilesWithoutFilesystemAccess
 	}
 }
 
+func TestEvaluateReusableInputDefaultUsesOnlyGraphTimeValues(t *testing.T) {
+	context := CompileContext{
+		GitHub: map[string]any{"event_name": "push", "ref": "refs/heads/main"},
+		Vars:   map[string]string{"COUNT": "3", "SUFFIX": "release"},
+	}
+	for _, test := range []struct {
+		template string
+		want     any
+	}{
+		{template: "${{ format('{0}-{1}', github.event_name, vars.SUFFIX) }}", want: "push-release"},
+		{template: "${{ github.ref == 'refs/heads/main' }}", want: true},
+		{template: "${{ fromJSON(vars.COUNT) }}", want: json.Number("3")},
+		{template: "deploy-${{ vars.SUFFIX }}", want: "deploy-release"},
+	} {
+		got, err := EvaluateReusableInputDefault(test.template, context)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Errorf("EvaluateReusableInputDefault(%q) = %#v, %v; want %#v", test.template, got, err, test.want)
+		}
+	}
+}
+
+func TestValidateReusableInputDefaultRejectsUnavailableContexts(t *testing.T) {
+	for _, template := range []string{
+		"${{ inputs.other }}",
+		"${{ needs.build.result }}",
+		"${{ matrix.os }}",
+		"${{ secrets.TOKEN }}",
+		"${{ false && github.token || 'safe' }}",
+		"${{ github[vars.KEY] }}",
+	} {
+		if err := ValidateReusableInputDefault(template); err == nil {
+			t.Errorf("ValidateReusableInputDefault(%q) unexpectedly succeeded", template)
+		}
+	}
+}
+
 func TestValidateConditionUsesConcreteMatrixTypes(t *testing.T) {
 	for _, test := range []struct {
 		name   string

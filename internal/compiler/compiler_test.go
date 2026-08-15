@@ -1690,6 +1690,120 @@ jobs:
 	}
 }
 
+func TestCompileEvaluatesReusableWorkflowInputDefaults(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n")
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        default: ${{ format('{0}-{1}', github.event_name, vars.SUFFIX) }}
+      enabled:
+        type: boolean
+        default: ${{ github.ref == 'refs/heads/main' }}
+      count:
+        type: number
+        default: ${{ fromJSON(vars.COUNT) }}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.label }}:${{ inputs.enabled }}:${{ inputs.count }}
+`)
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"COUNT": "3", "SUFFIX": "release"}},
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo push-release:true:3" {
+		t.Fatalf("reusable defaults = %#v", ir.Jobs)
+	}
+}
+
+func TestCompileValidatesReusableWorkflowInputDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		input    string
+		want     string
+		override bool
+	}{
+		{name: "dispatch inputs", input: "${{ inputs.other }}", want: "workflow-dispatch inputs, which are unavailable during compilation", override: true},
+		{name: "token in lazy branch", input: "${{ false && github.token || 'safe' }}", want: `unavailable value "github.token"`, override: true},
+		{name: "type mismatch", input: "${{ github.ref == 'refs/heads/main' }}", want: "must be string"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := t.TempDir()
+			with := ""
+			if test.override {
+				with = "    with:\n      value: override\n"
+			}
+			path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/reusable.yml\n"+with)
+			writeWorkflow(t, repository, "reusable.yml", "on:\n  workflow_call:\n    inputs:\n      value:\n        type: string\n        default: "+test.input+"\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
+			if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "./.github/workflows/reusable.yml:6:") {
+				t.Fatalf("Compile() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileResolvesCompoundNestedReusableWorkflowInputs(t *testing.T) {
+	repository := t.TempDir()
+	path := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with:
+      prefix: ${{ format('{0}-{1}', vars.PREFIX, github.event_name) }}
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      prefix: {type: string}
+jobs:
+  call:
+    strategy:
+      matrix:
+        os: [linux]
+    uses: ./.github/workflows/leaf.yml
+    with:
+      value: ${{ format('{0}-{1}-{2}', inputs.prefix, matrix.os, github.event_name) }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      value: {type: string}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.value }}
+`)
+	result, err := CompileWithOptions(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), Options{
+		EventTrust: EventTrusted,
+		Vars:       VariableSources{Bridge: map[string]string{"PREFIX": "release"}},
+		Runners:    RunnerPolicy{Labels: map[string]string{"ubuntu-latest": "linux"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || ir.Jobs[0].Steps[0].Run != "echo release-push-linux-push" {
+		t.Fatalf("nested reusable input = %#v", ir.Jobs)
+	}
+}
+
 func TestCompileExposesGitHubHeadRef(t *testing.T) {
 	workflow := []byte(`on: [push, pull_request, pull_request_target]
 concurrency: group-${{ github.head_ref }}
