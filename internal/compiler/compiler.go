@@ -114,6 +114,7 @@ type JobInstance struct {
 	Outputs                 map[string]string       `json:"outputs,omitempty"`
 	Container               *workflow.Container     `json:"container,omitempty"`
 	Services                []workflow.Service      `json:"services,omitempty"`
+	ServicesExpression      string                  `json:"services_expression,omitempty"`
 	SourcePath              string                  `json:"source_path"`
 	SourceDigest            string                  `json:"source_digest"`
 	RepositoryRoot          string                  `json:"-"`
@@ -462,7 +463,7 @@ instances:
 					return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
 				}
 			}
-			if instance.Container != nil || len(instance.Services) != 0 {
+			if instance.Container != nil || len(instance.Services) != 0 || instance.ServicesExpression != "" {
 				if len(actionRefs) != 0 && !lockActions {
 					return fmt.Errorf("build plan for job %q: containers with remote actions require action resolution through upload or profile validation", instance.LogicalJobID)
 				}
@@ -472,7 +473,7 @@ instances:
 				if instance.Container != nil {
 					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "job-containers")
 				}
-				if len(instance.Services) != 0 {
+				if len(instance.Services) != 0 || instance.ServicesExpression != "" {
 					authorization.DockerCapabilitySources = append(authorization.DockerCapabilitySources, "service-containers")
 				}
 				sort.Strings(authorization.DockerCapabilitySources)
@@ -571,6 +572,7 @@ instances:
 				Outputs:                 instance.Outputs,
 				Steps:                   steps,
 				Actions:                 actions,
+				ServicesExpression:      instance.ServicesExpression,
 			}
 			job.RequiresMise = &requiresMise
 			if instance.Container != nil {
@@ -1083,6 +1085,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Outputs:                 cloneMap(job.Outputs),
 				Container:               job.Container,
 				Services:                resolvedServices,
+				ServicesExpression:      instanceJob.ServicesExpression,
 				SourcePath:              jobPath,
 				SourceDigest:            sourceDigests[id],
 				RepositoryRoot:          sourceRoots[id],
@@ -1252,9 +1255,6 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 			}
 			*field = value
 		}
-		if container.Image == "" {
-			continue
-		}
 		for key, value := range container.Env {
 			resolvedValue, err := expression.EvaluateAvailableCompileTemplate(value, context)
 			if err != nil {
@@ -1273,8 +1273,13 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		}
 		for _, value := range append(append(append([]string{container.Image, container.Options, container.Command, container.Entrypoint}, container.Ports...), container.Volumes...), mapValues(container.Env)...) {
 			if strings.Contains(value, "${{") {
-				return nil, fmt.Errorf("service %q contains a runtime expression, which is not supported in this delivery slice", service.Name)
+				if err := expression.ValidateServiceRuntimeTemplate(value); err != nil {
+					return nil, fmt.Errorf("service %q: %w", service.Name, err)
+				}
 			}
+		}
+		if container.Image == "" {
+			continue
 		}
 		service.Container = container
 		resolved = append(resolved, service)

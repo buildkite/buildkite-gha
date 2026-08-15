@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -51,7 +52,7 @@ type jobContainerBackend struct {
 	mounts                    []containerMount
 	nodeMu                    sync.Mutex
 	probedNodes               map[string]bool
-	servicePorts              map[string]map[string]string
+	servicePorts              map[string]expression.ServiceContext
 	existingVolumes           map[string]bool
 	ownedVolumes              []string
 }
@@ -87,7 +88,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		return nil, err
 	}
 	id := hex.EncodeToString(nonce[:])
-	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner." + id + "=true", network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]map[string]string)}
+	b := &jobContainerBackend{runner: r, docker: docker, env: env, config: config, owner: "com.buildkite.gha.owner." + id + "=true", network: "buildkite-gha-network-" + id, workspace: workspace, temp: temp, servicePorts: make(map[string]expression.ServiceContext)}
 	if spec.Image != "" {
 		b.container = "buildkite-gha-job-" + id
 	}
@@ -260,7 +261,7 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 			b.serviceDiagnostics(processor, service.name)
 			return nil, markHardJobFailure(portErr)
 		}
-		b.servicePorts[service.id] = ports
+		b.servicePorts[service.id] = expression.ServiceContext{ID: service.name, Network: b.network, Ports: ports}
 	}
 	for _, service := range b.services {
 		if err = b.waitForService(ctx, processor, service.id, service.name); err != nil {

@@ -512,23 +512,27 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.Services != nil {
 		if in.Services.Expression != nil {
-			return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, "expression-valued services are unsupported")
-		}
-		names := make([]string, 0, len(in.Services.Value))
-		for name := range in.Services.Value {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			service := in.Services.Value[name]
-			if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
-				return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+			out.ServicesExpression = in.Services.Expression.Value
+			if err := expression.ValidateServiceMapRuntimeExpression(out.ServicesExpression); err != nil {
+				return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, err.Error())
 			}
-			container, err := adaptServiceContainer(path, in.ID.Value, service.Container, serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
-			if err != nil {
-				return Job{}, err
+		} else {
+			names := make([]string, 0, len(in.Services.Value))
+			for name := range in.Services.Value {
+				names = append(names, name)
 			}
-			out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			sort.Strings(names)
+			for _, name := range names {
+				service := in.Services.Value[name]
+				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
+					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+				}
+				container, err := adaptServiceContainer(path, in.ID.Value, service.Container, serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
+				if err != nil {
+					return Job{}, err
+				}
+				out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			}
 		}
 	}
 	if in.ContinueOnError != nil {

@@ -346,13 +346,25 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 	return current, nil
 }
 
-func resolveServicePort(services map[string]map[string]string, service, port, kind string) (string, error) {
-	for id, ports := range services {
+func resolveServicePort(services map[string]ServiceContext, service, port, kind string) (string, error) {
+	for id, context := range services {
 		if strings.EqualFold(id, service) {
-			if value, ok := ports[port]; ok {
+			if value, ok := context.Ports[port]; ok {
 				return value, nil
 			}
 			return "", fmt.Errorf("%s references unavailable service port %s.%s", kind, service, port)
+		}
+	}
+	return "", fmt.Errorf("%s references unavailable service %q", kind, service)
+}
+
+func resolveServiceValue(services map[string]ServiceContext, service, field, kind string) (string, error) {
+	for id, context := range services {
+		if strings.EqualFold(id, service) {
+			if strings.EqualFold(field, "id") {
+				return context.ID, nil
+			}
+			return context.Network, nil
 		}
 	}
 	return "", fmt.Errorf("%s references unavailable service %q", kind, service)

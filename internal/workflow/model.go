@@ -132,6 +132,7 @@ type Job struct {
 	Outputs                 map[string]string      `json:"outputs,omitempty"`
 	Container               *Container             `json:"container,omitempty"`
 	Services                []Service              `json:"services,omitempty"`
+	ServicesExpression      string                 `json:"services_expression,omitempty"`
 	DefaultShell            string                 `json:"default_shell,omitempty"`
 	DefaultWorkingDirectory string                 `json:"default_working_directory,omitempty"`
 	Steps                   []Step                 `json:"steps"`

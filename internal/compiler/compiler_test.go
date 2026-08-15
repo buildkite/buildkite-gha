@@ -2678,7 +2678,7 @@ jobs:
 	}
 }
 
-func TestCompilePlansRejectRuntimeServiceExpressionInStaticSlice(t *testing.T) {
+func TestCompilePlansRetainNeedsServiceExpressionForRuntime(t *testing.T) {
 	workflowSource := []byte(`on: push
 jobs:
   producer:
@@ -2693,8 +2693,62 @@ jobs:
         image: ${{ needs.producer.outputs.image }}
     steps: [{run: true}]
 `)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plans[1].Services["cache"].Image; got != "${{ needs.producer.outputs.image }}" {
+		t.Fatalf("runtime service image = %q", got)
+	}
+}
+
+func TestCompilePlansRetainWholeServiceMapExpression(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.out.outputs.services }}
+    steps:
+      - id: out
+        run: echo services={} >> "$GITHUB_OUTPUT"
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    services: ${{ fromJSON(needs.producer.outputs.services) }}
+    steps: [{run: true}]
+`)
+	plans, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := plans[1]
+	if got.ServicesExpression != "${{ fromJSON(needs.producer.outputs.services) }}" || !slices.Contains(got.RequiredCapabilities, "docker") {
+		t.Fatalf("dynamic services plan = expression %q, capabilities %#v", got.ServicesExpression, got.RequiredCapabilities)
+	}
+}
+
+func TestCompilePlansValidateFieldsBeforeSkippingEmptyService(t *testing.T) {
+	workflowSource := []byte(`on: push
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    steps: [{run: true}]
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [""]
+    services:
+      optional:
+        image: ${{ matrix.image }}
+        env:
+          INVALID: ${{ needs.producer.result }}
+    steps: [{run: true}]
+`)
 	_, err := compilePlansForTest(context.Background(), "containers.yml", workflowSource, readFile(t, smokePath("events", "push.json")), "0.0.0-test", "sha256:"+strings.Repeat("1", 64), defaultOptions())
-	if err == nil || !strings.Contains(err.Error(), "contains a runtime expression") {
+	if err == nil || !strings.Contains(err.Error(), "service runtime expression must directly reference needs") {
 		t.Fatalf("error = %v", err)
 	}
 }

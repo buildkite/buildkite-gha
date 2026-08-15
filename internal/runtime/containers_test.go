@@ -26,6 +26,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -889,6 +890,72 @@ func TestRemoveDockerConfigReportsCleanupFailure(t *testing.T) {
 	}
 }
 
+func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
+	services := map[string]plan.Container{
+		"database": {
+			Image:      "postgres:${{ needs.build.outputs.version }}",
+			Env:        map[string]string{"SOURCE": "${{ needs.build.outputs.source }}"},
+			Ports:      []string{"${{ needs.build.outputs.port }}"},
+			Volumes:    []string{"data:${{ needs.build.outputs.target }}"},
+			Options:    "--label version=${{ needs.build.outputs.version }}",
+			Command:    "postgres -c ${{ needs.build.outputs.setting }}",
+			Entrypoint: "${{ needs.build.outputs.entrypoint }}",
+		},
+		"optional": {Image: "${{ needs.build.outputs.optional }}"},
+	}
+	got, err := evaluateServices(services, expression.Context{Needs: map[string]map[string]string{"build": {
+		"version": "16", "source": "runtime", "port": "5432", "target": "/data", "setting": "fsync=off", "entrypoint": "docker-entrypoint.sh", "optional": "",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := got["database"]
+	if len(got) != 1 || service.Image != "postgres:16" || service.Env["SOURCE"] != "runtime" || service.Ports[0] != "5432" || service.Volumes[0] != "data:/data" || service.Options != "--label version=16" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
+		t.Fatalf("evaluated services = %#v", got)
+	}
+	if services["database"].Image != "postgres:${{ needs.build.outputs.version }}" {
+		t.Fatal("service evaluation mutated the plan")
+	}
+}
+
+func TestEvaluateServiceMapExpression(t *testing.T) {
+	eval := expression.Context{Needs: map[string]map[string]string{"build": {"services": `{"database":{"image":"postgres:16","env":{"MODE":"test"},"ports":["5432"]},"cache":"redis:7"}`}}}
+	got, err := evaluateServiceMap(nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["database"].Image != "postgres:16" || got["database"].Env["MODE"] != "test" || got["cache"].Image != "redis:7" {
+		t.Fatalf("evaluated services = %#v", got)
+	}
+}
+
+func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		{name: "array", value: `[]`, want: "want an object"},
+		{name: "unknown field", value: `{"db":{"image":"postgres:16","privileged":true}}`, want: "unknown field"},
+		{name: "invalid service name", value: `{"UPPER":"postgres:16"}`, want: "service name"},
+		{name: "invalid image", value: `{"db":"BAD IMAGE"}`, want: "invalid image"},
+		{name: "credentials", value: `{"db":{"image":"postgres:16","credentials":{"username":"user","password":"secret"}}}`, want: "cannot introduce registry credentials"},
+		{name: "nested expression", value: `{"db":{"image":"redis:7","options":"--label token=${{ secrets.TOKEN }}"}}`, want: "retains a runtime template"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := evaluateServiceMap(nil, "${{ fromJSON(needs.build.outputs.services) }}", expression.Context{Needs: map[string]map[string]string{"build": {"services": test.value}}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
+	_, err := evaluateServices(map[string]plan.Container{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}, expression.Context{Needs: map[string]map[string]string{"build": {"image": ""}}})
+	if err == nil || !strings.Contains(err.Error(), "unterminated") {
+		t.Fatalf("error = %v, want unterminated expression error", err)
+	}
+}
+
 func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
 	for _, test := range []struct {
 		name, volume, existing, wantRemoved string
@@ -941,7 +1008,7 @@ func TestRunServiceContainerReadsBroadDockerPortOutput(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = b.cleanup() })
 	want := map[string]string{"80": "8000", "81": "8001", "82": "8002"}
-	if !maps.Equal(b.servicePorts["database"], want) {
+	if !maps.Equal(b.servicePorts["database"].Ports, want) {
 		t.Fatalf("service ports = %#v, want %#v", b.servicePorts["database"], want)
 	}
 }
