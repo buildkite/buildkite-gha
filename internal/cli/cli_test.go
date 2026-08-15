@@ -3221,21 +3221,21 @@ func TestValidateHostedProfileResolvesActionsWithoutClaimingRuntime(t *testing.T
 	}
 }
 
-func TestValidateHostedProfileRejectsProtectedCapabilityAfterCompile(t *testing.T) {
+func TestValidateHostedProfileAdmitsOrdinarySecretsAfterCompile(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "secret.yml")
 	if err := os.WriteFile(workflowPath, []byte("on: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.TOKEN }}\n    steps:\n      - run: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	var stdout, stderr bytes.Buffer
-	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run([]string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Result != "not-admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "not-admitted" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "E_PROFILE" || !strings.Contains(report.Diagnostics[0].Message, "uses GitHub Actions secrets") {
+	if report.Result != "admitted" || report.Compile.Result != "compilable" || report.Admission.Result != "admitted" || len(report.Diagnostics) != 0 {
 		t.Fatalf("profile report = %#v", report)
 	}
 }
@@ -6400,7 +6400,6 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 		capability string
 		want       string
 	}{
-		{capability: "secrets", want: `Job "protected" uses GitHub Actions secrets, which hosted runs do not provide. Pass values through supported Buildkite secret handling or remove the dependency.`},
 		{capability: "privileged-container", want: `Job "protected" requires unsupported hosted runtime capability "privileged-container". Remove the requirement or use a runtime profile that supports it.`},
 		{capability: "future-capability", want: `Job "protected" requires unsupported hosted runtime capability "future-capability". Remove the requirement or use a runtime profile that supports it.`},
 	}
@@ -6415,6 +6414,17 @@ func TestUnprivilegedUploadRejectsCapabilities(t *testing.T) {
 		if err == nil || !errors.As(err, &finding) || finding.Message != test.want || finding.Detail != "" {
 			t.Fatalf("validateUnprivilegedBundle(%q) error = %v, want capability rejection", capability, err)
 		}
+	}
+}
+
+func TestUnprivilegedUploadAdmitsSecretsCapability(t *testing.T) {
+	bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+		Workflow:             plan.Workflow{LogicalJobID: "release"},
+		RequiredCapabilities: []string{"secrets"},
+		RequiredSecrets:      []string{"HOMEBREW_TAP_GITHUB_TOKEN"},
+	}}}}
+	if err := validateUnprivilegedBundle(bundle); err != nil {
+		t.Fatalf("validateUnprivilegedBundle() error = %v", err)
 	}
 }
 

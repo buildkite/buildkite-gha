@@ -32,13 +32,13 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
 | [Conditions and expressions](#expressions-and-contexts) | 🟡 Supported subset | Boolean and equality conditions and direct references to selected contexts. |
-| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs, `secrets: inherit`, and direct job-output mappings. |
+| [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
 | [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Workflows containing reusable-workflow jobs cannot receive one. |
-| [Other workflow secrets](#other-secrets-and-oidc) | 🚧 Not available in production | Production upload rejects ordinary secret requirements. |
+| [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🚧 Not available in production | A bounded container subset exists, but production upload rejects it. |
-| [Environments and snapshots](#job-configuration) | ➖ Accepted, no effect | No approvals, environment secrets, deployment state, or custom-image creation. |
+| [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
 | [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
@@ -127,7 +127,6 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Local `./.github/workflows/...` paths.
 - `boolean`, `number`, and `string` inputs.
 - Static input values and defaults.
-- `secrets: inherit` when the called workflow declares no required secrets. Nested workflows must inherit again at every call edge.
 - Nested calls up to four levels.
 - Caller-visible aggregate results.
 - Outputs mapped directly from `jobs.<job>.outputs.<name>`.
@@ -137,7 +136,7 @@ A top-level workflow that does not declare the effective event is excluded befor
 - Remote or dynamic workflow paths.
 - Call-level `if`.
 - Token requests from any direct or expanded job in a workflow containing a reusable-workflow call.
-- Explicit secret mappings or required called-workflow secrets.
+- `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
 - Dynamic inputs or matrices.
 - Literal or compound output expressions.
 - Top-level concurrency in the called workflow.
@@ -260,7 +259,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
 | `timeout-minutes` | 🟡 Supported subset | Accepts literal timeouts up to 360 minutes. Expressions are rejected. |
 | `continue-on-error` | 🟡 Supported subset | Accepts literal booleans. Expressions are rejected. A tolerated failure remains visible as a Buildkite soft failure and reports `success` through downstream `needs`. |
-| `environment` | ➖ Accepted, no effect | Creates no deployment record, approval, environment secret, or protection rule. |
+| `environment` | ❌ Unsupported | Environment approvals, secrets, deployment records, and protection rules are unavailable. |
 | `snapshot` | ➖ Accepted, no effect | Custom image creation is not implemented. |
 
 Job names can interpolate matrix values:
@@ -684,7 +683,11 @@ The token is not added to the initial job environment. The `github.token` value 
 
 ### Other secrets and OIDC
 
-**🚧 Not available in production.** The production profile rejects ordinary workflow secrets, although the compiler and runtime define an explicit boundary for them. Reusable workflow secret mappings and environment secrets are also unavailable. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere. `GITHUB_TOKEN` continues to use its separate permission-scoped contract regardless of action input optionality.
+**🟡 Supported subset.** Direct jobs can use statically named `${{ secrets.NAME }}` references. The compiler records names only in job plans. At runtime, the destination job runs `buildkite-agent secret get NAME` with its existing authenticated Agent session and registers each value with both the Buildkite Agent redactor and the local workflow-command redactor before use. Missing or denied secrets fail the job without printing the value or Agent error output. Secret values do not appear in plans or generated pipeline YAML.
+
+These are Buildkite secrets available to the destination job, not GitHub repository, environment, event, or fork-scoped secrets. Buildkite Secret access policies are the authorization boundary. A workflow can access any named secret that its destination job's Buildkite identity and secret policy permit, just as arbitrary code in that job can run `buildkite-agent secret get`.
+
+`GITHUB_TOKEN` always uses the separate scoped workflow-token contract described above and cannot be replaced by an ordinary Buildkite secret. Dynamic names, secret use in conditions or other compile-time expressions, GitHub environments and environment secrets, `secrets: inherit`, and reusable-workflow secret forwarding are unsupported. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere.
 
 **❌ Unsupported.** GitHub-compatible OIDC and `id-token` are not implemented.
 

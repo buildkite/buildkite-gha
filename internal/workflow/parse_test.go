@@ -56,6 +56,13 @@ func TestParsePreservesEnvironmentVariableCase(t *testing.T) {
 	}
 }
 
+func TestParseRejectsGitHubEnvironment(t *testing.T) {
+	_, err := Parse("environment.yml", []byte("on: push\njobs:\n  deploy:\n    environment: production\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"))
+	if err == nil || !strings.Contains(err.Error(), "GitHub environments and environment secrets are unsupported") {
+		t.Fatalf("Parse() error = %v", err)
+	}
+}
+
 func TestParseOwnsExplicitWorkflowAndJobPermissions(t *testing.T) {
 	source := []byte(`on: push
 permissions:

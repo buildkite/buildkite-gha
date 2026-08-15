@@ -949,17 +949,74 @@ func TestCompiledBracketSecretResolvesAndMasks(t *testing.T) {
 	}
 }
 
-func TestEnvironmentSecretsCannotReadAmbientAgentVariables(t *testing.T) {
-	t.Setenv("BUILDKITE_AGENT_ACCESS_TOKEN", "ambient-token")
-	t.Setenv("BUILDKITE_GHA_SECRET_BUILDKITE_AGENT_ACCESS_TOKEN", "")
-	if _, err := (EnvironmentSecrets{}).ResolveSecret(context.Background(), "BUILDKITE_AGENT_ACCESS_TOKEN"); err != nil {
-		// The explicit namespace exists but is empty; this still proves the ambient
-		// variable was not selected.
-		return
+func TestAgentSecretsUsesOnlyJobBoundConfiguration(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), `#!/bin/sh
+test "$#" -eq 3 || exit 10
+test "$1" = secret && test "$2" = get && test "$3" = HOMEBREW_TAP_GITHUB_TOKEN || exit 11
+test "$BUILDKITE_JOB_ID" = job-id || exit 12
+test "$BUILDKITE_AGENT_ACCESS_TOKEN" = job-token || exit 13
+test "$BUILDKITE_AGENT_ENDPOINT" = https://agent.example/v3 || exit 14
+test "$BUILDKITE_AGENT_JOB_API_SOCKET" = /tmp/job-api.sock || exit 15
+test "$BUILDKITE_AGENT_JOB_API_TOKEN" = job-api-token || exit 16
+test "$BUILDKITE_NO_HTTP2" = true || exit 17
+test "$HTTP_PROXY" = http://upper-http.example:8080 || exit 18
+test "$HTTPS_PROXY" = http://upper-https.example:8080 || exit 19
+test "$ALL_PROXY" = socks5://upper-all.example:1080 || exit 20
+test "$NO_PROXY" = upper-no-proxy.example || exit 21
+test "$http_proxy" = http://lower-http.example:8080 || exit 22
+test "$https_proxy" = http://lower-https.example:8080 || exit 23
+test "$all_proxy" = socks5://lower-all.example:1080 || exit 24
+test "$no_proxy" = lower-no-proxy.example || exit 25
+test "$SSL_CERT_FILE" = /etc/buildkite/ca.pem || exit 26
+test "$SSL_CERT_DIR" = /etc/buildkite/certs || exit 27
+test -z "${AMBIENT_SECRET+x}" || exit 28
+printf '%s\n' tap-secret
+`)
+	if err := os.Chmod(agent, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	value, _ := (EnvironmentSecrets{}).ResolveSecret(context.Background(), "BUILDKITE_AGENT_ACCESS_TOKEN")
-	if value == "ambient-token" {
-		t.Fatal("EnvironmentSecrets exposed the ambient Buildkite Agent token")
+	t.Setenv("BUILDKITE_AGENT_JOB_API_SOCKET", "/tmp/job-api.sock")
+	t.Setenv("BUILDKITE_AGENT_JOB_API_TOKEN", "job-api-token")
+	t.Setenv("AMBIENT_SECRET", "must-not-be-inherited")
+	transportEnvironment := map[string]string{
+		"HTTP_PROXY": "http://upper-http.example:8080", "HTTPS_PROXY": "http://upper-https.example:8080",
+		"ALL_PROXY": "socks5://upper-all.example:1080", "NO_PROXY": "upper-no-proxy.example",
+		"http_proxy": "http://lower-http.example:8080", "https_proxy": "http://lower-https.example:8080",
+		"all_proxy": "socks5://lower-all.example:1080", "no_proxy": "lower-no-proxy.example",
+		"SSL_CERT_FILE": "/etc/buildkite/ca.pem", "SSL_CERT_DIR": "/etc/buildkite/certs",
+	}
+	for name, value := range transportEnvironment {
+		t.Setenv(name, value)
+	}
+	resolved, err := resolveAgentSecretsBeforeWorkflow(AgentSecrets{
+		Executable: agent,
+		Endpoint:   "https://agent.example/v3",
+		JobID:      "job-id",
+		JobToken:   "job-token",
+		NoHTTP2:    "true",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range transportEnvironment {
+		t.Setenv(name, "http://workflow-controlled.example")
+	}
+	value, err := resolved.ResolveSecret(context.Background(), "HOMEBREW_TAP_GITHUB_TOKEN")
+	if err != nil || value != "tap-secret" {
+		t.Fatalf("ResolveSecret() = %q, %v", value, err)
+	}
+}
+
+func TestAgentSecretsDoesNotReturnCommandOutputOnFailure(t *testing.T) {
+	agent := filepath.Join(t.TempDir(), "buildkite-agent")
+	writeFixtureFile(t, filepath.Dir(agent), filepath.Base(agent), "#!/bin/sh\nprintf 'stdout-secret'\nprintf 'stderr-secret' >&2\nexit 1\n")
+	if err := os.Chmod(agent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (AgentSecrets{Executable: agent}).ResolveSecret(context.Background(), "DENIED")
+	if err == nil || strings.Contains(err.Error(), "stdout-secret") || strings.Contains(err.Error(), "stderr-secret") || !strings.Contains(err.Error(), "secret request failed") {
+		t.Fatalf("ResolveSecret() error = %v", err)
 	}
 }
 
@@ -2164,6 +2221,19 @@ func TestRunJobRejectsRegisteredSecretInOutput(t *testing.T) {
 	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-publish"}, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "contains a registered secret") || strings.Contains(err.Error(), "do-not-publish") {
 		t.Fatalf("RunJob() error = %v, want non-disclosing secret-output rejection", err)
+	}
+}
+
+func TestRunJobScrubsSecretFromRedactorFailure(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{ID: "run", Kind: "run", Command: "true"}})
+	job.RequiredCapabilities = []string{"secrets"}
+	job.RequiredSecrets = []string{"CANARY"}
+	_, err := (Runner{Secrets: testSecretResolver{"CANARY": "do-not-leak"}, Redactor: failingTokenRedactor{token: "do-not-leak"}}).RunJob(context.Background(), job, workspace)
+	if err == nil || strings.Contains(err.Error(), "do-not-leak") || !strings.Contains(err.Error(), "***") {
+		t.Fatalf("RunJob() error = %v, want scrubbed redactor failure", err)
 	}
 }
 

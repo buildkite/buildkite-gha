@@ -852,6 +852,36 @@ jobs:
 	}
 }
 
+func TestCompileBundleKeepsReleaseTokensOnSeparateBoundaries(t *testing.T) {
+	source := []byte(`name: Release
+on: push
+permissions:
+  contents: write
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+    steps:
+      - run: goreleaser release
+`)
+	bundle, err := CompileBundle(".github/workflows/release.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := bundle.Plans[0].Job
+	if job.GitHubToken == nil || !reflect.DeepEqual(job.GitHubToken.Permissions, map[string]string{"contents": "write"}) {
+		t.Fatalf("GITHUB_TOKEN boundary = %#v", job.GitHubToken)
+	}
+	if !reflect.DeepEqual(job.RequiredSecrets, []string{"HOMEBREW_TAP_GITHUB_TOKEN"}) || !reflect.DeepEqual(job.RequiredCapabilities, []string{"provider-token-write", "secrets"}) {
+		t.Fatalf("ordinary secret boundary = names %#v capabilities %#v", job.RequiredSecrets, job.RequiredCapabilities)
+	}
+	if bytes.Contains(bundle.Pipeline, []byte("GITHUB_TOKEN")) || bytes.Contains(bundle.Pipeline, []byte("HOMEBREW_TAP_GITHUB_TOKEN")) {
+		t.Fatalf("generated pipeline contains secret names:\n%s", bundle.Pipeline)
+	}
+}
+
 func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) {
 	source := []byte("on: push\njobs:\n  token:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo '${{ secrets.GITHUB_TOKEN }}'\n")
 	bundle, err := CompileBundle(".github/workflows/workflow.yml", source, readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")

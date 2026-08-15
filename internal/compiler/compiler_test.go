@@ -1568,7 +1568,7 @@ jobs:
 	}
 }
 
-func TestCompileFlattensInheritedReusableWorkflowSecrets(t *testing.T) {
+func TestCompileRejectsInheritedReusableWorkflowSecrets(t *testing.T) {
 	repository := t.TempDir()
 	path := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1585,12 +1585,9 @@ jobs:
         env:
           OPTIONAL_TOKEN: ${{ secrets.OPTIONAL_TOKEN }}
 `)
-	plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredSecrets, []string{"OPTIONAL_TOKEN"}) || !plans[0].HasCapability("secrets") {
-		t.Fatalf("inherited reusable secrets = plans %#v", plans)
+	_, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
+	if err == nil || !strings.Contains(err.Error(), "secrets: inherit is unsupported") {
+		t.Fatalf("Compile() error = %v", err)
 	}
 }
 
@@ -1616,53 +1613,6 @@ jobs:
 	}
 	if len(plans) != 1 || len(plans[0].RequiredSecrets) != 0 || plans[0].HasCapability("secrets") {
 		t.Fatalf("uninherited reusable secrets = plans %#v", plans)
-	}
-}
-
-func TestCompileRequiresSecretInheritanceAcrossEveryReusableEdge(t *testing.T) {
-	for _, test := range []struct {
-		name          string
-		rootInherit   bool
-		middleInherit bool
-		wantSecret    bool
-	}{
-		{name: "neither edge"},
-		{name: "root edge only", rootInherit: true},
-		{name: "middle edge only", middleInherit: true},
-		{name: "both edges", rootInherit: true, middleInherit: true, wantSecret: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			repository := t.TempDir()
-			rootSecrets := ""
-			if test.rootInherit {
-				rootSecrets = "    secrets: inherit\n"
-			}
-			middleSecrets := ""
-			if test.middleInherit {
-				middleSecrets = "    secrets: inherit\n"
-			}
-			path := writeWorkflow(t, repository, "caller.yml", "on: push\njobs:\n  call:\n    uses: ./.github/workflows/middle.yml\n"+rootSecrets)
-			writeWorkflow(t, repository, "middle.yml", "on: workflow_call\njobs:\n  call:\n    uses: ./.github/workflows/leaf.yml\n"+middleSecrets)
-			writeWorkflow(t, repository, "leaf.yml", `on: workflow_call
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "${{ secrets.NESTED_TOKEN }}"
-`)
-
-			plans, err := compileUntrustedPlans(path, readFile(t, path), readFile(t, smokePath("events", "push.json")), "0.1.0", "sha256:"+strings.Repeat("a", 64), "gha-untrusted")
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := []string{}
-			if test.wantSecret {
-				want = []string{"NESTED_TOKEN"}
-			}
-			if len(plans) != 1 || !reflect.DeepEqual(plans[0].RequiredSecrets, want) || plans[0].HasCapability("secrets") != test.wantSecret {
-				t.Fatalf("nested reusable secrets = plans %#v, want %v", plans, want)
-			}
-		})
 	}
 }
 
@@ -1884,7 +1834,7 @@ jobs:
 `)
 	writeWorkflow(t, repository, "reusable.yml", "on: workflow_call\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
 	_, err := Compile(path, readFile(t, path), readFile(t, smokePath("events", "push.json")))
-	if err == nil || !strings.Contains(err.Error(), "reusable-workflow secrets are runtime-dependent and unsupported") {
+	if err == nil || !strings.Contains(err.Error(), "reusable-workflow secret forwarding is unsupported") {
 		t.Fatalf("Compile() error = %v, want explicit secret mapping rejection", err)
 	}
 }
