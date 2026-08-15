@@ -536,7 +536,9 @@ func githubGlob(glob string, pathPattern bool) (string, error) {
 				i++
 				if pathPattern && i+1 < len(runes) && runes[i+1] == '/' {
 					i++
-					atoms = append(atoms, atom{value: `(.*\/)?`})
+					atoms = append(atoms, atom{value: `((?s:.*)\/)?`})
+				} else if pathPattern {
+					atoms = append(atoms, atom{value: `(?s:.*)`})
 				} else {
 					atoms = append(atoms, atom{value: ".*"})
 				}

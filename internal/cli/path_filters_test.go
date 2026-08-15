@@ -84,6 +84,13 @@ func TestParseChangedPathsFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBoundedCommandOutput(t *testing.T) {
+	command := exec.Command("printf", "123456")
+	if output, err := boundedCommandOutput(command, 5); err == nil || output != nil || !strings.Contains(err.Error(), "exceeds 5 bytes") {
+		t.Fatalf("bounded output = %q, %v", output, err)
+	}
+}
+
 func TestPopulateChangedPathsRequiresLinkedWebhook(t *testing.T) {
 	context := buildkitepipeline.TriggerConditionContext{}
 	populateChangedPaths(&context, compiler.Event{Event: "pull_request"}, effectiveEventFromPath, []workflowInput{{

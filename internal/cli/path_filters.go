@@ -14,7 +14,10 @@ import (
 	"github.com/buildkite/buildkite-gha/internal/compiler"
 )
 
-const maxGitHubPathFilterFiles = 300
+const (
+	maxGitHubPathFilterFiles = 300
+	maxGitChangedPathBytes   = 2 << 20
+)
 
 func populateChangedPaths(context *buildkitepipeline.TriggerConditionContext, event compiler.Event, origin effectiveEventOrigin, workflows []workflowInput) {
 	if event.Event != "pull_request" || !workflowsUsePathFilters(workflows, event.Event) {
@@ -101,7 +104,7 @@ func pullRequestChangedPaths(event compiler.Event, pullRequestNumber int, baseRe
 	if !validBuildkiteCommit(mergeBase) {
 		return nil, fmt.Errorf("git returned an invalid pull request merge base")
 	}
-	output, err := gitCommand(root, "diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv", mergeBase, headSHA).Output()
+	output, err := boundedCommandOutput(gitCommand(root, "diff", "--name-status", "-z", "--find-renames", "-l0", "--no-ext-diff", "--no-textconv", mergeBase, headSHA), maxGitChangedPathBytes)
 	if err != nil {
 		return nil, fmt.Errorf("list pull request changed paths: %w", err)
 	}
@@ -112,6 +115,37 @@ func gitCommand(root string, args ...string) *exec.Cmd {
 	command := exec.Command("git", append([]string{"-C", root}, args...)...)
 	command.Env = append(os.Environ(), "GIT_NO_REPLACE_OBJECTS=1")
 	return command
+}
+
+func boundedCommandOutput(command *exec.Cmd, limit int) ([]byte, error) {
+	output := &boundedOutput{remaining: limit}
+	command.Stdout = output
+	err := command.Run()
+	if output.exceeded {
+		return nil, fmt.Errorf("command output exceeds %d bytes", limit)
+	}
+	return output.Bytes(), err
+}
+
+type boundedOutput struct {
+	buffer    bytes.Buffer
+	remaining int
+	exceeded  bool
+}
+
+func (b *boundedOutput) Write(value []byte) (int, error) {
+	if len(value) > b.remaining {
+		_, _ = b.buffer.Write(value[:b.remaining])
+		b.remaining = 0
+		b.exceeded = true
+		return len(value), nil
+	}
+	b.remaining -= len(value)
+	return b.buffer.Write(value)
+}
+
+func (b *boundedOutput) Bytes() []byte {
+	return b.buffer.Bytes()
 }
 
 func nestedString(value map[string]any, keys ...string) string {
