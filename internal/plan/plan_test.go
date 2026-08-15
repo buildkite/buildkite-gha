@@ -677,6 +677,15 @@ func TestContainerContract(t *testing.T) {
 	validateJobPlanSchema(t, encoded)
 }
 
+func TestJobContainerRejectsServiceCredentials(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{Image: "node:24", Credentials: &ContainerCredentials{Username: "user", Password: "password"}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "service-only fields") {
+		t.Fatalf("Validate() error = %v, want service-only fields", err)
+	}
+}
+
 func TestPrerequisiteOutputProjectionContract(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("4", 64)
 	job := validJob()
@@ -907,6 +916,7 @@ func TestContainerImageGrammarMatchesSchema(t *testing.T) {
 		{"localhost:0/private/service", false},
 		{"localhost:65536/private/service", false},
 		{"LOCALHOST:5000/private/service", false},
+		{"${{ needs.build.outputs.image }}", false},
 	} {
 		t.Run(test.image, func(t *testing.T) {
 			job := validJob()

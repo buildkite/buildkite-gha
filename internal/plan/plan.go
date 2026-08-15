@@ -446,7 +446,7 @@ func (job Job) Validate() error {
 			return fmt.Errorf("job containers and services require network capability")
 		}
 		if job.Container != nil {
-			if len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
+			if job.Container.Credentials != nil || len(job.Container.Volumes) != 0 || job.Container.Options != "" || job.Container.Command != "" || job.Container.Entrypoint != "" {
 				return fmt.Errorf("job container contains service-only fields")
 			}
 			if err := validateContainer(job.Container.Image, job.Container.Env, job.Container.Ports); err != nil {
@@ -811,6 +811,9 @@ func compareNeedOutput(left, right NeedOutput) int {
 }
 
 func validateContainer(image string, env map[string]string, ports []string) error {
+	if !ValidContainerImageReference(image) {
+		return fmt.Errorf("invalid image reference")
+	}
 	if err := validateContainerImageEnv(image, env); err != nil {
 		return err
 	}
