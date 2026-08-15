@@ -54,8 +54,20 @@ func validateSecretsPolicy(contents string) (string, error) {
 	if strings.Contains(policy, "${{") {
 		return "", errors.New("policy must not contain GitHub expression syntax")
 	}
+	var document yaml.Node
+	if err := yaml.Unmarshal([]byte(policy), &document); err != nil {
+		return "", fmt.Errorf("parse policy YAML: %w", err)
+	}
+	for pending := []*yaml.Node{&document}; len(pending) > 0; {
+		node := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if node.Kind == yaml.AliasNode {
+			return "", errors.New("policy must not contain YAML aliases")
+		}
+		pending = append(pending, node.Content...)
+	}
 	var rules []map[string]any
-	if err := yaml.Unmarshal([]byte(policy), &rules); err != nil {
+	if err := document.Decode(&rules); err != nil {
 		return "", fmt.Errorf("parse policy YAML: %w", err)
 	}
 	if len(rules) == 0 {
