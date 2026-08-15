@@ -286,6 +286,7 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 		{name: "or returns selected operand", template: "${{ '' || 'fallback' }}", want: "fallback"},
 		{name: "truthy short circuit", template: "${{ 'fallback' || github.missing }}", want: "fallback"},
 		{name: "falsy short circuit", template: "${{ false && github.missing || 'fallback' }}", want: "fallback"},
+		{name: "missing member is null", template: "${{ matrix.missing == null && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{}}, want: "yes"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := EvaluateActionInputDefault(test.template, test.context)
@@ -746,6 +747,9 @@ func TestEvaluateConditionMatchesGitHubCoercionAndOrdering(t *testing.T) {
 		{condition: "'12' > 2", want: true},
 		{condition: "'Beta' > 'alpha'", want: true},
 		{condition: "'not-a-number' > 0", want: false},
+		{condition: "matrix.left == matrix.right", context: ConditionContext{Matrix: map[string]any{"left": json.Number("9007199254740992"), "right": json.Number("9007199254740993")}}, want: true},
+		{condition: "'1e-400' == 0", want: true},
+		{condition: "'1e309' == matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.Inf(1)}}, want: true},
 		{condition: "matrix.value", context: ConditionContext{Matrix: map[string]any{"value": math.NaN()}}, want: false},
 		{condition: "matrix.missing == null", context: ConditionContext{Matrix: map[string]any{}}, want: true},
 	}
@@ -983,6 +987,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		want       string
 	}{
 		{expression: "${{ secrets.TOKEN }}", want: `unsupported compile-time context "secrets"`},
+		{expression: "${{ github.token }}", want: `unavailable value "github.token"`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
 		{expression: "${{ startsWith(github.ref) }}", want: `unsupported compile-time function "startsWith"`},
 		{expression: "${{ contains(github.ref) }}", want: `unsupported compile-time function "contains"`},
@@ -997,7 +1002,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = EvaluateCompile(expr, CompileContext{Vars: map[string]string{"BAD": "["}, Event: map[string]any{"ref": "one", "REF": "two"}})
+			_, err = EvaluateCompile(expr, CompileContext{GitHub: map[string]any{"ref": "refs/heads/main"}, Vars: map[string]string{"BAD": "["}, Event: map[string]any{"ref": "one", "REF": "two"}})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("EvaluateCompile() error = %v, want %q", err, test.want)
 			}

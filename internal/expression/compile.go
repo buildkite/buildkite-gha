@@ -313,6 +313,9 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 }
 
 func resolveCompileReference(root string, path []string, context CompileContext) (any, error) {
+	if strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "token") {
+		return nil, fmt.Errorf("compile-time expression references unavailable value %q", root+"."+strings.Join(path, "."))
+	}
 	var (
 		current   any
 		available bool
@@ -329,6 +332,8 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 	default:
 		return nil, fmt.Errorf("unsupported compile-time context %q", root)
 	}
+	legalMissing := strings.EqualFold(root, "event") || strings.EqualFold(root, "vars") || strings.EqualFold(root, "matrix") ||
+		strings.EqualFold(root, "github") && len(path) != 0 && strings.EqualFold(path[0], "event")
 	missing := false
 	for _, part := range path {
 		if missing {
@@ -343,7 +348,7 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 			return nil, err
 		}
 		if !ok {
-			if available {
+			if available && legalMissing {
 				current = nil
 				missing = true
 				continue

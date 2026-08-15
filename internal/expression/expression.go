@@ -149,9 +149,11 @@ func githubEqual(left, right any) bool {
 	if left == nil && right == nil {
 		return true
 	}
-	if leftNumber, leftOK := conditionNumber(left); leftOK {
-		if rightNumber, rightOK := conditionNumber(right); rightOK {
-			return leftNumber.Cmp(rightNumber) == 0
+	if _, leftOK := conditionNumber(left); leftOK {
+		if _, rightOK := conditionNumber(right); rightOK {
+			leftNumber, _ := githubNumber(left)
+			rightNumber, _ := githubNumber(right)
+			return !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber
 		}
 	}
 	switch left := left.(type) {
@@ -167,13 +169,15 @@ func githubEqual(left, right any) bool {
 	if left != nil && right != nil && reflect.TypeOf(left) == reflect.TypeOf(right) {
 		leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
 		switch leftValue.Kind() {
-		case reflect.Map, reflect.Pointer, reflect.Slice:
+		case reflect.Map:
+			return leftValue.UnsafePointer() == rightValue.UnsafePointer()
+		case reflect.Pointer, reflect.Slice:
 			return leftValue.Pointer() == rightValue.Pointer()
 		}
 	}
 	leftNumber, leftOK := githubNumber(left)
 	rightNumber, rightOK := githubNumber(right)
-	return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+	return leftOK && rightOK && !math.IsNaN(leftNumber) && !math.IsNaN(rightNumber) && leftNumber == rightNumber
 }
 
 func githubOrderedCompare(left, right any) (int, bool) {
@@ -187,7 +191,16 @@ func githubOrderedCompare(left, right any) (int, bool) {
 	if !leftOK || !rightOK {
 		return 0, false
 	}
-	return leftNumber.Cmp(rightNumber), true
+	switch {
+	case math.IsNaN(leftNumber) || math.IsNaN(rightNumber):
+		return 0, false
+	case leftNumber < rightNumber:
+		return -1, true
+	case leftNumber > rightNumber:
+		return 1, true
+	default:
+		return 0, true
+	}
 }
 
 func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, error) {
@@ -215,30 +228,44 @@ func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, er
 	}
 }
 
-func githubNumber(value any) (*big.Rat, bool) {
+func githubNumber(value any) (float64, bool) {
 	switch value := value.(type) {
 	case nil:
-		return new(big.Rat), true
+		return 0, true
 	case bool:
 		if value {
-			return big.NewRat(1, 1), true
+			return 1, true
 		}
-		return new(big.Rat), true
+		return 0, true
+	case json.Number:
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		return parsed, err == nil || math.IsInf(parsed, 0)
 	case string:
 		if strings.TrimSpace(value) == "" {
-			return new(big.Rat), true
+			return 0, true
 		}
 		decoded, err := decodeJSONValue(value)
 		if err != nil {
-			return nil, false
+			return math.NaN(), true
 		}
 		number, ok := decoded.(json.Number)
 		if !ok {
-			return nil, false
+			return math.NaN(), true
 		}
-		return conditionNumber(number)
+		parsed, err := strconv.ParseFloat(number.String(), 64)
+		return parsed, err == nil || math.IsInf(parsed, 0)
 	default:
-		return conditionNumber(value)
+		reflected := reflect.ValueOf(value)
+		switch reflected.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return float64(reflected.Int()), true
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return float64(reflected.Uint()), true
+		case reflect.Float32, reflect.Float64:
+			return reflected.Float(), true
+		default:
+			return math.NaN(), false
+		}
 	}
 }
 

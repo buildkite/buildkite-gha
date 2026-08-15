@@ -130,7 +130,7 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 			}
 			return context.JobStatus, nil
 		}
-		return resolveRuntimeReference(root, path, context)
+		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
 	}
 	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {

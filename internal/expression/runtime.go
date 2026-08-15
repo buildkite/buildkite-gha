@@ -194,6 +194,14 @@ func runtimeString(value any) string {
 }
 
 func resolveRuntimeReference(root string, path []string, context Context) (any, error) {
+	return resolveRuntimeReferenceValue(root, path, context, false)
+}
+
+func resolveRuntimeReferenceWithMissingMembers(root string, path []string, context Context) (any, error) {
+	return resolveRuntimeReferenceValue(root, path, context, true)
+}
+
+func resolveRuntimeReferenceValue(root string, path []string, context Context, allowMissing bool) (any, error) {
 	switch classifyRuntimeReference(root, path) {
 	case runtimeReferenceRunner:
 		if value, ok := findStringValue(context.Runner, path[0]); ok {
@@ -205,7 +213,7 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 	case runtimeReferenceGitHub:
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
-			if context.GitHub == nil || strings.EqualFold(path[0], "token") {
+			if !allowMissing || context.GitHub == nil || strings.EqualFold(path[0], "token") {
 				return "", fmt.Errorf("expression references unavailable github value %q", strings.Join(path, "."))
 			}
 			return nil, nil
@@ -219,7 +227,7 @@ func resolveRuntimeReference(root string, path []string, context Context) (any, 
 				return value, nil
 			}
 		}
-		if context.Matrix == nil {
+		if !allowMissing || context.Matrix == nil {
 			return "", fmt.Errorf("expression references unavailable matrix value %q", path[0])
 		}
 		return nil, nil
