@@ -7,6 +7,9 @@ permissions:
   contents: read
 
 jobs:
+  service-parity:
+    uses: ./.github/workflows/service-container-oracle.yml
+
   docker-action:
     runs-on: ubuntu-latest
     steps:
