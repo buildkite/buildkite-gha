@@ -7,6 +7,7 @@ permissions:
   contents: read
 
 env:
+  ACTIONS_STEP_DEBUG: true
   CACHE_ROUNDTRIP_KEY: cache-v2-compatibility-__CACHE_ROUNDTRIP_NONCE__
   CACHE_ROUNDTRIP_PAYLOAD: cache-v2-compatibility:__CACHE_ROUNDTRIP_NONCE__
   CACHE_ROUNDTRIP_NONCE: __CACHE_ROUNDTRIP_NONCE__
