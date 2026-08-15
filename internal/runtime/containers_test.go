@@ -1093,6 +1093,7 @@ func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
 		name, value, want string
 	}{
 		{name: "array", value: `[]`, want: "want an object"},
+		{name: "null service", value: `{"db":null}`, want: "want an object"},
 		{name: "unknown field", value: `{"db":{"image":"postgres:16","privileged":true}}`, want: "unknown field"},
 		{name: "uppercase field", value: `{"db":{"Image":"postgres:16"}}`, want: "unknown field"},
 		{name: "null environment", value: `{"db":{"image":"postgres:16","env":null}}`, want: "want an object"},

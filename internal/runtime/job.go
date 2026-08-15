@@ -945,7 +945,7 @@ func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, 
 func normalizeServiceScalars(raw any) error {
 	service, ok := raw.(map[string]any)
 	if !ok {
-		return nil
+		return fmt.Errorf("got %T, want an object", raw)
 	}
 	for field := range service {
 		switch field {
