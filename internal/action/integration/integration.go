@@ -204,6 +204,11 @@ func ValidateCheckoutCommit(commit string) error {
 	return nil
 }
 
+// IsCheckoutV3 reports whether commit uses the audited v3.7.0 contract.
+func IsCheckoutV3(commit string) bool {
+	return commit == CheckoutV3Commit
+}
+
 func sortedCheckoutCommits() []string {
 	commits := make([]string, 0, len(checkoutCommits))
 	for commit, version := range checkoutCommits {
@@ -628,6 +633,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 	}
 	sort.Strings(names)
 	seen := make(map[string]bool, len(names))
+	v3 := IsCheckoutV3(commit)
 	for _, name := range names {
 		value := inputs[name]
 		normalized := strings.ToLower(name)
@@ -641,7 +647,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "ref":
-			if value == "" || validCheckoutSHA(value) || validCheckoutBranch(value) {
+			if value == "" || ValidCheckoutSHA(value) || validCheckoutBranch(value) {
 				continue
 			}
 		case "persist-credentials":
@@ -670,7 +676,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "show-progress":
-			if commit != CheckoutV3Commit && uploadArtifactBoolean(value) {
+			if !v3 && uploadArtifactBoolean(value) {
 				continue
 			}
 		case "path":
@@ -682,7 +688,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "filter":
-			if commit != CheckoutV3Commit && value == "" {
+			if !v3 && value == "" {
 				continue
 			}
 		case "ssh-strict", "sparse-checkout-cone-mode":
@@ -690,7 +696,7 @@ func ValidateCheckoutInputs(commit string, inputs map[string]string, repository,
 				continue
 			}
 		case "ssh-user":
-			if commit != CheckoutV3Commit && value == "git" {
+			if !v3 && value == "git" {
 				continue
 			}
 		case "github-server-url":
@@ -734,7 +740,8 @@ func validCheckoutBranch(value string) bool {
 	return true
 }
 
-func validCheckoutSHA(value string) bool {
+// ValidCheckoutSHA reports whether value is a lowercase 40-hex Git commit ID.
+func ValidCheckoutSHA(value string) bool {
 	if len(value) != 40 {
 		return false
 	}

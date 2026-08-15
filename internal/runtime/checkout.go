@@ -15,7 +15,6 @@ import (
 )
 
 var checkoutRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
-var checkoutSHAPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var agentProxyEnvironmentNames = [...]string{
 	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -74,7 +73,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	const adapter = "checkout adapter"
 	credentialed := job.HasCapability("provider-token-read") && r.RepositoryCredentials != nil
 	url, credentialHost, validProvider := checkoutRepositoryURL(job.Event.Provider, job.Event.Repository)
-	if !validProvider || !checkoutSHAPattern.MatchString(job.Event.SHA) {
+	if !validProvider || !actionintegration.ValidCheckoutSHA(job.Event.SHA) {
 		return result, fmt.Errorf("%s requires a valid GitHub or Origin event repository and exact SHA; other event sources are unsupported", adapter)
 	}
 	if err := actionintegration.ValidateCheckoutInputs(commit, inputs, job.Event.Repository, job.Event.SHA); err != nil {
@@ -137,7 +136,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 	}
 	head, err := os.ReadFile(filepath.Join(checkoutDirectory, ".git", "HEAD"))
 	headSHA := strings.TrimSpace(string(head))
-	if err != nil || !checkoutSHAPattern.MatchString(headSHA) || checkoutSHAPattern.MatchString(checkoutTarget) && headSHA != checkoutTarget {
+	if err != nil || !actionintegration.ValidCheckoutSHA(headSHA) || actionintegration.ValidCheckoutSHA(checkoutTarget) && headSHA != checkoutTarget {
 		return result, fmt.Errorf("%s did not produce the requested detached revision", adapter)
 	}
 	setCheckoutOutputs(result.Outputs, commit, checkoutRefOutput(inputs, job.Event.Ref), headSHA)
@@ -146,7 +145,7 @@ func (r Runner) runCheckout(ctx context.Context, processor *commandProcessor, wo
 
 func setCheckoutOutputs(outputs map[string]string, commit, ref, headSHA string) {
 	// Checkout outputs were added in v4.2.0 and aren't part of the v3 contract.
-	if commit == actionintegration.CheckoutV3Commit {
+	if actionintegration.IsCheckoutV3(commit) {
 		return
 	}
 	outputs["ref"] = ref
@@ -311,7 +310,7 @@ func checkoutRefOutput(inputs map[string]string, eventRef string) string {
 	if ref == "" {
 		return eventRef
 	}
-	if checkoutSHAPattern.MatchString(ref) {
+	if actionintegration.ValidCheckoutSHA(ref) {
 		return ""
 	}
 	return ref
@@ -341,11 +340,13 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 			"+refs/heads/*:refs/remotes/origin/*",
 			"+refs/tags/*:refs/tags/*",
 		)
-		ref := checkoutInput(inputs, "ref")
-		if ref == "" || ref == sha {
-			args = append(args, "+"+sha+":refs/buildkite-gha/event")
-		} else if checkoutSHAPattern.MatchString(ref) {
-			args = append(args, "+"+ref+":refs/buildkite-gha/selected")
+		revision, branch := checkoutSelectedRevision(inputs, sha)
+		if !branch {
+			namespace := "selected"
+			if revision == sha {
+				namespace = "event"
+			}
+			args = append(args, "+"+revision+":refs/buildkite-gha/"+namespace)
 		}
 		return args
 	}
@@ -357,26 +358,30 @@ func checkoutFetchArgs(inputs map[string]string, sha string) []string {
 }
 
 func checkoutFetchRevision(inputs map[string]string, sha string) string {
-	ref := checkoutInput(inputs, "ref")
-	if ref == "" || ref == sha {
-		return sha
+	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if !branch {
+		return revision
 	}
-	if checkoutSHAPattern.MatchString(ref) {
-		return ref
-	}
-	branch := strings.TrimPrefix(ref, "refs/heads/")
-	return "+refs/heads/" + branch + ":refs/remotes/origin/" + branch
+	return "+refs/heads/" + revision + ":refs/remotes/origin/" + revision
 }
 
 func checkoutRevision(inputs map[string]string, sha string) string {
+	revision, branch := checkoutSelectedRevision(inputs, sha)
+	if !branch {
+		return revision
+	}
+	return "refs/remotes/origin/" + revision
+}
+
+func checkoutSelectedRevision(inputs map[string]string, sha string) (revision string, branch bool) {
 	ref := checkoutInput(inputs, "ref")
 	if ref == "" || ref == sha {
-		return sha
+		return sha, false
 	}
-	if checkoutSHAPattern.MatchString(ref) {
-		return ref
+	if actionintegration.ValidCheckoutSHA(ref) {
+		return ref, false
 	}
-	return "refs/remotes/origin/" + strings.TrimPrefix(ref, "refs/heads/")
+	return strings.TrimPrefix(ref, "refs/heads/"), true
 }
 
 func checkoutInput(inputs map[string]string, wanted string) string {
