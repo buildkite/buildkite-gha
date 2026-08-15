@@ -580,11 +580,15 @@ instances:
 				job.Services = make(map[string]plan.Container, len(instance.Services))
 			}
 			for _, service := range instance.Services {
-				job.Services[service.Name] = plan.Container{
+				container := plan.Container{
 					Image: service.Container.Image, Env: cloneMap(service.Container.Env), Ports: append([]string(nil), service.Container.Ports...),
 					Volumes: append([]string(nil), service.Container.Volumes...), Options: service.Container.Options,
 					Command: service.Container.Command, Entrypoint: service.Container.Entrypoint,
 				}
+				if service.Container.Credentials != nil {
+					container.Credentials = &plan.ContainerCredentials{Username: service.Container.Credentials.Username, Password: service.Container.Credentials.Password}
+				}
+				job.Services[service.Name] = container
 			}
 			if err := job.Validate(); err != nil {
 				return fmt.Errorf("build plan for job %q: %w", instance.LogicalJobID, err)
@@ -661,6 +665,17 @@ func requiredSecrets(instance JobInstance, actionRequired []string, actionInputs
 					return nil, err
 				}
 			}
+		}
+	}
+	for _, service := range instance.Services {
+		if service.Container.Credentials == nil {
+			continue
+		}
+		if err := collect(service.Container.Credentials.Username); err != nil {
+			return nil, err
+		}
+		if err := collect(service.Container.Credentials.Password); err != nil {
+			return nil, err
 		}
 	}
 	for _, name := range actionRequired {
@@ -1218,6 +1233,17 @@ func resolveCompileServices(services []workflow.Service, context expression.Comp
 		container.Env = cloneMap(container.Env)
 		container.Ports = append([]string(nil), container.Ports...)
 		container.Volumes = append([]string(nil), container.Volumes...)
+		if container.Credentials != nil {
+			credentials := *container.Credentials
+			container.Credentials = &credentials
+			for _, field := range []*string{&container.Credentials.Username, &container.Credentials.Password} {
+				value, err := expression.EvaluateAvailableCompileTemplate(*field, context)
+				if err != nil {
+					return nil, fmt.Errorf("service %q credentials: %w", service.Name, err)
+				}
+				*field = value
+			}
+		}
 		fields := []*string{&container.Image, &container.Options, &container.Command, &container.Entrypoint}
 		for _, field := range fields {
 			value, err := expression.EvaluateAvailableCompileTemplate(*field, context)

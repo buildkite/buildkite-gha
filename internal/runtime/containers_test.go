@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -64,10 +65,19 @@ func newJobDocker(t *testing.T, scenario string) fakeJobDocker {
 
 func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.root, "calls"))
+	file, err := os.Open(filepath.Join(f.root, "calls"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := testFileLock(file, true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(file)
+	_ = testFileLock(file, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +189,16 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(46)
 	case "pull":
+		os.Exit(0)
+	case "login":
+		password, _ := io.ReadAll(os.Stdin)
+		status := "bad"
+		if string(password) == "registry-password\n" {
+			status = "ok"
+		}
+		_ = os.WriteFile(filepath.Join(root, "login-stdin"), []byte(status), 0o600)
+		os.Exit(0)
+	case "logout":
 		os.Exit(0)
 	case "network-create":
 		_ = os.WriteFile(network, nil, 0o600)
@@ -775,6 +795,98 @@ func TestRunServiceContainerCompleteArguments(t *testing.T) {
 		return
 	}
 	t.Fatal("service create call not found")
+}
+
+func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
+	f := newJobDocker(t, "")
+	service := plan.Container{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.cleanup() })
+	calls := f.calls(t)
+	login := jobDockerCallIndex(calls, "login", "registry.example.test", "--username", "registry-user", "--password-stdin")
+	pull := jobDockerCallIndex(calls, "pull", service.Image)
+	if login < 0 || pull < login {
+		t.Fatalf("login/pull order = %#v", calls)
+	}
+	for _, call := range calls {
+		if slices.Contains(call.Args, "registry-password") {
+			t.Fatalf("password appeared in Docker argv: %#v", call.Args)
+		}
+	}
+	status, err := os.ReadFile(filepath.Join(f.root, "login-stdin"))
+	if err != nil || string(status) != "ok" {
+		t.Fatalf("password stdin status = %q, %v", status, err)
+	}
+}
+
+func TestDockerRegistryMatchesRunnerInference(t *testing.T) {
+	for image, want := range map[string]string{
+		"alpine":                       "",
+		"library/alpine":               "",
+		"localhost/alpine":             "",
+		"localhost:5000/alpine":        "localhost:5000",
+		"registry.example/team/alpine": "registry.example",
+		"host/team/alpine":             "host",
+	} {
+		if got := dockerRegistry(image); got != want {
+			t.Errorf("dockerRegistry(%q) = %q, want %q", image, got, want)
+		}
+	}
+}
+
+func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
+	f := newJobDocker(t, "")
+	image := "registry.example/team/postgres:16"
+	services := map[string]plan.Container{
+		"a": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-a", Password: "password-a"}},
+		"b": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-b", Password: "password-b"}},
+	}
+	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{Image: image}, services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.cleanup() })
+	logins, pulls := 0, 0
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "login" {
+			logins++
+		}
+		if slices.Equal(call.Args, []string{"pull", image}) {
+			pulls++
+		}
+	}
+	if logins != 2 || pulls != 3 {
+		t.Fatalf("logins = %d, pulls = %d, calls = %#v", logins, pulls, f.calls(t))
+	}
+}
+
+func TestRunServiceContainerPartialRegistryCredentialsDoNotLogin(t *testing.T) {
+	for _, credentials := range []*plan.ContainerCredentials{{Username: "registry-user"}, {Password: "registry-password"}} {
+		f := newJobDocker(t, "")
+		b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "registry.example.test/postgres:16", Credentials: credentials}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		if jobDockerCallIndex(f.calls(t), "login") >= 0 {
+			t.Fatalf("partial credentials triggered login: %#v", f.calls(t))
+		}
+	}
+}
+
+func TestRemoveDockerConfigReportsCleanupFailure(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDockerConfig(filepath.Join(parent, "config")); err == nil || !strings.Contains(err.Error(), "private Docker configuration") {
+		t.Fatalf("removeDockerConfig() error = %v", err)
+	}
 }
 
 func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {

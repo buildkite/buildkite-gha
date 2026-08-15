@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -156,23 +157,39 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 		b.existingVolumes = lineSet(volumes)
 	}
 	if spec.Image != "" {
-		if err = r.runStreaming(ctx, newCommandProcessor(r.stdout(), r.stderr()), "", env, docker, "pull", spec.Image); err != nil {
+		if err = r.pullContainerImage(ctx, processor, env, docker, spec.Image); err != nil {
 			return nil, fmt.Errorf("pull job container image: %w", err)
 		}
 	}
-	pulled := map[string]bool{}
-	if spec.Image != "" {
-		pulled[spec.Image] = true
-	}
+	activeCredential := map[string][sha256.Size]byte{}
 	for _, serviceID := range sortedKeys(services) {
-		image := services[serviceID].Image
-		if pulled[image] {
-			continue
+		service := services[serviceID]
+		image := service.Image
+		if service.Credentials != nil && service.Credentials.Username != "" && service.Credentials.Password != "" {
+			registry := dockerRegistry(image)
+			digest := sha256.Sum256([]byte(service.Credentials.Username + "\x00" + service.Credentials.Password))
+			if activeCredential[registry] != digest {
+				if err = dockerLogin(ctx, env, docker, registry, service.Credentials.Username, service.Credentials.Password); err != nil {
+					return nil, fmt.Errorf("authenticate service %q registry %q: %w", serviceID, registry, err)
+				}
+				activeCredential[registry] = digest
+			}
+		} else {
+			registry := dockerRegistry(image)
+			if _, ok := activeCredential[registry]; ok {
+				args := []string{"logout"}
+				if registry != "" {
+					args = append(args, registry)
+				}
+				if _, err = boundedDockerOutput(ctx, env, docker, args...); err != nil {
+					return nil, fmt.Errorf("clear service %q registry authentication: %w", serviceID, err)
+				}
+				delete(activeCredential, registry)
+			}
 		}
-		if err = r.runStreaming(ctx, processor, "", env, docker, "pull", image); err != nil {
+		if err = r.pullContainerImage(ctx, processor, env, docker, image); err != nil {
 			return nil, fmt.Errorf("pull service %q image: %w", serviceID, err)
 		}
-		pulled[image] = true
 	}
 	if _, err = boundedDockerOutput(ctx, env, docker, "network", "create", "--label", "com.buildkite.gha=true", "--label", b.owner, b.network); err != nil {
 		return nil, fmt.Errorf("create job container network: %w", err)
@@ -293,6 +310,55 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 	}
 	ok = true
 	return b, nil
+}
+
+func dockerRegistry(image string) string {
+	parts := strings.Split(image, "/")
+	if len(parts) >= 3 || len(parts) == 2 && strings.ContainsAny(parts[0], ".:") {
+		return parts[0]
+	}
+	return ""
+}
+
+func dockerLogin(ctx context.Context, env map[string]string, docker, registry, username, password string) error {
+	args := []string{"login"}
+	if registry != "" {
+		args = append(args, registry)
+	}
+	args = append(args, "--username", username, "--password-stdin")
+	cmd := exec.CommandContext(ctx, docker, args...)
+	cmd.Env = processEnv(env)
+	cmd.Stdin = strings.NewReader(password + "\n")
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("docker login failed")
+	}
+	return nil
+}
+
+func (r Runner) pullContainerImage(ctx context.Context, processor *commandProcessor, env map[string]string, docker, image string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = r.runStreaming(ctx, processor, "", env, docker, "pull", image); err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return err
 }
 
 func lineSet(output string) map[string]bool {
@@ -710,8 +776,23 @@ func (b *jobContainerBackend) cleanup() error {
 			err = errors.Join(err, fmt.Errorf("verify owned Docker cleanup: leftover resources %q", strings.TrimSpace(out)))
 		}
 	}
-	_ = os.RemoveAll(b.config)
+	if e := removeDockerConfig(b.config); e != nil {
+		err = errors.Join(err, e)
+	}
 	return err
+}
+
+func removeDockerConfig(path string) error {
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("remove private Docker configuration: %w", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return fmt.Errorf("remove private Docker configuration: path remains")
+		}
+		return fmt.Errorf("verify private Docker configuration cleanup: %w", err)
+	}
+	return nil
 }
 
 func jobContainerCleanupTimeout(base time.Duration, services int) time.Duration {

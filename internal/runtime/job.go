@@ -436,6 +436,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
+	serviceEval := eval
+	serviceEval.Env = jobEnv
+	services, err := evaluateServiceCredentials(job.Services, serviceEval)
+	if err != nil {
+		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate service credentials: %w", err))
+	}
 	_, explicitJobPATH := jobEnv["PATH"]
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
 	if err != nil {
@@ -515,7 +521,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)
+		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, services, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -527,8 +533,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
-	} else if len(job.Services) != 0 {
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, job.Services)
+	} else if len(services) != 0 {
+		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, services)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -806,6 +812,30 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func evaluateServiceCredentials(services map[string]plan.Container, eval expression.Context) (map[string]plan.Container, error) {
+	if len(services) == 0 {
+		return services, nil
+	}
+	result := make(map[string]plan.Container, len(services))
+	for name, service := range services {
+		if service.Credentials != nil {
+			credentials := *service.Credentials
+			var err error
+			credentials.Username, err = expression.Evaluate(credentials.Username, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q username: %w", name, err)
+			}
+			credentials.Password, err = expression.Evaluate(credentials.Password, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q password: %w", name, err)
+			}
+			service.Credentials = &credentials
+		}
+		result[name] = service
+	}
+	return result, nil
 }
 
 func stepDisplayName(step plan.Step, eval expression.Context) string {

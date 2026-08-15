@@ -687,6 +687,12 @@ func applyStaticInputs(job workflow.Job, inputs map[string]any) workflow.Job {
 	for i := range job.Services {
 		container := job.Services[i].Container
 		container.Image = replaceStaticInputs(container.Image, inputs)
+		if container.Credentials != nil {
+			credentials := *container.Credentials
+			credentials.Username = replaceStaticInputs(credentials.Username, inputs)
+			credentials.Password = replaceStaticInputs(credentials.Password, inputs)
+			container.Credentials = &credentials
+		}
 		container.Env = replaceMapInputs(container.Env, inputs)
 		container.Options = replaceStaticInputs(container.Options, inputs)
 		container.Command = replaceStaticInputs(container.Command, inputs)
@@ -758,6 +764,9 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 		jobValues = append(jobValues, container.Ports...)
 		jobValues = append(jobValues, container.Volumes...)
 		jobValues = appendMapValues(jobValues, container.Env)
+		if container.Credentials != nil {
+			jobValues = append(jobValues, container.Credentials.Username, container.Credentials.Password)
+		}
 	}
 	if job.RunsOnExpr != nil {
 		jobValues = append(jobValues, job.RunsOnExpr.Text)

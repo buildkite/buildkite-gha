@@ -191,13 +191,19 @@ type Step struct {
 }
 
 type Container struct {
-	Image      string            `json:"image"`
-	Env        map[string]string `json:"env,omitempty"`
-	Ports      []string          `json:"ports,omitempty"`
-	Volumes    []string          `json:"volumes,omitempty"`
-	Options    string            `json:"options,omitempty"`
-	Command    string            `json:"command,omitempty"`
-	Entrypoint string            `json:"entrypoint,omitempty"`
+	Image       string                `json:"image"`
+	Credentials *ContainerCredentials `json:"credentials,omitempty"`
+	Env         map[string]string     `json:"env,omitempty"`
+	Ports       []string              `json:"ports,omitempty"`
+	Volumes     []string              `json:"volumes,omitempty"`
+	Options     string                `json:"options,omitempty"`
+	Command     string                `json:"command,omitempty"`
+	Entrypoint  string                `json:"entrypoint,omitempty"`
+}
+
+type ContainerCredentials struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 type ServiceContainer = Container
@@ -642,6 +648,11 @@ func validateServiceContainer(service ServiceContainer) error {
 	for _, value := range []string{service.Options, service.Command, service.Entrypoint} {
 		if strings.ContainsAny(value, "\x00\r") {
 			return fmt.Errorf("service container field contains a control character")
+		}
+	}
+	if service.Credentials != nil {
+		if len(service.Credentials.Username) > 65536 || len(service.Credentials.Password) > 65536 || strings.ContainsAny(service.Credentials.Username, "\x00\r\n") || strings.ContainsAny(service.Credentials.Password, "\x00\r\n") {
+			return fmt.Errorf("service container has invalid credentials")
 		}
 	}
 	return nil

@@ -33,13 +33,14 @@ type concurrencySyntax struct {
 }
 
 type rawServiceContainer struct {
-	Image      string
-	Env        map[string]string
-	Ports      []string
-	Volumes    []string
-	Options    string
-	Command    string
-	Entrypoint string
+	Image       string
+	Credentials *ContainerCredentials
+	Env         map[string]string
+	Ports       []string
+	Volumes     []string
+	Options     string
+	Command     string
+	Entrypoint  string
 }
 
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
@@ -359,7 +360,7 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 		image = mappingValue(node, "image")
 		controls := []string{"credentials", "volumes", "options", "command", "entrypoint"}
 		if service {
-			controls = []string{"credentials"}
+			controls = nil
 		}
 		for _, control := range controls {
 			if key := mappingKey(node, control); key != nil {
@@ -367,6 +368,16 @@ func validateRawContainer(path string, node *yaml.Node, service bool) (rawServic
 			}
 		}
 		if service {
+			if credentials := mappingValue(node, "credentials"); credentials != nil {
+				if credentials.Kind != yaml.MappingNode {
+					return extra, nil, rawError(path, credentials, "invalid service container credentials")
+				}
+				username, password := mappingValue(credentials, "username"), mappingValue(credentials, "password")
+				if username == nil || password == nil || username.Kind != yaml.ScalarNode || password.Kind != yaml.ScalarNode || len(username.Value) > 65536 || len(password.Value) > 65536 || strings.ContainsAny(username.Value, "\x00\r\n") || strings.ContainsAny(password.Value, "\x00\r\n") {
+					return extra, nil, rawError(path, credentials, "invalid service container credentials")
+				}
+				extra.Credentials = &ContainerCredentials{Username: username.Value, Password: password.Value}
+			}
 			for _, field := range []struct {
 				name  string
 				limit int
@@ -849,10 +860,7 @@ func adaptServiceContainer(path, jobID string, in *actionlint.Container, raw raw
 	if in.Image == nil || strings.TrimSpace(raw.Image) == "" {
 		return ServiceContainer{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
 	}
-	if in.Credentials != nil {
-		return ServiceContainer{}, locatedError(path, in.Credentials.Pos, jobID, "container credentials are unsupported")
-	}
-	out := ServiceContainer{Image: raw.Image, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos)}
+	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos)}
 	return out, nil
 }
 

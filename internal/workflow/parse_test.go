@@ -133,6 +133,9 @@ jobs:
     services:
       database:
         image: postgres:16
+        credentials:
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
         env: {POSTGRES_PASSWORD: test}
         ports: ['127.0.0.1::5432/tcp']
         volumes: ['database:/var/lib/postgresql/data:ro']
@@ -146,7 +149,7 @@ jobs:
 		t.Fatal(err)
 	}
 	service := parsed.Jobs[0].Services[0].Container
-	if service.Image != "postgres:16" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
+	if service.Image != "postgres:16" || service.Credentials == nil || service.Credentials.Username != "${{ secrets.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
 		t.Fatalf("service container = %#v", service)
 	}
 }
