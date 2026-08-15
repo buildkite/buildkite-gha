@@ -598,6 +598,7 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 	}
 	if publish {
+		_, _ = fmt.Fprintln(stdout, "~~~ :package: Publish GitHub Actions result")
 		publication, err := publishTerminalResult(agent, artifactRoot, job, planDigest, producer, result)
 		if publication.MetadataMirrorError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: result metadata mirror: %v\n", publication.MetadataMirrorError)
@@ -610,6 +611,9 @@ func runJobContext(ctx context.Context, args []string, stdout, stderr io.Writer,
 		}
 		if publication.ErrorAnnotationError != nil {
 			_, _ = fmt.Fprintf(stderr, "buildkite-gha: run-job: warning: workflow error annotation: %v\n", publication.ErrorAnnotationError)
+		}
+		if err != nil || publication.MetadataMirrorError != nil || publication.SummaryAnnotationError != nil || publication.WarningAnnotationError != nil || publication.ErrorAnnotationError != nil {
+			_, _ = fmt.Fprintln(stdout, "^^^ +++")
 		}
 		if err != nil {
 			details.setFailurePhase(telemetry.FailurePhaseResultPublication)

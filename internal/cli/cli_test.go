@@ -6994,6 +6994,9 @@ func TestRunJobHydratesNeedsAndPublishesAuthoritativeResult(t *testing.T) {
 	if !strings.Contains(stderr.String(), "warning: result metadata mirror") {
 		t.Fatalf("stderr = %q, want non-fatal metadata warning", stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") || !strings.Contains(stdout.String(), "^^^ +++\n") {
+		t.Fatalf("stdout = %q, want expanded result publication group", stdout.String())
+	}
 	if len(runner.commands) < 3 || strings.Join(runner.commands[0].args, " ") != strings.Join([]string{"artifact", "search", producerPath, "--step", producerStep, "--format", "%j"}, " ") {
 		t.Fatalf("commands = %#v, want exact producer search first", runner.commands)
 	}
@@ -7039,6 +7042,15 @@ func TestRunJobPublishesSummaryAsAdvisoryJobAnnotation(t *testing.T) {
 
 			if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != test.wantCode {
 				t.Fatalf("run() code = %d, stderr = %q, want %d", code, stderr.String(), test.wantCode)
+			}
+			if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") {
+				t.Fatalf("stdout = %q, want result publication group", stdout.String())
+			}
+			if test.wantWarning && !strings.Contains(stdout.String(), "^^^ +++\n") {
+				t.Fatalf("stdout = %q, want publication warning to expand its group", stdout.String())
+			}
+			if !test.wantWarning && test.wantCode == 0 && strings.Contains(stdout.String(), "^^^ +++\n") {
+				t.Fatalf("stdout = %q, want successful publication group collapsed", stdout.String())
 			}
 			if result := publishedCLIManifest(t, runner, job, planDigest); result.Result != test.wantResult {
 				t.Fatalf("published result = %q, want %q", result.Result, test.wantResult)
@@ -7355,6 +7367,9 @@ func TestRunJobFailsWhenAuthoritativePublicationFails(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"run-job", "--plan", planPath}, &stdout, &stderr, "dev", runner); code != 1 || !strings.Contains(stderr.String(), "publish terminal result") {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "~~~ :package: Publish GitHub Actions result\n") || !strings.Contains(stdout.String(), "^^^ +++\n") {
+		t.Fatalf("stdout = %q, want failed publication group expanded", stdout.String())
 	}
 	if event := <-events; event.FailurePhase != telemetry.FailurePhaseResultPublication || event.FailureCode != telemetry.FailureCodeUnknown {
 		t.Fatalf("telemetry = %#v", event)
