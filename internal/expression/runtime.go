@@ -53,14 +53,21 @@ const (
 // step runs.
 func validateRuntimeTemplate(template string) error {
 	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
-		root, path, err := referencePath(node)
-		if err != nil {
+		validator := newSemanticValidator(runtimeReferenceSurface)
+		validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+			if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+			}
+			return nil
+		}
+		validator.referenceError = func(err error) error {
 			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
 		}
-		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
-			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		validator.unsupported = func(node actionlint.ExprNode) error {
+			_, _, err := referencePath(node)
+			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
 		}
-		return nil
+		return validator.validate(node)
 	})
 }
 
@@ -114,11 +121,12 @@ func evaluateRuntimeTemplate(template string, context Context, evaluate func(act
 }
 
 func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	root, path, err := referencePath(node)
-	if err != nil {
-		return nil, err
+	evaluator := newSemanticEvaluator(runtimeReferenceSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		return resolveRuntimeReference(root, path, context)
 	}
-	return resolveRuntimeReference(root, path, context)
+	evaluator.unsupported = unsupportedReference
+	return evaluator.evaluate(node)
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {

@@ -30,14 +30,8 @@ func ValidateActionInputDefault(template string) error {
 }
 
 func validateActionInputDefaultNode(node actionlint.ExprNode) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
-		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
-		}
+	validator := newSemanticValidator(actionInputDefaultSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if isJobStatusReference(root, path) {
 			return nil
 		}
@@ -49,20 +43,18 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
 		}
 		return nil
-	case *actionlint.LogicalOpNode:
-		if err := validateActionInputDefaultNode(node.Left); err != nil {
-			return err
+	}
+	validator.referenceError = func(err error) error {
+		return fmt.Errorf("runtime interpolation requires a direct context reference: %w", err)
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
+		if !kind.IsEqualityOp() {
+			return fmt.Errorf("action input default comparison %s is unsupported", kind)
 		}
-		return validateActionInputDefaultNode(node.Right)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
-		}
-		if err := validateActionInputDefaultNode(node.Left); err != nil {
-			return err
-		}
-		return validateActionInputDefaultNode(node.Right)
-	case *actionlint.FuncCallNode:
+		return nil
+	}
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(_ *semanticValidator, node *actionlint.FuncCallNode) error {
 		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
 			return fmt.Errorf("action input default function %q is unsupported", node.Callee)
 		}
@@ -71,9 +63,9 @@ func validateActionInputDefaultNode(node actionlint.ExprNode) error {
 			return fmt.Errorf("action input default toJSON requires the complete matrix context")
 		}
 		return nil
-	default:
-		return fmt.Errorf("action input default expression is unsupported")
 	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
+	return validator.validate(node)
 }
 
 // EvaluateActionInputDefault substitutes the restricted compound expressions
@@ -135,22 +127,8 @@ func ActionInputDefaultRequiresGitHubToken(template, serverURL string) (bool, er
 }
 
 func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
-		}
+	evaluator := newSemanticEvaluator(actionInputDefaultSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
 		if isJobStatusReference(root, path) {
 			if context.JobStatus == "" {
 				return nil, fmt.Errorf("expression references unavailable job.status")
@@ -158,44 +136,24 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 			return context.JobStatus, nil
 		}
 		return resolveRuntimeReference(root, path, context)
-	case *actionlint.LogicalOpNode:
-		left, err := evaluateActionInputDefaultNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		switch node.Kind {
-		case actionlint.LogicalOpNodeKindAnd:
-			if !actionInputDefaultTruthy(left) {
-				return left, nil
-			}
-			return evaluateActionInputDefaultNode(node.Right, context)
-		case actionlint.LogicalOpNodeKindOr:
-			if actionInputDefaultTruthy(left) {
-				return left, nil
-			}
-			return evaluateActionInputDefaultNode(node.Right, context)
-		default:
-			return nil, fmt.Errorf("action input default logical operator %s is unsupported", node.Kind)
-		}
-	case *actionlint.CompareOpNode:
-		left, err := evaluateActionInputDefaultNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		right, err := evaluateActionInputDefaultNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
+	}
+	evaluator.truthy = actionInputDefaultTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
 		equal := actionInputDefaultEqual(left, right)
-		switch node.Kind {
+		switch kind {
 		case actionlint.CompareOpNodeKindEq:
 			return equal, nil
 		case actionlint.CompareOpNodeKindNotEq:
 			return !equal, nil
 		default:
-			return nil, fmt.Errorf("action input default comparison %s is unsupported", node.Kind)
+			return nil, fmt.Errorf("action input default comparison %s is unsupported", kind)
 		}
-	case *actionlint.FuncCallNode:
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("action input default expression is unsupported") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("action input default logical operator %s is unsupported", kind)
+	}
+	evaluator.call = func(_ *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
 		if !strings.EqualFold(node.Callee, "toJSON") || len(node.Args) != 1 {
 			return nil, fmt.Errorf("action input default function %q is unsupported", node.Callee)
 		}
@@ -208,9 +166,8 @@ func evaluateActionInputDefaultNode(node actionlint.ExprNode, context Context) (
 			return nil, fmt.Errorf("encode action input default matrix as JSON: %w", err)
 		}
 		return string(value), nil
-	default:
-		return nil, fmt.Errorf("action input default expression is unsupported")
 	}
+	return evaluator.evaluate(node)
 }
 
 // The actionInputDefault* helpers are the loose coercion family that mirrors

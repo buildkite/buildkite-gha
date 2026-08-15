@@ -74,37 +74,22 @@ func validateCondition(source string, scope ConditionScope, matrix map[string]an
 }
 
 func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
-		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return err
-		}
+	validator := newSemanticValidator(conditionSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if matrixKnown && strings.EqualFold(root, "matrix") && len(path) == 1 {
 			if _, ok := conditionMatrixValue(matrix, path[0]); !ok {
 				return fmt.Errorf("condition reference %q is unavailable in this matrix instance", root+"."+path[0])
 			}
 		}
 		return validateConditionReference(root, path, scope)
-	case *actionlint.NotOpNode:
-		return validateConditionNode(node.Operand, scope, matrix, matrixKnown)
-	case *actionlint.LogicalOpNode:
-		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
-			return err
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
+		if !kind.IsEqualityOp() {
+			return fmt.Errorf("condition comparison %s is unsupported", kind)
 		}
-		return validateConditionNode(node.Right, scope, matrix, matrixKnown)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
-		}
-		if err := validateConditionNode(node.Left, scope, matrix, matrixKnown); err != nil {
-			return err
-		}
-		if err := validateConditionNode(node.Right, scope, matrix, matrixKnown); err != nil {
-			return err
-		}
+		return nil
+	}
+	validator.afterCompare = func(node *actionlint.CompareOpNode) error {
 		left, right := conditionOperandCategory(node.Left, matrix), conditionOperandCategory(node.Right, matrix)
 		if left == "unsupported" || right == "unsupported" {
 			return fmt.Errorf("condition equality uses an unsupported matrix value type")
@@ -113,7 +98,8 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
 		}
 		return nil
-	case *actionlint.FuncCallNode:
+	}
+	validator.validateCall = func(_ *semanticValidator, node *actionlint.FuncCallNode) error {
 		switch strings.ToLower(node.Callee) {
 		case "always", "success", "failure", "cancelled":
 			if len(node.Args) != 0 {
@@ -136,20 +122,14 @@ func validateConditionNode(node actionlint.ExprNode, scope ConditionScope, matri
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
-	default:
-		return fmt.Errorf("unsupported condition expression")
 	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	return validator.validate(node)
 }
 
 func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope, context CompileContext, matrix map[string]any) error {
-	switch node := node.(type) {
-	case *actionlint.NullNode, *actionlint.BoolNode, *actionlint.IntNode, *actionlint.FloatNode, *actionlint.StringNode:
-		return nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return err
-		}
+	validator := newSemanticValidator(conditionSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") && len(path) != 0 {
 			if strings.EqualFold(path[0], "event") {
 				return nil
@@ -167,23 +147,14 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 			}
 		}
 		return validateConditionReference(root, path, scope)
-	case *actionlint.NotOpNode:
-		return validateCompileConditionNode(node.Operand, scope, context, matrix)
-	case *actionlint.LogicalOpNode:
-		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
-			return err
+	}
+	validator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
+		if !kind.IsEqualityOp() {
+			return fmt.Errorf("condition comparison %s is unsupported", kind)
 		}
-		return validateCompileConditionNode(node.Right, scope, context, matrix)
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return fmt.Errorf("condition comparison %s is unsupported", node.Kind)
-		}
-		if err := validateCompileConditionNode(node.Left, scope, context, matrix); err != nil {
-			return err
-		}
-		if err := validateCompileConditionNode(node.Right, scope, context, matrix); err != nil {
-			return err
-		}
+		return nil
+	}
+	validator.afterCompare = func(node *actionlint.CompareOpNode) error {
 		left := compileConditionOperandCategory(node.Left, context, matrix)
 		right := compileConditionOperandCategory(node.Right, context, matrix)
 		if left == "unsupported" || right == "unsupported" {
@@ -193,14 +164,15 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 			return fmt.Errorf("condition equality compares incompatible %s and %s operands", left, right)
 		}
 		return nil
-	case *actionlint.FuncCallNode:
+	}
+	validator.validateCall = func(validator *semanticValidator, node *actionlint.FuncCallNode) error {
 		switch {
 		case (strings.EqualFold(node.Callee, "always") || strings.EqualFold(node.Callee, "success") || strings.EqualFold(node.Callee, "failure") || strings.EqualFold(node.Callee, "cancelled")) && len(node.Args) == 0:
 			return nil
 		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1,
 			(strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
 			for _, argument := range node.Args {
-				if err := validateCompileConditionNode(argument, scope, context, matrix); err != nil {
+				if err := validator.validate(argument); err != nil {
 					return err
 				}
 			}
@@ -219,9 +191,9 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 		default:
 			return fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
-	default:
-		return fmt.Errorf("unsupported condition expression")
 	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	return validator.validate(node)
 }
 
 func compileConditionOperandCategory(node actionlint.ExprNode, context CompileContext, matrix map[string]any) string {
@@ -398,68 +370,30 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 }
 
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
-		}
+	evaluator := newSemanticEvaluator(conditionSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveConditionReference(root, path, context)
-	case *actionlint.NotOpNode:
-		value, err := evaluateConditionNode(node.Operand, context)
-		if err != nil {
-			return nil, err
-		}
-		return !conditionTruthy(value), nil
-	case *actionlint.LogicalOpNode:
-		left, err := evaluateConditionNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		leftBool := conditionTruthy(left)
-		if node.Kind == actionlint.LogicalOpNodeKindAnd && !leftBool {
-			return false, nil
-		}
-		if node.Kind == actionlint.LogicalOpNodeKindOr && leftBool {
-			return true, nil
-		}
-		right, err := evaluateConditionNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
-		return conditionTruthy(right), nil
-	case *actionlint.CompareOpNode:
-		left, err := evaluateConditionNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		right, err := evaluateConditionNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
+	}
+	evaluator.truthy = conditionTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
 		equal, err := conditionEqual(left, right)
 		if err != nil {
 			return nil, err
 		}
-		switch node.Kind {
+		switch kind {
 		case actionlint.CompareOpNodeKindEq:
 			return equal, nil
 		case actionlint.CompareOpNodeKindNotEq:
 			return !equal, nil
 		default:
-			return nil, fmt.Errorf("condition comparison %s is unsupported", node.Kind)
+			return nil, fmt.Errorf("condition comparison %s is unsupported", kind)
 		}
-	case *actionlint.FuncCallNode:
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported condition expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("condition logical operator %s is unsupported", kind)
+	}
+	evaluator.call = func(_ *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
 		switch strings.ToLower(node.Callee) {
 		case "always":
 			if len(node.Args) != 0 {
@@ -495,9 +429,8 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 		default:
 			return nil, fmt.Errorf("condition function %q is unsupported", node.Callee)
 		}
-	default:
-		return nil, fmt.Errorf("unsupported condition expression")
 	}
+	return evaluator.evaluate(node)
 }
 
 func validateHashFilesArgument(node actionlint.ExprNode, scope ConditionScope, matrix map[string]any, matrixKnown bool) error {

@@ -208,69 +208,32 @@ func compileInputLiteral(value any) (string, error) {
 }
 
 func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		root, path, err := referencePath(node)
-		if err != nil {
-			return nil, err
-		}
+	evaluator := newSemanticEvaluator(compileTimeSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveCompileReference(root, path, context)
-	case *actionlint.NotOpNode:
-		value, err := evaluateCompileNode(node.Operand, context)
-		if err != nil {
-			return nil, err
+	}
+	evaluator.truthy = actionInputDefaultTruthy
+	evaluator.validateCompare = func(kind actionlint.CompareOpNodeKind) error {
+		if !kind.IsEqualityOp() {
+			return fmt.Errorf("unsupported compile-time comparison %s", kind)
 		}
-		return !actionInputDefaultTruthy(value), nil
-	case *actionlint.LogicalOpNode:
-		left, err := evaluateCompileNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		switch node.Kind {
-		case actionlint.LogicalOpNodeKindAnd:
-			if !actionInputDefaultTruthy(left) {
-				return left, nil
-			}
-			return evaluateCompileNode(node.Right, context)
-		case actionlint.LogicalOpNodeKindOr:
-			if actionInputDefaultTruthy(left) {
-				return left, nil
-			}
-			return evaluateCompileNode(node.Right, context)
-		default:
-			return nil, fmt.Errorf("unsupported compile-time logical operator %s", node.Kind)
-		}
-	case *actionlint.CompareOpNode:
-		if !node.Kind.IsEqualityOp() {
-			return nil, fmt.Errorf("unsupported compile-time comparison %s", node.Kind)
-		}
-		left, err := evaluateCompileNode(node.Left, context)
-		if err != nil {
-			return nil, err
-		}
-		right, err := evaluateCompileNode(node.Right, context)
-		if err != nil {
-			return nil, err
-		}
+		return nil
+	}
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
 		equal := actionInputDefaultEqual(left, right)
-		if node.Kind == actionlint.CompareOpNodeKindNotEq {
+		if kind == actionlint.CompareOpNodeKindNotEq {
 			return !equal, nil
 		}
 		return equal, nil
-	case *actionlint.FuncCallNode:
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported compile-time expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("unsupported compile-time logical operator %s", kind)
+	}
+	evaluator.call = func(evaluator *semanticEvaluator, node *actionlint.FuncCallNode) (any, error) {
 		switch {
 		case strings.EqualFold(node.Callee, "fromJSON") && len(node.Args) == 1:
-			value, err := evaluateCompileNode(node.Args[0], context)
+			value, err := evaluator.evaluate(node.Args[0])
 			if err != nil {
 				return nil, err
 			}
@@ -280,11 +243,11 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 			}
 			return decodeJSONValue(text)
 		case (strings.EqualFold(node.Callee, "startsWith") || strings.EqualFold(node.Callee, "contains") || strings.EqualFold(node.Callee, "endsWith")) && len(node.Args) == 2:
-			value, err := evaluateCompileNode(node.Args[0], context)
+			value, err := evaluator.evaluate(node.Args[0])
 			if err != nil {
 				return nil, err
 			}
-			search, err := evaluateCompileNode(node.Args[1], context)
+			search, err := evaluator.evaluate(node.Args[1])
 			if err != nil {
 				return nil, err
 			}
@@ -305,9 +268,8 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 		default:
 			return nil, fmt.Errorf("unsupported compile-time function %q", node.Callee)
 		}
-	default:
-		return nil, fmt.Errorf("unsupported compile-time expression")
 	}
+	return evaluator.evaluate(node)
 }
 
 func resolveCompileReference(root string, path []string, context CompileContext) (any, error) {
