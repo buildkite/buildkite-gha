@@ -213,7 +213,7 @@ Update:
 - `internal/expression/condition.go` and runtime context resolution
 - `internal/runtime/containers_test.go`
 
-### Add registry authentication without persisting credentials
+### Add registry authentication within the existing credential boundary
 
 Infer the registry using GitHub runner semantics. When explicit credentials are
 present, resolve their expressions after the ordinary job secret broker has
@@ -222,20 +222,29 @@ GitHub's partial-credential behavior: login only when both username and password
 resolve non-empty. A partial mapping neither errors nor enables hosted registry
 fallback.
 
-For each container independently:
+Authentication must satisfy the repository's [security model](../security.md)
+and be no worse than GitHub Actions; it need not copy the runner's internal
+login lifecycle. In particular:
 
-1. Create a mode `0700` temporary Docker configuration.
-1. When both credential values are non-empty, run `docker login
-   --password-stdin` without putting the password in argv and retry up to three
-   times with cancellation-aware jitter.
-1. Pull with that isolated configuration, retrying independently up to three
-   times.
-1. Remove the configuration immediately after that pull.
+- Plans and generated pipeline YAML contain secret names only. Resolve values in
+  the destination job under Buildkite Secret access policy.
+- Register values with Agent and local redaction before use. Pass passwords to
+  `docker login` through standard input, never argv or command logs.
+- Never read or modify the host's ambient Docker configuration. Use private,
+  runtime-owned configuration with restrictive permissions, register cleanup
+  before login, and remove it within the bounded job cleanup.
+- Scope reusable authentication state to one job and one registry and credential
+  identity. Reuse within that boundary is allowed; credentials must not cross
+  jobs, credential identities, or registries.
+- Scrub Docker errors and verify that credentials are absent from plans,
+  artifacts, generated YAML, diagnostics, process arguments, and retained
+  filesystem state.
 
-Do not deduplicate pulls: repeated images can refer to mutable tags and GitHub
-pulls each container independently. Scrub all Docker errors before returning
-them. Plans, artifacts, generated pipeline YAML, diagnostics, and command logs
-contain credential references only.
+The implementation may login once per credential scope or once per pull and may
+reuse successful pulls where ordinary Docker semantics permit. Keep retries
+bounded and cancellation-aware. These choices are not compatibility promises;
+the observable requirement is that supported images authenticate as GitHub
+Actions does without broader credential authority, exposure, or persistence.
 
 Match GitHub-hosted implicit GHCR authentication only after the Buildkite
 workflow-token backend confirms that its issued token is valid for registry
@@ -303,7 +312,8 @@ Add credential references, secret capability provenance, isolated login and
 pull retries, masking, and authenticated local-registry runtime tests. Do not
 add ambient Docker credentials or arbitrary credential helpers. Evaluate
 credentials after the job environment and match GitHub's partial mapping
-behavior.
+behavior. Choose the simplest login reuse strategy that meets the security
+invariants above; do not require per-container parity with runner internals.
 
 ### 3. Runtime service expressions and complete context
 
@@ -334,13 +344,13 @@ Each slice must include:
   capability and secret provenance, matrix/reusable substitution, and
   fail-closed unknown fields.
 - Exact Docker argv tests for options and quoting, commands, entrypoints, ports,
-  volumes, labels, registry login, retries, and argument order.
+  volumes, labels, password-stdin login, and argument order.
 - Runtime lifecycle tests for partial startup, cancellation, health transitions,
   port context, job-first cleanup, ambiguous Docker failures, and leak
   detection.
 - Live Docker tests for host and container networking, common databases,
   unhealthy diagnostics, named-volume sharing, and an authenticated temporary
-  registry.
+  registry, including credential-scope and cleanup assertions.
 - `mise run check`, `mise run smoke:profile`, and the exact-commit hosted
   container runtime proof.
 
