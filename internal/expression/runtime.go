@@ -153,7 +153,9 @@ func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, er
 		switch root {
 		case "github", "secrets":
 			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
-		case "matrix", "vars", "inputs", "env", "steps", "needs", "runner":
+		case "steps", "needs":
+			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
+		case "matrix", "vars", "inputs", "env", "runner":
 			return nil
 		default:
 			return fmt.Errorf("unsupported runtime context %q", root)

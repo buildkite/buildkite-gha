@@ -1702,6 +1702,24 @@ func TestBackgroundOutputsFailClosedBeforeBarrier(t *testing.T) {
 	}
 }
 
+func TestStepNameFailsClosedOnUnavailableBackgroundOutput(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: runtime test\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{
+		{ID: "background", Kind: "run", Background: true, Command: `echo "value=private" >> "$GITHUB_OUTPUT"`},
+		{ID: "premature-reader", Name: `${{ steps.background.outputs.value }}`, Kind: "run", Command: `touch should-not-run`},
+	})
+
+	result, err := (Runner{}).RunJob(context.Background(), job, workspace)
+	if err == nil || result.Conclusion != "failure" || !strings.Contains(err.Error(), "name: expression references unavailable step") {
+		t.Fatalf("RunJob() result = %#v, error = %v, want unavailable background output in name", result, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "should-not-run")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("premature reader command ran: %v", statErr)
+	}
+}
+
 func TestBackgroundSupervisorBoundsActiveWorkAndQueuesFIFO(t *testing.T) {
 	supervisor := newBackgroundSupervisor(maxActiveBackgroundSteps)
 	release := make(chan struct{})

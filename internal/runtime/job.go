@@ -698,6 +698,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			eval.Steps[strings.ToLower(step.ID)] = map[string]string{}
 			continue
 		}
+		displayName, err := stepDisplayName(step, stepEval)
+		if err != nil {
+			execution := classifyStepExecution(ctx, stepCtx, step, newResult(), fmt.Errorf("name: %w", err))
+			cancelStep()
+			runErr = errors.Join(runErr, commitStepExecution(execution, &jobResult, &eval, statuses))
+			continue
+		}
 
 		jobEnv := mergeStepEnvironment(runtimeEnv, jobResult.Env)
 		evalSnapshot := stepEval
@@ -718,7 +725,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			)
 			continue
 		}
-		processor.logSection(stepDisplayName(step, evalSnapshot))
+		processor.logSection(displayName)
 		execution := r.executePlanStep(runCtx, stepCtx, processor, workspace, job, step, strconv.Itoa(stepIndex), jobEnv, stepEnv, evalSnapshot, &posts, actions, prepared)
 		cancelStep()
 		if execution.outcome == "failure" {
@@ -808,17 +815,14 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	return scrubJobResult(jobResult, sensitiveValues), runErr
 }
 
-func stepDisplayName(step plan.Step, eval expression.Context) string {
+func stepDisplayName(step plan.Step, eval expression.Context) (string, error) {
 	if step.Name != "" {
-		if name, err := expression.EvaluateStep(step.Name, eval); err == nil {
-			return name
-		}
-		return step.Name
+		return expression.EvaluateStep(step.Name, eval)
 	}
 	if step.Uses != "" {
-		return step.Uses
+		return step.Uses, nil
 	}
-	return step.ID
+	return step.ID, nil
 }
 
 func stepExpressionContext(context expression.Context) expression.Context {
@@ -1714,23 +1718,15 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			var script, dir string
 			var args []string
 			var env map[string]string
-			env, childErr = evaluateStepMap(step.Env, eval)
+			env, childErr = evaluateMap(step.Env, eval)
 			if childErr == nil {
-				script, childErr = expression.EvaluateStep(step.Run, eval)
+				script, childErr = expression.Evaluate(step.Run, eval)
 			}
 			if childErr == nil {
-				var workingDirectory string
-				workingDirectory, childErr = expression.EvaluateStep(step.WorkingDirectory, eval)
-				if childErr == nil {
-					dir, childErr = workspacePath(workspace, workingDirectory)
-				}
+				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
 			}
 			if childErr == nil {
-				var shell string
-				shell, childErr = expression.EvaluateStep(step.Shell, eval)
-				if childErr == nil {
-					args, childErr = shellCommand(shell, script)
-				}
+				args, childErr = shellCommand(step.Shell, script)
 			}
 			if childErr == nil {
 				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)

@@ -555,10 +555,15 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 		"${{ secrets[env.KEY] }}",
 		"${{ github[env.KEY] }}",
 		"${{ false && secrets[env.KEY] || '' }}",
+		"${{ steps[env.KEY].outputs.image }}",
+		"${{ toJSON(needs) }}",
 	} {
 		if _, err := EvaluateStep(template, context); err == nil {
-			t.Errorf("EvaluateStep(%q) allowed unprovable authority", template)
+			t.Errorf("EvaluateStep(%q) allowed prohibited access", template)
 		}
+	}
+	if _, err := EvaluateStep("${{ github.token || '' }}", context); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
+		t.Fatalf("EvaluateStep() github.token error = %v", err)
 	}
 	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
 		t.Fatal("Evaluate() broadened general runtime interpolation")
