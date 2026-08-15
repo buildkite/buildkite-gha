@@ -654,7 +654,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 	}
 	cacheToken := ""
 	if cacheErr == nil {
-		if action.CacheClientCompatibility {
+		if action.Cache || action.CacheClientCompatibility {
 			cacheEnv["ACTIONS_CACHE_URL"] = cacheURLCompatibility
 		}
 		env = mergeStringMaps(env, cacheEnv)
