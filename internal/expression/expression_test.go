@@ -800,8 +800,13 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 
 func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	context := ConditionContext{
-		Vars:        map[string]string{"KEY": "target"},
-		Matrix:      map[string]any{"target": "selected"},
+		Vars: map[string]string{"KEY": "target"},
+		Matrix: map[string]any{
+			"target": "selected",
+			"array":  []any{"zero", "one", "two"},
+			"object": map[string]any{"true": "boolean", "2": "number"},
+			"items":  []any{[]any{"first"}, []any{}, []any{nil}},
+		},
 		Needs:       map[string]map[string]string{"build": {}, "lint": {}},
 		NeedResults: map[string]string{"build": "success", "lint": "failure"},
 		Env:         map[string]string{"STEP": "build"},
@@ -814,10 +819,16 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 		"matrix[vars.KEY] == 'selected'",
 		"fromJSON('[\"zero\",\"one\"]')[1] == 'one'",
 		"fromJSON('[1]')[4] == null",
+		"matrix.array['1'] == 'one'",
+		"matrix.array[1.9] == 'one'",
+		"matrix.object[true] == 'boolean'",
+		"matrix.object[2] == 'number'",
+		"join(matrix.items.*[0], ',') == 'first,'",
 		"contains(needs.*.result, 'FAILURE')",
 		"steps[env.STEP].outcome == 'success'",
+		"steps['missing'].outcome == null",
 		"contains(steps.*.outcome, 'success') && contains(steps.*.outcome, 'failure')",
-		"toJSON(matrix) == '{\n  \"target\": \"selected\"\n}'",
+		"contains(toJSON(matrix), '\"target\"')",
 	} {
 		if err := ValidateCondition(condition, StepCondition); err != nil {
 			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
@@ -833,6 +844,11 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	}
 	if err := ValidateCondition("steps.*.outcome", JobCondition); err == nil {
 		t.Fatal("ValidateCondition() allowed step projection in a job condition")
+	}
+	for _, condition := range []string{"inputs[vars.KEY]", "toJSON(vars)", "toJSON(env)"} {
+		if err := ValidateCondition(condition, StepCondition); err == nil {
+			t.Errorf("ValidateCondition(%q) allowed an unavailable whole or computed context", condition)
+		}
 	}
 }
 
@@ -944,6 +960,7 @@ func TestEvaluateCompileSupportsIndexesAndFilters(t *testing.T) {
 		{expression: "${{ fromJSON('[\"zero\",\"one\"]')[1] }}", want: "one"},
 		{expression: "${{ fromJSON('[1]')[4] }}", want: nil},
 		{expression: "${{ join(github.event.items.*.name, ',') }}", want: "one,three"},
+		{expression: "${{ join(github['event'].items.*.name, ',') }}", want: "one,three"},
 		{expression: "${{ join(github.event.items.*.groups.*.id, ',') }}", want: "1,2,3"},
 	} {
 		expr, err := Parse(test.expression, 1, 1)
@@ -1103,6 +1120,7 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 		{expression: "${{ case(true, 'safe', github.token) }}", want: `unavailable value "github.token"`},
 		{expression: "${{ case(true, 'safe', secrets.TOKEN) }}", want: `unsupported compile-time context "secrets"`},
 		{expression: "${{ toJSON(github.event) }}", want: `unavailable value "github.event"`},
+		{expression: "${{ toJSON(github.event.*) }}", want: `whole event projection is unsupported`},
 		{expression: "${{ toJSON(event) }}", want: `whole event access is unsupported`},
 		{expression: "${{ hashFiles('go.sum') }}", want: `unsupported compile-time function "hashFiles"`},
 		{expression: "${{ startsWith(github.ref) }}", want: `function "startsWith" received an unsupported number of arguments`},

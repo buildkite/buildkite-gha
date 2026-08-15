@@ -246,10 +246,23 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return validator.validate(index.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
-	case "matrix", "vars", "inputs", "needs":
-	case "steps", "env":
+	case "matrix", "needs":
+	case "vars":
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
+	case "inputs":
+		return fmt.Errorf("computed or whole inputs access is unsupported")
+	case "steps":
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+	case "env":
+		if scope == JobCondition {
+			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
+		}
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}
 	case "github":
 		return fmt.Errorf("dynamic or whole github access is unsupported")
