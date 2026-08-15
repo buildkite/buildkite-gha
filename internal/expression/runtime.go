@@ -76,8 +76,8 @@ func Evaluate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
 }
 
-// EvaluateStep substitutes direct runtime references and hashFiles calls in a
-// workflow step template. Other runtime surfaces remain direct-reference only.
+// EvaluateStep evaluates the expression surface available to workflow step
+// fields. Other runtime surfaces remain direct-reference only.
 func EvaluateStep(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateStepRuntimeNode)
 }
@@ -130,20 +130,132 @@ func evaluateDirectRuntimeNode(node actionlint.ExprNode, context Context) (any, 
 }
 
 func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, error) {
-	call, ok := node.(*actionlint.FuncCallNode)
-	if !ok || !strings.EqualFold(call.Callee, "hashFiles") {
-		return evaluateDirectRuntimeNode(node, context)
+	validator := newSemanticValidator(stepRuntimeSurface)
+	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
+		if strings.EqualFold(root, "github") {
+			if len(path) != 1 {
+				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
+			}
+			switch strings.ToLower(path[0]) {
+			case "actor", "event_name", "head_ref", "ref", "repository", "server_url", "sha", "token":
+				return nil
+			default:
+				return fmt.Errorf("unsupported runtime github reference %q", referenceName(root, path))
+			}
+		}
+		if classifyRuntimeReference(root, path) == runtimeReferenceUnsupported {
+			return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+		}
+		return nil
 	}
-	if context.HashFiles == nil {
-		return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
+	validator.validateAccess = func(access actionlint.ExprNode) error {
+		root := strings.ToLower(referenceRoot(access))
+		switch root {
+		case "github", "secrets":
+			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
+		case "matrix", "vars", "inputs", "env", "steps", "needs", "runner":
+			return nil
+		default:
+			return fmt.Errorf("unsupported runtime context %q", root)
+		}
 	}
-	patterns, err := evaluateHashFilesArguments(call.Args, func(argument actionlint.ExprNode) (any, error) {
-		return evaluateRuntimeHashFilesArgument(argument, context)
-	})
-	if err != nil {
+	validator.validateCompare = func(actionlint.CompareOpNodeKind) error { return nil }
+	validator.afterCompare = func(*actionlint.CompareOpNode) error { return nil }
+	validator.validateCall = func(validator *semanticValidator, call *actionlint.FuncCallNode) error {
+		if recognized, err := validatePureFunction(validator, call); recognized {
+			return err
+		}
+		if !strings.EqualFold(call.Callee, "hashFiles") || len(call.Args) == 0 || len(call.Args) > 255 {
+			return fmt.Errorf("unsupported runtime function %q", call.Callee)
+		}
+		for _, argument := range call.Args {
+			if err := validator.validate(argument); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	if err := validator.validate(node); err != nil {
 		return nil, err
 	}
-	return context.HashFiles(patterns)
+
+	evaluator := newSemanticEvaluator(stepRuntimeSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("unsupported runtime logical operator %s", kind)
+	}
+	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
+			return value, err
+		}
+		if !strings.EqualFold(call.Callee, "hashFiles") {
+			return nil, fmt.Errorf("unsupported runtime function %q", call.Callee)
+		}
+		if context.HashFiles == nil {
+			return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
+		}
+		patterns, err := evaluateHashFilesArguments(call.Args, evaluator.evaluate)
+		if err != nil {
+			return nil, err
+		}
+		return context.HashFiles(patterns)
+	}
+	return evaluator.evaluate(node)
+}
+
+func resolveStepRuntimeRoot(root string, context Context) (any, error) {
+	switch strings.ToLower(root) {
+	case "github":
+		return context.GitHub, nil
+	case "secrets":
+		return context.Secrets, nil
+	case "matrix":
+		return context.Matrix, nil
+	case "vars":
+		return context.Vars, nil
+	case "inputs":
+		return context.Inputs, nil
+	case "env":
+		return context.Env, nil
+	case "runner":
+		return context.Runner, nil
+	case "steps":
+		steps := make(map[string]any)
+		for name, outputs := range context.Steps {
+			steps[name] = map[string]any{"outputs": outputs}
+		}
+		for name, status := range context.StepStatuses {
+			step, _ := steps[name].(map[string]any)
+			if step == nil {
+				step = map[string]any{"outputs": map[string]string{}}
+				steps[name] = step
+			}
+			step["outcome"], step["conclusion"] = status.Outcome, status.Conclusion
+		}
+		return steps, nil
+	case "needs":
+		needs := make(map[string]any)
+		for name, outputs := range context.Needs {
+			needs[name] = map[string]any{"outputs": outputs, "result": context.NeedResults[name]}
+		}
+		for name, result := range context.NeedResults {
+			if _, ok := needs[name]; !ok {
+				needs[name] = map[string]any{"outputs": map[string]string{}, "result": result}
+			}
+		}
+		return needs, nil
+	default:
+		return nil, fmt.Errorf("unsupported runtime context %q", root)
+	}
 }
 
 func evaluateHashFilesArguments(nodes []actionlint.ExprNode, evaluate func(actionlint.ExprNode) (any, error)) ([]string, error) {
@@ -159,25 +271,6 @@ func evaluateHashFilesArguments(nodes []actionlint.ExprNode, evaluate func(actio
 		patterns[i] = runtimeString(value)
 	}
 	return patterns, nil
-}
-
-func evaluateRuntimeHashFilesArgument(node actionlint.ExprNode, context Context) (any, error) {
-	switch node := node.(type) {
-	case *actionlint.NullNode:
-		return nil, nil
-	case *actionlint.BoolNode:
-		return node.Value, nil
-	case *actionlint.IntNode:
-		return node.Value, nil
-	case *actionlint.FloatNode:
-		return node.Value, nil
-	case *actionlint.StringNode:
-		return node.Value, nil
-	case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
-		return evaluateDirectRuntimeNode(node, context)
-	default:
-		return nil, fmt.Errorf("arguments must be literals or direct context references")
-	}
 }
 
 func runtimeString(value any) string {

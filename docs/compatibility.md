@@ -453,9 +453,9 @@ Three expression modes intentionally support different syntax.
 
 | Syntax | Conditions | Runtime interpolation | Other compile-time expressions |
 | --- | --- | --- | --- |
-| `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
+| `!`, `&&`, `\|\|`, `==`, `!=`, `<`, `<=`, `>`, `>=` | ✅ Supported | 🟡 Workflow step fields | 🟡 When the result resolves fully |
 | `always()`, `success()`, `failure()`, `cancelled()` | ✅ Without arguments | ❌ Unsupported | ❌ Unsupported |
-| `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | ❌ Unsupported | 🟡 When the result resolves fully |
+| `startsWith()`, `contains()`, `endsWith()`, `format()`, `join()`, `toJSON()`, `fromJSON()`, `case()` | ✅ Supported | 🟡 Workflow step fields | 🟡 When the result resolves fully |
 | `hashFiles()` | 🟡 Step `if` only | 🟡 Workflow steps only | ❌ Unsupported |
 
 ### Conditions
@@ -481,7 +481,9 @@ An event-backed condition is reduced from the immutable event snapshot before ru
 
 ### Runtime interpolation
 
-Interpolated values support direct references only. Available contexts include `github`, `runner`, `inputs`, `matrix`, `vars`, `env`, `steps`, `needs`, `secrets`, and service ports where that value exists. Top-level workflow step `run`, `env`, `with`, explicit `shell`, and explicit `working-directory` fields also support `hashFiles()` with literal or direct-reference arguments. Job fields, job outputs, job defaults, step names, and action metadata keep the direct-reference-only rule.
+Workflow step `run`, `env`, `with`, `name`, explicit `shell`, and explicit `working-directory` fields support the operators and pure functions listed above. They also support computed indexes and projections over available non-authority contexts. General runtime interpolation, job fields, job outputs, job defaults, and action metadata keep the direct-reference-only rule.
+
+These workflow step fields support `hashFiles()`. Composite-action child fields support compound expressions but not `hashFiles()`.
 
 Direct `github.token` references are step-only. Whole, filtered, or dynamically indexed `github` access fails closed because the compiler cannot prove token authority.
 

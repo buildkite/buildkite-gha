@@ -320,6 +320,24 @@ jobs:
 	}
 }
 
+func TestCompileAcceptsCompoundWorkflowStepFields(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ format('test-{0}', github.event_name) }}
+        env:
+          ENABLED: ${{ contains(github.ref, 'heads') }}
+        run: echo "${{ format('{0}-{1}', vars.PREFIX, vars.MISSING || 'fallback') }}"
+        shell: ${{ 'bash' || 'sh' }}
+        working-directory: ${{ format('{0}', '.') }}
+`)
+	if _, err := Compile("steps.yml", source, readFile(t, smokePath("events", "push.json"))); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCompileRetainsSupportedRuntimeDependentConditions(t *testing.T) {
 	source := []byte(`on: push
 jobs:

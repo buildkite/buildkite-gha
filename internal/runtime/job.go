@@ -810,7 +810,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 
 func stepDisplayName(step plan.Step, eval expression.Context) string {
 	if step.Name != "" {
-		if name, err := expression.Evaluate(step.Name, eval); err == nil {
+		if name, err := expression.EvaluateStep(step.Name, eval); err == nil {
 			return name
 		}
 		return step.Name
@@ -1714,15 +1714,23 @@ func (r Runner) runCompositeMetadata(ctx context.Context, processor *commandProc
 			var script, dir string
 			var args []string
 			var env map[string]string
-			env, childErr = evaluateMap(step.Env, eval)
+			env, childErr = evaluateStepMap(step.Env, eval)
 			if childErr == nil {
-				script, childErr = expression.Evaluate(step.Run, eval)
+				script, childErr = expression.EvaluateStep(step.Run, eval)
 			}
 			if childErr == nil {
-				dir, childErr = workspacePath(workspace, step.WorkingDirectory)
+				var workingDirectory string
+				workingDirectory, childErr = expression.EvaluateStep(step.WorkingDirectory, eval)
+				if childErr == nil {
+					dir, childErr = workspacePath(workspace, workingDirectory)
+				}
 			}
 			if childErr == nil {
-				args, childErr = shellCommand(step.Shell, script)
+				var shell string
+				shell, childErr = expression.EvaluateStep(step.Shell, eval)
+				if childErr == nil {
+					args, childErr = shellCommand(shell, script)
+				}
 			}
 			if childErr == nil {
 				childErr = r.runProcess(ctx, processor, dir, mergeStepEnvironment(childJobEnv, env), &stepResult, nil, args[0], args[1:]...)

@@ -31,6 +31,7 @@ const (
 	conditionSurface
 	runtimeReferenceSurface
 	actionInputDefaultSurface
+	stepRuntimeSurface
 )
 
 type evaluationPolicy struct {
@@ -51,6 +52,8 @@ func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
 		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case actionInputDefaultSurface:
 		policy = evaluationPolicy{allowLiterals: true, allowLogical: true, allowCompare: true, allowFunction: true}
+	case stepRuntimeSurface:
+		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case runtimeReferenceSurface:
 	}
 	return semanticEvaluator{policy: policy}
@@ -94,7 +97,8 @@ func (v *semanticValidator) validate(node actionlint.ExprNode) error {
 		return v.referenceError(err)
 	case *actionlint.IndexAccessNode:
 		root, path, err := referencePath(node)
-		if err == nil && (v.validateAccess == nil || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
+		staticAuthority := strings.EqualFold(root, "github") || strings.EqualFold(root, "secrets")
+		if err == nil && (v.validateAccess == nil || staticAuthority || len(path) == 1 || strings.EqualFold(root, "job") && len(path) == 4 && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports")) {
 			return v.validateReference(node, root, path)
 		}
 		if v.validateAccess != nil {

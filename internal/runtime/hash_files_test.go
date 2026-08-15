@@ -237,7 +237,7 @@ func TestHashFilesRemainsUnavailableOutsideWorkflowStepFields(t *testing.T) {
 
 	writeFixtureFile(t, workspace, ".github/actions/composite/action.yml", "runs:\n  using: composite\n  steps:\n    - shell: sh\n      run: echo \"${{ hashFiles('value') }}\"\n")
 	job = runtimePlan(t, workspace, ".github/workflows/test.yml", []plan.Step{{ID: "composite", Kind: "uses", Uses: "./.github/actions/composite"}})
-	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
+	if _, err := (Runner{}).RunJob(context.Background(), job, workspace); err == nil || !strings.Contains(err.Error(), `runtime function "hashFiles" is unavailable`) {
 		t.Fatalf("composite metadata hashFiles error = %v", err)
 	}
 }

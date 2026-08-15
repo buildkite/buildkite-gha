@@ -525,8 +525,8 @@ func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 	if _, err := Evaluate("${{ hashFiles('*.go') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
 		t.Fatalf("Evaluate() hashFiles error = %v", err)
 	}
-	if _, err := EvaluateStep("${{ contains('a', 'b') }}", context); err == nil || !strings.Contains(err.Error(), "unsupported expression reference") {
-		t.Fatalf("EvaluateStep() contains error = %v", err)
+	if got, err := EvaluateStep("${{ contains('abc', 'B') }}", context); err != nil || got != "true" {
+		t.Fatalf("EvaluateStep() contains = %q, %v", got, err)
 	}
 
 	condition := ConditionContext{HashFiles: hash}
@@ -535,6 +535,33 @@ func TestHashFilesIsLimitedToStepRuntimeExpressions(t *testing.T) {
 	}
 	if err := ValidateCondition("hashFiles('*.go') != ''", StepCondition); err != nil {
 		t.Fatalf("ValidateCondition() = %v", err)
+	}
+}
+
+func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
+	context := Context{
+		Matrix:       map[string]any{"os": "linux", "versions": []any{1, 2}},
+		Vars:         map[string]string{"PREFIX": "release"},
+		Env:          map[string]string{"KEY": "os"},
+		Steps:        map[string]map[string]string{"build": {"image": "app:v1"}},
+		StepStatuses: map[string]StepStatus{"build": {Outcome: "success", Conclusion: "success"}},
+	}
+	template := "${{ format('{0}-{1}-{2}', vars.PREFIX, matrix[env.KEY], join(matrix.versions, '.')) }}:${{ matrix.missing || steps.build.outputs.image }}"
+	got, err := EvaluateStep(template, context)
+	if err != nil || got != "release-linux-1.2:app:v1" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	for _, template := range []string{
+		"${{ secrets[env.KEY] }}",
+		"${{ github[env.KEY] }}",
+		"${{ false && secrets[env.KEY] || '' }}",
+	} {
+		if _, err := EvaluateStep(template, context); err == nil {
+			t.Errorf("EvaluateStep(%q) allowed unprovable authority", template)
+		}
+	}
+	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
+		t.Fatal("Evaluate() broadened general runtime interpolation")
 	}
 }
 
