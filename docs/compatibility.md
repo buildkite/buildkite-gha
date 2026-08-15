@@ -38,7 +38,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Reusable workflows](#reusable-workflows) | 🟡 Supported subset | Local workflows with static inputs and direct job-output mappings. Secret forwarding is unsupported. |
 | [Actions](#actions) | 🟡 Supported subset | Local and public JavaScript and composite actions on Linux and macOS; verified Dockerfile actions on Linux only. |
 | [Checkout, artifacts, and cache](#actions) | 🟡 Supported subset | Only the audited versions and modes listed below. |
-| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Workflows containing reusable-workflow jobs cannot receive one. |
+| [`GITHUB_TOKEN`](#github-token) | 🟡 Supported subset | One job-bound token for the event repository. Local reusable-workflow jobs use the top-level workflow permissions. |
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
@@ -171,7 +171,6 @@ A top-level workflow that does not declare the effective event is excluded befor
 
 - Remote or dynamic workflow paths.
 - Call-level `if`.
-- Token requests from any direct or expanded job in a workflow containing a reusable-workflow call.
 - `secrets: inherit`, explicit secret mappings, or required called-workflow secrets.
 - `needs`-dependent inputs or dynamic matrices.
 - Input defaults that reference `inputs`.
@@ -227,7 +226,9 @@ permissions:
 
 Supported values are `read`, `write`, and `none`. Supported repository permission names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `packages`, `pages`, `pull-requests`, `security-events`, and `statuses`. The separate `id-token` permission is also supported.
 
-An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions. These forms remain compilable when no job needs a token. Hosted token issuance accepts the omitted default or an explicit, non-empty top-level map. It rejects job-level maps and reusable-workflow jobs. Write access therefore requires an explicit top-level map.
+An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. A job map replaces the workflow map; it does not merge with it. These forms remain compilable when no job needs a token. Hosted token issuance accepts the omitted default or an explicit, non-empty top-level map and rejects job-level maps. Write access therefore requires an explicit top-level map.
+
+Jobs expanded from local reusable workflows use the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side; permission maps in called workflows do not narrow `GITHUB_TOKEN`. The separate `id-token` permission retains called-workflow narrowing. A warning identifies workflows that use this compatibility behavior. Job-level permission maps remain unsupported, including maps on reusable-workflow call jobs.
 
 The `read-all` and `write-all` values and noncanonical names are unsupported. An empty map, or a map containing only `none`, creates no token.
 
@@ -770,11 +771,11 @@ JavaScript and Docker actions with compatible bundled cache clients also receive
 
 ### GitHub token
 
-**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or `github.token`, or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. Effective `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
+**🟡 Supported subset.** A job requests one short-lived `GITHUB_TOKEN` for the exact event repository by statically referencing `secrets.GITHUB_TOKEN` or `github.token`, or by using an action whose effective input default can reach `github.token` for the event provider. A `github.server_url == 'https://github.com'` guard skips the token branch for an Origin event repository. Native action adapters ignore upstream input defaults, so `actions/checkout` alone does not request a token. The top-level requesting workflow's `permissions` determine the token scope. The Buildkite organization feature and the pipeline's workflow access token setting must be enabled. Both are disabled by default.
 
-Buildkite reads the workflow policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps or reusable-workflow jobs. The workflow-token endpoint must interpret omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
+Buildkite reads the top-level requesting workflow's policy from the pipeline repository at the build's immutable commit. The workflow must be directly under `.github/workflows/`, use a simple `.yml` or `.yaml` filename, and contain no job-level permission maps. The workflow-token endpoint interprets omitted top-level permissions as exactly `contents: read`, without consulting GitHub repository or organization defaults. Write access requires an explicit, non-empty top-level map. An explicit empty map or scopes resolving only to `none` produce no token.
 
-If the selected workflow contains a reusable-workflow job, no direct or expanded job can receive a token. Tokenless local reusable workflows remain supported.
+Eligible direct and expanded jobs can receive a token when the selected workflow contains local reusable-workflow jobs. Every expanded job receives the top-level requesting workflow's repository permissions for `GITHUB_TOKEN`. Only this immutable top-level map is enforced server-side. Buildkite does not inspect permission maps in called workflows for `GITHUB_TOKEN`, so those maps do not narrow it. The separate `id-token` permission retains called-workflow narrowing. Compilation emits `W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS` for this difference from GitHub Actions. Remote and private reusable workflows remain unsupported.
 
 Pull-request builds and their triggered or rebuilt descendants may request only `contents: read`. Merge-queue builds and their descendants cannot request a token. The endpoint does not support GitHub Enterprise Server. The backend verifies this provenance and remains authoritative.
 

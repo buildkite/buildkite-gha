@@ -918,6 +918,58 @@ func TestCompileBundleGitHubTokenUsesRestrictedDefaultPermissions(t *testing.T) 
 	}
 }
 
+func TestCompileBundleReusableWorkflowTokensUseRootPermissions(t *testing.T) {
+	repository := t.TempDir()
+	caller := writeWorkflow(t, repository, "caller.yml", `on: push
+permissions:
+  contents: write
+  id-token: write
+  issues: read
+jobs:
+  direct:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+  delegated:
+    uses: ./.github/workflows/reusable.yml
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on: workflow_call
+permissions:
+  contents: read
+jobs:
+  token:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps: [{run: true}]
+`)
+
+	bundle, err := CompileBundle(caller, readFile(t, caller), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPermissions := map[string]string{"contents": "write", "issues": "read"}
+	if len(bundle.Plans) != 2 {
+		t.Fatalf("plans = %d, want direct and reusable jobs", len(bundle.Plans))
+	}
+	for _, artifact := range bundle.Plans {
+		if artifact.Job.GitHubToken == nil || artifact.Job.GitHubToken.Workflow != "caller.yml" || !reflect.DeepEqual(artifact.Job.GitHubToken.Permissions, wantPermissions) {
+			t.Fatalf("job %q token = %#v, want caller policy and permissions %#v", artifact.Job.Workflow.LogicalJobID, artifact.Job.GitHubToken, wantPermissions)
+		}
+		wantIDTokenPermission := ""
+		if artifact.Job.Workflow.LogicalJobID == "direct" {
+			wantIDTokenPermission = "write"
+		}
+		if artifact.Job.IDTokenPermission != wantIDTokenPermission {
+			t.Fatalf("job %q id-token permission = %q, want %q", artifact.Job.Workflow.LogicalJobID, artifact.Job.IDTokenPermission, wantIDTokenPermission)
+		}
+	}
+	if len(bundle.IR.Warnings) != 1 || bundle.IR.Warnings[0].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" {
+		t.Fatalf("warnings = %#v, want reusable workflow token warning", bundle.IR.Warnings)
+	}
+}
+
 func TestCompileBundleGitHubTokenRejectsExplicitEmptyPermissions(t *testing.T) {
 	for _, test := range []struct {
 		reference string

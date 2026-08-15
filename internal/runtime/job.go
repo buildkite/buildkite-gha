@@ -420,7 +420,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		if secrets == nil {
 			secrets = map[string]string{}
 		}
-		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.Workflow.Path, job.GitHubToken.Permissions)
+		secrets["GITHUB_TOKEN"], err = r.resolveWorkflowToken(runCtx, processor, job.Event.Repository, job.GitHubToken.Workflow, job.GitHubToken.Permissions)
 		if err != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, err)
 		}
@@ -1195,13 +1195,9 @@ func (r Runner) resolveSecrets(ctx context.Context, processor *commandProcessor,
 	return values, nil
 }
 
-func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandProcessor, repository, workflowPath string, permissions map[string]string) (string, error) {
+func (r Runner) resolveWorkflowToken(ctx context.Context, processor *commandProcessor, repository, workflow string, permissions map[string]string) (string, error) {
 	if r.WorkflowToken == nil {
 		return "", fmt.Errorf("GitHub workflow token provider is not configured")
-	}
-	workflow, err := plan.GitHubWorkflowPolicyFilename(workflowPath)
-	if err != nil {
-		return "", err
 	}
 	token, err := r.WorkflowToken.WorkflowToken(ctx, repository, workflow, permissions)
 	if err != nil {

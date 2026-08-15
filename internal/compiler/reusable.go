@@ -62,6 +62,7 @@ type reusableResolver struct {
 	root                  string
 	stack                 []string
 	context               expression.CompileContext
+	rootPermissions       *workflow.Permissions
 	expanded              int
 	runtimeMatrixBoundary bool
 }
@@ -115,7 +116,10 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 	if err != nil {
 		return nil, runtimeMatrixBoundary, err
 	}
-	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
+	resolver := reusableResolver{
+		root: root, stack: []string{canonicalPath}, context: context,
+		rootPermissions: effectivePermissions(nil, parsed.Permissions, nil, false), runtimeMatrixBoundary: runtimeMatrixBoundary,
+	}
 	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
 	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", context.Inputs, nil, nil, true, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
@@ -187,6 +191,14 @@ func (resolver *reusableResolver) resolve(path, digest string, parsed *workflow.
 	for _, id := range order {
 		job := jobs[id]
 		job.Permissions = effectivePermissions(job.Permissions, parsed.Permissions, permissionCeiling, depth != 0)
+		if depth != 0 {
+			idTokenPermission, hasIDTokenPermission := job.Permissions.Scopes["id-token"]
+			job.Permissions = clonePermissions(resolver.rootPermissions)
+			delete(job.Permissions.Scopes, "id-token")
+			if hasIDTokenPermission {
+				job.Permissions.Scopes["id-token"] = idTokenPermission
+			}
+		}
 		job, err = applyStaticInputs(path, job, inputs)
 		if err != nil {
 			return reusableResolution{}, err

@@ -246,9 +246,11 @@ type ContainerCredentials struct {
 
 type ServiceContainer = Container
 
-// GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Permissions
-// are API-normalized and compiler-owned; the repository always comes from Event.
+// GitHubToken describes one synthetic secrets.GITHUB_TOKEN value. Workflow is
+// the top-level policy filename. Permissions are API-normalized and
+// compiler-owned; the repository always comes from Event.
 type GitHubToken struct {
+	Workflow    string            `json:"workflow"`
 	Permissions map[string]string `json:"permissions"`
 }
 
@@ -586,6 +588,9 @@ func (job Job) Validate() error {
 	if job.GitHubToken != nil {
 		if job.Event.Provider != "github" || !validGitHubRepository(job.Event.Repository) {
 			return fmt.Errorf("GitHub workflow token requires a valid github.com event repository")
+		}
+		if err := ValidateGitHubWorkflowPolicyFilename(job.GitHubToken.Workflow); err != nil {
+			return err
 		}
 		if err := validateGitHubTokenPermissions(job.GitHubToken.Permissions); err != nil {
 			return err

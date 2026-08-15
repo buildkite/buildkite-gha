@@ -711,7 +711,7 @@ func TestPluginUsesJSONConfigurationAndOnlyRequiredRuntime(t *testing.T) {
 func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
-		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
+		"secret.yml": "name: Secret\non: push\njobs:\n  secret:\n    permissions:\n      contents: read\n    runs-on: ubuntu-latest\n    env:\n      TOKEN: ${{ secrets.GITHUB_TOKEN }}\n    steps: [{run: true}]\n",
 	})
 	t.Chdir(repository)
 	configuration, err := json.Marshal(map[string]any{"workflow": ".github/workflows/secret.yml"})
@@ -747,7 +747,7 @@ func TestPluginAdmissionFailurePrintsDiagnosticsBeforeSummaryAndAnnotatesDetails
 			annotation = &runner.commands[i]
 		}
 	}
-	if annotation == nil || !strings.Contains(string(annotation.stdin), "needs GITHUB_TOKEN") ||
+	if annotation == nil || !strings.Contains(string(annotation.stdin), "job-level permissions are unsupported") ||
 		!strings.Contains(string(annotation.stdin), `href="https://github.com/buildkite/buildkite-gha/blob/0123456789abcdef0123456789abcdef01234567/.github/workflows/secret.yml#L`) {
 		t.Fatalf("admission failure annotation = %#v", annotation)
 	}
@@ -2676,7 +2676,7 @@ jobs:
 	if len(report.Jobs) != 1 || report.Jobs[0].ID != "delegated" || report.Jobs[0].Result != compatibility.Failed {
 		t.Fatalf("caller job ledger = %#v", report.Jobs)
 	}
-	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph {
+	if len(report.Diagnostics) != 2 || report.Diagnostics[0].Job != "delegated" || report.Diagnostics[0].Stage != stageGraph || report.Diagnostics[1].Code != "W_REUSABLE_WORKFLOW_TOKEN_USES_ROOT_PERMISSIONS" {
 		t.Fatalf("diagnostics = %#v", report.Diagnostics)
 	}
 }
@@ -6968,7 +6968,7 @@ func TestUnprivilegedUploadAdmitsOnlyCompilerVerifiedWorkflowToken(t *testing.T)
 	job := plan.Job{
 		Workflow:             plan.Workflow{Path: ".github/workflows/comment.yml", LogicalJobID: "comment"},
 		RequiredCapabilities: []string{"provider-token-write"},
-		GitHubToken:          &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}},
+		GitHubToken:          &plan.GitHubToken{Workflow: "comment.yml", Permissions: map[string]string{"pull_requests": "write"}},
 	}
 	for _, test := range []struct {
 		name          string
@@ -6998,7 +6998,7 @@ func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T)
 	artifact := compiler.PlanArtifact{
 		Job: plan.Job{
 			Workflow:    plan.Workflow{LogicalJobID: "build"},
-			GitHubToken: &plan.GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}},
+			GitHubToken: &plan.GitHubToken{Workflow: "build.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}},
 		},
 		Authorization: compiler.PlanAuthorization{GitHubTokenActions: []string{"owner/action@v1"}},
 	}
@@ -7630,7 +7630,7 @@ func TestRunJobDisabledWorkflowTokenLinksPipelineSettings(t *testing.T) {
 	job.Workflow.Path = ".github/workflows/ci.yml"
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "ci.yml", Permissions: map[string]string{"contents": "read"}}
 	planPath, planDigest := writeCLIJobPlan(t, job)
 	setCLIJobIdentity(t, job, planDigest)
 	truePath, err := exec.LookPath("true")

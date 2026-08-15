@@ -2551,7 +2551,7 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "caller.yml", Permissions: map[string]string{"contents": "read", "pull_requests": "write"}}
 	job.Env = map[string]string{"GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"}
 	provider := &testWorkflowTokenProvider{token: token}
 	redactor := &testRedactor{}
@@ -2560,7 +2560,7 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() result = %#v, error = %v", result, err)
 	}
-	if provider.calls != 1 || provider.repository != job.Event.Repository || provider.workflow != "test.yml" || !reflect.DeepEqual(provider.permissions, job.GitHubToken.Permissions) {
+	if provider.calls != 1 || provider.repository != job.Event.Repository || provider.workflow != "caller.yml" || !reflect.DeepEqual(provider.permissions, job.GitHubToken.Permissions) {
 		t.Fatalf("token request = calls %d, repository %q, workflow %q, permissions %#v", provider.calls, provider.repository, provider.workflow, provider.permissions)
 	}
 	if !reflect.DeepEqual(redactor.values, []string{token}) {
@@ -2571,7 +2571,7 @@ func TestRunJobMintsAndRedactsScopedGitHubWorkflowToken(t *testing.T) {
 	}
 }
 
-func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
+func TestRunJobRejectsInvalidWorkflowTokenPolicyBeforeMinting(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/nested/test.yml"
 	writeFixtureFile(t, workspace, workflowPath, "name: workflow token\n")
@@ -2579,7 +2579,7 @@ func TestRunJobRejectsNestedWorkflowTokenPathBeforeMinting(t *testing.T) {
 	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "nested/test.yml", Permissions: map[string]string{"contents": "read"}}
 	provider := &testWorkflowTokenProvider{token: "must-not-be-minted"}
 	_, err := (Runner{WorkflowToken: provider, Redactor: &testRedactor{}}).RunJob(context.Background(), job, workspace)
 	if err == nil || !strings.Contains(err.Error(), "simple .yml or .yaml filename") || provider.calls != 0 {
@@ -2844,7 +2844,7 @@ func TestRunJobAbortsAndScrubsWorkflowTokenWhenRedactionFails(t *testing.T) {
 	job.Schema = plan.Schema
 	job.Event.Repository = "buildkite/buildkite-gha"
 	job.RequiredCapabilities = []string{"provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"pull_requests": "write"}}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"pull_requests": "write"}}
 	_, err := (Runner{WorkflowToken: &testWorkflowTokenProvider{token: token}, Redactor: failingTokenRedactor{token: token}}).RunJob(context.Background(), job, workspace)
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "***") {
 		t.Fatalf("RunJob() error = %v, want redaction failure without token disclosure", err)
@@ -5157,7 +5157,7 @@ if [ "$action:$phase" = main-fails:main ]; then exit 7; fi
 	})
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"network", "provider-token-write"}
-	job.GitHubToken = &plan.GitHubToken{Permissions: map[string]string{"contents": "read"}}
+	job.GitHubToken = &plan.GitHubToken{Workflow: "test.yml", Permissions: map[string]string{"contents": "read"}}
 	job.Event.Repository = "owner/repo"
 	job.Env = map[string]string{"LIFECYCLE_LOG": lifecycle}
 	job.Actions = []plan.ActionLock{
