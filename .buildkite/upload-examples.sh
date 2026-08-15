@@ -103,7 +103,7 @@ steps:
           automatic: false
         cache: "/cache/bkcache/mise"
         plugins:
-          - github-actions#v0.9.3:
+          - github-actions#latest:
               workflow: "$workflow"
               source-ref: "$commit"
 YAML
