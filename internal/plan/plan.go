@@ -270,15 +270,22 @@ func Decode(source []byte) (Job, error) {
 		return Job{}, fmt.Errorf("decode job plan: %w", err)
 	}
 	for i, step := range presence.Steps {
-		if _, literal := step["continue_on_error"]; literal {
-			if _, expression := step["continue_on_error_expression"]; expression {
-				return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
+		controls := make(map[string]bool, 4)
+		for name := range step {
+			name = strings.ToLower(name)
+			switch name {
+			case "continue_on_error", "continue_on_error_expression", "timeout_minutes", "timeout_minutes_expression":
+				if controls[name] {
+					return Job{}, fmt.Errorf("decode job plan: step %d repeats %s with different casing", i+1, name)
+				}
+				controls[name] = true
 			}
 		}
-		if _, literal := step["timeout_minutes"]; literal {
-			if _, expression := step["timeout_minutes_expression"]; expression {
-				return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
-			}
+		if controls["continue_on_error"] && controls["continue_on_error_expression"] {
+			return Job{}, fmt.Errorf("decode job plan: step %d has both continue_on_error fields", i+1)
+		}
+		if controls["timeout_minutes"] && controls["timeout_minutes_expression"] {
+			return Job{}, fmt.Errorf("decode job plan: step %d has both timeout_minutes fields", i+1)
 		}
 	}
 	var job Job
