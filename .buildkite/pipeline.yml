@@ -134,7 +134,9 @@ steps:
         plugins:
           - mise#a5845c5082d3a4fe36dd77ae74973dfc86fc91a2:
               version: "2026.5.12"
-        command: "mise exec -- go run ./cmd/buildkite-gha plugin"
+        command: |
+          revision="$$(git rev-parse HEAD)"
+          mise exec -- go run -ldflags "-X main.revision=$$revision" ./cmd/buildkite-gha plugin
 
   - wait: ~
 
