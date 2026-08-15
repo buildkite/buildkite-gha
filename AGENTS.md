@@ -19,7 +19,7 @@ CLI. Manual GUI testing does not apply.
 ### Toolchain (managed by mise)
 
 - The toolchain (Go 1.26.5, Node 20/24, `golangci-lint`, `shellcheck`, `jq`,
-  `goreleaser`, `svu`) is pinned in `mise.toml` and installed with `mise`.
+  `goreleaser`) is pinned in `mise.toml` and installed with `mise`.
 - `mise` is installed at `~/.local/bin/mise` and activated for interactive
   shells via `~/.bashrc`. The startup update script runs `mise install`, so
   the toolchain is already present at session start.

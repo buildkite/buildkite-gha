@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+die() { printf '[select-release-version-test] error: %s\n' "$*" >&2; exit 1; }
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fake_bin="$(mktemp -d)"
+trap 'rm -rf "$fake_bin"' EXIT
+
+cat > "$fake_bin/amp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+settings=''
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --settings-file ]]; then
+    settings="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+[[ -n "$settings" ]]
+grep -Fq '"amp.tools.enable": []' "$settings"
+[[ "$PWD" == "${settings%/settings.json}" ]]
+prompt="$(cat)"
+[[ "$prompt" == *"Current release: $EXPECT_CURRENT"* ]]
+[[ "$prompt" == *"$EXPECT_EVIDENCE"* ]]
+printf '%s\n' "$FAKE_RESPONSE"
+EOF
+chmod +x "$fake_bin/amp"
+
+run_success() {
+  local current="$1" response="$2" expected="$3" evidence='DIFF evidence marker' actual
+  actual="$(printf '%s\n' "$evidence" | env PATH="$fake_bin:$PATH" EXPECT_CURRENT="$current" \
+    EXPECT_EVIDENCE="$evidence" FAKE_RESPONSE="$response" "$root/scripts/select-release-version" "$current")"
+  [[ "$actual" == "$expected" ]] || die "unexpected result: $actual"
+}
+
+run_failure() {
+  local response="$1" expected_error="$2" output evidence='DIFF evidence marker'
+  if output="$(printf '%s\n' "$evidence" | env PATH="$fake_bin:$PATH" EXPECT_CURRENT=v0.13.15 \
+    EXPECT_EVIDENCE="$evidence" FAKE_RESPONSE="$response" "$root/scripts/select-release-version" v0.13.15 2>&1)"; then
+    die "expected failure for response: $response"
+  fi
+  [[ "$output" == *"$expected_error"* ]] || die "unexpected failure: $output"
+}
+
+run_success v0.13.15 $'DECISION=minor\nRATIONALE=Adds supported secret handling.' \
+  $'VERSION=v0.14.0\nDECISION=minor\nRATIONALE=Adds supported secret handling.'
+run_success v0.13.15 $'DECISION=patch\nRATIONALE=Fixes an existing runtime path.' \
+  $'VERSION=v0.13.16\nDECISION=patch\nRATIONALE=Fixes an existing runtime path.'
+run_failure $'DECISION=none\nRATIONALE=Only generated noise changed.' 'Amp returned none'
+run_failure $'DECISION=ambiguous\nRATIONALE=The compatibility impact is unclear.' 'Amp returned ambiguous'
+run_failure 'minor' 'expected exactly two response lines'
+run_failure $'DECISION=major\nRATIONALE=Breaking API.' 'invalid release decision'
+
+printf '%s\n' 'select-release-version tests passed'
