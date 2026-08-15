@@ -115,9 +115,27 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-For a quick check, replace `--event-path` with `--event` and one of `push`, `pull_request`, `workflow_dispatch`, or `schedule`. The generated minimal snapshot is not equivalent to a real payload; use `--event-path` when exact payload data matters.
+For a quick push compatibility check, generate a minimal event snapshot:
 
-Use `--all-events` with `--profile hosted` to evaluate every declared supported event separately. JSON output uses `processing-report/v3` to retain each event's result.
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --event push \
+  .github/workflows/ci.yml
+```
+
+`--event` also supports `pull_request`, `workflow_dispatch`, and `schedule`. The generated minimal snapshot is not equivalent to a real payload; use `--event-path` when exact payload data matters.
+
+Use `--all-events` to evaluate every declared supported event separately:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  .github/workflows/ci.yml
+```
+
+JSON output uses `processing-report/v3` to retain each event's result.
 
 An `admitted` result means the workflow satisfies upload policy. A `not-applicable` result means the workflow does not declare the selected event and upload would skip it without compiling it. Validation does not execute the workflow or prove that arbitrary action code works without GitHub services. Use `--format json` for machine-readable output.
 

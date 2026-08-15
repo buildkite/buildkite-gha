@@ -59,6 +59,29 @@ buildkite-gha validate \
 
 `--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload.
 
+Inspect the aggregate result and each event outcome:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --format json \
+  .github/workflows/ci.yml |
+  jq '{result, events: [.evaluations[] | {event, result: .report.result}]}'
+```
+
+Inspect diagnostics with their generated event names:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --format json \
+  .github/workflows/ci.yml |
+  jq -r '(.validation.diagnostics[] | "validation: \(.code): \(.message)"),
+    (.evaluations[] | .event as $event | .report.diagnostics[] | "\($event): \(.code): \(.message)")'
+```
+
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 
 Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted.
