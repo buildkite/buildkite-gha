@@ -21,6 +21,7 @@ import (
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
+	buildkitepipeline "github.com/buildkite/buildkite-gha/internal/buildkite"
 	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/buildkite/buildkite-gha/internal/workflow"
@@ -210,6 +211,7 @@ func Validate(path string, source []byte) (Report, error) {
 	if err != nil {
 		return Report{}, processingFinding(StageWorkflowParsing, CodeWorkflowSyntax, "syntax", err)
 	}
+	triggerErr := processingFinding(StagePipeline, CodePipelineGeneration, "compatibility", buildkitepipeline.ValidateTriggerConditions(parsed.Triggers))
 	options := defaultOptions()
 	event := Event{
 		Event: "validation", Trust: options.EventTrust,
@@ -224,7 +226,7 @@ func Validate(path string, source []byte) (Report, error) {
 	cancelInProgress, cancellationErr := resolveWorkflowCancellation(path, parsed.Concurrency, context)
 	cancellationErr = processingFinding(StageExpressions, CodeExpressionInvalid, "compatibility", cancellationErr)
 	expanded, expandErr := expand(path, source, parsed, context, options)
-	if err := errors.Join(concurrencyErr, cancellationErr, expandErr); err != nil {
+	if err := errors.Join(triggerErr, concurrencyErr, cancellationErr, expandErr); err != nil {
 		return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), err
 	}
 	return expansionReport(expanded, compilerWarnings(parsed.Concurrency, cancelInProgress)), nil

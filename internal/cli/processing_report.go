@@ -102,6 +102,24 @@ func (o processingOutput) write(report compatibility.ProcessingReport) error {
 	return nil
 }
 
+func (o processingOutput) writeV3(report compatibility.ProcessingReportV3) error {
+	if err := compatibility.WriteProcessingV3(o.reports, o.format, report); err != nil {
+		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: write report: %v\n", o.command, err)
+		return err
+	}
+	combined := report.Validation
+	combined.Profile = report.Profile
+	combined.Diagnostics = append([]compatibility.Diagnostic(nil), report.Validation.Diagnostics...)
+	for _, evaluation := range report.Evaluations {
+		for _, diagnostic := range evaluation.Report.Diagnostics {
+			diagnostic.Message = fmt.Sprintf("Generated %s event: %s", evaluation.Event, diagnostic.Message)
+			combined.Diagnostics = append(combined.Diagnostics, diagnostic)
+		}
+	}
+	o.annotate(combined)
+	return nil
+}
+
 func writePluginProcessing(w io.Writer, report compatibility.ProcessingReport) error {
 	report.Finalize()
 	workflow, _ := processingAnnotationWorkflowPath(report.Workflow, "")

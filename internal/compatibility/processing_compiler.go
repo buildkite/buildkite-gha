@@ -96,25 +96,23 @@ func InitialProcessingReport(path, profile string, eventEvaluated bool, report c
 }
 
 func setInitialStageResults(report *ProcessingReport, eventEvaluated bool, failed map[string]bool) {
+	for stage := range failed {
+		report.SetStage(stage, Failed)
+	}
 	workflowFailed := failed[stageWorkflowParsing]
-	if workflowFailed {
-		report.SetStage(stageWorkflowParsing, Failed)
-	} else {
+	if !workflowFailed {
 		report.SetStage(stageWorkflowParsing, Passed)
 	}
 	eventFailed := false
 	if eventEvaluated {
 		eventFailed = failed[stageEventValidation]
-		if eventFailed {
-			report.SetStage(stageEventValidation, Failed)
-		} else {
+		if !eventFailed {
 			report.SetStage(stageEventValidation, Passed)
 		}
 	}
 	blocked := workflowFailed || eventFailed || failed[""]
 	for _, stage := range []string{stageGraph, stageMatrix, stageExpressions, stageDiscovery} {
 		if failed[stage] {
-			report.SetStage(stage, Failed)
 			blocked = true
 			continue
 		}

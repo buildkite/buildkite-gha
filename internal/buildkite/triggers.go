@@ -67,6 +67,17 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 	return strings.Join(terms, " || "), nil
 }
 
+// ValidateTriggerConditions validates every trigger using the same translation
+// rules as pipeline generation without selecting an effective event.
+func ValidateTriggerConditions(triggers []workflow.Trigger) error {
+	for _, trigger := range triggers {
+		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // TranslateEventTriggerCondition validates every trigger but emits a
 // condition only for the selected effective event. A false applicable result
 // means the workflow must not be compiled for that event.
