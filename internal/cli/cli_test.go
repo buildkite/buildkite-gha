@@ -4819,7 +4819,7 @@ func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: CI" || !strings.HasSuffix(pipeline.Steps[0].Condition, "&& true)") || len(pipeline.Steps[0].Steps) != 1 {
+	if len(pipeline.Steps) != 1 || pipeline.Steps[0].Group != ":github: CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
 		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
 	}
 }

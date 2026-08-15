@@ -186,15 +186,6 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, cont
 					return fmt.Sprintf("Pull request activity %q does not match this workflow's pull_request activity filters.", *context.PullRequestActionValue), nil
 				}
 			}
-			if context.ChangedPathsKnown && (trigger.Paths != nil || trigger.PathsIgnore != nil) {
-				matches, err := pathFiltersMatch(context.ChangedPaths, trigger.Paths, trigger.PathsIgnore)
-				if err != nil {
-					return "", fmt.Errorf("pull_request paths: %w", err)
-				}
-				if !matches {
-					return "Changed paths do not match this workflow's pull_request path filters.", nil
-				}
-			}
 		}
 		return "", nil
 	}
@@ -331,7 +322,12 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext, selec
 			if err != nil {
 				return "", false, fmt.Errorf("pull_request paths: %w", err)
 			}
-			parts = append(parts, fmt.Sprintf("%t", matches))
+			if !matches {
+				return "", false, &UnsupportedPathFiltersError{
+					Event:  t.Event,
+					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
+				}
+			}
 		}
 		return strings.Join(parts, " && "), true, nil
 	default:

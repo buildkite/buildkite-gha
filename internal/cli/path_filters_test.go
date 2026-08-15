@@ -75,11 +75,14 @@ func TestParseChangedPathsFailsClosed(t *testing.T) {
 	if _, err := parseChangedPaths([]byte("R100\x00old.go\x00new.go\x00")); err == nil || !strings.Contains(err.Error(), "renamed") {
 		t.Fatalf("rename error = %v", err)
 	}
+	if _, err := parseChangedPaths([]byte("D\x00old.go\x00A\x00new.go\x00")); err == nil || !strings.Contains(err.Error(), "rename conformance") {
+		t.Fatalf("undetected rename error = %v", err)
+	}
 	var output bytes.Buffer
-	for i := 0; i <= maxGitHubPathFilterFiles; i++ {
+	for i := 0; i <= maxLocallyEvaluatedPathFilterFiles; i++ {
 		_, _ = fmt.Fprintf(&output, "M\x00file-%03d\x00", i)
 	}
-	if _, err := parseChangedPaths(output.Bytes()); err == nil || !strings.Contains(err.Error(), "300-file") {
+	if _, err := parseChangedPaths(output.Bytes()); err == nil || !strings.Contains(err.Error(), "300-file local evaluation bound") {
 		t.Fatalf("file limit error = %v", err)
 	}
 }
