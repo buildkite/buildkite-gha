@@ -55,7 +55,7 @@ Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path>] [--format text|json] <workflow>\n",
+	"validate": "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--format text|json] <workflow>\n",
 	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
@@ -65,7 +65,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	_, _ = fmt.Fprint(stdout, commandUsage[command])
 	switch command {
 	case "validate":
-		_, _ = fmt.Fprint(stdout, "\nWithout --profile, validate checks event-independent syntax, the static graph, and every declared trigger; it does not evaluate hosted admission. The hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility. Use --event-path for an exact snapshot, or --event to generate a minimal compatibility snapshot for push, pull_request, workflow_dispatch, or schedule. Generated snapshots are test inputs, not substitutes for real payloads.\n")
+		_, _ = fmt.Fprint(stdout, "\nWithout --profile, validate checks event-independent syntax, the static graph, and every declared trigger; it does not evaluate hosted admission. The hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility. Use --event-path for an exact snapshot, --event to generate one minimal compatibility snapshot, or --all-events to evaluate every declared supported event separately. Generated snapshots are test inputs, not substitutes for real payloads.\n")
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
@@ -1295,14 +1295,21 @@ func verifyBuildkiteTarget(job plan.Job) error {
 }
 
 func validate(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
-	workflowPath, eventPath, eventName, format, profile, err := validateArgs(args)
+	workflowPath, eventPath, eventName, format, profile, allEvents, err := validateArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
 	}
-	if profile != "" && eventPath == "" && eventName == "" {
-		return usageError(stderr, "validate: --profile hosted requires --event or --event-path; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
+	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
+		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
 	out := newProcessingOutput("validate", format, stdout, stderr, agent)
+	if allEvents {
+		return validateAllEvents(out, workflowPath, version, stderr)
+	}
+	return validateOne(out, workflowPath, eventPath, eventName, profile, version, stderr)
+}
+
+func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version string, stderr io.Writer) int {
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1397,32 +1404,98 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	return 0
 }
 
-func validateArgs(args []string) (workflowPath, eventPath, eventName, format, profile string, err error) {
+func validateAllEvents(out processingOutput, workflowPath, version string, stderr io.Writer) int {
+	source, err := os.ReadFile(workflowPath)
+	if err != nil {
+		validation := compatibility.EnvironmentProcessingReport(workflowPath, "", "workflow input could not be read")
+		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validation)
+		_ = out.writeV3(report)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
+		return 1
+	}
+	validation, validationErr := compiler.Validate(workflowPath, source)
+	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
+	if validationErr != nil {
+		validationReport.Result = "incompatible"
+		report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
+		if out.writeV3(report) != nil {
+			return 1
+		}
+		return 1
+	}
+	validationReport.Result = "compilable"
+	report := compatibility.NewProcessingReportV3(workflowPath, hostedProfile, validationReport)
+	parsed, err := workflow.Parse(workflowPath, source)
+	if err != nil {
+		return 1
+	}
+	declared := make(map[string]bool, len(parsed.Triggers))
+	for _, trigger := range parsed.Triggers {
+		declared[trigger.Event] = true
+	}
+	failed := false
+	for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		if !declared[event] {
+			continue
+		}
+		var eventReport *compatibility.ProcessingReport
+		eventOut := processingOutput{
+			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
+			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
+		}
+		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, stderr); code != 0 {
+			failed = true
+		}
+		if eventReport == nil {
+			return 1
+		}
+		report.Evaluations = append(report.Evaluations, compatibility.EventEvaluation{
+			Event: event, Source: "generated", Report: *eventReport,
+		})
+	}
+	if out.writeV3(report) != nil {
+		return 1
+	}
+	if failed {
+		return 1
+	}
+	return 0
+}
+
+func validateArgs(args []string) (workflowPath, eventPath, eventName, format, profile string, allEvents bool, err error) {
 	format = "text"
 	formatSeen := false
 	profileSeen := false
 	eventPathSeen := false
 	eventSeen := false
+	allEventsSeen := false
 	for i := 0; i < len(args); i++ {
 		option := args[i]
 		switch option {
 		case "--format", "--profile", "--event-path", "--event":
 			seen := map[string]bool{"--format": formatSeen, "--profile": profileSeen, "--event-path": eventPathSeen, "--event": eventSeen}[option]
 			if seen {
-				return "", "", "", "", "", fmt.Errorf("%s may only be specified once", option)
+				return "", "", "", "", "", false, fmt.Errorf("%s may only be specified once", option)
 			}
 			i++
 			if i == len(args) {
-				return "", "", "", "", "", fmt.Errorf("%s requires a value", option)
+				return "", "", "", "", "", false, fmt.Errorf("%s requires a value", option)
 			}
+		case "--all-events":
+			if allEventsSeen {
+				return "", "", "", "", "", false, fmt.Errorf("--all-events may only be specified once")
+			}
+			allEventsSeen = true
+			allEvents = true
+			continue
 		case "-h", "--help":
-			return "", "", "", "", "", fmt.Errorf("help must be requested immediately after the command")
+			return "", "", "", "", "", false, fmt.Errorf("help must be requested immediately after the command")
 		default:
 			if strings.HasPrefix(option, "-") {
-				return "", "", "", "", "", fmt.Errorf("unknown option %q", option)
+				return "", "", "", "", "", false, fmt.Errorf("unknown option %q", option)
 			}
 			if workflowPath != "" {
-				return "", "", "", "", "", fmt.Errorf("expected one workflow path")
+				return "", "", "", "", "", false, fmt.Errorf("expected one workflow path")
 			}
 			workflowPath = option
 			continue
@@ -1432,13 +1505,13 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 			formatSeen = true
 			format = args[i]
 			if format != "text" && format != "json" {
-				return "", "", "", "", "", fmt.Errorf("--format must be text or json")
+				return "", "", "", "", "", false, fmt.Errorf("--format must be text or json")
 			}
 		case "--profile":
 			profileSeen = true
 			profile = args[i]
 			if profile != hostedProfile && profile != legacyHostedTokenlessProfile {
-				return "", "", "", "", "", fmt.Errorf("--profile must be %q", hostedProfile)
+				return "", "", "", "", "", false, fmt.Errorf("--profile must be %q", hostedProfile)
 			}
 			profile = hostedProfile
 		case "--event-path":
@@ -1450,18 +1523,24 @@ func validateArgs(args []string) (workflowPath, eventPath, eventName, format, pr
 		}
 	}
 	if workflowPath == "" {
-		return "", "", "", "", "", fmt.Errorf("workflow path is required")
+		return "", "", "", "", "", false, fmt.Errorf("workflow path is required")
 	}
 	if eventPathSeen && eventSeen {
-		return "", "", "", "", "", fmt.Errorf("--event and --event-path are mutually exclusive")
+		return "", "", "", "", "", false, fmt.Errorf("--event and --event-path are mutually exclusive")
 	}
 	if eventSeen && profile == "" {
-		return "", "", "", "", "", fmt.Errorf("--event requires --profile hosted")
+		return "", "", "", "", "", false, fmt.Errorf("--event requires --profile hosted")
 	}
 	if eventSeen && !slices.Contains([]string{"push", "pull_request", "workflow_dispatch", "schedule"}, eventName) {
-		return "", "", "", "", "", fmt.Errorf("unsupported --event %q; supported events are push, pull_request, workflow_dispatch, and schedule", eventName)
+		return "", "", "", "", "", false, fmt.Errorf("unsupported --event %q; supported events are push, pull_request, workflow_dispatch, and schedule", eventName)
 	}
-	return workflowPath, eventPath, eventName, format, profile, nil
+	if allEvents && (eventPathSeen || eventSeen) {
+		return "", "", "", "", "", false, fmt.Errorf("--all-events is mutually exclusive with --event and --event-path")
+	}
+	if allEvents && profile == "" {
+		return "", "", "", "", "", false, fmt.Errorf("--all-events requires --profile hosted")
+	}
+	return workflowPath, eventPath, eventName, format, profile, allEvents, nil
 }
 
 func generatedEventSnapshot(name string) ([]byte, error) {

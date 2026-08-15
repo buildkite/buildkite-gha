@@ -48,11 +48,20 @@ buildkite-gha validate \
 
 `--event` supports `push`, `pull_request`, `workflow_dispatch`, and `schedule`. It is available only with `--profile hosted` and is mutually exclusive with `--event-path`. The generated snapshot uses example repository identity and minimal event fields. It can expose payload-dependent incompatibilities, but it is not equivalent to a real payload and cannot prove behavior for every payload shape. Use `--event-path` when exact refs, activity, repository identity, or payload fields matter.
 
-Validation produces one processing report for one event. There is no `--all-events` option: combining generated evaluations under the current single-report contract would overstate admission when behavior depends on payload fields. Run `--event` once per event you need to inspect, and use exact snapshots for payload-dependent workflows.
+Use `--all-events` with `--profile hosted` to evaluate every declared `push`, `pull_request`, `workflow_dispatch`, and `schedule` trigger with a separate generated snapshot:
+
+```sh
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  .github/workflows/ci.yml
+```
+
+`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload.
 
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 
-Use `--format json` for a `buildkite-gha/processing-report/v2` report.
+Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 

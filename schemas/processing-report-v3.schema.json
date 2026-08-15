@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buildkite.com/schemas/buildkite-gha/processing-report-v3.schema.json",
+  "title": "buildkite-gha processing report v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "workflow", "profile", "result", "status", "validation", "evaluations"],
+  "properties": {
+    "schema": {"const": "buildkite-gha/processing-report/v3"},
+    "workflow": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "profile": {"const": "hosted"},
+    "result": {"type": "string", "minLength": 1, "maxLength": 128},
+    "status": {"enum": ["passed", "failed", "not-evaluated"]},
+    "validation": {"$ref": "processing-report-v2.schema.json"},
+    "evaluations": {
+      "type": "array",
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event", "event_source", "report"],
+        "properties": {
+          "event": {"enum": ["push", "pull_request", "workflow_dispatch", "schedule"]},
+          "event_source": {"const": "generated"},
+          "report": {"$ref": "processing-report-v2.schema.json"}
+        }
+      }
+    }
+  }
+}
