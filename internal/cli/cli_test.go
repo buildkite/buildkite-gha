@@ -3733,6 +3733,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	workflowDirectory := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows")
 	workflowPaths := []string{
 		filepath.Join(workflowDirectory, "artifact-multi-prefix.yml"),
+		filepath.Join(workflowDirectory, "cache-v2-compatibility.yml"),
 		filepath.Join(workflowDirectory, "cache-v5.yml"),
 		filepath.Join(workflowDirectory, "cache-v6.yml"),
 		filepath.Join(workflowDirectory, "concurrent.yml"),
@@ -3751,7 +3752,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	if code := run(args, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Uploaded 12 jobs from 5 workflows") || stderr.Len() != 0 || len(runner.commands) != 14 {
+	if !strings.Contains(stdout.String(), "Uploaded 14 jobs from 6 workflows") || stderr.Len() != 0 || len(runner.commands) != 16 {
 		t.Fatalf("stdout/stderr/commands = %q / %q / %d", stdout.String(), stderr.String(), len(runner.commands))
 	}
 	pipelineCommand := runner.commands[len(runner.commands)-1]
@@ -3782,7 +3783,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
 		t.Fatal(err)
 	}
-	wantLabels := []string{"bounded multi-prefix artifact selection", "actions/cache v5 proof", "actions/cache v6 proof", "buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
+	wantLabels := []string{"bounded multi-prefix artifact selection", "actions/cache v2 compatibility proof", "actions/cache v5 proof", "actions/cache v6 proof", "buildkite-gha concurrent smoke", "buildkite-gha shell smoke"}
 	seenKeys := make(map[string]bool)
 	seenCheckNames := make(map[string]bool)
 	for i, group := range pipeline.Steps {
@@ -3810,7 +3811,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 			}
 		}
 	}
-	if len(pipeline.Steps) != 5 || len(seenKeys) != 12 {
+	if len(pipeline.Steps) != 6 || len(seenKeys) != 14 {
 		t.Fatalf("aggregate groups/keys = %d/%d", len(pipeline.Steps), len(seenKeys))
 	}
 	planCount := 0
@@ -3827,7 +3828,7 @@ func TestRunUploadAggregatesExplicitPathsAtomicallyWithNamespacedJobs(t *testing
 			t.Fatalf("plan targets unknown aggregate key %q", job.Target.StepKey)
 		}
 	}
-	if planCount != 12 {
+	if planCount != 14 {
 		t.Fatalf("aggregate uploaded plans = %d", planCount)
 	}
 }
@@ -6639,7 +6640,7 @@ func TestUnprivilegedUploadRejectsKnownGitHubServiceActions(t *testing.T) {
 }
 
 func TestUnprivilegedUploadAllowsOnlyAuditedCacheCommits(t *testing.T) {
-	for _, commit := range []string{actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+	for _, commit := range actionintegration.CacheCommits() {
 		for _, path := range []string{"", "restore", "save"} {
 			action := plan.ActionLock{Source: "github", Repository: "actions/cache", Path: path, Commit: commit}
 			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
@@ -6674,7 +6675,7 @@ func TestCacheServiceRequiredUsesOnlyAuditedCacheLocks(t *testing.T) {
 	}
 
 	locks := []plan.ActionLock{{Source: "github", Repository: "owner/action", Commit: strings.Repeat("a", 40)}}
-	for _, commit := range []string{actionintegration.CacheV503Commit, actionintegration.CacheV5Commit, actionintegration.CacheCommit} {
+	for _, commit := range actionintegration.CacheCommits() {
 		locks = append(locks[:1], plan.ActionLock{Source: "github", Repository: "actions/cache", Path: "restore", Commit: commit})
 		required, err = cacheServiceRequired(locks)
 		if err != nil || !required {

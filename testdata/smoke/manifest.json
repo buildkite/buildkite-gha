@@ -155,6 +155,24 @@
       "action_preflight": "hosted"
     },
     {
+      "id": "cache-v2-compatibility",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-compatibility.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "Compiler, upload, run-job, and runtime resolver tests admit the audited cache-v2 release commits and preserve isolated per-phase credentials.",
+      "note": "This build-unique v3.4.0 producer to v6.1.0 consumer proves the oldest and newest admitted archive lifecycle at compile time. It remains compile-only until the cross-generation roundtrip passes against the hosted Buildkite Results service.",
+      "action_preflight": "hosted"
+    },
+    {
+      "id": "cache-v2-admission",
+      "workflow": "testdata/smoke/.github/workflows/cache-v2-admission.yml",
+      "event": "testdata/smoke/events/push.json",
+      "expectation": "compile-pass",
+      "evidence": "The hosted profile resolves and admits the restore entry point from every supported immutable actions/cache release commit.",
+      "note": "This fixture is compile and admission coverage only. It does not execute cache restores or prove a Buildkite Results roundtrip.",
+      "action_preflight": "hosted"
+    },
+    {
       "id": "unsupported-job-container",
       "workflow": "testdata/unsupported/.github/workflows/job-container.yml",
       "event": "testdata/smoke/events/push.json",

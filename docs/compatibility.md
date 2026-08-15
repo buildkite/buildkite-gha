@@ -637,9 +637,35 @@ Only ZIPs produced by the supported upload adapter are accepted. Digest or ZIP v
 
 ### Cache action
 
-**🟡 Supported subset.** Public runtime support remains limited to `actions/cache` v6.1.0 at [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9). Its root, `restore`, and `save` entry points run the stock Node 24 cache-v2 client against the Buildkite Results service.
+**🟡 Supported subset.** The exact releases below run their stock cache-v2 clients against the Buildkite Results service. Root, `restore`, and `save` entry points are supported.
 
-The hosted profile also admits the exact v5.0.3 and v5.1.0 commits for runtime-proof collection. They are not part of the public compatibility contract until that hosted proof is complete. Other v5 commits, v4, and unknown v6 commits remain unsupported.
+| Release | Commit | Node | `@actions/cache` |
+| --- | --- | --- | --- |
+| v3.4.0 | [`f4b3439a656ba812b8cb417d2d49f9c810103092`](https://github.com/actions/cache/tree/f4b3439a656ba812b8cb417d2d49f9c810103092) | 16 | 4.0.0 |
+| v3.4.2 | [`387e18722e6ff315b24a3b8b071feddd27b7bf7e`](https://github.com/actions/cache/tree/387e18722e6ff315b24a3b8b071feddd27b7bf7e) | 16 | 4.0.1 |
+| v3.4.3 | [`2f8e54208210a422b2efd51efaa6bd6d7ca8920f`](https://github.com/actions/cache/tree/2f8e54208210a422b2efd51efaa6bd6d7ca8920f) | 16 | 4.0.2 |
+| v3.5.0 | [`6f8efc29b200d32929f49075959781ed54ec270c`](https://github.com/actions/cache/tree/6f8efc29b200d32929f49075959781ed54ec270c) | 16 | 4.1.0 |
+| v4.2.0 | [`1bd1e32a3bdc45362d1e726936510720a7c30a57`](https://github.com/actions/cache/tree/1bd1e32a3bdc45362d1e726936510720a7c30a57) | 20 | 4.0.0 |
+| v4.2.1 | [`0c907a75c2c80ebcb7f088228285e798b750cf8f`](https://github.com/actions/cache/tree/0c907a75c2c80ebcb7f088228285e798b750cf8f) | 20 | 4.0.1 |
+| v4.2.2 | [`d4323d4df104b026a6aa633fdb11d772146be0bf`](https://github.com/actions/cache/tree/d4323d4df104b026a6aa633fdb11d772146be0bf) | 20 | 4.0.2 |
+| v4.2.3 | [`5a3ec84eff668545956fd18022155c47e93e2684`](https://github.com/actions/cache/tree/5a3ec84eff668545956fd18022155c47e93e2684) | 20 | 4.0.3 |
+| v4.2.4 | [`0400d5f644dc74513175e3cd8d07132dd4860809`](https://github.com/actions/cache/tree/0400d5f644dc74513175e3cd8d07132dd4860809) | 20 | 4.0.5 |
+| v4.3.0 | [`0057852bfaa89a56745cba8c7296529d2fc39830`](https://github.com/actions/cache/tree/0057852bfaa89a56745cba8c7296529d2fc39830) | 20 | 4.1.0 |
+| v5.0.0 | [`a7833574556fa59680c1b7cb190c1735db73ebf0`](https://github.com/actions/cache/tree/a7833574556fa59680c1b7cb190c1735db73ebf0) | 24 | 5.0.0 |
+| v5.0.1 | [`9255dc7a253b0ccc959486e2bca901246202afeb`](https://github.com/actions/cache/tree/9255dc7a253b0ccc959486e2bca901246202afeb) | 24 | 5.0.1 |
+| v5.0.2 | [`8b402f58fbc84540c8b491a91e594a4576fec3d7`](https://github.com/actions/cache/tree/8b402f58fbc84540c8b491a91e594a4576fec3d7) | 24 | 5.0.3 |
+| v5.0.3 | [`cdf6c1fa76f9f475f3d7449005a359c84ca0f306`](https://github.com/actions/cache/tree/cdf6c1fa76f9f475f3d7449005a359c84ca0f306) | 24 | 5.0.5 |
+| v5.0.4 | [`668228422ae6a00e4ad889ee87cd7109ec5666a7`](https://github.com/actions/cache/tree/668228422ae6a00e4ad889ee87cd7109ec5666a7) | 24 | 5.0.5 |
+| v5.0.5 | [`27d5ce7f107fe9357f9df03efb73ab90386fccae`](https://github.com/actions/cache/tree/27d5ce7f107fe9357f9df03efb73ab90386fccae) | 24 | 5.0.5 |
+| v5.1.0 | [`caa296126883cff596d87d8935842f9db880ef25`](https://github.com/actions/cache/tree/caa296126883cff596d87d8935842f9db880ef25) | 24 | 5.1.0 |
+| v6.0.0 | [`2c8a9bd7457de244a408f35966fab2fb45fda9c8`](https://github.com/actions/cache/tree/2c8a9bd7457de244a408f35966fab2fb45fda9c8) | 24 | 6.0.1 |
+| v6.1.0 | [`55cc8345863c7cc4c66a329aec7e433d2d1c52a9`](https://github.com/actions/cache/tree/55cc8345863c7cc4c66a329aec7e433d2d1c52a9) | 24 | 6.1.0 |
+
+The v3 releases use managed Node 16 and emit its standard deprecation warning. Node 20 declarations run with managed Node 24. Every admitted bundle selects cache v2 from `ACTIONS_CACHE_SERVICE_V2`, uses `ACTIONS_RESULTS_URL` and a job-scoped runtime token, and preserves the root restore/post-save lifecycle and separate entry points. Their tar with zstd-or-gzip archive versioning is compatible across releases.
+
+v3.4.1 is excluded because [its upstream release warns that it was published with an incorrect SHA](https://github.com/actions/cache/releases/tag/v3.4.1). Releases before v3.4.0 and v4.2.0 bundle cache-v1 clients. Floating tags, prereleases, unknown commits, and future releases require a source and bundled-dependency audit before admission.
+
+Hosted runtime proof currently covers v6.1.0. The hosted profile validates resolution, compilation, and admission for every listed commit but does not execute the actions. The cross-generation smoke fixture is a v3.4.0 producer and v6.1.0 consumer; it remains compile-only pending a hosted Buildkite Results roundtrip.
 
 JavaScript and Docker actions with compatible bundled cache clients also receive job-bound cache-v2 credentials when the service is available. Root invocations of `actions/setup-node`, `actions/setup-java`, `actions/setup-python`, `actions/setup-go`, and `actions/setup-dotnet` use a subprocess-scoped synthetic `GITHUB_SERVER_URL` when the real host would make their clients select cache v1. Each allowlist entry requires an audit of the action source and bundled dependencies to confirm that `GITHUB_SERVER_URL` affects only caching behavior and is not load-bearing for any request the action makes. The workflow expression context retains the real server URL. Ordinary `run` steps and native action adapters do not receive cache credentials.
 
