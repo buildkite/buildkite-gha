@@ -2,40 +2,60 @@
 set -euo pipefail
 
 die() { printf '[release] error: %s\n' "$*" >&2; exit 1; }
-[[ $# -eq 1 ]] || die 'usage: mise run release -- <next-v0-tag>'
-next="$1"
-command -v git >/dev/null 2>&1 || die 'missing required command: git'
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root"
-[[ "$(git branch --show-current)" == main ]] || die 'releases must be made from main'
-[[ -z "$(git status --porcelain --untracked-files=all)" ]] || die 'working tree is not clean'
-git fetch origin main --tags
-[[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die 'main is not up to date with origin/main'
+next_release_version() {
+  local current="$1" bump="$2" minor patch
+  [[ "$current" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
+    || die "invalid current pre-1.0 version: $current"
+  minor="${BASH_REMATCH[1]}"
+  patch="${BASH_REMATCH[2]}"
+  case "$bump" in
+    minor) printf 'v0.%d.0\n' "$((10#$minor + 1))" ;;
+    patch) printf 'v0.%d.%d\n' "$minor" "$((10#$patch + 1))" ;;
+    *) die "invalid bump: $bump" ;;
+  esac
+}
 
-if [[ -z "$(git tag --list 'v*')" ]]; then
-  current='no release'
-  [[ "$next" == v0.1.0 ]] || die 'the first release must be v0.1.0'
-else
-  current=''
-  while IFS= read -r tag; do
-    if [[ "$tag" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-      current="$tag"
-      break
-    fi
-  done < <(git tag --merged HEAD --list 'v0.*' --sort=-version:refname)
-  [[ -n "$current" ]] || die 'no pre-1.0 release tag is reachable from main'
+main() {
+  [[ $# -eq 1 ]] || die 'usage: mise run release -- <next-v0-tag>'
+  local next="$1" root current patch minor confirmation
+  command -v git >/dev/null 2>&1 || die 'missing required command: git'
 
-  patch="$(scripts/next-release-version "$current" patch)"
-  minor="$(scripts/next-release-version "$current" minor)"
-  [[ "$next" == "$patch" || "$next" == "$minor" ]] \
-    || die "next release must be $patch or $minor, not $next"
+  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  cd "$root"
+  [[ "$(git branch --show-current)" == main ]] || die 'releases must be made from main'
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die 'working tree is not clean'
+  git fetch origin main --tags
+  [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die 'main is not up to date with origin/main'
+
+  if [[ -z "$(git tag --list 'v*')" ]]; then
+    current='no release'
+    [[ "$next" == v0.1.0 ]] || die 'the first release must be v0.1.0'
+  else
+    current=''
+    while IFS= read -r tag; do
+      if [[ "$tag" =~ ^v0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+        current="$tag"
+        break
+      fi
+    done < <(git tag --merged HEAD --list 'v0.*' --sort=-version:refname)
+    [[ -n "$current" ]] || die 'no pre-1.0 release tag is reachable from main'
+
+    patch="$(next_release_version "$current" patch)"
+    minor="$(next_release_version "$current" minor)"
+    [[ "$next" == "$patch" || "$next" == "$minor" ]] \
+      || die "next release must be $patch or $minor, not $next"
+  fi
+
+  printf 'Releasing %s -> %s\n' "$current" "$next"
+  read -r -p "Type ${next} to create and push this tag: " confirmation \
+    || die 'release canceled before tagging'
+  [[ "$confirmation" == "$next" ]] || die 'release canceled before tagging'
+  git tag "$next"
+  git push origin "$next"
+  printf 'Tagged and pushed %s; Buildkite will publish it.\n' "$next"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-printf 'Releasing %s -> %s\n' "$current" "$next"
-read -r -p "Type ${next} to create and push this tag: " confirmation \
-  || die 'release canceled before tagging'
-[[ "$confirmation" == "$next" ]] || die 'release canceled before tagging'
-git tag "$next"
-git push origin "$next"
-printf 'Tagged and pushed %s; Buildkite will publish it.\n' "$next"

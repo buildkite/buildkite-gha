@@ -34,7 +34,7 @@ run = "echo '--- Lint Go'; golangci-lint run"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts"
-run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/update-checkout-main-commits scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/next-release-version scripts/next-release-version-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
+run = "echo '--- Lint shell'; shellcheck -x .buildkite/upload-examples.sh scripts/ci-buildkite-release scripts/compare-example scripts/starter-workflows-corpus scripts/update-checkout-main-commits scripts/verify-source-checkout scripts/hosted-docker-probe scripts/container-runtime-probe scripts/verify-summary-annotation scripts/verify-workflow-annotations scripts/verify-upload-artifact scripts/verify-artifact-roundtrip scripts/release scripts/release-test scripts/smoke-local testdata/actions/docker/entrypoint.sh testdata/container-runtime/.github/actions/docker/entrypoint.sh"
 
 [tasks.lint]
 description = "Lint Go code and shell scripts"
@@ -59,7 +59,7 @@ run = "scripts/release"
 
 [tasks."release:check"]
 description = "Validate the release configuration"
-run = "echo '--- Check release configuration'; goreleaser check && scripts/next-release-version-test"
+run = "echo '--- Check release configuration'; goreleaser check && scripts/release-test"
 
 [tasks."smoke:local"]
 description = "Validate and deterministically compile the local smoke inventory"
