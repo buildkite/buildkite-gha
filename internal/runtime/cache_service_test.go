@@ -240,11 +240,12 @@ func testCacheServiceLifecycleUsesFreshIsolatedCredentials(t *testing.T, using, 
 		program := fmt.Sprintf(`import fs from "node:fs";
 import {spawnSync} from "node:child_process";
 if (process.versions.node.split(".")[0] !== "24") throw new Error("actions/cache did not use managed Node 24");
-const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN"];
+const required = ["ACTIONS_CACHE_SERVICE_V2", "ACTIONS_RESULTS_URL", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_CACHE_URL"];
 for (const name of required) if (!process.env[name]) throw new Error("missing " + name);
+if (process.env.ACTIONS_CACHE_URL !== %q) throw new Error("unexpected ACTIONS_CACHE_URL: " + process.env.ACTIONS_CACHE_URL);
 if (process.env.GITHUB_SERVER_URL !== %q) throw new Error("unexpected GITHUB_SERVER_URL: " + process.env.GITHUB_SERVER_URL);
 for (const name of [
-  "ACTIONS_CACHE_URL", "ACTIONS_RUNTIME_URL",
+  "ACTIONS_RUNTIME_URL",
   "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSLKEYLOGFILE", "LD_AUDIT", "LD_PRELOAD", "LD_LIBRARY_PATH",
   "OPENSSL_CONF", "OPENSSL_CONF_INCLUDE", "OPENSSL_ENGINES", "OPENSSL_MODULES",
   "TAR_OPTIONS",
@@ -256,7 +257,7 @@ if (tar.status !== 0) throw new Error("trusted tar failed: " + tar.stderr);
 if (process.env.PATH !== %q) throw new Error("unsafe PATH: " + process.env.PATH);
 fs.appendFileSync(process.env.LIFECYCLE_LOG, "%s|" + process.env.ACTIONS_RUNTIME_TOKEN + "|" + process.env.ACTIONS_RESULTS_URL + "|" + process.env.ACTIONS_CACHE_SERVICE_V2 + "\n");
 console.log("credential=" + process.env.ACTIONS_RUNTIME_TOKEN);
-`, githubServerURLOverride, cacheActionToolPath, phase)
+`, cacheURLCompatibility, githubServerURLOverride, cacheActionToolPath, phase)
 		writeFixtureFile(t, remote, phase+".js", program)
 	}
 	writeFixtureFile(t, remote, "ordinary/action.yml", "name: ordinary\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n  post: post.js\n")
