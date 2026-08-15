@@ -16,6 +16,13 @@ next_release_version() {
   esac
 }
 
+require_release_changes() {
+  local current="$1" head tag
+  head="$(git rev-parse HEAD)"
+  tag="$(git rev-parse "$current^{commit}")"
+  [[ "$head" != "$tag" ]] || die "no changes since $current"
+}
+
 main() {
   [[ $# -eq 1 ]] || die 'usage: mise run release -- <next-v0-tag>'
   local next="$1" root current patch minor confirmation
@@ -40,6 +47,7 @@ main() {
       fi
     done < <(git tag --merged HEAD --list 'v0.*' --sort=-version:refname)
     [[ -n "$current" ]] || die 'no pre-1.0 release tag is reachable from main'
+    require_release_changes "$current"
 
     patch="$(next_release_version "$current" patch)"
     minor="$(next_release_version "$current" minor)"
