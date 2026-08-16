@@ -59,7 +59,7 @@ var commandUsage = map[string]string{
 	"validate":       "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
 	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> --action-resolution-snapshot <path> [--refresh-action-resolution-snapshot] [--action-cache-dir <path> --action-cache-max-bytes <bytes>] [--github-token-env <name>] [--jobs <count>]\n",
 	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
+	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user=<boolean>] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
@@ -73,7 +73,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
-		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Runner labels are case-insensitive. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, macos-latest targets the hosted macos-medium queue, and macos-14 and macos-15 require an explicit organization-provided queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. The experimental --experimental-runner-user option provisions and uses a non-root Linux runner identity; it does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
+		_, _ = fmt.Fprint(stdout, "\nEvery workflow operand must be an explicit .yml or .yaml path; use -- before paths that begin with a dash. Multiple operands must be tracked files inside the checked-out repository. Inputs are uploaded as one aggregate pipeline: successful workflows become groups, while failed or skipped workflows become top-level replacement steps. Reusable-only workflow_call files are imported through callers but do not become groups. Scheduled groups select only build.source == schedule: Buildkite schedules retain cron ownership, so every scheduled workflow group is eligible on any Buildkite scheduled build. Each repeatable --runner-queue argument maps one supported runs-on label to a Buildkite queue. Runner labels are case-insensitive. Every supported Linux label defaults to the matching immutable hosted-toolchains image; --runner-image overrides it for a configured profile. Duplicate or unsupported mappings fail, unmapped supported Linux labels retain default agent targeting with that image, macos-latest targets the hosted macos-medium queue, and macos-14 and macos-15 require an explicit organization-provided queue. Each repeatable --runtime-distribution argument binds linux/amd64 or darwin/arm64 to a verified executable. Upload importers may run on either platform; the matching runtime defaults to the importer executable, and workflows targeting the other platform require its distribution. Generated Linux jobs provision and use a non-root runner identity by default; --experimental-runner-user=false temporarily disables this behavior. The option does not affect macOS jobs. The deprecated --runtime-queue hosted option is accepted for plugin compatibility but does not select a queue. Event precedence is an explicit event file, Buildkite's reserved webhook metadata, then reduced-fidelity Buildkite environment compatibility data; every source remains unsigned. Verified checkout jobs automatically use Buildkite repository-provider Git credentials when the job enables them; the deprecated --private-checkout option is accepted as a no-op.\n")
 	}
 }
 
@@ -263,7 +263,7 @@ func parsePluginConfiguration(source string) (pluginConfiguration, error) {
 			return pluginConfiguration{}, fmt.Errorf("%s contains unknown field %q", pluginConfigurationEnvironment, key)
 		}
 	}
-	experimentalRunnerUser := false
+	experimentalRunnerUser := true
 	if value, configured := encoded["experimental-runner-user"]; configured {
 		var ok bool
 		experimentalRunnerUser, ok = value.(bool)
@@ -2057,10 +2057,10 @@ func finishUpload(ctx context.Context, uploadArguments parsedUploadArgs, stdout,
 		}
 	}
 	aggregatePipeline, err := buildkitepipeline.Emit(buildkitepipeline.Pipeline{
-		CompilerStep:           importerStep,
-		EventProvider:          effectiveEvent.Event.Provider,
-		ExperimentalRunnerUser: uploadArguments.experimentalRunnerUser,
-		Workflows:              generatedWorkflows,
+		CompilerStep:      importerStep,
+		EventProvider:     effectiveEvent.Event.Provider,
+		DisableRunnerUser: !uploadArguments.experimentalRunnerUser,
+		Workflows:         generatedWorkflows,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: upload: emit aggregate Buildkite pipeline: %v\n", err)
@@ -2969,7 +2969,8 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 	runtimeQueue := ""
 	runtimeQueueSeen := false
 	deprecatedPrivateCheckoutSeen := false
-	experimentalRunnerUser := false
+	experimentalRunnerUser := true
+	experimentalRunnerUserSeen := false
 	optionsEnded := false
 	for i := 0; i < len(args); i++ {
 		if optionsEnded {
@@ -2999,11 +3000,18 @@ func parseUploadArgs(args []string) (parsedUploadArgs, error) {
 			deprecatedPrivateCheckoutSeen = true
 			continue
 		}
-		if args[i] == "--experimental-runner-user" {
-			if experimentalRunnerUser {
+		if args[i] == "--experimental-runner-user" || strings.HasPrefix(args[i], "--experimental-runner-user=") {
+			if experimentalRunnerUserSeen {
 				return parsedUploadArgs{}, fmt.Errorf("--experimental-runner-user may only be specified once")
 			}
-			experimentalRunnerUser = true
+			experimentalRunnerUserSeen = true
+			value, configured := strings.CutPrefix(args[i], "--experimental-runner-user=")
+			if configured {
+				if value != "true" && value != "false" {
+					return parsedUploadArgs{}, fmt.Errorf("--experimental-runner-user must be true or false")
+				}
+				experimentalRunnerUser = value == "true"
+			}
 			continue
 		}
 		if args[i] == "--runtime-distribution" {

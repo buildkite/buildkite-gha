@@ -7,12 +7,11 @@ import (
 	"go.yaml.in/yaml/v4"
 )
 
-func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
+func TestEmitRunnerUserIsDefaultForLinuxOnly(t *testing.T) {
 	image := "buildkite.namespace-images.com/agent-base@sha256:" + strings.Repeat("0", 64)
 	pipeline := Pipeline{
-		CompilerStep:           "importer",
-		DistributionDigest:     testDigest("distribution"),
-		ExperimentalRunnerUser: true,
+		CompilerStep:       "importer",
+		DistributionDigest: testDigest("distribution"),
 		Jobs: []Job{
 			{Key: "linux", Label: "Linux", Queue: "hosted", Platform: "linux/amd64", RuntimeImage: image, PlanDigest: testDigest("linux plan"), RequiresMise: true},
 			{Key: "darwin", Label: "Darwin", Queue: "macos", Platform: "darwin/arm64", PlanDigest: testDigest("darwin plan")},
@@ -57,24 +56,24 @@ func TestEmitExperimentalRunnerUserIsExplicitAndLinuxOnly(t *testing.T) {
 		`BUILDKITE_GHA_PLAN_DIGEST='` + testDigest("linux plan") + `' "$distribution" run-job --plan "$plan"`,
 	} {
 		if !strings.Contains(linux, required) {
-			t.Errorf("experimental Linux command does not contain %q:\n%s", required, linux)
+			t.Errorf("Linux runner-user command does not contain %q:\n%s", required, linux)
 		}
 	}
-	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /", `chown runner:"$runner_group" "$distribution"`, `run-job --plan-digest`} {
+	for _, forbidden := range []string{"chmod -R 0777", "chmod -R a+w", "chmod o+", "chown -R runner:\"$runner_group\" /", `chown runner:"$runner_group" "$distribution"`, `run-job --plan-digest`, "BUILDKITE_BUILD_CHECKOUT_PATH", "GITHUB_WORKSPACE"} {
 		if strings.Contains(linux, forbidden) {
-			t.Errorf("experimental Linux command contains broad permission change %q:\n%s", forbidden, linux)
+			t.Errorf("Linux runner-user command contains forbidden workspace or permission change %q:\n%s", forbidden, linux)
 		}
 	}
 	if darwin := commands["darwin"]; strings.Contains(darwin, "useradd") || strings.Contains(darwin, "sudo -n") {
-		t.Fatalf("Darwin command selected Linux experiment:\n%s", darwin)
+		t.Fatalf("Darwin command selected Linux runner user:\n%s", darwin)
 	}
 
-	pipeline.ExperimentalRunnerUser = false
+	pipeline.DisableRunnerUser = true
 	output, err = Emit(pipeline)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(output), "useradd") || strings.Contains(string(output), "sudo -n") {
-		t.Fatalf("default pipeline selected runner-user experiment:\n%s", output)
+		t.Fatalf("opt-out pipeline selected runner user:\n%s", output)
 	}
 }

@@ -79,22 +79,24 @@ func TestEmitGolden(t *testing.T) {
 			!strings.Contains(step.Command, "echo '~~~ :package: Prepare GitHub Actions runtime'\n") ||
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `artifact download '.buildkite-gha/distributions/`) ||
+			!strings.Contains(step.Command, `artifact download '.buildkite-gha/plans/`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `run-job --plan-digest `) ||
-			!strings.Contains(step.Command, `--plan-producer 'gha-importer'`) {
-			t.Fatalf("step %q does not verify its distribution before delegated plan acquisition:\n%s", step.Key, step.Command)
+			!strings.Contains(step.Command, `sha256sum "$plan"`) ||
+			!strings.Contains(step.Command, `sudo -n --preserve-env --user runner`) ||
+			!strings.Contains(step.Command, `run-job --plan "$plan"`) {
+			t.Fatalf("step %q does not verify its artifacts before runner execution:\n%s", step.Key, step.Command)
 		}
 	}
 	if !strings.Contains(string(first), `artifact download '.buildkite-gha/distributions/`) ||
-		strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
+		!strings.Contains(string(first), `artifact download '.buildkite-gha/plans/`) ||
 		strings.Contains(string(first), `.buildkite-gha/bootstrap/`) ||
 		strings.Contains(string(first), "go run") ||
 		strings.Contains(string(first), "cache:") ||
 		strings.Contains(string(first), "BUILDKITE_GHA_MISE_DATA_DIR") {
 		t.Fatalf("generated jobs are not self-contained:\n%s", first)
 	}
-	if strings.Count(string(first), `--step 'gha-importer'`) != 3 {
-		t.Fatalf("generated distribution downloads are not constrained to the exact importer:\n%s", first)
+	if strings.Count(string(first), `--step 'gha-importer'`) != 6 {
+		t.Fatalf("generated artifact downloads are not constrained to the exact importer:\n%s", first)
 	}
 	if !strings.Contains(string(first), `Consumer ($VALUE, variant=\"two\")`) {
 		t.Fatal("runtime dollar sign or quoted label did not survive scalar encoding")
@@ -289,8 +291,8 @@ func TestEmitAggregateWorkflowGroups(t *testing.T) {
 			if step.DependsOn != nil {
 				t.Fatalf("dependency-free aggregate child %q emitted depends_on: %#v", step.Key, step.DependsOn)
 			}
-			if strings.Count(step.Command, `--step 'importer'`) != 1 || !strings.Contains(step.Command, `run-job --plan-digest `) || !strings.Contains(step.Command, `--plan-producer 'importer'`) || strings.Contains(step.Command, `artifact download '.buildkite-gha/plans/`) {
-				t.Fatalf("aggregate child %q does not delegate plan acquisition to importer: %q", step.Key, step.Command)
+			if strings.Count(step.Command, `--step 'importer'`) != 2 || !strings.Contains(step.Command, `run-job --plan "$plan"`) || !strings.Contains(step.Command, `sudo -n --preserve-env --user runner`) || !strings.Contains(step.Command, `artifact download '.buildkite-gha/plans/`) {
+				t.Fatalf("aggregate child %q does not prepare runner execution from importer artifacts: %q", step.Key, step.Command)
 			}
 		}
 	}
