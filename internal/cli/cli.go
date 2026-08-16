@@ -1318,10 +1318,10 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	if allEvents {
 		return validateAllEvents(out, workflowPath, version, actionCacheDir, stderr)
 	}
-	return validateOne(out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, stderr)
+	return validateOne(out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, nil, stderr)
 }
 
-func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, stderr io.Writer) int {
+func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, sharedActionSource compiler.ActionSource, stderr io.Writer) int {
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1384,7 +1384,7 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 			compiler.PlatformLinuxAMD64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, nil)
+		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, sharedActionSource, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
@@ -1445,6 +1445,16 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
+	sharedActionSource, cleanup, err := newHostedActionSource(actionCacheDir, nil)
+	if err != nil {
+		validationReport.AddEnvironmentFailure("public action source could not be configured")
+		validationReport.Result = "indeterminate"
+		report.Validation = validationReport
+		_ = out.writeV3(report)
+		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
+		return 1
+	}
+	defer cleanup()
 	failed := false
 	for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
@@ -1455,7 +1465,7 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
 			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
 		}
-		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, stderr); code != 0 {
+		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, sharedActionSource, stderr); code != 0 {
 			failed = true
 		}
 		if eventReport == nil {
@@ -2556,15 +2566,15 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
 }
 
-func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionCacheDir, actionAuthentication)
+func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionCacheDir, sharedActionSource, actionAuthentication)
 }
 
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
-	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", actionAuthentication)
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", nil, actionAuthentication)
 }
 
-func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
@@ -2577,31 +2587,24 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	}
 	hasActions := irUsesActions(ir)
 	if hasActions {
-		actionRoot := actionCacheDir
-		if actionRoot == "" {
-			actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
+		actionSource := sharedActionSource
+		cleanup := func() {}
+		if actionSource == nil {
+			var sourceOptions []actionsource.Option
+			if ir.Event.Provider == "github" {
+				authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
+				if authenticationOption != nil {
+					sourceOptions = append(sourceOptions, authenticationOption)
+				}
+			}
+			actionSource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions)
 			if err != nil {
-				return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
-			}
-			defer func() { _ = os.RemoveAll(actionRoot) }()
-		}
-		var sourceOptions []actionsource.Option
-		if ir.Event.Provider == "github" {
-			authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
-			if authenticationOption != nil {
-				sourceOptions = append(sourceOptions, authenticationOption)
+				return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 			}
 		}
-		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
-		}
-		store, err := actionsource.NewStore(actionRoot, nil)
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
-		}
+		defer cleanup()
 		options.ResolveActions = true
-		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
+		options.ActionSource = actionSource
 	}
 	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
 	if err != nil {
@@ -2618,6 +2621,30 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
+}
+
+func newHostedActionSource(actionCacheDir string, sourceOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionRoot := actionCacheDir
+	cleanup := func() {}
+	if actionRoot == "" {
+		var err error
+		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("create action source store: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(actionRoot) }
+	}
+	resolver, err := actionsource.NewResolver(nil, sourceOptions...)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("configure public action resolver: %w", err)
+	}
+	store, err := actionsource.NewStore(actionRoot, nil)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("configure public action source store: %w", err)
+	}
+	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {

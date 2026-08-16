@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
@@ -484,6 +485,7 @@ func (b *actionLockBuilder) describe(ctx context.Context, raw string) (string, p
 
 type memoizedActionSource struct {
 	source ActionSource
+	mu     sync.Mutex
 	cache  map[string]memoizedAction
 }
 
@@ -499,15 +501,26 @@ func newMemoizedActionSource(actionSource ActionSource) ActionSource {
 	return &memoizedActionSource{source: actionSource, cache: map[string]memoizedAction{}}
 }
 
+// MemoizeActionSource reuses successful action resolutions and materializations
+// across compiler invocations that share the returned source.
+func MemoizeActionSource(actionSource ActionSource) ActionSource {
+	return newMemoizedActionSource(actionSource)
+}
+
 func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
 	key := strings.ToLower(ref.Owner+"/"+ref.Repository) + "\x00" + ref.Path + "\x00" + ref.Ref
+	s.mu.Lock()
 	if cached, ok := s.cache[key]; ok {
+		s.mu.Unlock()
 		return cached.resolved, cached.materialized, nil
 	}
+	s.mu.Unlock()
 	resolved, materialized, err := s.source.Fetch(ctx, ref)
 	if err != nil {
 		return source.Resolved{}, source.Materialized{}, err
 	}
+	s.mu.Lock()
 	s.cache[key] = memoizedAction{resolved: resolved, materialized: materialized}
+	s.mu.Unlock()
 	return resolved, materialized, nil
 }

@@ -414,6 +414,25 @@ runs:
 	}
 }
 
+func TestMemoizeActionSourceSharesResolutionAcrossCompilations(t *testing.T) {
+	workspace, remote := t.TempDir(), t.TempDir()
+	writeAction(t, remote, "", `name: shared
+runs:
+  using: node24
+  main: index.js
+`)
+	fake := &fakeActionSource{root: remote, calls: map[string]int{}}
+	shared := MemoizeActionSource(fake)
+	for range 2 {
+		if _, err := compileActionInvocations(context.Background(), workspace, shared, "https://github.com", []string{"owner/action@v1"}, []map[string]string{nil}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fake.calls["owner/action@v1"] != 1 {
+		t.Fatalf("remote action resolutions = %d, want one shared resolution", fake.calls["owner/action@v1"])
+	}
+}
+
 func TestCompileActionInvocationsDetectsOnlyEffectiveNestedGitHubTokenDefaults(t *testing.T) {
 	w := t.TempDir()
 	writeAction(t, w, "child", `name: child

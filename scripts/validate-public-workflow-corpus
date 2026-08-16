@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+
+workdir="${WORKDIR:-$HOME/gha-corpus}"
+record_id="${RECORD_ID:-20340547}"
+if [[ -n "${JOBS:-}" ]]; then
+  jobs="$JOBS"
+elif command -v nproc >/dev/null; then
+  jobs="$(nproc)"
+else
+  jobs="$(sysctl -n hw.ncpu)"
+fi
+readonly workdir record_id jobs
+
+for command in curl python3; do
+  command -v "$command" >/dev/null || {
+    echo "$command is required" >&2
+    exit 127
+  }
+done
+[[ "$jobs" =~ ^[1-9][0-9]*$ ]] || {
+  echo "JOBS must be a positive integer, got: $jobs" >&2
+  exit 2
+}
+
+mkdir -p "$workdir"
+cd "$workdir"
+
+download() {
+  local name=$1
+  [[ -f "$name" ]] && return
+  curl --fail --location --retry 3 --output "$name.partial" \
+    "https://zenodo.org/api/records/$record_id/files/$name/content"
+  mv "$name.partial" "$name"
+}
+
+download workflows.csv.gz
+download workflows.tar.gz
+
+if [[ ! -f files/.complete-v2 ]]; then
+  rm -rf files reports workflows.tsv
+  mkdir -p files
+  python3 - <<'PY'
+import csv
+import gzip
+import os
+import sys
+import tarfile
+
+csv.field_size_limit(sys.maxsize)
+latest = {}
+with gzip.open("workflows.csv.gz", "rt", newline="") as source:
+    for row in csv.DictReader(source):
+        if row["valid_workflow"] != "True":
+            continue
+        key = (row["repository"], row["file_path"])
+        committed = int(row["committed_date"])
+        if key not in latest or committed > latest[key][0]:
+            latest[key] = (committed, row["file_hash"], row["git_change_type"])
+
+workflows = []
+for (repository, path), (_, file_hash, change_type) in latest.items():
+    if change_type != "D" and file_hash:
+        workflows.append((repository, path, file_hash))
+workflows.sort()
+
+wanted = {}
+with open("workflows.tsv", "w", encoding="utf-8") as manifest:
+    for index, (repository, path, file_hash) in enumerate(workflows):
+        workflow_id = f"{index:06d}"
+        wanted.setdefault(file_hash, []).append((workflow_id, os.path.basename(path)))
+        manifest.write(f"{workflow_id}\t{repository}\t{path}\t{file_hash}\n")
+
+print(
+    f"{len(workflows):,} live workflow files across "
+    f"{len({repository for repository, _, _ in workflows}):,} repos"
+)
+
+extracted = 0
+with tarfile.open("workflows.tar.gz", "r|gz") as archive:
+    for member in archive:
+        if not member.isfile():
+            continue
+        file_hash = member.name.rsplit("/", 1)[-1]
+        destinations = wanted.pop(file_hash, None)
+        if not destinations:
+            continue
+        source = archive.extractfile(member)
+        if source is None:
+            continue
+        content = source.read()
+        for workflow_id, filename in destinations:
+            directory = os.path.join(
+                "files", workflow_id[:3], workflow_id, ".github", "workflows"
+            )
+            os.makedirs(directory)
+            with open(os.path.join(directory, filename), "wb") as destination:
+                destination.write(content)
+            extracted += 1
+
+if wanted:
+    missing = sum(len(destinations) for destinations in wanted.values())
+    raise SystemExit(f"corpus archive is missing {missing:,} selected workflows")
+print(f"extracted {extracted:,}")
+open("files/.complete-v2", "w").close()
+PY
+fi
+
+validator="$workdir/buildkite-gha"
+(
+  cd "$root"
+  CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+    -o "$validator" ./cmd/buildkite-gha
+)
+validator_commit="$(git -C "$root" rev-parse HEAD)"
+validator_version="$("$validator" --version)"
+readonly validator validator_commit validator_version
+printf 'validator: %s (%s)\n' "$validator_version" "$validator_commit"
+[[ "$("$validator" help validate)" == *"--action-cache-dir"* ]] || {
+  echo 'buildkite-gha validate must support --action-cache-dir' >&2
+  exit 1
+}
+
+action_cache="$workdir/action-cache"
+readonly action_cache
+mkdir -p "$action_cache"
+rm -rf reports
+mkdir -p reports
+export action_cache validator validator_commit validator_version
+# The quoted variables expand in each xargs child shell.
+# shellcheck disable=SC2016
+find files -mindepth 3 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
+  | xargs -0 -P "$jobs" -n 1 bash -c '
+      workflow=$1
+      workflow_id=${workflow#files/*/}
+      workflow_id=${workflow_id%%/*}
+      "$validator" validate --profile hosted --all-events --action-cache-dir "$action_cache" --format json "$workflow" > "reports/$workflow_id.json" 2>/dev/null || true
+    ' _
+
+python3 - <<'PY'
+import collections
+import glob
+import json
+import os
+
+repositories = {}
+with open("workflows.tsv", encoding="utf-8") as manifest:
+    for line in manifest:
+        workflow_id, repository, _, _ = line.rstrip("\n").split("\t")
+        repositories[workflow_id] = repository
+
+blocked_repos = set()
+codes_by_repo = collections.defaultdict(set)
+findings = collections.Counter()
+evaluations = collections.Counter()
+seen_workflows = set()
+bad_reports = 0
+for path in glob.glob("reports/*.json"):
+    workflow_id = path.rsplit("/", 1)[-1].removesuffix(".json")
+    repository = repositories[workflow_id]
+    seen_workflows.add(workflow_id)
+    try:
+        with open(path, encoding="utf-8") as report:
+            result = json.load(report)
+    except (OSError, json.JSONDecodeError):
+        bad_reports += 1
+        blocked_repos.add(repository)
+        codes_by_repo[repository].add("E_REPORT")
+        findings["E_REPORT"] += 1
+        continue
+    if (
+        result.get("schema") != "buildkite-gha/processing-report/v3"
+        or result.get("profile") != "hosted"
+        or not isinstance(result.get("validation"), dict)
+        or not isinstance(result.get("evaluations"), list)
+    ):
+        bad_reports += 1
+        blocked_repos.add(repository)
+        codes_by_repo[repository].add("E_REPORT")
+        findings["E_REPORT"] += 1
+        continue
+    if result.get("result") not in ("admitted", "not-applicable"):
+        blocked_repos.add(repository)
+    reports = [("validation", result["validation"])]
+    seen_events = set()
+    for evaluation in result["evaluations"]:
+        event = evaluation.get("event") if isinstance(evaluation, dict) else None
+        if (
+            not isinstance(evaluation, dict)
+            or event not in ("push", "pull_request", "workflow_dispatch", "schedule")
+            or event in seen_events
+            or evaluation.get("event_source") != "generated"
+            or not isinstance(evaluation.get("report"), dict)
+        ):
+            bad_reports += 1
+            blocked_repos.add(repository)
+            codes_by_repo[repository].add("E_REPORT")
+            findings["E_REPORT"] += 1
+            reports = []
+            break
+        seen_events.add(event)
+        evaluations[event] += 1
+        reports.append((event, evaluation["report"]))
+    for _, report in reports:
+        if report.get("schema") != "buildkite-gha/processing-report/v2":
+            bad_reports += 1
+            blocked_repos.add(repository)
+            codes_by_repo[repository].add("E_REPORT")
+            findings["E_REPORT"] += 1
+            break
+    for _, report in reports:
+        for diagnostic in report.get("diagnostics") or []:
+            code = diagnostic.get("code") or "unknown"
+            codes_by_repo[repository].add(code)
+            findings[code] += 1
+
+for workflow_id in repositories.keys() - seen_workflows:
+    repository = repositories[workflow_id]
+    bad_reports += 1
+    blocked_repos.add(repository)
+    codes_by_repo[repository].add("E_REPORT")
+    findings["E_REPORT"] += 1
+
+all_repos = set(repositories.values())
+clean = len(all_repos - blocked_repos)
+print(
+    f"repos: {len(all_repos):,}   clean: {clean:,} "
+    f"({100 * clean / len(all_repos):.2f}%)   unparseable reports: {bad_reports:,}"
+)
+print("admission scope: generated event snapshots, not arbitrary real payloads")
+print("\ndiagnostic code -> repos affected")
+repos_by_code = collections.Counter(
+    code for codes in codes_by_repo.values() for code in codes
+)
+for code, count in repos_by_code.most_common(40):
+    print(f"{100 * count / len(all_repos):6.2f}%  {count:6,}  {code}")
+
+with open("validate-tally.json", "w", encoding="utf-8") as destination:
+    json.dump(
+        {
+            "repos": len(all_repos),
+            "clean": clean,
+            "validator_commit": os.environ["validator_commit"],
+            "validator_version": os.environ["validator_version"],
+            "admission_scope": "generated-event-snapshots",
+            "by_repo": dict(repos_by_code),
+            "by_finding": dict(findings),
+            "evaluations": dict(evaluations),
+            "unparseable_reports": bad_reports,
+        },
+        destination,
+        indent=2,
+        sort_keys=True,
+    )
+    destination.write("\n")
+PY
