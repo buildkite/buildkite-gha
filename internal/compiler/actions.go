@@ -487,6 +487,7 @@ type memoizedActionSource struct {
 	source ActionSource
 	mu     sync.Mutex
 	cache  map[string]memoizedAction
+	active map[string]*memoizedActionCall
 }
 
 type memoizedAction struct {
@@ -494,11 +495,18 @@ type memoizedAction struct {
 	materialized source.Materialized
 }
 
+type memoizedActionCall struct {
+	done         chan struct{}
+	resolved     source.Resolved
+	materialized source.Materialized
+	err          error
+}
+
 func newMemoizedActionSource(actionSource ActionSource) ActionSource {
 	if actionSource == nil {
 		return nil
 	}
-	return &memoizedActionSource{source: actionSource, cache: map[string]memoizedAction{}}
+	return &memoizedActionSource{source: actionSource, cache: map[string]memoizedAction{}, active: map[string]*memoizedActionCall{}}
 }
 
 // MemoizeActionSource reuses successful action resolutions and materializations
@@ -514,13 +522,28 @@ func (s *memoizedActionSource) Fetch(ctx context.Context, ref source.Reference) 
 		s.mu.Unlock()
 		return cached.resolved, cached.materialized, nil
 	}
-	s.mu.Unlock()
-	resolved, materialized, err := s.source.Fetch(ctx, ref)
-	if err != nil {
-		return source.Resolved{}, source.Materialized{}, err
+	if active, ok := s.active[key]; ok {
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return source.Resolved{}, source.Materialized{}, ctx.Err()
+		case <-active.done:
+			if active.err != nil && ctx.Err() == nil && (errors.Is(active.err, context.Canceled) || errors.Is(active.err, context.DeadlineExceeded)) {
+				return s.Fetch(ctx, ref)
+			}
+			return active.resolved, active.materialized, active.err
+		}
 	}
-	s.mu.Lock()
-	s.cache[key] = memoizedAction{resolved: resolved, materialized: materialized}
+	call := &memoizedActionCall{done: make(chan struct{})}
+	s.active[key] = call
 	s.mu.Unlock()
-	return resolved, materialized, nil
+	call.resolved, call.materialized, call.err = s.source.Fetch(ctx, ref)
+	s.mu.Lock()
+	delete(s.active, key)
+	if call.err == nil {
+		s.cache[key] = memoizedAction{resolved: call.resolved, materialized: call.materialized}
+	}
+	close(call.done)
+	s.mu.Unlock()
+	return call.resolved, call.materialized, call.err
 }

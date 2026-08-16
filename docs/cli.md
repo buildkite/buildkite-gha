@@ -72,6 +72,18 @@ buildkite-gha validate \
 
 `--action-cache-dir` is available only with `--profile hosted`. The cache stores verified action source by immutable commit. Mutable ref resolutions are cached for up to one hour under `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1` (or the platform user cache directory). Concurrent validation processes can share this resolution cache. A moved tag or branch can therefore use its previous commit for up to one hour. Do not share either writable cache between mutually untrusted validation jobs.
 
+For a large workflow corpus, reuse one validator process and action resolver:
+
+```sh
+buildkite-gha validate-batch \
+  --manifest workflows.jsonl \
+  --output-dir reports \
+  --corpus-id zenodo:20340547 \
+  --action-cache-dir .buildkite-gha-action-cache
+```
+
+Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, content hash, and validator executable digest.
+
 Inspect the aggregate result and each event outcome:
 
 ```sh

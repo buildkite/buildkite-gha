@@ -6,14 +6,7 @@ readonly root
 
 workdir="${WORKDIR:-$HOME/gha-corpus}"
 record_id="${RECORD_ID:-20340547}"
-if [[ -n "${JOBS:-}" ]]; then
-  jobs="$JOBS"
-elif command -v nproc >/dev/null; then
-  jobs="$(nproc)"
-else
-  jobs="$(sysctl -n hw.ncpu)"
-fi
-readonly record_id jobs
+readonly record_id
 
 for command in curl python3; do
   command -v "$command" >/dev/null || {
@@ -21,11 +14,6 @@ for command in curl python3; do
     exit 127
   }
 done
-[[ "$jobs" =~ ^[1-9][0-9]*$ ]] || {
-  echo "JOBS must be a positive integer, got: $jobs" >&2
-  exit 2
-}
-
 mkdir -p "$workdir"
 workdir="$(cd "$workdir" && pwd)"
 corpus_dir="$workdir/records/$record_id"
@@ -45,7 +33,7 @@ download workflows.csv.gz
 download workflows.tar.gz
 
 if [[ ! -f files/.complete-v3 ]]; then
-  rm -rf files reports workflows.tsv
+  rm -rf files reports workflows.tsv workflows.jsonl
   mkdir -p files
   python3 - <<'PY'
 import csv
@@ -116,6 +104,41 @@ open("files/.complete-v3", "w").close()
 PY
 fi
 
+if [[ ! -f workflows.jsonl ]]; then
+  python3 - <<'PY'
+import json
+import os
+
+with open("workflows.tsv", encoding="utf-8") as source, open(
+    "workflows.jsonl", "w", encoding="utf-8"
+) as destination:
+    for line in source:
+        workflow_id, repository, path, file_hash = line.rstrip("\n").split("\t")
+        local_path = os.path.abspath(
+            os.path.join(
+                "files",
+                workflow_id[:3],
+                workflow_id,
+                ".github",
+                "workflows",
+                os.path.basename(path),
+            )
+        )
+        json.dump(
+            {
+                "id": workflow_id,
+                "repository": repository,
+                "path": path,
+                "hash": file_hash,
+                "source": local_path,
+            },
+            destination,
+            sort_keys=True,
+        )
+        destination.write("\n")
+PY
+fi
+
 validator="$workdir/buildkite-gha"
 (
   cd "$root"
@@ -124,28 +147,41 @@ validator="$workdir/buildkite-gha"
 )
 validator_commit="$(git -C "$root" rev-parse HEAD)"
 validator_version="$("$validator" --version)"
-readonly validator validator_commit validator_version
-printf 'validator: %s (%s)\n' "$validator_version" "$validator_commit"
-[[ "$("$validator" help validate)" == *"--action-cache-dir"* ]] || {
-  echo 'buildkite-gha validate must support --action-cache-dir' >&2
+validator_digest="$(python3 - "$validator" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)"
+readonly validator validator_commit validator_version validator_digest
+printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit" "$validator_digest"
+[[ "$("$validator" help validate-batch)" == *"--action-cache-dir"* ]] || {
+  echo 'buildkite-gha validate-batch must support --action-cache-dir' >&2
   exit 1
 }
 
 action_cache="$workdir/action-cache"
-readonly action_cache
+reports="$workdir/reports/$record_id/$validator_digest"
+readonly action_cache reports
 mkdir -p "$action_cache"
-rm -rf reports
-mkdir -p reports
-export action_cache validator validator_commit validator_version
-# The quoted variables expand in each xargs child shell.
-# shellcheck disable=SC2016
-find files -mindepth 3 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 \
-  | xargs -0 -P "$jobs" -n 1 bash -c '
-      workflow=$1
-      workflow_id=${workflow#files/*/}
-      workflow_id=${workflow_id%%/*}
-      "$validator" validate --profile hosted --all-events --action-cache-dir "$action_cache" --format json "$workflow" > "reports/$workflow_id.json" 2>/dev/null || true
-    ' _
+mkdir -p "$reports"
+export reports validator_commit validator_version validator_digest
+batch_args=(
+  validate-batch
+  --manifest workflows.jsonl
+  --output-dir "$reports"
+  --corpus-id "zenodo:$record_id"
+  --action-cache-dir "$action_cache"
+)
+if [[ -n "${JOBS:-}" ]]; then
+  batch_args+=(--jobs "$JOBS")
+fi
+"$validator" "${batch_args[@]}"
 
 python3 - <<'PY'
 import collections
@@ -154,10 +190,10 @@ import json
 import os
 
 repositories = {}
-with open("workflows.tsv", encoding="utf-8") as manifest:
+with open("workflows.jsonl", encoding="utf-8") as manifest:
     for line in manifest:
-        workflow_id, repository, _, _ = line.rstrip("\n").split("\t")
-        repositories[workflow_id] = repository
+        record = json.loads(line)
+        repositories[record["source"]] = record["repository"]
 
 blocked_repos = set()
 codes_by_repo = collections.defaultdict(set)
@@ -165,19 +201,19 @@ findings = collections.Counter()
 evaluations = collections.Counter()
 seen_workflows = set()
 bad_reports = 0
-for path in glob.glob("reports/*.json"):
-    workflow_id = path.rsplit("/", 1)[-1].removesuffix(".json")
-    repository = repositories[workflow_id]
-    seen_workflows.add(workflow_id)
+for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recursive=True):
     try:
         with open(path, encoding="utf-8") as report:
             result = json.load(report)
     except (OSError, json.JSONDecodeError):
+        continue
+    workflow = result.get("workflow")
+    repository = repositories.get(workflow)
+    if repository is None or workflow in seen_workflows:
         bad_reports += 1
-        blocked_repos.add(repository)
-        codes_by_repo[repository].add("E_REPORT")
         findings["E_REPORT"] += 1
         continue
+    seen_workflows.add(workflow)
     if (
         result.get("schema") != "buildkite-gha/processing-report/v3"
         or result.get("profile") != "hosted"
@@ -224,8 +260,8 @@ for path in glob.glob("reports/*.json"):
             codes_by_repo[repository].add(code)
             findings[code] += 1
 
-for workflow_id in repositories.keys() - seen_workflows:
-    repository = repositories[workflow_id]
+for workflow in repositories.keys() - seen_workflows:
+    repository = repositories[workflow]
     bad_reports += 1
     blocked_repos.add(repository)
     codes_by_repo[repository].add("E_REPORT")
@@ -252,6 +288,7 @@ with open("validate-tally.json", "w", encoding="utf-8") as destination:
             "clean": clean,
             "validator_commit": os.environ["validator_commit"],
             "validator_version": os.environ["validator_version"],
+            "validator_digest": "sha256:" + os.environ["validator_digest"],
             "admission_scope": "generated-event-snapshots",
             "by_repo": dict(repos_by_code),
             "by_finding": dict(findings),
