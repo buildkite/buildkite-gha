@@ -278,6 +278,13 @@ func expressionReferenceUsesIndex(node actionlint.ExprNode) bool {
 
 type expressionProjection []any
 
+func newExpressionProjection(capacity int) expressionProjection {
+	if capacity == 0 {
+		capacity = 1
+	}
+	return make(expressionProjection, 0, capacity)
+}
+
 func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error) {
 	switch node := node.(type) {
 	case *actionlint.VariableNode:
@@ -288,7 +295,7 @@ func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error
 			return nil, err
 		}
 		if projection, ok := receiver.(expressionProjection); ok {
-			result := make(expressionProjection, 0, len(projection))
+			result := newExpressionProjection(len(projection))
 			for _, item := range projection {
 				value, found, err := objectValue(item, node.Property)
 				if err != nil {
@@ -321,7 +328,7 @@ func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error
 			return nil, err
 		}
 		if projection, ok := receiver.(expressionProjection); ok {
-			result := expressionProjection{}
+			result := newExpressionProjection(0)
 			for _, item := range projection {
 				if values, ok := expressionChildren(item); ok {
 					result = append(result, values...)
@@ -331,9 +338,9 @@ func (e *semanticEvaluator) evaluateAccess(node actionlint.ExprNode) (any, error
 		}
 		values, ok := expressionChildren(receiver)
 		if !ok {
-			return expressionProjection{}, nil
+			return newExpressionProjection(0), nil
 		}
-		return expressionProjection(values), nil
+		return append(newExpressionProjection(len(values)), values...), nil
 	default:
 		return e.evaluate(node)
 	}
@@ -373,7 +380,7 @@ func expressionChildren(value any) ([]any, bool) {
 
 func expressionIndex(value, index any) (any, error) {
 	if projection, ok := value.(expressionProjection); ok {
-		result := expressionProjection{}
+		result := newExpressionProjection(0)
 		for _, child := range projection {
 			item, found, err := expressionIndexValue(child, index)
 			if err != nil {
