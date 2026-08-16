@@ -17,6 +17,20 @@ import (
 
 const actionResolutionSnapshotSchema = "buildkite-gha-action-resolution-snapshot/v1"
 
+var actionResolutionSnapshotStorage = struct {
+	createTemp func(string, string) (*os.File, error)
+	openFile   func(string, int, os.FileMode) (*os.File, error)
+	write      func(*os.File, []byte) (int, error)
+	close      func(*os.File) error
+	rename     func(string, string) error
+}{
+	createTemp: os.CreateTemp,
+	openFile:   os.OpenFile,
+	write:      func(file *os.File, data []byte) (int, error) { return file.Write(data) },
+	close:      func(file *os.File) error { return file.Close() },
+	rename:     os.Rename,
+}
+
 type actionResolutionSnapshot struct {
 	root       string
 	generation string
@@ -114,11 +128,15 @@ func newActionResolutionSnapshot(root string, refresh bool) (*actionResolutionSn
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Join(absolute, "generations", generation), 0o700); err != nil {
+		generationPath := filepath.Join(absolute, "generations", generation)
+		if err := os.MkdirAll(generationPath, 0o700); err != nil {
 			return nil, fmt.Errorf("create action resolution generation: %w", err)
 		}
 		current = actionResolutionSnapshotCurrent{Schema: actionResolutionSnapshotSchema, Generation: generation}
 		if err := storeActionResolutionJSON(currentPath, current); err != nil {
+			if removeErr := os.RemoveAll(generationPath); removeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("remove unpublished action resolution generation: %w", removeErr))
+			}
 			return nil, err
 		}
 	}
@@ -212,6 +230,9 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 		entry.Missing = true
 	}
 	if storeErr := storeActionResolutionJSON(path, entry); storeErr != nil {
+		if removeErr := os.Remove(path + ".claimed"); removeErr != nil {
+			return Resolved{}, errors.Join(storeErr, fmt.Errorf("remove unpublished action resolution snapshot claim: %w", removeErr))
+		}
 		return Resolved{}, storeErr
 	}
 	return resolved, err
@@ -232,12 +253,16 @@ func actionResolutionSnapshotClaimExists(path string) (bool, error) {
 }
 
 func storeActionResolutionSnapshotClaim(path string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := actionResolutionSnapshotStorage.openFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("store action resolution snapshot claim: %w", err)
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("store action resolution snapshot claim: %w", err)
+	if err := actionResolutionSnapshotStorage.close(file); err != nil {
+		storeErr := fmt.Errorf("store action resolution snapshot claim: %w", err)
+		if removeErr := os.Remove(path); removeErr != nil {
+			return errors.Join(storeErr, fmt.Errorf("remove incomplete action resolution snapshot claim: %w", removeErr))
+		}
+		return storeErr
 	}
 	return nil
 }
@@ -294,22 +319,26 @@ func storeActionResolutionJSON(path string, value any) error {
 	if err != nil {
 		return fmt.Errorf("encode action resolution snapshot: %w", err)
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".resolution-*.tmp")
+	temporary, err := actionResolutionSnapshotStorage.createTemp(filepath.Dir(path), ".resolution-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create action resolution snapshot entry: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
 	if err = temporary.Chmod(0o600); err == nil {
-		_, err = temporary.Write(data)
+		var written int
+		written, err = actionResolutionSnapshotStorage.write(temporary, data)
+		if err == nil && written != len(data) {
+			err = io.ErrShortWrite
+		}
 	}
-	if closeErr := temporary.Close(); err == nil {
+	if closeErr := actionResolutionSnapshotStorage.close(temporary); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return fmt.Errorf("write action resolution snapshot entry: %w", err)
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := actionResolutionSnapshotStorage.rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("publish action resolution snapshot entry: %w", err)
 	}
 	return nil
