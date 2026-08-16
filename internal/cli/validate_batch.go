@@ -27,6 +27,7 @@ const batchResultIdentity = "buildkite-gha-corpus-result/v1"
 type batchValidationArgs struct {
 	manifest, outputDir, corpusID, actionCacheDir string
 	jobs                                          int
+	actionCacheMaxBytes                           int64
 }
 
 type batchValidationRecord struct {
@@ -57,12 +58,11 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
-	if options.actionCacheDir != "" {
-		if _, err := actionsource.NewStore(options.actionCacheDir, nil); err != nil {
-			return usageError(stderr, "validate-batch: --action-cache-dir: %v", err)
-		}
+	var sourceOptions []actionsource.Option
+	if options.actionCacheMaxBytes > 0 {
+		sourceOptions = append(sourceOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
 	}
-	actionSource, cleanup, err := newHostedActionSource(options.actionCacheDir, nil)
+	actionSource, cleanup, err := newHostedActionSource(options.actionCacheDir, sourceOptions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate-batch: %v\n", err)
 		return 1
@@ -138,7 +138,7 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		name := args[i]
-		if name != "--manifest" && name != "--output-dir" && name != "--corpus-id" && name != "--action-cache-dir" && name != "--jobs" {
+		if name != "--manifest" && name != "--output-dir" && name != "--corpus-id" && name != "--action-cache-dir" && name != "--action-cache-max-bytes" && name != "--jobs" {
 			return options, fmt.Errorf("unknown option %q", name)
 		}
 		if seen[name] {
@@ -158,6 +158,12 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 			options.corpusID = args[i]
 		case "--action-cache-dir":
 			options.actionCacheDir = args[i]
+		case "--action-cache-max-bytes":
+			maxBytes, parseErr := strconv.ParseInt(args[i], 10, 64)
+			if parseErr != nil || maxBytes <= 0 {
+				return options, fmt.Errorf("--action-cache-max-bytes must be a positive integer")
+			}
+			options.actionCacheMaxBytes = maxBytes
 		case "--jobs":
 			jobs, parseErr := strconv.Atoi(args[i])
 			if parseErr != nil || jobs <= 0 {
@@ -168,6 +174,9 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 	}
 	if options.manifest == "" || options.outputDir == "" || options.corpusID == "" {
 		return options, fmt.Errorf("--manifest, --output-dir, and --corpus-id are required")
+	}
+	if options.actionCacheMaxBytes > 0 && options.actionCacheDir == "" {
+		return options, fmt.Errorf("--action-cache-max-bytes requires --action-cache-dir")
 	}
 	return options, nil
 }

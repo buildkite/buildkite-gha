@@ -609,9 +609,11 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 		t.Fatalf("materialized identity = %#v", first)
 	}
 	second, err := store.Materialize(context.Background(), resolved)
-	if err != nil || second != first || requests.Load() != 1 {
-		t.Fatalf("second = %q, %v; requests=%d", second, err, requests.Load())
+	if err != nil || second.RepositoryRoot != first.RepositoryRoot || second.ActionRoot != first.ActionRoot || second.SourceDigest != first.SourceDigest || requests.Load() != 1 {
+		t.Fatalf("second = %v, %v; requests=%d", second, err, requests.Load())
 	}
+	first.Release()
+	second.Release()
 }
 
 func TestStoreCanonicalizesAliasedAncestorAndRejectsSymlinkRoot(t *testing.T) {
@@ -809,12 +811,8 @@ func TestStoreCodeloadRedirectPolicy(t *testing.T) {
 func TestStoreConcurrentMaterialize(t *testing.T) {
 	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
 	var requests atomic.Int32
-	release := make(chan struct{})
 	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if requests.Add(1) == 2 {
-			close(release)
-		}
-		<-release
+		requests.Add(1)
 		_, _ = w.Write(archive)
 	}))
 	defer ts.Close()
@@ -847,5 +845,183 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 			t.Fatalf("digests differ: %q and %q", digest, got.SourceDigest)
 		}
 		digest = got.SourceDigest
+		got.Release()
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("archive requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestStoreEvictionSkipsLeasedEntryAndRemovesItAfterRelease(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	root := t.TempDir()
+	store, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithCacheMaxBytes(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r@v1")
+	materialized, err := store.Materialize(context.Background(), Resolved{Reference: ref, Commit: testSHA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Dir(materialized.RepositoryRoot)
+	if err := store.maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("leased entry was evicted: %v", err)
+	}
+	retained, err := materialized.Retain(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized.Release()
+	if err := store.maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("retained entry was evicted: %v", err)
+	}
+	retained.Release()
+	if err := store.maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(base); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released entry still exists: %v", err)
+	}
+}
+
+func TestStoreMaintenanceUsesLRUAndCleansOnlyUnlockedPartials(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "owner", "repo")
+	if err := os.MkdirAll(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commits := []string{strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)}
+	var entrySize int64
+	for i, commit := range commits {
+		base := filepath.Join(repository, commit)
+		if err := os.MkdirAll(filepath.Join(base, "tree"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "tree", "payload"), bytes.Repeat([]byte{byte('a' + i)}, 32), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		manifest := filepath.Join(base, manifestName)
+		if err := os.WriteFile(manifest, []byte("manifest"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(manifest, when, when); err != nil {
+			t.Fatal(err)
+		}
+		entrySize, _ = cacheEntrySize(base)
+	}
+	activePartial := filepath.Join(repository, ".partial-active")
+	abandonedPartial := filepath.Join(repository, ".partial-abandoned")
+	for _, partial := range []string{activePartial, abandonedPartial} {
+		if err := os.Mkdir(partial, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activeLock, err := lockActionCache(context.Background(), filepath.Join(activePartial, ".lock"), actionCacheLockExclusive, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activeLock.unlock()
+	if _, err := NewStore(root, nil, WithCacheMaxBytes(2*entrySize)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repository, commits[0])); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oldest entry still exists: %v", err)
+	}
+	for _, commit := range commits[1:] {
+		if _, err := os.Stat(filepath.Join(repository, commit)); err != nil {
+			t.Fatalf("newer entry %s was evicted: %v", commit, err)
+		}
+	}
+	if _, err := os.Stat(activePartial); err != nil {
+		t.Fatalf("active partial was removed: %v", err)
+	}
+	if _, err := os.Stat(abandonedPartial); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned partial still exists: %v", err)
+	}
+}
+
+func TestStoreConcurrentBoundedEviction(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	root := t.TempDir()
+	stores := make([]*Store, 2)
+	for i := range stores {
+		store, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithCacheMaxBytes(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		stores[i] = store
+	}
+	ref, _ := Parse("o/r@v1")
+	errs := make(chan error, 8)
+	var workers sync.WaitGroup
+	for i := range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			commit := fmt.Sprintf("%040x", i+1)
+			materialized, err := stores[i%len(stores)].Materialize(context.Background(), Resolved{Reference: ref, Commit: commit})
+			if err == nil {
+				_, err = os.Stat(filepath.Join(materialized.ActionRoot, "action.yml"))
+				materialized.Release()
+			}
+			errs <- err
+		}()
+	}
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent bounded materialization: %v", err)
+		}
+	}
+	if err := stores[0].maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := stores[0].cacheEntries()
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("bounded entries = %d, error %v", len(entries), err)
+	}
+}
+
+func TestStoreBoundedEvictionProtectsUnboundedReader(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	root := t.TempDir()
+	unbounded, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r@v1")
+	active, err := unbounded.Materialize(context.Background(), Resolved{Reference: ref, Commit: strings.Repeat("a", 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Release()
+	bounded, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithCacheMaxBytes(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.ActionRoot); err != nil {
+		t.Fatalf("bounded maintenance evicted an unbounded reader: %v", err)
+	}
+	active.Release()
+	if err := bounded.maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.ActionRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released entry still exists: %v", err)
 	}
 }

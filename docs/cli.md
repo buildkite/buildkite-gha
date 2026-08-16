@@ -79,10 +79,13 @@ buildkite-gha validate-batch \
   --manifest workflows.jsonl \
   --output-dir reports \
   --corpus-id zenodo:20340547 \
-  --action-cache-dir .buildkite-gha-action-cache
+  --action-cache-dir .buildkite-gha-action-cache \
+  --action-cache-max-bytes 21474836480
 ```
 
 Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, content hash, and validator executable digest.
+
+`--action-cache-max-bytes` requires `--action-cache-dir`. It evicts the least recently used immutable action trees until the cache is within the byte budget. Concurrent validators protect entries while reading or publishing them. Maintenance also removes abandoned partial entries; active partial entries remain locked. The public corpus script defaults to 20 GiB, leaving headroom on a 64 GB orb.
 
 Inspect the aggregate result and each event outcome:
 
