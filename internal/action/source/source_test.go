@@ -621,6 +621,52 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 	second.Release()
 }
 
+func TestStoreRejectsInvalidUTF8ArchiveMetadataOnEveryMaterialization(t *testing.T) {
+	tests := []struct {
+		name    string
+		entries []tar.Header
+	}{
+		{
+			name: "name",
+			entries: []tar.Header{
+				{Name: "root/", Typeflag: tar.TypeDir},
+				{Name: "root/\xff", Typeflag: tar.TypeReg},
+			},
+		},
+		{
+			name: "symlink target",
+			entries: []tar.Header{
+				{Name: "root/", Typeflag: tar.TypeDir},
+				{Name: "root/target", Typeflag: tar.TypeReg},
+				{Name: "root/link", Typeflag: tar.TypeSymlink, Linkname: "target/\xff/.."},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archive := tgz(t, tt.entries)
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(archive)
+			}))
+			defer server.Close()
+
+			store, err := NewStore(t.TempDir(), server.Client(), WithTestEndpoints(server.URL, server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, _ := Parse("Owner/Repo@v1")
+			resolved := Resolved{Reference: ref, Commit: testSHA}
+			for attempt := 1; attempt <= 2; attempt++ {
+				materialized, err := store.Materialize(context.Background(), resolved)
+				if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+					materialized.Release()
+					t.Fatalf("materialization %d error = %v, want invalid UTF-8 rejection", attempt, err)
+				}
+			}
+		})
+	}
+}
+
 func TestStoreCanonicalizesAliasedAncestorAndRejectsSymlinkRoot(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

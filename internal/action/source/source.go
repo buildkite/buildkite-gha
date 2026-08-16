@@ -889,6 +889,9 @@ func extractTar(r io.Reader, dst string, c config) error {
 		if e != nil {
 			return fmt.Errorf("read archive: %w", e)
 		}
+		if !utf8.ValidString(h.Name) || !utf8.ValidString(h.Linkname) {
+			return fmt.Errorf("archive contains invalid UTF-8 metadata")
+		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			// archive/tar still exposes legacy xattrs separately from PAX records.
 			if h.Xattrs != nil || h.Linkname != "" || !benignPAX(h.PAXRecords, false) { //nolint:staticcheck
