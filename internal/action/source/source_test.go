@@ -1096,6 +1096,15 @@ func TestActionResolutionSnapshotRejectsMissingCurrentGeneration(t *testing.T) {
 	if refreshed.ResolutionSnapshotID() == firstGeneration {
 		t.Fatal("refresh reused generation after the current pointer was removed")
 	}
+	if err := os.RemoveAll(filepath.Join(root, "generations", refreshed.ResolutionSnapshotID())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(nil, WithActionResolutionSnapshot(root, false)); err == nil || !strings.Contains(err.Error(), "current generation is missing") {
+		t.Fatalf("missing generation directory error = %v", err)
+	}
+	if _, err := NewResolver(nil, WithActionResolutionSnapshot(root, true)); err != nil {
+		t.Fatalf("refresh after missing generation directory: %v", err)
+	}
 }
 
 func TestActionResolutionSnapshotPersistsOnlyDefinitiveMissingRefs(t *testing.T) {
