@@ -344,7 +344,13 @@ for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recur
         event = evaluation.get("event") if isinstance(evaluation, dict) else None
         if (
             not isinstance(evaluation, dict)
-            or event not in ("push", "pull_request", "workflow_dispatch", "schedule")
+            or event not in (
+                "push",
+                "pull_request",
+                "merge_group",
+                "workflow_dispatch",
+                "schedule",
+            )
             or event in seen_events
             or evaluation.get("event_source") != "generated"
             or not isinstance(evaluation.get("report"), dict)

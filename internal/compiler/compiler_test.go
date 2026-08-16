@@ -2839,6 +2839,32 @@ func TestCompileRejectsInvalidEventSnapshots(t *testing.T) {
 	}
 }
 
+func TestParseEventValidatesMergeGroupIdentity(t *testing.T) {
+	headSHA, baseSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	headRef := "refs/heads/gh-readonly-queue/main/pr-1-deadbeef"
+	event := fmt.Sprintf(`{"provider":"github","event":"merge_group","repository":{"owner":"acme","name":"widgets"},"ref":%q,"sha":%q,"actor":"octocat","payload":{"action":"checks_requested","merge_group":{"head_ref":%q,"head_sha":%q,"base_ref":"refs/heads/main","base_sha":%q}}}`, headRef, headSHA, headRef, headSHA, baseSHA)
+	parsed, err := ParseEvent([]byte(event))
+	if err != nil || parsed.Event != "merge_group" || parsed.Ref != headRef || parsed.SHA != headSHA {
+		t.Fatalf("ParseEvent() = %#v, %v", parsed, err)
+	}
+	for _, test := range []struct {
+		name, old, replacement, want string
+	}{
+		{name: "activity", old: `"checks_requested"`, replacement: `"destroyed"`, want: "checks_requested"},
+		{name: "head ref", old: headRef, replacement: "refs/heads/other", want: "must match"},
+		{name: "head sha", old: headSHA, replacement: strings.Repeat("c", 40), want: "must match"},
+		{name: "base ref", old: "refs/heads/main", replacement: "main", want: "base_ref"},
+		{name: "base sha", old: baseSHA, replacement: "main", want: "head and base SHAs"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(event, test.old, test.replacement, 1)
+			if _, err := ParseEvent([]byte(changed)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ParseEvent() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func smokePath(parts ...string) string {
 	return filepath.Join(append([]string{"..", "..", "testdata", "smoke"}, parts...)...)
 }

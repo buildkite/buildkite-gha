@@ -1306,10 +1306,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		for _, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
 			t.Run(event, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				args := []string{"validate", "--profile", "hosted", "--event", event, "--format", "json", workflow}
@@ -1329,7 +1329,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with all generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1341,10 +1341,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 4 {
+		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 5 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		for i, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		for i, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
 			if report.Evaluations[i].Event != event || report.Evaluations[i].Source != "generated" || report.Evaluations[i].Report.Result != "admitted" {
 				t.Fatalf("evaluation %d = %#v", i, report.Evaluations[i])
 			}
@@ -4076,7 +4076,7 @@ func TestRunUploadNamesAggregateGitHubChecksFromWorkflowLabels(t *testing.T) {
 func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join(t.TempDir(), "multi-trigger.yml")
-	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
+	workflowSource := "name: Active event\non:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
 	if err := os.WriteFile(workflowPath, []byte(workflowSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -4092,6 +4092,7 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 	}{
 		{name: "push fallback", source: "webhook", wantEvent: "push", wantCondition: `build.source == "webhook"`},
 		{name: "pull request webhook metadata", source: "webhook", githubEvent: "pull_request", webhook: []byte(`{"action":"opened","pull_request":{"base":{"ref":"main"}}}`), wantEvent: "pull_request", wantCondition: `build.source == "webhook"`},
+		{name: "merge group webhook metadata", source: "webhook", githubEvent: "merge_group", webhook: []byte(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/gh-readonly-queue/main/pr-1-deadbeef","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base_ref":"refs/heads/main","base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}`), wantEvent: "merge_group", wantCondition: `build.source == "webhook"`},
 		{name: "UI fallback", source: "ui", wantEvent: "workflow_dispatch", wantCondition: `build.source == "ui"`},
 		{name: "API fallback", source: "api", wantEvent: "workflow_dispatch", wantCondition: `build.source == "api"`},
 		{name: "schedule fallback", source: "schedule", wantEvent: "schedule", wantCondition: `build.source == "schedule"`},
@@ -4106,6 +4107,11 @@ func TestRunUploadNamesGitHubCheckForActiveEvent(t *testing.T) {
 			t.Setenv("BUILDKITE_PULL_REQUEST", "false")
 			t.Setenv("BUILDKITE_SOURCE", test.source)
 			t.Setenv("BUILDKITE_GITHUB_EVENT", test.githubEvent)
+			if test.githubEvent == "merge_group" {
+				t.Setenv("BUILDKITE_BRANCH", "gh-readonly-queue/main/pr-1-deadbeef")
+				t.Setenv("BUILDKITE_MERGE_QUEUE_BASE_BRANCH", "main")
+				t.Setenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT", strings.Repeat("b", 40))
+			}
 			runner := &cliCaptureRunner{webhook: test.webhook}
 			args := []string{"upload"}
 			if test.eventPath != "" {

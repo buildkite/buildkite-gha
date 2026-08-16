@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -218,6 +219,45 @@ func TestBuildkiteWebhookEventSourceUsesPayloadButPreservesExecutionIdentity(t *
 		repository["owner"] != "buildkite" || repository["name"] != "buildkite-gha" ||
 		payload["after"] != strings.Repeat("b", 40) || payload["nested"].(map[string]any)["complete"] != true {
 		t.Fatalf("webhook snapshot = %#v", snapshot)
+	}
+}
+
+func TestBuildkiteWebhookEventSourceBindsMergeGroupIdentity(t *testing.T) {
+	headSHA, baseSHA := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	branch := "gh-readonly-queue/main/pr-1-deadbeef"
+	env := map[string]string{
+		"BUILDKITE": "true", "BUILDKITE_STEP_KEY": "step",
+		"BUILDKITE_REPO":                    "https://github.com/acme/widgets",
+		"BUILDKITE_COMMIT":                  headSHA,
+		"BUILDKITE_BRANCH":                  branch,
+		"BUILDKITE_GITHUB_EVENT":            "merge_group",
+		"BUILDKITE_MERGE_QUEUE_BASE_BRANCH": "main",
+		"BUILDKITE_MERGE_QUEUE_BASE_COMMIT": baseSHA,
+	}
+	webhook := fmt.Sprintf(`{"action":"checks_requested","merge_group":{"head_ref":"refs/heads/%s","head_sha":"%s","base_ref":"refs/heads/main","base_sha":"%s"}}`, branch, headSHA, baseSHA)
+	source, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(webhook))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	if err := json.Unmarshal(source, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["event"] != "merge_group" || snapshot["ref"] != "refs/heads/"+branch || snapshot["sha"] != headSHA {
+		t.Fatalf("merge_group snapshot = %#v", snapshot)
+	}
+
+	for _, test := range []struct{ name, old, replacement, want string }{
+		{name: "head", old: headSHA, replacement: strings.Repeat("c", 40), want: "head_sha"},
+		{name: "base", old: baseSHA, replacement: strings.Repeat("c", 40), want: "base_sha"},
+		{name: "action", old: "checks_requested", replacement: "destroyed", want: "action"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := strings.Replace(webhook, test.old, test.replacement, 1)
+			if _, err := buildkiteWebhookEventSource(func(key string) string { return env[key] }, []byte(changed)); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("buildkiteWebhookEventSource() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

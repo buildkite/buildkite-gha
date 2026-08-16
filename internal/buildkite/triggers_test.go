@@ -10,12 +10,12 @@ import (
 func TestTranslateTriggerCondition(t *testing.T) {
 	got, err := TranslateTriggerCondition([]workflow.Trigger{
 		{Event: "push", Branches: []string{"main", "releases/**", "!releases/**-alpha", "releases/v[0-9]+"}},
-		{Event: "pull_request"}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
+		{Event: "pull_request"}, {Event: "merge_group", Branches: []string{"main"}}, {Event: "workflow_dispatch"}, {Event: "schedule"}, {Event: "workflow_call"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`build.source_event == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.source_event == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.source == "ui"`, `build.source == "schedule"`} {
+	for _, want := range []string{`build.source_event == "push"`, `build.branch =~ /^main$/`, `releases\/.*`, `build.source_event == "pull_request"`, `build.source_action == "opened"`, `build.source_action == "synchronize"`, `build.source_event == "merge_group"`, `build.merge_queue.base_branch =~ /^main$/`, `build.source_action == "checks_requested"`, `build.source == "ui"`, `build.source == "schedule"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("condition missing %q:\n%s", want, got)
 		}
@@ -33,6 +33,8 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 		{name: "mixed include ignore", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"main"}, BranchesIgnore: []string{"release"}}}, want: "cannot be combined"},
 		{name: "leading negative", triggers: []workflow.Trigger{{Event: "push", Branches: []string{"!release/**"}}}, want: "must follow a positive"},
 		{name: "unsupported PR type", triggers: []workflow.Trigger{{Event: "pull_request", Types: []string{"not-real"}}}, want: "cannot be mapped exactly"},
+		{name: "unsupported merge group type", triggers: []workflow.Trigger{{Event: "merge_group", Types: []string{"destroyed"}}}, want: "cannot be mapped exactly"},
+		{name: "merge group paths", triggers: []workflow.Trigger{{Event: "merge_group", Paths: []string{"src/**"}}}, want: "path filters are unsupported"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -41,6 +43,28 @@ func TestTranslateTriggerConditionRejectsUnsafeTriggers(t *testing.T) {
 				t.Errorf("TranslateTriggerCondition(%v) error = %v, want %q", test.triggers, err, test.want)
 			}
 		})
+	}
+}
+
+func TestTranslateEventTriggerConditionUsesMergeGroupSnapshot(t *testing.T) {
+	base, action := "main", "checks_requested"
+	context := TriggerConditionContext{
+		EventPredicate:        `build.source == "webhook"`,
+		MergeGroupBaseBranch:  `"main"`,
+		MergeGroupAction:      `"checks_requested"`,
+		MergeGroupBaseValue:   &base,
+		MergeGroupActionValue: &action,
+	}
+	condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{{
+		Event: "merge_group", Branches: []string{"main"}, Types: []string{"checks_requested"},
+	}}, "merge_group", context)
+	if err != nil || !applicable {
+		t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+	}
+	for _, want := range []string{`build.source == "webhook"`, `"main" =~ /^main$/`, `"checks_requested" == "checks_requested"`} {
+		if !strings.Contains(condition, want) {
+			t.Fatalf("merge_group condition missing %q: %s", want, condition)
+		}
 	}
 }
 

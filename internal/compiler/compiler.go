@@ -905,10 +905,47 @@ func parseEvent(source []byte) (Event, error) {
 	if input.Payload == nil {
 		input.Payload = map[string]any{}
 	}
+	if input.Event == "merge_group" {
+		if err := validateMergeGroupEvent(input.Ref, input.SHA, input.Payload); err != nil {
+			return Event{}, err
+		}
+	}
 	return Event{
 		Provider: input.Provider, Event: input.Event, Repository: input.Repository,
 		Ref: input.Ref, SHA: input.SHA, Actor: input.Actor, Payload: input.Payload,
 	}, nil
+}
+
+func validateMergeGroupEvent(ref, sha string, payload map[string]any) error {
+	if action, _ := payload["action"].(string); action != "checks_requested" {
+		return fmt.Errorf("merge_group event snapshot requires payload.action to be checks_requested")
+	}
+	mergeGroup, ok := payload["merge_group"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("merge_group event snapshot requires payload.merge_group")
+	}
+	headRef, _ := mergeGroup["head_ref"].(string)
+	baseRef, _ := mergeGroup["base_ref"].(string)
+	headSHA, _ := mergeGroup["head_sha"].(string)
+	baseSHA, _ := mergeGroup["base_sha"].(string)
+	if !strings.HasPrefix(headRef, "refs/heads/") || strings.TrimPrefix(headRef, "refs/heads/") == "" {
+		return fmt.Errorf("merge_group event snapshot requires payload.merge_group.head_ref to be a branch ref")
+	}
+	if !strings.HasPrefix(baseRef, "refs/heads/") || strings.TrimPrefix(baseRef, "refs/heads/") == "" {
+		return fmt.Errorf("merge_group event snapshot requires payload.merge_group.base_ref to be a branch ref")
+	}
+	if !validEventCommit(headSHA) || !validEventCommit(baseSHA) {
+		return fmt.Errorf("merge_group event snapshot requires full lowercase payload.merge_group head and base SHAs")
+	}
+	if ref != headRef || sha != headSHA {
+		return fmt.Errorf("merge_group event snapshot ref and sha must match payload.merge_group head_ref and head_sha")
+	}
+	return nil
+}
+
+func validEventCommit(commit string) bool {
+	decoded, err := hex.DecodeString(commit)
+	return err == nil && len(decoded) == 20 && commit == strings.ToLower(commit)
 }
 
 func compileContext(event Event, vars map[string]string, workflowPath, workflowName string) expression.CompileContext {
