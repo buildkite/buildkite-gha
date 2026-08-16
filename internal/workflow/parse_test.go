@@ -139,15 +139,85 @@ func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	}
 }
 
-func TestParseOwnsLiteralContainersAndSortsServices(t *testing.T) {
-	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: postgres:16, ports: ['5432:5432']}\n    steps:\n      - run: true\n")
+func TestParseOwnsLiteralContainersInDeclarationOrder(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    container:\n      image: node:24\n      env: {NODE_ENV: test}\n      ports: [8080]\n    services:\n      zed: {image: redis:7}\n      alpha: {image: 'registry.example:5000/team/postgres:16', ports: ['5432:5432']}\n    steps:\n      - run: true\n")
 	parsed, err := Parse("containers.yml", source)
 	if err != nil {
 		t.Fatal(err)
 	}
 	job := parsed.Jobs[0]
-	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "alpha" || job.Services[1].Name != "zed" {
+	if job.Container == nil || job.Container.Image != "node:24" || job.Container.Env["NODE_ENV"] != "test" || len(job.Services) != 2 || job.Services[0].Name != "zed" || job.Services[1].Name != "alpha" || job.Services[1].Container.Image != "registry.example:5000/team/postgres:16" {
 		t.Fatalf("owned containers = %#v / %#v", job.Container, job.Services)
+	}
+}
+
+func TestParseContainerImageRegistryPorts(t *testing.T) {
+	for _, test := range []struct {
+		image string
+		valid bool
+	}{
+		{"localhost:5000/private/service:latest", true},
+		{"127.0.0.1:65535/private/service", true},
+		{"[::1]:5000/private/service", true},
+		{"localhost:0/private/service", false},
+		{"localhost:65536/private/service", false},
+	} {
+		t.Run(test.image, func(t *testing.T) {
+			source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      service:\n        image: '" + test.image + "'\n    steps: [{run: true}]\n")
+			_, err := Parse("containers.yml", source)
+			if (err == nil) != test.valid {
+				t.Fatalf("Parse() error = %v, valid = %t", err, test.valid)
+			}
+		})
+	}
+}
+
+func TestParseOwnsCompleteStaticServiceContainer(t *testing.T) {
+	source := []byte(`on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: postgres:16
+        credentials:
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+        env: {POSTGRES_PASSWORD: test}
+        ports: ['127.0.0.1::5432/tcp']
+        volumes: ['database:/var/lib/postgresql/data:ro']
+        options: --health-cmd "pg_isready -U postgres" --health-retries 5
+        command: postgres -c fsync=off
+        entrypoint: docker-entrypoint.sh
+    steps: [{run: true}]
+`)
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := parsed.Jobs[0].Services[0].Container
+	if service.Image != "postgres:16" || service.Credentials == nil || service.Credentials.Username != "${{ secrets.REGISTRY_USER }}" || service.Credentials.Password != "${{ secrets.REGISTRY_PASSWORD }}" || service.Env["POSTGRES_PASSWORD"] != "test" || len(service.Ports) != 1 || len(service.Volumes) != 1 || service.Options == "" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
+		t.Fatalf("service container = %#v", service)
+	}
+}
+
+func TestParsePreservesPartialServiceContainerCredentials(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        credentials:\n          username: registry-user\n    steps: [{run: true}]\n")
+	parsed, err := Parse("containers.yml", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials := parsed.Jobs[0].Services[0].Container.Credentials
+	if credentials == nil || credentials.Username != "registry-user" || credentials.Password != "" {
+		t.Fatalf("credentials = %#v", credentials)
+	}
+}
+
+func TestParseRejectsExpressionValuedServiceContainerEnvironment(t *testing.T) {
+	source := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    services:\n      database:\n        image: postgres:16\n        env: ${{ fromJSON('{}') }}\n    steps: [{run: true}]\n")
+	_, err := Parse("containers.yml", source)
+	if err == nil || !strings.Contains(err.Error(), "containers.yml:8:14: job \"test\": expression-valued service container env is unsupported") {
+		t.Fatalf("Parse() error = %v", err)
 	}
 }
 

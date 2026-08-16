@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/buildkite/buildkite-gha/internal/workflow"
+	"github.com/rhysd/actionlint"
 )
 
 const maxSkipReasonLength = 70
@@ -19,6 +20,9 @@ type TriggerConditionContext struct {
 	Tag                    string
 	PullRequestBaseBranch  string
 	PullRequestAction      string
+	ChangedPaths           []string
+	ChangedPathsKnown      bool
+	ChangedPathsError      string
 	BranchValue            *string
 	TagValue               *string
 	PullRequestBaseValue   *string
@@ -28,10 +32,14 @@ type TriggerConditionContext struct {
 // UnsupportedPathFiltersError reports a trigger that cannot be translated
 // without changing its path-filter semantics.
 type UnsupportedPathFiltersError struct {
-	Event string
+	Event  string
+	Reason string
 }
 
 func (e *UnsupportedPathFiltersError) Error() string {
+	if e.Reason != "" {
+		return fmt.Sprintf("%s path filters are unsupported: %s", e.Event, e.Reason)
+	}
 	return fmt.Sprintf("%s path filters are unsupported: Buildkite if_changed is not equivalent", e.Event)
 }
 
@@ -53,7 +61,7 @@ func LiveTriggerConditionContext(eventPredicate string) TriggerConditionContext 
 func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 	var terms []string
 	for _, t := range triggers {
-		term, contributes, err := translateTrigger(t, liveTriggerContext(t.Event))
+		term, contributes, err := translateTrigger(t, liveTriggerContext(t.Event), true)
 		if err != nil {
 			return "", err
 		}
@@ -71,7 +79,7 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 // rules as pipeline generation without selecting an effective event.
 func ValidateTriggerConditions(triggers []workflow.Trigger) error {
 	for _, trigger := range triggers {
-		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event)); err != nil {
+		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), false); err != nil {
 			return err
 		}
 	}
@@ -85,10 +93,11 @@ func TranslateEventTriggerCondition(triggers []workflow.Trigger, event string, c
 	var terms []string
 	for _, trigger := range triggers {
 		triggerContext := liveTriggerContext(trigger.Event)
-		if trigger.Event == event {
+		selected := trigger.Event == event
+		if selected {
 			triggerContext = context
 		}
-		term, contributes, err := translateTrigger(trigger, triggerContext)
+		term, contributes, err := translateTrigger(trigger, triggerContext, selected)
 		if err != nil {
 			return "", false, err
 		}
@@ -215,9 +224,15 @@ func liveTriggerContext(event string) TriggerConditionContext {
 	return LiveTriggerConditionContext(predicate)
 }
 
-func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (string, bool, error) {
-	if t.Paths != nil || t.PathsIgnore != nil {
-		return "", false, &UnsupportedPathFiltersError{Event: t.Event}
+func translateTrigger(t workflow.Trigger, context TriggerConditionContext, selected bool) (string, bool, error) {
+	pathFilters := t.Paths != nil || t.PathsIgnore != nil
+	if pathFilters {
+		if t.Event != "push" && t.Event != "pull_request" {
+			return "", false, &UnsupportedPathFiltersError{Event: t.Event}
+		}
+		if _, err := pathFiltersMatch(nil, t.Paths, t.PathsIgnore); err != nil {
+			return "", false, fmt.Errorf("%s paths: %w", t.Event, err)
+		}
 	}
 	switch t.Event {
 	case "workflow_call":
@@ -267,6 +282,9 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 		} else if hasTagFilter {
 			parts = append(parts, context.Tag+" != null", tag)
 		}
+		if pathFilters && (!selected || context.TagValue == nil) {
+			return "", false, &UnsupportedPathFiltersError{Event: t.Event}
+		}
 		return strings.Join(parts, " && "), true, nil
 	case "pull_request":
 		if t.Tags != nil || t.TagsIgnore != nil || t.Workflows != nil {
@@ -308,10 +326,88 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext) (stri
 			actions = append(actions, context.PullRequestAction+` == `+yamlScalar(a))
 		}
 		parts = append(parts, "("+strings.Join(actions, " || ")+")")
+		if pathFilters && selected {
+			if !context.ChangedPathsKnown {
+				return "", false, &UnsupportedPathFiltersError{Event: t.Event, Reason: context.ChangedPathsError}
+			}
+			matches, err := pathFiltersMatch(context.ChangedPaths, t.Paths, t.PathsIgnore)
+			if err != nil {
+				return "", false, fmt.Errorf("pull_request paths: %w", err)
+			}
+			if !matches {
+				return "", false, &UnsupportedPathFiltersError{
+					Event:  t.Event,
+					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
+				}
+			}
+		}
 		return strings.Join(parts, " && "), true, nil
 	default:
 		return "", false, fmt.Errorf("unsupported GitHub trigger event %q", t.Event)
 	}
+}
+
+func pathFiltersMatch(paths, include, exclude []string) (bool, error) {
+	if include != nil && exclude != nil {
+		return false, fmt.Errorf("include and ignore filters cannot be combined")
+	}
+	patterns := include
+	if exclude != nil {
+		patterns = exclude
+	}
+	compiled := make([]struct {
+		pattern  *regexp.Regexp
+		positive bool
+	}, 0, len(patterns))
+	positiveSeen := false
+	for _, pattern := range patterns {
+		positive := include != nil
+		negated := strings.HasPrefix(pattern, "!")
+		if negated {
+			if exclude != nil {
+				return false, fmt.Errorf("ignore filter pattern %q cannot be negated", pattern)
+			}
+			positive = false
+			pattern = strings.TrimPrefix(pattern, "!")
+		}
+		if pattern == "" {
+			return false, fmt.Errorf("empty path glob")
+		}
+		if negated && !positiveSeen {
+			return false, fmt.Errorf("negative pattern %q must follow a positive pattern", "!"+pattern)
+		}
+		if strings.Contains(pattern, `\`) {
+			return false, fmt.Errorf("path glob %q contains an unsupported backslash", pattern)
+		}
+		if invalid := actionlint.ValidatePathGlob(pattern); len(invalid) != 0 {
+			return false, fmt.Errorf("invalid path glob %q: %s", pattern, invalid[0].Message)
+		}
+		expression, err := githubPathGlob(pattern)
+		if err != nil {
+			return false, err
+		}
+		matcher, err := regexp.Compile(expression)
+		if err != nil {
+			return false, fmt.Errorf("compile path glob %q: %w", pattern, err)
+		}
+		compiled = append(compiled, struct {
+			pattern  *regexp.Regexp
+			positive bool
+		}{matcher, positive})
+		positiveSeen = positiveSeen || positive
+	}
+	for _, path := range paths {
+		matched := exclude != nil
+		for _, pattern := range compiled {
+			if pattern.pattern.MatchString(path) {
+				matched = pattern.positive
+			}
+		}
+		if matched {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 var supportedPullRequestAction = map[string]bool{
@@ -423,6 +519,14 @@ func refFilterMatches(value string, include, exclude []string) (bool, error) {
 }
 
 func githubRefGlob(glob string) (string, error) {
+	return githubGlob(glob, false)
+}
+
+func githubPathGlob(glob string) (string, error) {
+	return githubGlob(glob, true)
+}
+
+func githubGlob(glob string, pathPattern bool) (string, error) {
 	regexLiteral := func(value string) string {
 		return strings.ReplaceAll(regexp.QuoteMeta(value), "/", `\/`)
 	}
@@ -444,7 +548,14 @@ func githubRefGlob(glob string) (string, error) {
 		case '*':
 			if i+1 < len(runes) && runes[i+1] == '*' {
 				i++
-				atoms = append(atoms, atom{value: ".*"})
+				if pathPattern && (i == 1 || runes[i-2] == '/') && i+1 < len(runes) && runes[i+1] == '/' {
+					i++
+					atoms = append(atoms, atom{value: `((?s:.*)\/)?`})
+				} else if pathPattern {
+					atoms = append(atoms, atom{value: `(?s:.*)`})
+				} else {
+					atoms = append(atoms, atom{value: ".*"})
+				}
 			} else {
 				atoms = append(atoms, atom{value: `[^\/]*`})
 			}
@@ -455,6 +566,9 @@ func githubRefGlob(glob string) (string, error) {
 			}
 			if j == len(runes) {
 				return "", fmt.Errorf("unterminated character class in glob %q", glob)
+			}
+			if pathPattern && !validGitHubPathCharacterClass(runes[i+1:j]) {
+				return "", fmt.Errorf("invalid character class in path glob %q", glob)
 			}
 			class := string(runes[i : j+1])
 			if _, err := regexp.Compile(class); err != nil {
@@ -479,4 +593,27 @@ func githubRefGlob(glob string) (string, error) {
 	}
 	regex.WriteByte('$')
 	return regex.String(), nil
+}
+
+func validGitHubPathCharacterClass(class []rune) bool {
+	isASCIIAlphanumeric := func(value rune) bool {
+		return value >= '0' && value <= '9' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+	}
+	sameRange := func(left, right rune) bool {
+		return left >= '0' && left <= right && right <= '9' ||
+			left >= 'A' && left <= right && right <= 'Z' ||
+			left >= 'a' && left <= right && right <= 'z'
+	}
+	if len(class) == 0 {
+		return false
+	}
+	for i, value := range class {
+		if isASCIIAlphanumeric(value) {
+			continue
+		}
+		if value != '-' || i == 0 || i == len(class)-1 || !sameRange(class[i-1], class[i+1]) {
+			return false
+		}
+	}
+	return true
 }

@@ -258,11 +258,23 @@ func cloneExpressionContext(in expression.Context) expression.Context {
 		Env:              cloneStrings(in.Env),
 		GitHub:           cloneAnyMap(in.GitHub),
 		Runner:           cloneStrings(in.Runner),
-		Services:         cloneNestedStrings(in.Services),
+		Services:         cloneServiceContexts(in.Services),
 		JobStatus:        in.JobStatus,
 		HashFiles:        in.HashFiles,
 		HashFilesContext: in.HashFilesContext,
 	}
+}
+
+func cloneServiceContexts(in map[string]expression.ServiceContext) map[string]expression.ServiceContext {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]expression.ServiceContext, len(in))
+	for name, service := range in {
+		service.Ports = cloneStrings(service.Ports)
+		out[name] = service
+	}
+	return out
 }
 
 func cloneStepStatuses(in map[string]expression.StepStatus) map[string]expression.StepStatus {

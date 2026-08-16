@@ -90,10 +90,95 @@ func TestTranslateEventTriggerConditionSelectsOnlyEffectiveEvent(t *testing.T) {
 func TestTranslateEventTriggerConditionValidatesInactiveTriggers(t *testing.T) {
 	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
 		{Event: "push"},
-		{Event: "pull_request", Paths: []string{"src/**"}},
+		{Event: "pull_request", Paths: []string{"!src/**"}},
 	}, "push", LiveTriggerConditionContext("true"))
-	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
+	if err == nil || !strings.Contains(err.Error(), "must follow a positive pattern") {
 		t.Fatalf("inactive path filter error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionRejectsInactivePushPathFilters(t *testing.T) {
+	_, _, err := TranslateEventTriggerCondition([]workflow.Trigger{
+		{Event: "push", Paths: []string{"src/**"}},
+		{Event: "pull_request"},
+	}, "pull_request", TriggerConditionContext{EventPredicate: "true", PullRequestAction: `"opened"`})
+	if err == nil || !strings.Contains(err.Error(), "path filters are unsupported") {
+		t.Fatalf("inactive push path filter error = %v", err)
+	}
+}
+
+func TestTranslateEventTriggerConditionMatchesPullRequestPaths(t *testing.T) {
+	context := TriggerConditionContext{
+		EventPredicate:        "true",
+		PullRequestBaseBranch: `"main"`,
+		PullRequestAction:     `"opened"`,
+		ChangedPaths:          []string{"docs/readme.md", "src/main.go"},
+		ChangedPathsKnown:     true,
+	}
+	for _, test := range []struct {
+		name    string
+		trigger workflow.Trigger
+	}{
+		{
+			name:    "ordered re-inclusion",
+			trigger: workflow.Trigger{Event: "pull_request", Paths: []string{"**", "!docs/**", "docs/required/**"}},
+		},
+		{
+			name:    "ignore runs for one unignored path",
+			trigger: workflow.Trigger{Event: "pull_request", PathsIgnore: []string{"docs/**"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{test.trigger}, "pull_request", context)
+			if err != nil || !applicable || strings.Contains(condition, "false") {
+				t.Fatalf("condition/applicable/error = %q / %t / %v", condition, applicable, err)
+			}
+		})
+	}
+	_, _, err := TranslateEventTriggerCondition(
+		[]workflow.Trigger{{Event: "pull_request", Paths: []string{"web/**"}}},
+		"pull_request",
+		context,
+	)
+	if err == nil || !strings.Contains(err.Error(), "diff-timeout outcome is unavailable") {
+		t.Fatalf("nonmatching local paths error = %v", err)
+	}
+}
+
+func TestPathFiltersMatchOrderedPatternsPerPath(t *testing.T) {
+	matched, err := pathFiltersMatch(
+		[]string{"docs/required/release.md"},
+		[]string{"**", "!docs/**", "docs/required/**"},
+		nil,
+	)
+	if err != nil || !matched {
+		t.Fatalf("ordered path match = %t, %v", matched, err)
+	}
+	matched, err = pathFiltersMatch([]string{"docs/readme.md"}, nil, []string{"docs/**"})
+	if err != nil || matched {
+		t.Fatalf("ignored-only path match = %t, %v", matched, err)
+	}
+	for _, path := range []string{"README.md", "docs/README.md"} {
+		matched, err = pathFiltersMatch([]string{path}, []string{"**/README.md"}, nil)
+		if err != nil || !matched {
+			t.Fatalf("globstar path %q match = %t, %v", path, matched, err)
+		}
+	}
+	if matched, err = pathFiltersMatch([]string{"foobar"}, []string{"foo**/bar"}, nil); err != nil || matched {
+		t.Fatalf("non-segment globstar match = %t, %v", matched, err)
+	}
+	matched, err = pathFiltersMatch([]string{"docs/line\nbreak.md"}, []string{"docs/**"}, nil)
+	if err != nil || !matched {
+		t.Fatalf("newline path match = %t, %v", matched, err)
+	}
+	if _, err := pathFiltersMatch([]string{"foobar"}, []string{`foo\bar`}, nil); err == nil || !strings.Contains(err.Error(), "unsupported backslash") {
+		t.Fatalf("backslash path glob error = %v", err)
+	}
+	if _, err := pathFiltersMatch([]string{"a/b"}, []string{`a[^x]b`}, nil); err == nil || !strings.Contains(err.Error(), "invalid character class") {
+		t.Fatalf("unsupported character class error = %v", err)
+	}
+	if matched, err := pathFiltersMatch([]string{"src/file7.go"}, []string{`src/file[0-9].go`}, nil); err != nil || !matched {
+		t.Fatalf("documented character class match = %t, %v", matched, err)
 	}
 }
 

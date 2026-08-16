@@ -148,6 +148,56 @@ func collectSecretReferences(expression actionlint.ExprNode, found map[string]st
 	return referenceErr
 }
 
+// ValidateServiceRuntimeTemplate permits only needs.<job>.outputs.<name>
+// references after compile-time service evaluation. Other documented service
+// contexts must already have been resolved by the compiler.
+func ValidateServiceRuntimeTemplate(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		root, path, err := referencePath(node)
+		if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+			return fmt.Errorf("service runtime expression must directly reference needs.<job>.outputs.<name>")
+		}
+		return nil
+	})
+}
+
+// ValidateServiceCredentialTemplate matches GitHub's narrower service
+// credential context: github, vars, secrets, and env direct references.
+func ValidateServiceCredentialTemplate(template string) error {
+	return visitTemplateExpressions(template, func(node actionlint.ExprNode) error {
+		root, path, err := referencePath(node)
+		if err != nil {
+			return fmt.Errorf("service credential expression requires a direct context reference: %w", err)
+		}
+		switch classifyRuntimeReference(root, path) {
+		case runtimeReferenceGitHub, runtimeReferenceVar, runtimeReferenceSecret, runtimeReferenceEnv:
+			return nil
+		default:
+			return fmt.Errorf("service credential expression context %q is unsupported", root)
+		}
+	})
+}
+
+func ValidateServiceMapRuntimeExpression(source string) error {
+	body, err := expressionBody(source)
+	if err != nil {
+		return err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return fmt.Errorf("invalid service-map expression: %w", parseErr)
+	}
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
+		return fmt.Errorf("service-map expression must call fromJSON with one needs output")
+	}
+	root, path, err := referencePath(call.Args[0])
+	if err != nil || !strings.EqualFold(root, "needs") || len(path) != 3 || !strings.EqualFold(path[1], "outputs") {
+		return fmt.Errorf("service-map expression must call fromJSON with one needs output")
+	}
+	return nil
+}
+
 func sortedReferenceNames(found map[string]struct{}) []string {
 	names := make([]string, 0, len(found))
 	for name := range found {

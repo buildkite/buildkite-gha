@@ -16,10 +16,12 @@ import (
 // a workflow graph. Values are snapshots supplied by the compiler; evaluation
 // never reads the process environment or a secret provider.
 type CompileContext struct {
-	GitHub map[string]any
-	Event  map[string]any
-	Vars   map[string]string
-	Matrix map[string]any
+	GitHub   map[string]any
+	Event    map[string]any
+	Vars     map[string]string
+	Inputs   map[string]any
+	Matrix   map[string]any
+	Strategy map[string]any
 }
 
 // EvaluateCompile evaluates one complete graph-time expression. The supported
@@ -130,7 +132,9 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 		reference := referenceName(root, path)
 		switch {
 		case strings.EqualFold(root, "vars") && len(path) == 1,
+			strings.EqualFold(root, "inputs") && len(path) == 1,
 			strings.EqualFold(root, "matrix") && len(path) == 1,
+			strings.EqualFold(root, "strategy") && len(path) == 1,
 			strings.EqualFold(root, "event") && len(path) >= 1:
 			return nil
 		case strings.EqualFold(root, "github") && len(path) == 1:
@@ -144,7 +148,7 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 		if strings.EqualFold(root, "github") {
 			return fmt.Errorf("compile-time expression references unavailable value %q", reference)
 		}
-		if !strings.EqualFold(root, "vars") && !strings.EqualFold(root, "matrix") && !strings.EqualFold(root, "event") {
+		if !strings.EqualFold(root, "vars") && !strings.EqualFold(root, "inputs") && !strings.EqualFold(root, "matrix") && !strings.EqualFold(root, "strategy") && !strings.EqualFold(root, "event") {
 			return fmt.Errorf("unsupported compile-time context %q", root)
 		}
 		return fmt.Errorf("unsupported compile-time reference %q", reference)
@@ -168,7 +172,7 @@ func validateCompileAccessNode(validator *semanticValidator, node actionlint.Exp
 	switch node := node.(type) {
 	case *actionlint.VariableNode:
 		switch strings.ToLower(node.Name) {
-		case "vars", "matrix":
+		case "vars", "inputs", "matrix", "strategy":
 			return nil
 		case "event":
 			return fmt.Errorf("whole event access is unsupported")
@@ -344,18 +348,47 @@ func EvaluateAvailableCompileTemplate(template string, context CompileContext) (
 		if err != nil {
 			evaluated.WriteString(complete)
 		} else {
+			var replacement string
 			switch value := value.(type) {
 			case nil:
 			case string:
-				evaluated.WriteString(value)
+				replacement = value
 			case bool, json.Number, float64, int:
-				_, _ = fmt.Fprint(&evaluated, value)
+				replacement = fmt.Sprint(value)
 			default:
 				return "", fmt.Errorf("template expression resolved to %T, want a scalar", value)
 			}
+			if introducesExpressionSyntax(evaluated.String(), replacement, source[consumed:]) {
+				return "", fmt.Errorf("compile-time expression result contains expression syntax")
+			}
+			evaluated.WriteString(replacement)
 		}
 		remaining = source[consumed:]
 	}
+}
+
+func introducesExpressionSyntax(before, replacement, after string) bool {
+	if len(before) > 2 {
+		before = before[len(before)-2:]
+	}
+	if len(after) > 2 {
+		after = after[:2]
+	}
+	boundary, replacementEnd := len(before), len(before)+len(replacement)
+	combined := before + replacement + after
+	for offset := 0; offset < len(combined); {
+		relative := strings.Index(combined[offset:], "${{")
+		if relative < 0 {
+			return false
+		}
+		start := offset + relative
+		end := start + len("${{")
+		if len(replacement) > 0 && start < replacementEnd && end > boundary || len(replacement) == 0 && start < boundary && end > boundary {
+			return true
+		}
+		offset = start + 1
+	}
+	return false
 }
 
 // SubstituteCompileInputs replaces static inputs.<name> references inside
@@ -466,6 +499,16 @@ func evaluateCompileNode(node actionlint.ExprNode, context CompileContext) (any,
 				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
 			}
 			return context.Matrix, nil
+		case "inputs":
+			if context.Inputs == nil {
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
+			}
+			return context.Inputs, nil
+		case "strategy":
+			if context.Strategy == nil {
+				return nil, compileRuntimeDependencyError{fmt.Errorf("compile-time context %q is unavailable", root)}
+			}
+			return context.Strategy, nil
 		default:
 			return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 		}
@@ -515,8 +558,12 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 		current, available = context.Event, context.Event != nil
 	case strings.EqualFold(root, "vars"):
 		current, available = context.Vars, context.Vars != nil
+	case strings.EqualFold(root, "inputs"):
+		current, available = context.Inputs, context.Inputs != nil
 	case strings.EqualFold(root, "matrix"):
 		current, available = context.Matrix, context.Matrix != nil
+	case strings.EqualFold(root, "strategy"):
+		current, available = context.Strategy, context.Strategy != nil
 	default:
 		return nil, compileRuntimeDependencyError{fmt.Errorf("unsupported compile-time context %q", root)}
 	}
@@ -547,13 +594,25 @@ func resolveCompileReference(root string, path []string, context CompileContext)
 	return current, nil
 }
 
-func resolveServicePort(services map[string]map[string]string, service, port, kind string) (string, error) {
-	for id, ports := range services {
+func resolveServicePort(services map[string]ServiceContext, service, port, kind string) (string, error) {
+	for id, context := range services {
 		if strings.EqualFold(id, service) {
-			if value, ok := ports[port]; ok {
+			if value, ok := context.Ports[port]; ok {
 				return value, nil
 			}
 			return "", fmt.Errorf("%s references unavailable service port %s.%s", kind, service, port)
+		}
+	}
+	return "", fmt.Errorf("%s references unavailable service %q", kind, service)
+}
+
+func resolveServiceValue(services map[string]ServiceContext, service, field, kind string) (string, error) {
+	for id, context := range services {
+		if strings.EqualFold(id, service) {
+			if strings.EqualFold(field, "id") {
+				return context.ID, nil
+			}
+			return context.Network, nil
 		}
 	}
 	return "", fmt.Errorf("%s references unavailable service %q", kind, service)

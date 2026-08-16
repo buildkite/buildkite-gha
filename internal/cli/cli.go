@@ -47,6 +47,7 @@ const usage = `Usage:
 
 Commands:
   validate  Validate the supported static workflow subset
+  validate-batch  Validate a workflow manifest for corpus analysis
   compile   Compile a workflow to deterministic Buildkite pipeline YAML
   upload    Compile and upload a Buildkite pipeline
   run-job   Run a compiled job plan
@@ -55,10 +56,11 @@ Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--format text|json] <workflow>\n",
-	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
-	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
+	"validate":       "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
+	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> [--action-cache-dir <path>] [--jobs <count>]\n",
+	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
+	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
+	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {
@@ -66,6 +68,8 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	switch command {
 	case "validate":
 		_, _ = fmt.Fprint(stdout, "\nWithout --profile, validate checks event-independent syntax, the static graph, and every declared trigger; it does not evaluate hosted admission. The hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility. Use --event-path for an exact snapshot, --event to generate one minimal compatibility snapshot, or --all-events to evaluate every declared supported event separately. Generated snapshots are test inputs, not substitutes for real payloads.\n")
+	case "validate-batch":
+		_, _ = fmt.Fprint(stdout, "\nThe manifest is newline-delimited JSON. Each record requires id, repository, path, hash, and source fields. Results are atomic processing-report/v3 JSON files keyed by the corpus ID, record identity, content hash, and validator executable. Existing valid results resume the batch.\n")
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
@@ -151,6 +155,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 			switch args[0] {
 			case "validate":
 				return validate(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+			case "validate-batch":
+				return validateBatch(args[1:], stderr, version)
 			case "compile":
 				return compile(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "upload":
@@ -1295,21 +1301,33 @@ func verifyBuildkiteTarget(job plan.Job) error {
 }
 
 func validate(args []string, stdout, stderr io.Writer, version string, agent transport.Agent) int {
+	args, actionCacheDir, err := validateActionCacheArgs(args)
+	if err != nil {
+		return usageError(stderr, "validate: %v", err)
+	}
 	workflowPath, eventPath, eventName, format, profile, allEvents, err := validateArgs(args)
 	if err != nil {
 		return usageError(stderr, "validate: %v", err)
+	}
+	if actionCacheDir != "" && profile == "" {
+		return usageError(stderr, "validate: --action-cache-dir requires --profile hosted")
+	}
+	if actionCacheDir != "" {
+		if _, err := actionsource.NewStore(actionCacheDir, nil); err != nil {
+			return usageError(stderr, "validate: --action-cache-dir: %v", err)
+		}
 	}
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
 	out := newProcessingOutput("validate", format, stdout, stderr, agent)
 	if allEvents {
-		return validateAllEvents(out, workflowPath, version, stderr)
+		return validateAllEvents(out, workflowPath, version, actionCacheDir, nil, stderr)
 	}
-	return validateOne(out, workflowPath, eventPath, eventName, profile, version, stderr)
+	return validateOne(out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, nil, stderr)
 }
 
-func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version string, stderr io.Writer) int {
+func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1357,7 +1375,13 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 		return 1
 	}
 	if profile != "" {
-		_, _, distributionDigest, executableErr := executable()
+		distributionDigest := ""
+		var executableErr error
+		if runtime != nil {
+			distributionDigest, executableErr = runtime.distributionDigest, runtime.executableErr
+		} else {
+			_, _, distributionDigest, executableErr = executable()
+		}
 		if executableErr != nil {
 			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
@@ -1372,7 +1396,11 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 			compiler.PlatformLinuxAMD64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		preflight, profileErr := compileHosted(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, nil)
+		var actionSource compiler.ActionSource
+		if runtime != nil {
+			actionSource = runtime.actionSource
+		}
+		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, actionSource, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
@@ -1404,7 +1432,13 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 	return 0
 }
 
-func validateAllEvents(out processingOutput, workflowPath, version string, stderr io.Writer) int {
+type profileValidationRuntime struct {
+	actionSource       compiler.ActionSource
+	distributionDigest string
+	executableErr      error
+}
+
+func validateAllEvents(out processingOutput, workflowPath, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
 		validation := compatibility.EnvironmentProcessingReport(workflowPath, "", "workflow input could not be read")
@@ -1433,6 +1467,23 @@ func validateAllEvents(out processingOutput, workflowPath, version string, stder
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
+	cleanup := func() {}
+	if runtime == nil {
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil)
+		cleanup = sourceCleanup
+		if sourceErr != nil {
+			validationReport.AddEnvironmentFailure("public action source could not be configured")
+			validationReport.Result = "indeterminate"
+			report.Validation = validationReport
+			_ = out.writeV3(report)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
+			cleanup()
+			return 1
+		}
+		_, _, distributionDigest, executableErr := executable()
+		runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
+	}
+	defer cleanup()
 	failed := false
 	for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
 		if !declared[event] {
@@ -1443,7 +1494,7 @@ func validateAllEvents(out processingOutput, workflowPath, version string, stder
 			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
 			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
 		}
-		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, stderr); code != 0 {
+		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
 			failed = true
 		}
 		if eventReport == nil {
@@ -1460,6 +1511,28 @@ func validateAllEvents(out processingOutput, workflowPath, version string, stder
 		return 1
 	}
 	return 0
+}
+
+func validateActionCacheArgs(args []string) ([]string, string, error) {
+	filtered := make([]string, 0, len(args))
+	var cacheDir string
+	seen := false
+	for i := 0; i < len(args); i++ {
+		if args[i] != "--action-cache-dir" {
+			filtered = append(filtered, args[i])
+			continue
+		}
+		if seen {
+			return nil, "", fmt.Errorf("--action-cache-dir may only be specified once")
+		}
+		seen = true
+		i++
+		if i == len(args) || strings.TrimSpace(args[i]) == "" {
+			return nil, "", fmt.Errorf("--action-cache-dir requires a path")
+		}
+		cacheDir = args[i]
+	}
+	return filtered, cacheDir, nil
 }
 
 func validateArgs(args []string) (workflowPath, eventPath, eventName, format, profile string, allEvents bool, err error) {
@@ -1767,9 +1840,18 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 		}
 		return 1
 	}
+	populateChangedPaths(&effectiveEvent.TriggerContext, effectiveEvent.Event, effectiveEvent.Origin, workflows)
 	processingReports := make([]compatibility.ProcessingReport, len(workflows))
 	for i := range workflows {
 		if workflows[i].ReusableOnly {
+			continue
+		}
+		if workflows[i].PathFiltersError != "" {
+			workflows[i].Applicable = true
+			workflows[i].TriggerCondition = effectiveEvent.TriggerContext.EventPredicate
+			processingReports[i] = triggerFailureProcessingReport(workflows[i], &buildkitepipeline.UnsupportedPathFiltersError{
+				Event: effectiveEvent.Event.Event, Reason: workflows[i].PathFiltersError,
+			})
 			continue
 		}
 		selection, triggerErr := selectWorkflowTrigger(workflows[i].Triggers, effectiveEvent)
@@ -2246,10 +2328,14 @@ func triggerFailureProcessingReport(input workflowInput, err error) compatibilit
 	report := triggerProcessingReport(input.Path, input.Source)
 	var pathFilters *buildkitepipeline.UnsupportedPathFiltersError
 	if errors.As(err, &pathFilters) {
+		message := fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event))
+		if pathFilters.Reason != "" {
+			message = fmt.Sprintf("%s trigger path filters could not be evaluated safely. Ensure the linked webhook and local checkout contain matching pull-request history, or remove the path filters.", upperFirst(pathFilters.Event))
+		}
 		err = &compiler.ProcessingFinding{
 			Stage: compiler.StagePipeline, Code: compiler.CodePipelineGeneration, Category: "compatibility",
 			Path: input.Path, Line: 1, Column: 1,
-			Message: fmt.Sprintf("%s trigger path filters cannot be translated safely. Remove paths and paths-ignore from this trigger, or move the filtering into a job or step.", upperFirst(pathFilters.Event)),
+			Message: message,
 			Detail:  pathFilters.Error(), Err: err,
 		}
 	}
@@ -2278,6 +2364,7 @@ type workflowInput struct {
 	Source                                                []byte
 	Triggers                                              []workflow.Trigger
 	TriggerCondition, SkipReason, AnnotationReason        string
+	PathFiltersError                                      string
 	ReusableOnly, Applicable                              bool
 }
 
@@ -2522,7 +2609,15 @@ func compileHosted(ctx context.Context, workflowPath string, workflowSource, eve
 	return compileHostedNamespaced(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionAuthentication)
 }
 
+func compileHostedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, "", actionCacheDir, sharedActionSource, actionAuthentication)
+}
+
 func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace string, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
+	return compileHostedNamespacedWithActionCache(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, importerStep, groupLabel, configuredTargets, runtimeDistributions, stepKeyNamespace, "", nil, actionAuthentication)
+}
+
+func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath string, workflowSource, eventSource []byte, version, distributionDigest, importerStep, groupLabel string, configuredTargets map[string]compiler.RunnerTarget, runtimeDistributions map[compiler.Platform]string, stepKeyNamespace, actionCacheDir string, sharedActionSource compiler.ActionSource, actionAuthentication *actionSourceAuthentication) (hostedCompilation, error) {
 	options := hostedOptions(groupLabel, configuredTargets, runtimeDistributions)
 	options.StepKeyNamespace = stepKeyNamespace
 	preflight, err := compiler.CompileWithOptions(workflowPath, workflowSource, eventSource, options)
@@ -2535,28 +2630,24 @@ func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowS
 	}
 	hasActions := irUsesActions(ir)
 	if hasActions {
-		actionRoot, err := os.MkdirTemp("", "buildkite-gha-action-source-")
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("create action source store: %w", err))
-		}
-		defer func() { _ = os.RemoveAll(actionRoot) }()
-		var sourceOptions []actionsource.Option
-		if ir.Event.Provider == "github" {
-			authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
-			if authenticationOption != nil {
-				sourceOptions = append(sourceOptions, authenticationOption)
+		actionSource := sharedActionSource
+		cleanup := func() {}
+		if actionSource == nil {
+			var sourceOptions []actionsource.Option
+			if ir.Event.Provider == "github" {
+				authenticationOption := actionAuthentication.option(ir.Event.Repository.Owner + "/" + ir.Event.Repository.Name)
+				if authenticationOption != nil {
+					sourceOptions = append(sourceOptions, authenticationOption)
+				}
+			}
+			actionSource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions)
+			if err != nil {
+				return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 			}
 		}
-		resolver, err := actionsource.NewResolver(nil, sourceOptions...)
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action resolver: %w", err))
-		}
-		store, err := actionsource.NewStore(actionRoot, nil)
-		if err != nil {
-			return hostedCompilation{}, hostedError(hostedEnvironmentFailure, fmt.Errorf("configure public action source store: %w", err))
-		}
+		defer cleanup()
 		options.ResolveActions = true
-		options.ActionSource = compiler.PublicActionSource{Resolver: resolver, Store: store}
+		options.ActionSource = actionSource
 	}
 	bundle, err := compiler.CompileBundlePlansContext(ctx, workflowPath, workflowSource, eventSource, version, distributionDigest, options)
 	if err != nil {
@@ -2573,6 +2664,30 @@ func compileHostedNamespaced(ctx context.Context, workflowPath string, workflowS
 		return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, hostedError(hostedEvaluationFailure, fmt.Errorf("final compilation introduced actions absent from preflight"))
 	}
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
+}
+
+func newHostedActionSource(actionCacheDir string, sourceOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionRoot := actionCacheDir
+	cleanup := func() {}
+	if actionRoot == "" {
+		var err error
+		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("create action source store: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(actionRoot) }
+	}
+	resolver, err := actionsource.NewResolver(nil, sourceOptions...)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("configure public action resolver: %w", err)
+	}
+	store, err := actionsource.NewStore(actionRoot, nil)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("configure public action source store: %w", err)
+	}
+	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {
@@ -2599,13 +2714,8 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 			if capability == "secrets" {
 				continue
 			}
-			if capability == "docker" && !slices.Equal(artifact.Authorization.DockerCapabilitySources, []string{"dockerfile-actions"}) {
-				if slices.Contains(artifact.Authorization.DockerCapabilitySources, "job-containers") || slices.Contains(artifact.Authorization.DockerCapabilitySources, "service-containers") {
-					message, detail := hostedContainerDiagnostic(artifact.Job)
-					addFailure(artifact, message, detail, errors.New("hosted container unsupported"))
-					continue
-				}
-				message := fmt.Sprintf("Job %q requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.", artifact.Job.Workflow.LogicalJobID)
+			if capability == "docker" && !admittedDockerProvenance(artifact.Job, artifact.Authorization.DockerCapabilitySources) {
+				message := fmt.Sprintf("Job %q requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.", artifact.Job.Workflow.LogicalJobID)
 				addFailure(artifact, message, "", errors.New("unsupported Docker access"))
 				continue
 			}
@@ -2663,6 +2773,23 @@ func validateUnprivilegedBundle(bundle compiler.Bundle) error {
 	return errors.Join(diagnostics...)
 }
 
+func admittedDockerProvenance(job plan.Job, sources []string) bool {
+	if len(sources) == 0 {
+		return false
+	}
+	expected := make([]string, 0, 3)
+	if slices.Contains(sources, "dockerfile-actions") {
+		expected = append(expected, "dockerfile-actions")
+	}
+	if job.Container != nil {
+		expected = append(expected, "job-containers")
+	}
+	if len(job.Services) != 0 || job.ServicesExpression != "" {
+		expected = append(expected, "service-containers")
+	}
+	return slices.Equal(sources, expected)
+}
+
 func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason string) (message, detail string) {
 	limitation := reason
 	fix := "Use a supported workflow-level permissions map or remove the GITHUB_TOKEN dependency."
@@ -2717,27 +2844,6 @@ func githubTokenAdmissionDiagnostic(artifact compiler.PlanArtifact, reason strin
 	}
 	message = fmt.Sprintf("Job %q needs GITHUB_TOKEN, but %s. %s", artifact.Job.Workflow.LogicalJobID, limitation, fix)
 	detail = fmt.Sprintf("Cause: %s. Effective permissions: %s.", strings.Join(causes, "; "), permissions)
-	return message, detail
-}
-
-func hostedContainerDiagnostic(job plan.Job) (message, detail string) {
-	var constructs []string
-	if job.Container != nil {
-		constructs = append(constructs, fmt.Sprintf("job container %q", job.Container.Image))
-	}
-	serviceNames := make([]string, 0, len(job.Services))
-	for name := range job.Services {
-		serviceNames = append(serviceNames, name)
-	}
-	sort.Strings(serviceNames)
-	for _, name := range serviceNames {
-		constructs = append(constructs, fmt.Sprintf("service container %q (image %q)", name, job.Services[name].Image))
-	}
-	if len(constructs) == 0 {
-		constructs = append(constructs, "a job or service container")
-	}
-	message = fmt.Sprintf("Job %q uses %s, which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.", job.Workflow.LogicalJobID, strings.Join(constructs, " and "))
-	detail = "The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them."
 	return message, detail
 }
 

@@ -110,7 +110,7 @@ func resolveReusableWorkflows(path string, source []byte, parsed *workflow.Workf
 	}
 	resolver := reusableResolver{root: root, stack: []string{canonicalPath}, context: context, runtimeMatrixBoundary: runtimeMatrixBoundary}
 	resolver.discoverRuntimeMatrixBoundaries(parsed, 0, map[string]int{canonicalPath: 0})
-	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", nil, nil, nil, true, 0)
+	resolution, err := resolver.resolve(sourcePath, digest, parsed, "", "", context.Inputs, nil, nil, true, 0)
 	return resolution.jobs, resolver.runtimeMatrixBoundary, err
 }
 
@@ -691,6 +691,24 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 	}
 	job.Env = replaceMapInputs(job.Env, inputs)
 	job.Outputs = replaceMapInputs(job.Outputs, inputs)
+	job.Services = append([]workflow.Service(nil), job.Services...)
+	for i := range job.Services {
+		container := job.Services[i].Container
+		container.Image = replaceStaticInputs(container.Image, inputs)
+		if container.Credentials != nil {
+			credentials := *container.Credentials
+			credentials.Username = replaceStaticInputs(credentials.Username, inputs)
+			credentials.Password = replaceStaticInputs(credentials.Password, inputs)
+			container.Credentials = &credentials
+		}
+		container.Env = replaceMapInputs(container.Env, inputs)
+		container.Options = replaceStaticInputs(container.Options, inputs)
+		container.Command = replaceStaticInputs(container.Command, inputs)
+		container.Entrypoint = replaceStaticInputs(container.Entrypoint, inputs)
+		container.Ports = replaceSliceInputs(container.Ports, inputs)
+		container.Volumes = replaceSliceInputs(container.Volumes, inputs)
+		job.Services[i].Container = container
+	}
 	job.RunsOn = append([]string(nil), job.RunsOn...)
 	for i := range job.RunsOn {
 		job.RunsOn[i] = replaceStaticInputs(job.RunsOn[i], inputs)
@@ -787,6 +805,17 @@ func staticTimeoutMinutes(value any) (float64, bool) {
 	}
 }
 
+func replaceSliceInputs(values []string, inputs map[string]any) []string {
+	if values == nil {
+		return nil
+	}
+	result := make([]string, len(values))
+	for i, value := range values {
+		result[i] = replaceStaticInputs(value, inputs)
+	}
+	return result
+}
+
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 	if usesInputs, err := expression.ConditionUsesContext(job.If, "inputs"); err != nil {
 		return jobError(path, job, fmt.Sprintf("parse reusable-workflow job condition: %v", err))
@@ -800,6 +829,16 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 	jobValues = append(jobValues, job.RunsOn...)
 	jobValues = appendMapValues(jobValues, job.Env)
 	jobValues = appendMapValues(jobValues, job.Outputs)
+	for _, service := range job.Services {
+		container := service.Container
+		jobValues = append(jobValues, container.Image, container.Options, container.Command, container.Entrypoint)
+		jobValues = append(jobValues, container.Ports...)
+		jobValues = append(jobValues, container.Volumes...)
+		jobValues = appendMapValues(jobValues, container.Env)
+		if container.Credentials != nil {
+			jobValues = append(jobValues, container.Credentials.Username, container.Credentials.Password)
+		}
+	}
 	if job.RunsOnExpr != nil {
 		jobValues = append(jobValues, job.RunsOnExpr.Text)
 	}

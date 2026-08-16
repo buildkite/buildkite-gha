@@ -1,12 +1,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -438,6 +440,12 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if err != nil {
 		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate job environment: %w", err))
 	}
+	serviceEval := eval
+	serviceEval.Env = jobEnv
+	services, evaluatedServiceOrder, err := evaluateServiceMap(job.Services, job.ServiceOrder, job.ServicesExpression, serviceEval)
+	if err != nil {
+		return tolerateJobSetupFailure(runCtx, job, jobResult, fmt.Errorf("evaluate services: %w", err))
+	}
 	_, explicitJobPATH := jobEnv["PATH"]
 	runnerTemp, err := os.MkdirTemp("", "buildkite-gha-runner-")
 	if err != nil {
@@ -517,7 +525,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				return tolerateJobSetupFailure(runCtx, job, jobResult, mountErr)
 			}
 		}
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, *job.Container, job.Services, containerMounts...)
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, *job.Container, services, evaluatedServiceOrder, containerMounts...)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -529,8 +537,8 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 				runJobErr = errors.Join(runJobErr, err)
 			}
 		}()
-	} else if len(job.Services) != 0 {
-		backend, setupErr := r.startJobContainer(runCtx, processor, workspace, runnerTemp, plan.Container{}, job.Services)
+	} else if len(services) != 0 {
+		backend, setupErr := r.startJobContainerOrdered(runCtx, processor, workspace, runnerTemp, plan.Container{}, services, evaluatedServiceOrder)
 		if setupErr != nil {
 			return tolerateJobSetupFailure(runCtx, job, jobResult, setupErr)
 		}
@@ -830,6 +838,207 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runErr = &toleratedJobFailure{err: runErr}
 	}
 	return scrubJobResult(jobResult, sensitiveValues), runErr
+}
+
+func evaluateServices(services map[string]plan.Container, eval expression.Context) (map[string]plan.Container, error) {
+	if len(services) == 0 {
+		return services, nil
+	}
+	result := make(map[string]plan.Container, len(services))
+	for name, service := range services {
+		service.Env = maps.Clone(service.Env)
+		service.Ports = append([]string(nil), service.Ports...)
+		service.Volumes = append([]string(nil), service.Volumes...)
+		for fieldName, field := range map[string]*string{"image": &service.Image, "options": &service.Options, "command": &service.Command, "entrypoint": &service.Entrypoint} {
+			value, err := expression.Evaluate(*field, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q %s: %w", name, fieldName, err)
+			}
+			*field = value
+		}
+		for key, value := range service.Env {
+			resolved, err := expression.Evaluate(value, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q environment %q: %w", name, key, err)
+			}
+			service.Env[key] = resolved
+		}
+		for _, values := range [][]string{service.Ports, service.Volumes} {
+			for i, value := range values {
+				resolved, err := expression.Evaluate(value, eval)
+				if err != nil {
+					return nil, fmt.Errorf("service %q field: %w", name, err)
+				}
+				values[i] = resolved
+			}
+		}
+		if service.Credentials != nil {
+			credentials := *service.Credentials
+			var err error
+			credentials.Username, err = expression.Evaluate(credentials.Username, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q username: %w", name, err)
+			}
+			credentials.Password, err = expression.Evaluate(credentials.Password, eval)
+			if err != nil {
+				return nil, fmt.Errorf("service %q password: %w", name, err)
+			}
+			service.Credentials = &credentials
+		}
+		if service.Image == "" {
+			continue
+		}
+		if err := plan.ValidateEvaluatedServiceContainer(service); err != nil {
+			return nil, fmt.Errorf("service %q: %w", name, err)
+		}
+		result[name] = service
+	}
+	return result, nil
+}
+
+func serviceOrder(services map[string]plan.Container, preferred []string) []string {
+	result := make([]string, 0, len(services))
+	seen := make(map[string]bool, len(services))
+	for _, name := range preferred {
+		if _, ok := services[name]; ok && !seen[name] {
+			result = append(result, name)
+			seen[name] = true
+		}
+	}
+	for _, name := range sortedKeys(services) {
+		if !seen[name] {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+func evaluateServiceMap(static map[string]plan.Container, staticOrder []string, source string, eval expression.Context) (map[string]plan.Container, []string, error) {
+	if source == "" {
+		services, err := evaluateServices(static, eval)
+		return services, serviceOrder(services, staticOrder), err
+	}
+	entries, err := expression.EvaluateObject(source, eval)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(entries) > 32 {
+		return nil, nil, fmt.Errorf("services expression has more than 32 entries")
+	}
+	services := make(map[string]plan.Container, len(entries))
+	order := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name, raw := entry.Name, entry.Value
+		if !plan.ValidateServiceName(name) {
+			return nil, nil, fmt.Errorf("service name %q must be lowercase and valid", name)
+		}
+		var service plan.Container
+		if image, ok := raw.(string); ok {
+			service.Image = image
+		} else {
+			if err := normalizeServiceScalars(raw); err != nil {
+				return nil, nil, fmt.Errorf("decode service %q: %w", name, err)
+			}
+			encoded, err := json.Marshal(raw)
+			if err != nil {
+				return nil, nil, fmt.Errorf("encode service %q: %w", name, err)
+			}
+			decoder := json.NewDecoder(bytes.NewReader(encoded))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&service); err != nil {
+				return nil, nil, fmt.Errorf("decode service %q: %w", name, err)
+			}
+		}
+		validationService := service
+		if validationService.Image == "" {
+			validationService.Image = "scratch"
+		}
+		if err := plan.ValidateEvaluatedServiceContainer(validationService); err != nil {
+			return nil, nil, fmt.Errorf("service %q: %w", name, err)
+		}
+		if service.Image == "" {
+			continue
+		}
+		services[name] = service
+		order = append(order, name)
+	}
+	return services, order, nil
+}
+
+func normalizeServiceScalars(raw any) error {
+	service, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("got %T, want an object", raw)
+	}
+	for field := range service {
+		switch field {
+		case "credentials":
+			return errors.New("expression cannot introduce registry credentials")
+		case "image", "env", "ports", "volumes", "options", "command", "entrypoint":
+		default:
+			return fmt.Errorf("unknown field %q", field)
+		}
+	}
+	for _, field := range []string{"image", "options", "command", "entrypoint"} {
+		if value, exists := service[field]; exists {
+			normalized, err := serviceScalarString(value)
+			if err != nil {
+				return fmt.Errorf("field %q: %w", field, err)
+			}
+			service[field] = normalized
+		}
+	}
+	if rawEnv, exists := service["env"]; exists {
+		env, ok := rawEnv.(map[string]any)
+		if !ok {
+			return fmt.Errorf("field %q: got %T, want an object", "env", rawEnv)
+		}
+		for key, value := range env {
+			normalized, err := serviceScalarString(value)
+			if err != nil {
+				return fmt.Errorf("environment %q: %w", key, err)
+			}
+			env[key] = normalized
+		}
+	}
+	for _, field := range []string{"ports", "volumes"} {
+		if rawValues, exists := service[field]; exists {
+			values, ok := rawValues.([]any)
+			if !ok {
+				return fmt.Errorf("field %q: got %T, want an array", field, rawValues)
+			}
+			for i, value := range values {
+				normalized, err := serviceScalarString(value)
+				if err != nil {
+					return fmt.Errorf("field %q entry %d: %w", field, i, err)
+				}
+				values[i] = normalized
+			}
+		}
+	}
+	return nil
+}
+
+func serviceScalarString(value any) (string, error) {
+	switch value := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return value, nil
+	case bool:
+		return strconv.FormatBool(value), nil
+	case json.Number:
+		number, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil {
+			return "", fmt.Errorf("invalid number %q", value)
+		}
+		if number == 0 {
+			return "0", nil
+		}
+		return strconv.FormatFloat(number, 'G', 15, 64), nil
+	default:
+		return "", fmt.Errorf("got %T, want a scalar", value)
+	}
 }
 
 func stepDisplayName(step plan.Step, eval expression.Context) (string, error) {

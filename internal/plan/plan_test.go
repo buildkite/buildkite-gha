@@ -726,6 +726,7 @@ func TestContainerContract(t *testing.T) {
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Container = &Container{Image: "node:24", Env: map[string]string{"NODE_ENV": "test"}, Ports: []string{"8080"}}
 	job.Services = map[string]Container{"redis": {Image: "redis:7", Ports: []string{"6379:6379"}}}
+	job.ServiceOrder = []string{"redis"}
 	job.Steps = []Step{{ID: "local", Kind: "uses", Uses: "./actions/build", Action: &ActionSelector{Lock: "a-0000000000000001"}}}
 	job.Actions = []ActionLock{{ID: "a-0000000000000001", Source: "workspace", Path: "actions/build", SourceDigest: "sha256:" + strings.Repeat("a", 64)}}
 	encoded, err := Encode(job)
@@ -736,6 +737,15 @@ func TestContainerContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	validateJobPlanSchema(t, encoded)
+}
+
+func TestJobContainerRejectsServiceCredentials(t *testing.T) {
+	job := validJob()
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Container = &Container{Image: "node:24", Credentials: &ContainerCredentials{Username: "user", Password: "password"}}
+	if err := job.Validate(); err == nil || !strings.Contains(err.Error(), "service-only fields") {
+		t.Fatalf("Validate() error = %v, want service-only fields", err)
+	}
 }
 
 func TestPrerequisiteOutputProjectionContract(t *testing.T) {
@@ -946,6 +956,43 @@ func TestContainerPortGrammarMatchesSchema(t *testing.T) {
 			if err := json.Unmarshal(encoded, &document); err != nil {
 				t.Fatal(err)
 			}
+			schemaValid := schema.Validate(document) == nil
+			if goValid != test.valid || schemaValid != test.valid {
+				t.Fatalf("Go valid = %t, schema valid = %t, want %t", goValid, schemaValid, test.valid)
+			}
+		})
+	}
+}
+
+func TestContainerImageGrammarMatchesSchema(t *testing.T) {
+	schema := compileJobPlanSchema(t)
+	for _, test := range []struct {
+		image string
+		valid bool
+	}{
+		{"redis:7", true},
+		{"ghcr.io/example/service:latest", true},
+		{"localhost:5000/private/service:latest", true},
+		{"127.0.0.1:65535/private/service", true},
+		{"[::1]:5000/private/service", true},
+		{"localhost:0/private/service", false},
+		{"localhost:65536/private/service", false},
+		{"LOCALHOST:5000/private/service", false},
+		{"${{ needs.build.outputs.image }}", false},
+	} {
+		t.Run(test.image, func(t *testing.T) {
+			job := validJob()
+			job.RequiredCapabilities = []string{"docker", "network"}
+			job.Container = &Container{Image: test.image}
+			encoded, err := json.Marshal(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			goValid := job.Validate() == nil
 			schemaValid := schema.Validate(document) == nil
 			if goValid != test.valid || schemaValid != test.valid {
 				t.Fatalf("Go valid = %t, schema valid = %t, want %t", goValid, schemaValid, test.valid)

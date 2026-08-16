@@ -59,6 +59,31 @@ buildkite-gha validate \
 
 `--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload.
 
+Reuse downloaded immutable action source across profile validation runs:
+
+```sh
+mkdir -p .buildkite-gha-action-cache
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --action-cache-dir .buildkite-gha-action-cache \
+  .github/workflows/ci.yml
+```
+
+`--action-cache-dir` is available only with `--profile hosted`. The cache stores verified action source by immutable commit. Mutable ref resolutions are cached for up to one hour under `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1` (or the platform user cache directory). Concurrent validation processes can share this resolution cache. A moved tag or branch can therefore use its previous commit for up to one hour. Do not share either writable cache between mutually untrusted validation jobs.
+
+For a large workflow corpus, reuse one validator process and action resolver:
+
+```sh
+buildkite-gha validate-batch \
+  --manifest workflows.jsonl \
+  --output-dir reports \
+  --corpus-id zenodo:20340547 \
+  --action-cache-dir .buildkite-gha-action-cache
+```
+
+Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, content hash, and validator executable digest.
+
 Inspect the aggregate result and each event outcome:
 
 ```sh
@@ -197,9 +222,9 @@ Raw webhook data is not retained in generated plans or pipeline YAML and cannot 
 
 The selected snapshot establishes one effective GitHub event for applicability, compilation, group conditions, and event-qualified check names; group labels remain static across events. An explicit event path uses its event directly and never re-reads live Buildkite event fields. Linked webhook metadata supplies the GitHub event name. Without either source, pull request builds map to `pull_request`; Buildkite `ui` and `api` sources map to `workflow_dispatch`; `schedule` maps to `schedule`; and other sources, including `trigger_job`, map to `push` even when `build.source_event` is absent.
 
-Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
+Top-level workflows that do not declare the effective event are excluded before event-dependent validation and compilation, then emitted as top-level skipped command steps with no plan artifacts. Reusable-only workflows remain available to local callers. If no directly runnable workflow applies, upload succeeds with a skipped-only pipeline. For applicable workflows, only the selected event contributes a group condition: push branch/tag filters, pull request base-branch/activity/path filters, or the corresponding manual/schedule Buildkite source predicate. Cross-event trigger conditions are never ORed into that group.
 
-Unsupported trigger events, path filters, and inexact filters replace the affected workflow with one failing top-level command step rather than being approximated. Malformed event data remains fatal to the importer. Safe compilation errors in an applicable workflow also produce a failing replacement step. Buildkite still owns build creation and schedule identity; every workflow with `on.schedule` is eligible for a Buildkite scheduled build because Buildkite does not expose which schedule created it.
+Unsupported or uncertain filters replace only the affected workflow with a failing top-level step. Pull request path filters run only when the linked webhook and local checkout prove a match; see [Pull request path filters](compatibility.md#pull-request-path-filters). Malformed event data still stops the import. Buildkite owns build creation and schedule identity, so every workflow with `on.schedule` is eligible for every Buildkite scheduled build.
 
 After all applicable workflows have been attempted, the command uploads the exact executable, content-addressed plans, and synthetic failure steps before running one:
 

@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+readonly root
+
+workdir="${WORKDIR:-$HOME/gha-corpus}"
+record_id="${RECORD_ID:-20340547}"
+readonly record_id
+
+for command in curl python3; do
+  command -v "$command" >/dev/null || {
+    echo "$command is required" >&2
+    exit 127
+  }
+done
+mkdir -p "$workdir"
+workdir="$(cd "$workdir" && pwd)"
+corpus_dir="$workdir/records/$record_id"
+readonly workdir corpus_dir
+mkdir -p "$corpus_dir"
+cd "$corpus_dir"
+
+download() {
+  local name=$1
+  [[ -f "$name" ]] && return
+  curl --fail --location --retry 3 --output "$name.partial" \
+    "https://zenodo.org/api/records/$record_id/files/$name/content"
+  mv "$name.partial" "$name"
+}
+
+download workflows.csv.gz
+download workflows.tar.gz
+
+if [[ ! -f files/.complete-v3 ]]; then
+  rm -rf files reports workflows.tsv workflows.jsonl
+  mkdir -p files
+  python3 - <<'PY'
+import csv
+import gzip
+import os
+import sys
+import tarfile
+
+csv.field_size_limit(sys.maxsize)
+latest = {}
+with gzip.open("workflows.csv.gz", "rt", newline="") as source:
+    for row in csv.DictReader(source):
+        key = row["uid"]
+        committed = int(row["committed_date"])
+        if key not in latest or committed > latest[key][0]:
+            latest[key] = (committed, row)
+
+workflows = []
+for _, row in latest.values():
+    if (
+        row["valid_workflow"] == "True"
+        and row["git_change_type"] != "D"
+        and row["file_path"]
+        and row["file_hash"]
+    ):
+        workflows.append((row["repository"], row["file_path"], row["file_hash"]))
+workflows.sort()
+
+wanted = {}
+with open("workflows.tsv", "w", encoding="utf-8") as manifest:
+    for index, (repository, path, file_hash) in enumerate(workflows):
+        workflow_id = f"{index:06d}"
+        wanted.setdefault(file_hash, []).append((workflow_id, os.path.basename(path)))
+        manifest.write(f"{workflow_id}\t{repository}\t{path}\t{file_hash}\n")
+
+print(
+    f"{len(workflows):,} live workflow files across "
+    f"{len({repository for repository, _, _ in workflows}):,} repos"
+)
+
+extracted = 0
+with tarfile.open("workflows.tar.gz", "r|gz") as archive:
+    for member in archive:
+        if not member.isfile():
+            continue
+        file_hash = member.name.rsplit("/", 1)[-1]
+        destinations = wanted.pop(file_hash, None)
+        if not destinations:
+            continue
+        source = archive.extractfile(member)
+        if source is None:
+            continue
+        content = source.read()
+        for workflow_id, filename in destinations:
+            directory = os.path.join(
+                "files", workflow_id[:3], workflow_id, ".github", "workflows"
+            )
+            os.makedirs(directory)
+            with open(os.path.join(directory, filename), "wb") as destination:
+                destination.write(content)
+            extracted += 1
+
+if wanted:
+    missing = sum(len(destinations) for destinations in wanted.values())
+    raise SystemExit(f"corpus archive is missing {missing:,} selected workflows")
+print(f"extracted {extracted:,}")
+open("files/.complete-v3", "w").close()
+PY
+fi
+
+if [[ ! -f workflows.jsonl ]]; then
+  python3 - <<'PY'
+import json
+import os
+
+with open("workflows.tsv", encoding="utf-8") as source, open(
+    "workflows.jsonl", "w", encoding="utf-8"
+) as destination:
+    for line in source:
+        workflow_id, repository, path, file_hash = line.rstrip("\n").split("\t")
+        local_path = os.path.abspath(
+            os.path.join(
+                "files",
+                workflow_id[:3],
+                workflow_id,
+                ".github",
+                "workflows",
+                os.path.basename(path),
+            )
+        )
+        json.dump(
+            {
+                "id": workflow_id,
+                "repository": repository,
+                "path": path,
+                "hash": file_hash,
+                "source": local_path,
+            },
+            destination,
+            sort_keys=True,
+        )
+        destination.write("\n")
+PY
+fi
+
+validator="$workdir/buildkite-gha"
+(
+  cd "$root"
+  CGO_ENABLED=0 mise exec -- go build -trimpath -buildvcs=false \
+    -o "$validator" ./cmd/buildkite-gha
+)
+validator_commit="$(git -C "$root" rev-parse HEAD)"
+validator_version="$("$validator" --version)"
+validator_digest="$(python3 - "$validator" <<'PY'
+import hashlib
+import sys
+
+digest = hashlib.sha256()
+with open(sys.argv[1], "rb") as source:
+    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+)"
+readonly validator validator_commit validator_version validator_digest
+printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit" "$validator_digest"
+[[ "$("$validator" help validate-batch)" == *"--action-cache-dir"* ]] || {
+  echo 'buildkite-gha validate-batch must support --action-cache-dir' >&2
+  exit 1
+}
+
+action_cache="$workdir/action-cache"
+reports="$workdir/reports/$record_id/$validator_digest"
+readonly action_cache reports
+mkdir -p "$action_cache"
+mkdir -p "$reports"
+export reports validator_commit validator_version validator_digest
+batch_args=(
+  validate-batch
+  --manifest workflows.jsonl
+  --output-dir "$reports"
+  --corpus-id "zenodo:$record_id"
+  --action-cache-dir "$action_cache"
+)
+if [[ -n "${JOBS:-}" ]]; then
+  batch_args+=(--jobs "$JOBS")
+fi
+"$validator" "${batch_args[@]}"
+
+python3 - <<'PY'
+import collections
+import glob
+import json
+import os
+
+repositories = {}
+with open("workflows.jsonl", encoding="utf-8") as manifest:
+    for line in manifest:
+        record = json.loads(line)
+        repositories[record["source"]] = record["repository"]
+
+blocked_repos = set()
+codes_by_repo = collections.defaultdict(set)
+findings = collections.Counter()
+evaluations = collections.Counter()
+seen_workflows = set()
+bad_reports = 0
+for path in glob.glob(os.path.join(os.environ["reports"], "**", "*.json"), recursive=True):
+    try:
+        with open(path, encoding="utf-8") as report:
+            result = json.load(report)
+    except (OSError, json.JSONDecodeError):
+        continue
+    workflow = result.get("workflow")
+    repository = repositories.get(workflow)
+    if repository is None or workflow in seen_workflows:
+        bad_reports += 1
+        findings["E_REPORT"] += 1
+        continue
+    seen_workflows.add(workflow)
+    if (
+        result.get("schema") != "buildkite-gha/processing-report/v3"
+        or result.get("profile") != "hosted"
+        or not isinstance(result.get("validation"), dict)
+        or not isinstance(result.get("evaluations"), list)
+    ):
+        bad_reports += 1
+        blocked_repos.add(repository)
+        codes_by_repo[repository].add("E_REPORT")
+        findings["E_REPORT"] += 1
+        continue
+    if result.get("result") not in ("admitted", "not-applicable"):
+        blocked_repos.add(repository)
+    reports = [("validation", result["validation"])]
+    seen_events = set()
+    for evaluation in result["evaluations"]:
+        event = evaluation.get("event") if isinstance(evaluation, dict) else None
+        if (
+            not isinstance(evaluation, dict)
+            or event not in ("push", "pull_request", "workflow_dispatch", "schedule")
+            or event in seen_events
+            or evaluation.get("event_source") != "generated"
+            or not isinstance(evaluation.get("report"), dict)
+        ):
+            bad_reports += 1
+            blocked_repos.add(repository)
+            codes_by_repo[repository].add("E_REPORT")
+            findings["E_REPORT"] += 1
+            reports = []
+            break
+        seen_events.add(event)
+        evaluations[event] += 1
+        reports.append((event, evaluation["report"]))
+    for _, report in reports:
+        if report.get("schema") != "buildkite-gha/processing-report/v2":
+            bad_reports += 1
+            blocked_repos.add(repository)
+            codes_by_repo[repository].add("E_REPORT")
+            findings["E_REPORT"] += 1
+            break
+    for _, report in reports:
+        for diagnostic in report.get("diagnostics") or []:
+            code = diagnostic.get("code") or "unknown"
+            codes_by_repo[repository].add(code)
+            findings[code] += 1
+
+for workflow in repositories.keys() - seen_workflows:
+    repository = repositories[workflow]
+    bad_reports += 1
+    blocked_repos.add(repository)
+    codes_by_repo[repository].add("E_REPORT")
+    findings["E_REPORT"] += 1
+
+all_repos = set(repositories.values())
+clean = len(all_repos - blocked_repos)
+print(
+    f"repos: {len(all_repos):,}   clean: {clean:,} "
+    f"({100 * clean / len(all_repos):.2f}%)   unparseable reports: {bad_reports:,}"
+)
+print("admission scope: generated event snapshots, not arbitrary real payloads")
+print("\ndiagnostic code -> repos affected")
+repos_by_code = collections.Counter(
+    code for codes in codes_by_repo.values() for code in codes
+)
+for code, count in repos_by_code.most_common(40):
+    print(f"{100 * count / len(all_repos):6.2f}%  {count:6,}  {code}")
+
+with open("validate-tally.json", "w", encoding="utf-8") as destination:
+    json.dump(
+        {
+            "repos": len(all_repos),
+            "clean": clean,
+            "validator_commit": os.environ["validator_commit"],
+            "validator_version": os.environ["validator_version"],
+            "validator_digest": "sha256:" + os.environ["validator_digest"],
+            "admission_scope": "generated-event-snapshots",
+            "by_repo": dict(repos_by_code),
+            "by_finding": dict(findings),
+            "evaluations": dict(evaluations),
+            "unparseable_reports": bad_reports,
+        },
+        destination,
+        indent=2,
+        sort_keys=True,
+    )
+    destination.write("\n")
+PY

@@ -3,7 +3,9 @@ package expression
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -23,10 +25,16 @@ type Context struct {
 	Env              map[string]string
 	GitHub           map[string]any
 	Runner           map[string]string
-	Services         map[string]map[string]string
+	Services         map[string]ServiceContext
 	JobStatus        string
 	HashFiles        func([]string) (string, error)
 	HashFilesContext func(context.Context, []string) (string, error)
+}
+
+type ServiceContext struct {
+	ID      string
+	Network string
+	Ports   map[string]string
 }
 
 type runtimeReferenceKind uint8
@@ -34,6 +42,7 @@ type runtimeReferenceKind uint8
 const (
 	runtimeReferenceUnsupported runtimeReferenceKind = iota
 	runtimeReferenceServicePort
+	runtimeReferenceServiceValue
 	runtimeReferenceGitHub
 	runtimeReferenceInput
 	runtimeReferenceMatrix
@@ -74,6 +83,108 @@ func ValidateRuntimeTemplate(template string) error {
 // Evaluate substitutes direct runtime references in a template once.
 func Evaluate(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, evaluateDirectRuntimeNode)
+}
+
+func EvaluateValue(source string, context Context) (any, error) {
+	body, err := expressionBody(source)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	if call, ok := node.(*actionlint.FuncCallNode); ok && strings.EqualFold(call.Callee, "fromJSON") && len(call.Args) == 1 {
+		value, err := evaluateDirectRuntimeNode(call.Args[0], context)
+		if err != nil {
+			return nil, err
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+		}
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.UseNumber()
+		var decoded any
+		if err := decoder.Decode(&decoded); err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+		}
+		return decoded, nil
+	}
+	return evaluateDirectRuntimeNode(node, context)
+}
+
+type ObjectEntry struct {
+	Name  string
+	Value any
+}
+
+// EvaluateObject evaluates one fromJSON expression while retaining JSON object
+// order for surfaces, such as services, where declaration order is observable.
+func EvaluateObject(source string, context Context) ([]ObjectEntry, error) {
+	body, err := expressionBody(source)
+	if err != nil {
+		return nil, err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	call, ok := node.(*actionlint.FuncCallNode)
+	if !ok || !strings.EqualFold(call.Callee, "fromJSON") || len(call.Args) != 1 {
+		return nil, fmt.Errorf("expression must call fromJSON with one argument")
+	}
+	value, err := evaluateDirectRuntimeNode(call.Args[0], context)
+	if err != nil {
+		return nil, err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil, fmt.Errorf("fromJSON argument resolved to %T, want string", value)
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if token == nil {
+		if err := decoder.Decode(new(any)); err != io.EOF {
+			return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+		}
+		return nil, nil
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, fmt.Errorf("fromJSON resolved to a non-object, want an object")
+	}
+	var result []ObjectEntry
+	seen := map[string]bool{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		name := key.(string)
+		if seen[name] {
+			return nil, fmt.Errorf("fromJSON object repeats key %q", name)
+		}
+		seen[name] = true
+		var entry any
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, fmt.Errorf("fromJSON: %w", err)
+		}
+		result = append(result, ObjectEntry{Name: name, Value: entry})
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("fromJSON: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("fromJSON: unexpected trailing content")
+	}
+	return result, nil
 }
 
 // EvaluateStep evaluates the expression surface available to workflow step
@@ -384,6 +495,8 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		return "", fmt.Errorf("expression references unavailable runner value %q", path[0])
 	case runtimeReferenceServicePort:
 		return resolveServicePort(context.Services, path[1], path[3], "expression")
+	case runtimeReferenceServiceValue:
+		return resolveServiceValue(context.Services, path[1], path[2], "expression")
 	case runtimeReferenceGitHub:
 		value, ok := lookupRuntimeValue(context.GitHub, path)
 		if !ok {
@@ -454,6 +567,8 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceRunner
 	case len(path) == 4 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && strings.EqualFold(path[2], "ports"):
 		return runtimeReferenceServicePort
+	case len(path) == 3 && strings.EqualFold(root, "job") && strings.EqualFold(path[0], "services") && (strings.EqualFold(path[2], "id") || strings.EqualFold(path[2], "network")):
+		return runtimeReferenceServiceValue
 	case len(path) >= 1 && strings.EqualFold(root, "github"):
 		return runtimeReferenceGitHub
 	case len(path) == 1 && strings.EqualFold(root, "inputs"):

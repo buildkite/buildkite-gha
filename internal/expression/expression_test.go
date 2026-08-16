@@ -356,8 +356,8 @@ func TestEvaluateSupportsStaticIndexReferences(t *testing.T) {
 	}
 }
 
-func TestServicePortIsTheOnlyRuntimeJobExpression(t *testing.T) {
-	services := map[string]map[string]string{"redis": {"6379": "49152"}}
+func TestServiceRuntimeContext(t *testing.T) {
+	services := map[string]ServiceContext{"redis": {ID: "container-id", Network: "job-network", Ports: map[string]string{"6379": "49152"}}}
 	context := Context{Services: services, Env: map[string]string{"PORT": "6379"}}
 	for _, reference := range []string{"job.services.redis.ports[6379]", "JOB.Services.REDIS.Ports[6379]", "job.services.REDIS.ports['6379']"} {
 		got, err := Evaluate("${{ "+reference+" }}", context)
@@ -365,8 +365,17 @@ func TestServicePortIsTheOnlyRuntimeJobExpression(t *testing.T) {
 			t.Fatalf("Evaluate(%q) = %q, %v", reference, got, err)
 		}
 	}
+	for reference, want := range map[string]string{"job.services.redis.id": "container-id", "job.services.redis.network": "job-network"} {
+		got, err := Evaluate("${{ "+reference+" }}", context)
+		if err != nil || got != want {
+			t.Fatalf("Evaluate(%q) = %q, %v; want %q", reference, got, err, want)
+		}
+	}
 	if got, err := EvaluateCondition("job.services.Redis.ports[6379] == '49152'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service condition = %v, %v", got, err)
+	}
+	if got, err := EvaluateCondition("job.services.redis.id == 'container-id' && job.services.redis.network == 'job-network'", ConditionContext{Services: services}); err != nil || !got {
+		t.Fatalf("service identity condition = %v, %v", got, err)
 	}
 	for _, reference := range []string{"job.services.missing.ports[6379]", "job.services.redis.ports[1234]", "job.services.redis.ports[env.PORT]", "job.status"} {
 		if _, err := Evaluate("${{ "+reference+" }}", context); err == nil {
@@ -1293,6 +1302,35 @@ func TestEvaluateAvailableCompileTemplatePreservesRuntimeExpressions(t *testing.
 	}
 	if want := "echo target ${{ github.ref }}"; got != want {
 		t.Fatalf("EvaluateAvailableCompileTemplate() = %q, want %q", got, want)
+	}
+}
+
+func TestValidateServiceCredentialTemplateContexts(t *testing.T) {
+	for _, template := range []string{"${{ github.actor }}", "${{ vars.USER }}", "${{ secrets.PASSWORD }}", "${{ env.USER }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err != nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) = %v", template, err)
+		}
+	}
+	for _, template := range []string{"${{ inputs.user }}", "${{ matrix.user }}", "${{ strategy.job-index }}", "${{ needs.build.outputs.user }}", "${{ env.USER.extra }}", "${{ secrets }}"} {
+		if err := ValidateServiceCredentialTemplate(template); err == nil {
+			t.Errorf("ValidateServiceCredentialTemplate(%q) succeeded", template)
+		}
+	}
+}
+
+func TestEvaluateAvailableCompileTemplateRejectsIntroducedExpressionSyntax(t *testing.T) {
+	for _, test := range []struct {
+		template string
+		value    string
+	}{
+		{template: "${{ inputs.value }}", value: "${{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}", value: "{{ secrets.ADMIN }}"},
+		{template: "$${{ inputs.value }}{{ secrets.ADMIN }}", value: ""},
+	} {
+		_, err := EvaluateAvailableCompileTemplate(test.template, CompileContext{Inputs: map[string]any{"value": test.value}})
+		if err == nil || !strings.Contains(err.Error(), "result contains expression syntax") {
+			t.Errorf("EvaluateAvailableCompileTemplate(%q) error = %v", test.template, err)
+		}
 	}
 }
 

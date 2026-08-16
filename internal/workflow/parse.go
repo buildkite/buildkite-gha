@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/buildkite/buildkite-gha/internal/expression"
+	"github.com/buildkite/buildkite-gha/internal/plan"
 	"github.com/rhysd/actionlint"
 	"go.yaml.in/yaml/v4"
 )
@@ -32,6 +33,18 @@ type concurrencySyntax struct {
 	Diagnostics []expectedActionlintDiagnostic
 }
 
+type rawServiceContainer struct {
+	Image       string
+	Credentials *ContainerCredentials
+	Env         map[string]string
+	Ports       []string
+	Volumes     []string
+	Options     string
+	Command     string
+	Entrypoint  string
+	Order       int
+}
+
 // Parse uses actionlint as the syntax frontend and immediately converts its AST
 // into the owned workflow model.
 func Parse(path string, source []byte) (*Workflow, error) {
@@ -39,7 +52,8 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	if err := yaml.Unmarshal(source, &document); err != nil {
 		return nil, fmt.Errorf("%s: parse workflow YAML: %w", path, err)
 	}
-	if err := validateRawContainers(path, &document); err != nil {
+	serviceContainers, containerDiagnostics, err := validateRawContainers(path, &document)
+	if err != nil {
 		return nil, err
 	}
 	workflowCancellation, jobCancellations := rawConcurrencyCancellations(&document)
@@ -48,7 +62,8 @@ func Parse(path string, source []byte) (*Workflow, error) {
 		return nil, err
 	}
 	parsed, errs := actionlint.Parse(source)
-	if err := filterActionlintDiagnostics(path, errs, concurrency.Diagnostics); err != nil {
+	expectedDiagnostics := append(concurrency.Diagnostics, containerDiagnostics...)
+	if err := filterActionlintDiagnostics(path, errs, expectedDiagnostics); err != nil {
 		return nil, err
 	}
 	scalars, err := scalarValues(&document)
@@ -162,7 +177,7 @@ func Parse(path string, source []byte) (*Workflow, error) {
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		job, err := adaptJob(path, parsed.Jobs[id], scalars, concurrency.Steps)
+		job, err := adaptJob(path, parsed.Jobs[id], scalars, concurrency.Steps, serviceContainers)
 		if err != nil {
 			return nil, err
 		}
@@ -278,27 +293,29 @@ func adaptTriggers(events []actionlint.Event) []Trigger {
 	return out
 }
 
-var containerImagePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?$`)
 var containerEnvKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var containerPortPattern = regexp.MustCompile(`^(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(?::(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:/(?:tcp|udp))?$`)
 
 // validateRawContainers deliberately walks only the owned container locations.
 // actionlint normalizes maps (including service IDs), so the raw tree is also
 // the authoritative source for diagnostics.
-func validateRawContainers(path string, document *yaml.Node) error {
+func validateRawContainers(path string, document *yaml.Node) (map[string]rawServiceContainer, []expectedActionlintDiagnostic, error) {
+	serviceContainers := map[string]rawServiceContainer{}
+	var diagnostics []expectedActionlintDiagnostic
 	root := document
 	if root.Kind == yaml.DocumentNode && len(root.Content) != 0 {
 		root = root.Content[0]
 	}
 	jobs := mappingValue(root, "jobs")
 	if jobs == nil || jobs.Kind != yaml.MappingNode {
-		return nil
+		return serviceContainers, diagnostics, nil
 	}
 	for i := 0; i+1 < len(jobs.Content); i += 2 {
+		jobID := strings.ToLower(jobs.Content[i].Value)
 		job := jobs.Content[i+1]
 		if container := mappingValue(job, "container"); container != nil {
-			if err := validateRawContainer(path, container); err != nil {
-				return err
+			if _, _, err := validateRawContainer(path, container, false); err != nil {
+				return nil, nil, err
 			}
 		}
 		services := mappingValue(job, "services")
@@ -306,19 +323,23 @@ func validateRawContainers(path string, document *yaml.Node) error {
 			continue
 		}
 		if len(services.Content)/2 > 32 {
-			return rawError(path, services, "container services have more than 32 entries")
+			return nil, nil, rawError(path, services, "container services have more than 32 entries")
 		}
 		for j := 0; j+1 < len(services.Content); j += 2 {
 			name, container := services.Content[j], services.Content[j+1]
 			if name.Value != strings.ToLower(name.Value) || !serviceIDPattern.MatchString(name.Value) {
-				return rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
+				return nil, nil, rawError(path, name, fmt.Sprintf("invalid service ID %q; service IDs must be lowercase", name.Value))
 			}
-			if err := validateRawContainer(path, container); err != nil {
-				return err
+			extra, expected, err := validateRawContainer(path, container, true)
+			if err != nil {
+				return nil, nil, err
 			}
+			extra.Order = j / 2
+			serviceContainers[jobID+"\x00"+name.Value] = extra
+			diagnostics = append(diagnostics, expected...)
 		}
 	}
-	return nil
+	return serviceContainers, diagnostics, nil
 }
 
 func rawError(path string, node *yaml.Node, message string) error {
@@ -364,59 +385,132 @@ func rawConcurrencyCancellation(concurrency *yaml.Node) *Position {
 	return &position
 }
 
-func validateRawContainer(path string, node *yaml.Node) error {
+func validateRawContainer(path string, node *yaml.Node, service bool) (rawServiceContainer, []expectedActionlintDiagnostic, error) {
+	var extra rawServiceContainer
+	var diagnostics []expectedActionlintDiagnostic
 	image := node
 	if node.Kind == yaml.MappingNode {
 		image = mappingValue(node, "image")
-		for _, control := range []string{"credentials", "volumes", "options"} {
+		controls := []string{"credentials", "volumes", "options", "command", "entrypoint"}
+		if service {
+			controls = nil
+		}
+		for _, control := range controls {
 			if key := mappingKey(node, control); key != nil {
-				return rawError(path, key, "container "+control+" are unsupported")
+				return extra, nil, rawError(path, key, "container "+control+" are unsupported")
+			}
+		}
+		if service {
+			if credentials := mappingValue(node, "credentials"); credentials != nil {
+				if credentials.Kind != yaml.MappingNode {
+					return extra, nil, rawError(path, credentials, "invalid service container credentials")
+				}
+				username, password := mappingValue(credentials, "username"), mappingValue(credentials, "password")
+				for _, value := range []*yaml.Node{username, password} {
+					if value != nil && (value.Kind != yaml.ScalarNode || len(value.Value) > 65536 || strings.ContainsAny(value.Value, "\x00\r\n")) {
+						return extra, nil, rawError(path, credentials, "invalid service container credentials")
+					}
+				}
+				extra.Credentials = &ContainerCredentials{}
+				if username != nil {
+					extra.Credentials.Username = username.Value
+				}
+				if password != nil {
+					extra.Credentials.Password = password.Value
+				}
+				if (username == nil) != (password == nil) {
+					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(mappingKey(node, "credentials")), Prefix: "both \"username\" and \"password\" must be specified"})
+				}
+			}
+			for _, field := range []struct {
+				name  string
+				limit int
+				dest  *string
+			}{{"command", 65536, &extra.Command}, {"entrypoint", 4096, &extra.Entrypoint}} {
+				if value := mappingValue(node, field.name); value != nil {
+					if value.Kind != yaml.ScalarNode || len(value.Value) > field.limit || strings.ContainsAny(value.Value, "\x00\r") {
+						return extra, nil, rawError(path, value, "invalid service container "+field.name)
+					}
+					*field.dest = value.Value
+					key := mappingKey(node, field.name)
+					diagnostics = append(diagnostics, expectedActionlintDiagnostic{Position: nodePosition(key), Prefix: "unexpected key \"" + field.name + "\""})
+				}
 			}
 		}
 	}
-	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || !containerImagePattern.MatchString(image.Value) {
+	if image == nil || image.Kind != yaml.ScalarNode || len(image.Value) > 512 || strings.ContainsAny(image.Value, "\x00\r\n") || !strings.Contains(image.Value, "${{") && !plan.ValidContainerImageReference(image.Value) {
 		if image == nil {
 			image = node
 		}
-		return rawError(path, image, "invalid container image")
+		return extra, nil, rawError(path, image, "invalid container image")
 	}
+	extra.Image = image.Value
 	env := mappingValue(node, "env")
 	if env != nil && env.Kind == yaml.MappingNode {
 		if len(env.Content)/2 > 256 {
-			return rawError(path, env, "container environment has more than 256 entries")
+			return extra, nil, rawError(path, env, "container environment has more than 256 entries")
 		}
 		total := 0
 		for i := 0; i+1 < len(env.Content); i += 2 {
 			key, value := env.Content[i], env.Content[i+1]
 			if len(key.Value) > 255 || !containerEnvKeyPattern.MatchString(key.Value) {
-				return rawError(path, key, "invalid container environment key")
+				return extra, nil, rawError(path, key, "invalid container environment key")
 			}
 			if value.Kind != yaml.ScalarNode || len(value.Value) > 65536 {
-				return rawError(path, value, "invalid container environment value")
+				return extra, nil, rawError(path, value, "invalid container environment value")
 			}
 			total += len(key.Value) + len(value.Value)
+			if service {
+				if extra.Env == nil {
+					extra.Env = map[string]string{}
+				}
+				extra.Env[key.Value] = value.Value
+			}
 		}
 		if total > 1048576 {
-			return rawError(path, env, "container environment exceeds 1048576 bytes")
+			return extra, nil, rawError(path, env, "container environment exceeds 1048576 bytes")
 		}
 	}
 	ports := mappingValue(node, "ports")
 	if ports != nil && ports.Kind == yaml.SequenceNode {
 		if len(ports.Content) > 128 {
-			return rawError(path, ports, "container has more than 128 ports")
+			return extra, nil, rawError(path, ports, "container has more than 128 ports")
 		}
 		seen := map[string]bool{}
 		for _, port := range ports.Content {
-			if port.Kind != yaml.ScalarNode || !containerPortPattern.MatchString(port.Value) || seen[port.Value] {
-				return rawError(path, port, "invalid or repeated container port")
+			if port.Kind != yaml.ScalarNode || len(port.Value) > 4096 || strings.ContainsAny(port.Value, "\x00\r\n") || seen[port.Value] || !service && !containerPortPattern.MatchString(port.Value) {
+				return extra, nil, rawError(path, port, "invalid or repeated container port")
 			}
 			seen[port.Value] = true
+			if service {
+				extra.Ports = append(extra.Ports, port.Value)
+			}
 		}
 	}
-	return nil
+	if service && node.Kind == yaml.MappingNode {
+		volumes := mappingValue(node, "volumes")
+		if volumes != nil {
+			if volumes.Kind != yaml.SequenceNode || len(volumes.Content) > 128 {
+				return extra, nil, rawError(path, volumes, "invalid service container volumes")
+			}
+			for _, volume := range volumes.Content {
+				if volume.Kind != yaml.ScalarNode || len(volume.Value) > 4096 || strings.ContainsAny(volume.Value, "\x00\r\n") {
+					return extra, nil, rawError(path, volume, "invalid service container volume")
+				}
+				extra.Volumes = append(extra.Volumes, volume.Value)
+			}
+		}
+		if options := mappingValue(node, "options"); options != nil {
+			if options.Kind != yaml.ScalarNode || len(options.Value) > 65536 || strings.ContainsAny(options.Value, "\x00\r\n") {
+				return extra, nil, rawError(path, options, "invalid service container options")
+			}
+			extra.Options = options.Value
+		}
+	}
+	return extra, diagnostics, nil
 }
 
-func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency) (Job, error) {
+func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurrency map[Position]stepConcurrency, serviceContainers map[string]rawServiceContainer) (Job, error) {
 	out := Job{ID: in.ID.Value, Span: pointSpan(in.Pos)}
 	if in.Environment != nil {
 		return Job{}, locatedError(path, in.Environment.Pos, fmt.Sprintf("job %q", in.ID.Value), "GitHub environments and environment secrets are unsupported")
@@ -462,23 +556,34 @@ func adaptJob(path string, in *actionlint.Job, scalars map[Position]any, concurr
 	}
 	if in.Services != nil {
 		if in.Services.Expression != nil {
-			return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, "expression-valued services are unsupported")
-		}
-		names := make([]string, 0, len(in.Services.Value))
-		for name := range in.Services.Value {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			service := in.Services.Value[name]
-			if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
-				return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+			out.ServicesExpression = in.Services.Expression.Value
+			if err := expression.ValidateServiceMapRuntimeExpression(out.ServicesExpression); err != nil {
+				return Job{}, locatedError(path, in.Services.Expression.Pos, in.ID.Value, err.Error())
 			}
-			container, err := adaptContainer(path, in.ID.Value, service.Container)
-			if err != nil {
-				return Job{}, err
+		} else {
+			names := make([]string, 0, len(in.Services.Value))
+			for name := range in.Services.Value {
+				names = append(names, name)
 			}
-			out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			sort.Slice(names, func(i, j int) bool {
+				left := serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+names[i]].Order
+				right := serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+names[j]].Order
+				if left != right {
+					return left < right
+				}
+				return names[i] < names[j]
+			})
+			for _, name := range names {
+				service := in.Services.Value[name]
+				if service == nil || service.Name == nil || service.Container == nil || !serviceIDPattern.MatchString(service.Name.Value) {
+					return Job{}, locatedError(path, in.Services.Pos, in.ID.Value, fmt.Sprintf("invalid service ID %q", name))
+				}
+				container, err := adaptServiceContainer(path, in.ID.Value, service.Container, serviceContainers[strings.ToLower(in.ID.Value)+"\x00"+service.Name.Value])
+				if err != nil {
+					return Job{}, err
+				}
+				out.Services = append(out.Services, Service{Name: service.Name.Value, Container: container})
+			}
 		}
 	}
 	if in.ContinueOnError != nil {
@@ -805,6 +910,17 @@ func adaptContainer(path, jobID string, in *actionlint.Container) (Container, er
 		}
 		out.Ports = append(out.Ports, port.Value)
 	}
+	return out, nil
+}
+
+func adaptServiceContainer(path, jobID string, in *actionlint.Container, raw rawServiceContainer) (ServiceContainer, error) {
+	if in.Image == nil || strings.TrimSpace(raw.Image) == "" {
+		return ServiceContainer{}, locatedError(path, in.Pos, jobID, "container image must be non-empty")
+	}
+	if in.Env != nil && in.Env.Expression != nil {
+		return ServiceContainer{}, locatedError(path, in.Env.Expression.Pos, jobID, "expression-valued service container env is unsupported")
+	}
+	out := ServiceContainer{Image: raw.Image, Credentials: raw.Credentials, Env: raw.Env, Ports: raw.Ports, Volumes: raw.Volumes, Options: raw.Options, Command: raw.Command, Entrypoint: raw.Entrypoint, Span: pointSpan(in.Pos)}
 	return out, nil
 }
 

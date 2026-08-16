@@ -2363,7 +2363,7 @@ jobs:
 	}
 }
 
-func TestHostedReportAggregatesIndependentAdmissionFailures(t *testing.T) {
+func TestHostedReportAdmitsIndependentContainerJobs(t *testing.T) {
 	workflowPath := filepath.Join(t.TempDir(), "containers.yml")
 	workflow := []byte(`on: push
 jobs:
@@ -2384,18 +2384,17 @@ jobs:
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
 	var stdout, stderr bytes.Buffer
 	args := []string{"validate", "--profile", "hosted-tokenless", "--format", "json", "--event-path", eventPath, workflowPath}
-	if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
-		t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+	if code := Run(args, &stdout, &stderr, "dev"); code != 0 {
+		t.Fatalf("Run() code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 	var report compatibility.ProcessingReport
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	profileFailures := 0
 	instances := map[string]string{}
 	for _, diagnostic := range report.Diagnostics {
 		if diagnostic.Code == "E_PROFILE" {
-			profileFailures++
+			t.Fatalf("unexpected profile diagnostic: %#v", diagnostic)
 		}
 	}
 	for _, job := range report.Jobs {
@@ -2403,7 +2402,7 @@ jobs:
 			instances[job.Instance] = job.Result
 		}
 	}
-	if profileFailures != 2 || instances["gha-first"] != compatibility.Failed || instances["gha-second"] != compatibility.Failed {
+	if report.Result != "admitted" || report.Admission.Result != "admitted" || instances["gha-first"] != compatibility.Passed || instances["gha-second"] != compatibility.Passed {
 		t.Fatalf("report = %#v", report)
 	}
 }
@@ -3098,10 +3097,10 @@ func TestProcessingAnnotationLeadsWithTheActionableDiagnostic(t *testing.T) {
 			want: `Job "test" needs GITHUB_TOKEN, but job-level permissions are unsupported.`,
 		},
 		{
-			name: "hosted container",
+			name: "Docker provenance",
 			diagnostic: compatibility.Diagnostic{Code: "E_PROFILE",
-				Message: `Job "test" uses service container "postgres". The compiler supports this construct, but hosted production does not run job or service containers.`},
-			want: `Job "test" uses service container "postgres".`,
+				Message: `Job "test" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`},
+			want: `Job "test" requires Docker without matching compiler provenance.`,
 		},
 		{
 			name: "third-party runtime warning",
@@ -4908,6 +4907,92 @@ func TestRunUploadEmitsTriggerFailuresAsFailingSteps(t *testing.T) {
 	}
 }
 
+func TestRunUploadAppliesPullRequestPathFiltersFromGitDiff(t *testing.T) {
+	requireImporterHost(t)
+	workflowJobs := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"
+	workflowSource := "on:\n  pull_request:\n    paths: [\"src/**\"]\n" + workflowJobs
+	repository := writeUploadWorkflowRepository(t, map[string]string{
+		"ci.yml":       "name: CI\n" + workflowSource,
+		"mismatch.yml": "name: Original\n" + workflowSource,
+	})
+	runGit := func(args ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("commit", "-qm", "base")
+	base := runGit("rev-parse", "HEAD")
+	runGit("update-ref", "refs/remotes/origin/main", base)
+	if err := os.Mkdir(filepath.Join(repository, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repository, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "src/main.go")
+	runGit("commit", "-qm", "head")
+	head := runGit("rev-parse", "HEAD")
+	merge := runGit("commit-tree", head+"^{tree}", "-p", base, "-p", head, "-m", "merge")
+	if err := os.WriteFile(filepath.Join(repository, ".github", "workflows", "mismatch.yml"), []byte("name: Local mismatch\non: pull_request\n"+workflowJobs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	webhook, err := json.Marshal(map[string]any{
+		"action": "opened", "number": 42,
+		"pull_request": map[string]any{
+			"base":             map[string]any{"ref": "main", "sha": base, "repo": map[string]any{"full_name": "buildkite/buildkite-gha"}},
+			"head":             map[string]any{"ref": "feature", "sha": head, "repo": map[string]any{"full_name": "contributor/buildkite-gha"}},
+			"mergeable":        true,
+			"merge_commit_sha": merge,
+		},
+		"sender": map[string]any{"login": "octocat"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repository)
+	t.Setenv("BUILDKITE", "true")
+	t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+	t.Setenv("BUILDKITE_STEP_KEY", "path-filter-importer")
+	t.Setenv("BUILDKITE_REPO", "https://github.com/buildkite/buildkite-gha")
+	t.Setenv("BUILDKITE_COMMIT", head)
+	t.Setenv("BUILDKITE_BRANCH", "contributor:feature")
+	t.Setenv("BUILDKITE_PULL_REQUEST", "42")
+	t.Setenv("BUILDKITE_PULL_REQUEST_BASE_BRANCH", "main")
+	t.Setenv("BUILDKITE_PULL_REQUEST_REPO", "https://github.com/contributor/buildkite-gha")
+	t.Setenv("BUILDKITE_SOURCE", "webhook")
+	t.Setenv("BUILDKITE_GITHUB_EVENT", "pull_request")
+	runner := &cliCaptureRunner{webhook: webhook}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"upload", ".github/workflows/ci.yml", ".github/workflows/mismatch.yml"}, &stdout, &stderr, "dev", runner); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("run() code/stderr = %d / %q", code, stderr.String())
+	}
+	var pipeline struct {
+		Steps []struct {
+			Group     string `yaml:"group"`
+			Label     string `yaml:"label"`
+			Condition string `yaml:"if"`
+			Command   string `yaml:"command"`
+			Steps     []any  `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	pipelineCommand := runner.commands[len(runner.commands)-1]
+	if err := yaml.Unmarshal(pipelineCommand.stdin, &pipeline); err != nil {
+		t.Fatal(err)
+	}
+	if len(pipeline.Steps) != 2 || pipeline.Steps[0].Group != ":github: CI" || strings.Contains(pipeline.Steps[0].Condition, "false") || len(pipeline.Steps[0].Steps) != 1 {
+		t.Fatalf("path-filter pipeline = %#v\n%s", pipeline.Steps, pipelineCommand.stdin)
+	}
+	if failure := pipeline.Steps[1]; failure.Label != ":github: Local mismatch" || !isGeneratedFailureCommand(failure.Command) || failure.Group != "" || len(failure.Steps) != 0 {
+		t.Fatalf("workflow mismatch failure = %#v\n%s", failure, pipelineCommand.stdin)
+	}
+}
+
 func TestRunUploadEmitsReusableInputFailuresAsActionableFailingSteps(t *testing.T) {
 	requireImporterHost(t)
 	repository := writeUploadWorkflowRepository(t, map[string]string{
@@ -6660,19 +6745,6 @@ func TestGitHubTokenAdmissionDiagnosticSeparatesGuidanceFromDetail(t *testing.T)
 	}
 }
 
-func TestHostedContainerDiagnosticSeparatesGuidanceFromDetail(t *testing.T) {
-	job := plan.Job{
-		Workflow: plan.Workflow{LogicalJobID: "test"},
-		Services: map[string]plan.Container{"postgres": {Image: "postgres:11-alpine"}},
-	}
-	wantMessage := `Job "test" uses service container "postgres" (image "postgres:11-alpine"), which hosted runs do not support. Replace it with ordinary steps or an externally reachable service.`
-	wantDetail := `The compiler supports job and service containers, but the hosted profile does not run them; runner configuration cannot enable them.`
-	message, detail := hostedContainerDiagnostic(job)
-	if message != wantMessage || detail != wantDetail {
-		t.Fatalf("hostedContainerDiagnostic() = %q, %q", message, detail)
-	}
-}
-
 func TestUnprivilegedUploadAllowsPublicAndDockerfileActionCapabilities(t *testing.T) {
 	for _, capabilities := range [][]string{nil, {"network"}, {"docker"}, {"docker", "network"}} {
 		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
@@ -6693,24 +6765,53 @@ func TestUnprivilegedUploadRejectsDockerWithoutCompilerProvenance(t *testing.T) 
 	}}}}
 	err := validateUnprivilegedBundle(bundle)
 	var finding *compiler.ProcessingFinding
-	want := `Job "unproven-docker" requires Docker, which hosted runs support only for Dockerfile actions. Use a Dockerfile action or remove the Docker requirement.`
+	want := `Job "unproven-docker" requires Docker without matching compiler provenance. Hosted runs support only verified Dockerfile actions and bounded job or service containers.`
 	if err == nil || !errors.As(err, &finding) || finding.Message != want || finding.Detail != "" {
 		t.Fatalf("validateUnprivilegedBundle() error = %v, want Docker provenance rejection", err)
 	}
 }
 
-func TestUnprivilegedUploadRejectsContainerProvenance(t *testing.T) {
-	for _, sources := range [][]string{
-		{"job-containers"},
-		{"service-containers"},
-		{"dockerfile-actions", "job-containers", "service-containers"},
+func TestUnprivilegedUploadAdmitsCompilerVerifiedContainerProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		job     plan.Job
+		sources []string
+	}{
+		{name: "job", job: plan.Job{Container: &plan.Container{Image: "node:24"}}, sources: []string{"job-containers"}},
+		{name: "service", job: plan.Job{Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"service-containers"}},
+		{name: "dynamic services", job: plan.Job{ServicesExpression: "${{ fromJSON(needs.build.outputs.services) }}"}, sources: []string{"service-containers"}},
+		{name: "all", job: plan.Job{Container: &plan.Container{Image: "node:24"}, Services: map[string]plan.Container{"redis": {Image: "redis:7"}}}, sources: []string{"dockerfile-actions", "job-containers", "service-containers"}},
 	} {
-		bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
-			Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"},
-		}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: sources}}}}
-		if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "hosted container unsupported") {
-			t.Fatalf("validateUnprivilegedBundle(%v) error = %v", sources, err)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+				Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"}, Container: test.job.Container, Services: test.job.Services, ServicesExpression: test.job.ServicesExpression,
+			}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: test.sources}}}}
+			if err := validateUnprivilegedBundle(bundle); err != nil {
+				t.Fatalf("validateUnprivilegedBundle(%v) error = %v", test.sources, err)
+			}
+		})
+	}
+}
+
+func TestUnprivilegedUploadRejectsMismatchedContainerProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		job     plan.Job
+		sources []string
+	}{
+		{name: "claim without container", sources: []string{"job-containers"}},
+		{name: "container without claim", job: plan.Job{Container: &plan.Container{Image: "node:24"}}},
+		{name: "unknown source", sources: []string{"docker-plugin"}},
+		{name: "unsorted source", job: plan.Job{Container: &plan.Container{Image: "node:24"}}, sources: []string{"job-containers", "dockerfile-actions"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := compiler.Bundle{Plans: []compiler.PlanArtifact{{Job: plan.Job{
+				Workflow: plan.Workflow{LogicalJobID: "container-job"}, RequiredCapabilities: []string{"docker", "network"}, Container: test.job.Container,
+			}, Authorization: compiler.PlanAuthorization{DockerCapabilitySources: test.sources}}}}
+			if err := validateUnprivilegedBundle(bundle); err == nil || !strings.Contains(err.Error(), "unsupported Docker access") {
+				t.Fatalf("validateUnprivilegedBundle(%v) error = %v", test.sources, err)
+			}
+		})
 	}
 }
 
@@ -7619,6 +7720,15 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
+	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", "one", "--action-cache-dir", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("validateActionCacheArgs() error = %v, want duplicate cache directory error", err)
+	}
+	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("validateActionCacheArgs() error = %v, want empty cache directory error", err)
+	}
+	if args, cacheDir, err := validateActionCacheArgs([]string{"--profile", "hosted", "--action-cache-dir", "cache", "--all-events", "workflow.yml"}); err != nil || cacheDir != "cache" || !slices.Equal(args, []string{"--profile", "hosted", "--all-events", "workflow.yml"}) {
+		t.Fatalf("validateActionCacheArgs() = %q, %q, %v", args, cacheDir, err)
+	}
 	if _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
 	}
@@ -7766,6 +7876,18 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 		if _, err := parseUploadArgs(test.args); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("parseUploadArgs(%#v) error = %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+func TestValidateActionCacheRequiresHostedProfile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--action-cache-dir", t.TempDir(), "workflow.yml"}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "requires --profile hosted") {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	stderr.Reset()
+	missing := filepath.Join(t.TempDir(), "missing")
+	if code := Run([]string{"validate", "--profile", "hosted", "--event", "push", "--action-cache-dir", missing, "workflow.yml"}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "cache root is not a non-symlink directory") {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
 }
 

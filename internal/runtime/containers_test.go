@@ -11,6 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +30,7 @@ import (
 	actionintegration "github.com/buildkite/buildkite-gha/internal/action/integration"
 	"github.com/buildkite/buildkite-gha/internal/action/source"
 	"github.com/buildkite/buildkite-gha/internal/compiler"
+	"github.com/buildkite/buildkite-gha/internal/expression"
 	"github.com/buildkite/buildkite-gha/internal/plan"
 )
 
@@ -63,10 +70,19 @@ func newJobDocker(t *testing.T, scenario string) fakeJobDocker {
 
 func (f fakeJobDocker) calls(t *testing.T) []jobDockerCall {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(f.root, "calls"))
+	file, err := os.Open(filepath.Join(f.root, "calls"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = file.Close() }()
+	if err := testFileLock(file, true); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(file)
+	_ = testFileLock(file, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +156,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	}
 	scenario := os.Getenv("JOB_DOCKER_SCENARIO")
 	key := args[0]
-	if key == "network" && len(args) > 1 {
+	if (key == "network" || key == "volume") && len(args) > 1 {
 		key += "-" + args[1]
 	}
 	if scenario == "block-pull" && key == "pull" {
@@ -149,9 +165,16 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	if scenario == "fail-pull" && key == "pull" {
 		os.Exit(42)
 	}
+	if scenario == "block-login" && key == "login" {
+		select {}
+	}
 	container, network := filepath.Join(root, "container"), filepath.Join(root, "network")
 	actionContainer, actionImage := filepath.Join(root, "action-container"), filepath.Join(root, "action-image")
+	containerName := func(reference string) string {
+		return strings.TrimPrefix(reference, "docker-id-")
+	}
 	containerPath := func(name string) string {
+		name = containerName(name)
 		if strings.HasPrefix(name, "buildkite-gha-service-") {
 			return filepath.Join(root, "service-"+name)
 		}
@@ -175,6 +198,23 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(46)
 	case "pull":
 		os.Exit(0)
+	case "login":
+		password, _ := io.ReadAll(os.Stdin)
+		status := "bad"
+		if string(password) == "registry-password\n" {
+			status = "ok"
+		}
+		_ = os.WriteFile(filepath.Join(root, "login-stdin"), []byte(status), 0o600)
+		if scenario == "fail-login-once" {
+			marker := filepath.Join(root, "failed-login")
+			if _, err := os.Stat(marker); errors.Is(err, os.ErrNotExist) {
+				_ = os.WriteFile(marker, nil, 0o600)
+				os.Exit(42)
+			}
+		}
+		os.Exit(0)
+	case "logout":
+		os.Exit(0)
 	case "network-create":
 		_ = os.WriteFile(network, nil, 0o600)
 		if scenario == "fail-network-create" {
@@ -184,12 +224,19 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 	case "create":
 		name := ""
 		var publications []string
+		var volumes []string
 		for i := 0; i+1 < len(args); i++ {
 			if args[i] == "--name" {
 				name = args[i+1]
 			}
 			if args[i] == "--publish" {
 				publications = append(publications, args[i+1])
+			}
+			if args[i] == "--volume" || args[i] == "-v" {
+				parts := strings.Split(args[i+1], ":")
+				if len(parts) > 1 && parts[0] != "" && !filepath.IsAbs(parts[0]) {
+					volumes = append(volumes, parts[0])
+				}
 			}
 			if args[i] == "--mount" {
 				p := strings.Split(args[i+1], ",")
@@ -215,6 +262,9 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if strings.HasPrefix(name, "buildkite-gha-service-") {
 			_ = os.WriteFile(containerPath(name)+".ports", []byte(strings.Join(publications, "\n")), 0o600)
 		}
+		if len(volumes) != 0 {
+			_ = os.WriteFile(filepath.Join(root, "volumes-"+name), []byte(strings.Join(volumes, "\n")), 0o600)
+		}
 		if scenario == "fail-later-service-create" && strings.HasPrefix(name, "buildkite-gha-service-") {
 			counter := filepath.Join(root, "service-create-count")
 			data, _ := os.ReadFile(counter)
@@ -228,6 +278,7 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		if scenario == "fail-create" {
 			os.Exit(42)
 		}
+		fmt.Print("docker-id-" + name)
 		os.Exit(0)
 	case "start":
 		if scenario == "fail-start" {
@@ -236,7 +287,11 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(0)
 	case "port":
 		if scenario == "malformed-port" {
-			fmt.Print("6379/tcp -> 0.0.0.0:49152\n")
+			fmt.Print("not Docker port output\n")
+			os.Exit(0)
+		}
+		if scenario == "broad-port" {
+			fmt.Print("80/tcp -> 0.0.0.0:8000\n81/tcp -> [::]:8001\n82/sctp -> 127.0.0.1:8002\n")
 			os.Exit(0)
 		}
 		data, _ := os.ReadFile(containerPath(args[len(args)-1]) + ".ports")
@@ -259,9 +314,14 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "inspect":
-		name := args[len(args)-1]
+		name := containerName(args[len(args)-1])
 		if _, err := os.Stat(containerPath(name)); err != nil {
 			os.Exit(1)
+		}
+		if strings.Contains(strings.Join(args, " "), ".Mounts") {
+			data, _ := os.ReadFile(filepath.Join(root, "volumes-"+name))
+			fmt.Print(string(data))
+			os.Exit(0)
 		}
 		switch scenario {
 		case "service-unhealthy":
@@ -277,10 +337,14 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 				fmt.Print("healthy\n")
 			}
 		default:
-			fmt.Print("running\n")
+			fmt.Print("\n")
 		}
 		os.Exit(0)
 	case "logs":
+		if scenario == "service-log-command" {
+			fmt.Print("::warning::not-an-annotation\n::add-mask::not-a-mask\nnot-a-mask\n")
+			os.Exit(0)
+		}
 		fmt.Print("diagnostic sibling-secret\n")
 		os.Exit(0)
 	case "ps":
@@ -291,17 +355,40 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		owner, _ := os.ReadFile(filepath.Join(root, "action-owner"))
 		isAction := strings.Contains(joined, "buildkite-gha-container-") || (len(owner) != 0 && strings.Contains(joined, string(owner)))
 		path := container
+		nameFiltered := false
+		idFiltered := false
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "name=^/buildkite-gha-service-") {
 				name := strings.TrimSuffix(strings.TrimPrefix(arg, "name=^/"), "$")
 				path = containerPath(name)
+				nameFiltered = true
+			}
+			if strings.HasPrefix(arg, "id=docker-id-buildkite-gha-service-") {
+				path = containerPath(strings.TrimPrefix(arg, "id="))
+				nameFiltered = true
+				idFiltered = true
 			}
 		}
 		if isAction {
 			path = actionContainer
 		}
+		if !nameFiltered && !isAction && strings.Contains(joined, "label=com.buildkite.gha.owner.") {
+			if _, err := os.Stat(container); err == nil {
+				fmt.Println("job-container-id")
+			}
+			entries, _ := os.ReadDir(root)
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "service-buildkite-gha-service-") && !strings.HasSuffix(entry.Name(), ".ports") {
+					fmt.Println("docker-id-" + strings.TrimPrefix(entry.Name(), "service-"))
+				}
+			}
+			os.Exit(0)
+		}
 		if _, err := os.Stat(path); err == nil {
 			fmt.Print("container-id")
+			if scenario == "service-auto-remove-before-stop" && idFiltered {
+				_ = os.Remove(path)
+			}
 		}
 		os.Exit(0)
 	case "run":
@@ -326,13 +413,27 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		}
 		os.Exit(0)
 	case "stop":
+		if scenario == "service-auto-remove-before-stop" {
+			if _, err := os.Stat(containerPath(args[len(args)-1])); errors.Is(err, os.ErrNotExist) {
+				os.Exit(1)
+			}
+		}
+		if scenario == "service-auto-remove" {
+			_ = os.Remove(containerPath(args[len(args)-1]))
+		}
 		os.Exit(0)
 	case "rm":
 		joined := strings.Join(args, " ")
+		path := containerPath(args[len(args)-1])
+		if scenario == "service-auto-remove" && strings.Contains(args[len(args)-1], "buildkite-gha-service-") {
+			if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+				os.Exit(1)
+			}
+		}
 		if strings.Contains(joined, "buildkite-gha-container-") {
 			_ = os.Remove(actionContainer)
 		} else {
-			_ = os.Remove(containerPath(args[len(args)-1]))
+			_ = os.Remove(path)
 		}
 		os.Exit(0)
 	case "image":
@@ -364,6 +465,25 @@ func TestJobContainerFakeDockerProcess(t *testing.T) {
 		os.Exit(0)
 	case "network-rm":
 		_ = os.Remove(network)
+		os.Exit(0)
+	case "volume-ls":
+		if data, err := os.ReadFile(filepath.Join(root, "existing-volumes")); err == nil {
+			fmt.Print(string(data))
+		}
+		if scenario == "volume-leftover" {
+			if data, err := os.ReadFile(filepath.Join(root, "removed-volumes")); err == nil {
+				fmt.Print(string(data))
+			}
+		}
+		os.Exit(0)
+	case "volume-rm":
+		_ = os.WriteFile(filepath.Join(root, "removed-volumes"), []byte(strings.Join(args[3:], "\n")), 0o600)
+		os.Exit(0)
+	case "volume-inspect":
+		removed, _ := os.ReadFile(filepath.Join(root, "removed-volumes"))
+		if slices.Contains(strings.Fields(string(removed)), args[len(args)-1]) {
+			os.Exit(1)
+		}
 		os.Exit(0)
 	case "exec":
 		startupProbe := strings.Contains(strings.Join(args, "\x00"), "startup-probe.pid")
@@ -578,11 +698,12 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 		"z-cache": {Image: "redis:7", Env: map[string]string{"Z": "last", "A": "first"}, Ports: j.Container.Ports},
 		"a-db":    {Image: "postgres:16", Env: map[string]string{"B": "two"}},
 	}
+	j.ServiceOrder = []string{"z-cache", "a-db"}
 	if _, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
 	}
 	calls := f.calls(t)
-	var creates, starts, inspects []jobDockerCall
+	var creates, starts, healthInspects []jobDockerCall
 	for _, c := range calls {
 		switch c.Args[0] {
 		case "create":
@@ -590,18 +711,20 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 		case "start":
 			starts = append(starts, c)
 		case "inspect":
-			inspects = append(inspects, c)
+			if strings.Contains(strings.Join(c.Args, " "), ".State.Health") {
+				healthInspects = append(healthInspects, c)
+			}
 		}
 	}
-	if len(creates) != 3 || len(starts) != 3 || len(inspects) != 2 || jobDockerCallIndex(calls, "inspect") < jobDockerCallIndex(calls, "start")+1 {
+	if len(creates) != 3 || len(starts) != 3 || len(healthInspects) != 2 {
 		t.Fatalf("unexpected service lifecycle: %#v", calls)
 	}
-	// Sorted IDs retain their association with aliases/images, and all service
+	// Declared IDs retain their association with aliases/images, and all service
 	// creates and starts precede readiness inspection.
-	if strings.Join(creates[0].Args, " ") == "" || !strings.Contains(strings.Join(creates[0].Args, " "), "--network-alias a-db") || creates[0].Args[len(creates[0].Args)-1] != "postgres:16" || !strings.Contains(strings.Join(creates[1].Args, " "), "--network-alias z-cache") || creates[1].Args[len(creates[1].Args)-1] != "redis:7" {
+	if strings.Join(creates[0].Args, " ") == "" || !strings.Contains(strings.Join(creates[0].Args, " "), "--network-alias z-cache") || creates[0].Args[len(creates[0].Args)-1] != "redis:7" || !strings.Contains(strings.Join(creates[1].Args, " "), "--network-alias a-db") || creates[1].Args[len(creates[1].Args)-1] != "postgres:16" {
 		t.Fatalf("service order/association: %#v", creates)
 	}
-	firstInspect := jobDockerCallIndex(calls, "inspect")
+	firstInspect := jobDockerCallIndex(calls, "inspect", "--format", `{{if .State.Health}}{{.State.Health.Status}}{{end}}`)
 	startsBeforeInspect := 0
 	for i := 0; i < firstInspect; i++ {
 		if calls[i].Args[0] == "start" {
@@ -611,9 +734,9 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 	if startsBeforeInspect != 2 {
 		t.Fatalf("only %d service starts preceded readiness", startsBeforeInspect)
 	}
-	serviceArgs := strings.Join(creates[1].Args, " ")
+	serviceArgs := strings.Join(creates[0].Args, " ")
 	jobArgs := strings.Join(creates[2].Args, " ")
-	for _, want := range []string{"--env A=first --env Z=last", "--publish 127.0.0.1::8080", "--publish 127.0.0.1:5432:5432", "--publish 127.0.0.1:9000:90/udp"} {
+	for _, want := range []string{"--env A=first --env Z=last", "--publish 8080", "--publish 5432:5432", "--publish 9000:90/udp"} {
 		if !strings.Contains(serviceArgs, want) && strings.HasPrefix(want, "--env") || (!strings.HasPrefix(want, "--env") && (!strings.Contains(serviceArgs, want) || !strings.Contains(jobArgs, want))) {
 			t.Errorf("missing %q: service=%q job=%q", want, serviceArgs, jobArgs)
 		}
@@ -631,12 +754,442 @@ func TestRunJobContainerServicesLifecycleAndArguments(t *testing.T) {
 			}
 		}
 	}
-	// Successful cleanup is reverse service order, then job, network, verification.
+	// Successful cleanup is job first, then services in declaration order,
+	// network, and verification.
 	joined := fmt.Sprint(calls)
-	zrm, arm := strings.Index(joined, "rm --force "+creates[1].Args[2]), strings.Index(joined, "rm --force "+creates[0].Args[2])
-	jobrm, netrm := strings.Index(joined, "rm --force "+creates[2].Args[2]), strings.Index(joined, "network rm")
-	if zrm < 0 || zrm >= arm || arm >= jobrm || jobrm >= netrm {
+	arm, zrm := strings.Index(joined, "rm --force --volumes docker-id-"+creates[0].Args[2]), strings.Index(joined, "rm --force --volumes docker-id-"+creates[1].Args[2])
+	jobrm, netrm := strings.Index(joined, "rm --force --volumes "+creates[2].Args[2]), strings.Index(joined, "network rm")
+	if jobrm < 0 || jobrm >= arm || arm >= zrm || zrm >= netrm {
 		t.Fatalf("cleanup order: %s", joined)
+	}
+}
+
+func TestRunServiceContainerAutoRemoveCleanup(t *testing.T) {
+	f := newJobDocker(t, "service-auto-remove")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	createdWithAutoRemove, queriedByID := false, false
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "create" && slices.Contains(call.Args, "--rm") {
+			createdWithAutoRemove = true
+		}
+		if len(call.Args) != 0 && call.Args[0] == "ps" && slices.ContainsFunc(call.Args, func(arg string) bool { return strings.HasPrefix(arg, "id=docker-id-buildkite-gha-service-") }) {
+			queriedByID = true
+		}
+		if len(call.Args) != 0 && call.Args[0] == "rm" && strings.Contains(call.Args[len(call.Args)-1], "buildkite-gha-service-") {
+			t.Fatalf("cleanup removed auto-removed service: %#v", call.Args)
+		}
+	}
+	if !createdWithAutoRemove || !queriedByID {
+		t.Fatalf("created with --rm = %t, queried by ID = %t", createdWithAutoRemove, queriedByID)
+	}
+}
+
+func TestRunServiceContainerAlreadyAutoRemovedCleanup(t *testing.T) {
+	f := newJobDocker(t, "")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceID := b.services[0].name
+	path := filepath.Join(f.root, "service-"+strings.TrimPrefix(serviceID, "docker-id-"))
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "stop" && call.Args[len(call.Args)-1] == serviceID {
+			t.Fatalf("cleanup stopped already removed service: %#v", call.Args)
+		}
+	}
+}
+
+func TestRunServiceContainerAutoRemoveBetweenQueryAndStop(t *testing.T) {
+	f := newJobDocker(t, "service-auto-remove-before-stop")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--rm"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if jobDockerCallIndex(f.calls(t), "stop", "--time", "2", b.services[0].name) < 0 {
+		t.Fatal("cleanup did not exercise stop race")
+	}
+}
+
+func TestDockerArgumentListMatchesRunnerQuoting(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, value string
+		want        []string
+	}{
+		{name: "empty", value: `--env ""`, want: []string{"--env", ""}},
+		{name: "double quotes", value: `--health-cmd "pg_isready -U postgres"`, want: []string{"--health-cmd", "pg_isready -U postgres"}},
+		{name: "single quotes literal", value: `--label 'two words'`, want: []string{"--label", "'two", "words'"}},
+		{name: "escaped quote", value: `one\"two`, want: []string{`one"two`}},
+		{name: "unmatched quote", value: `"two words`, want: []string{"two words"}},
+		{name: "newline literal", value: "one\ntwo", want: []string{"one\ntwo"}},
+		{name: "consecutive quotes", value: `"one""two"`, want: []string{`one"two`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := dockerArgumentList(test.value)
+			if err != nil || !slices.Equal(got, test.want) {
+				t.Fatalf("dockerArgumentList(%q) = %#v, %v; want %#v", test.value, got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestServiceOptionsRejectOnlyNetworkOverride(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		options []string
+		wantErr bool
+	}{
+		{options: []string{"--network", "host"}, wantErr: true},
+		{options: []string{"--network=host"}, wantErr: true},
+		{options: []string{"--net", "host"}, wantErr: true},
+		{options: []string{"--net=host"}, wantErr: true},
+		{options: []string{"--networking=allowed"}},
+		{options: []string{"--privileged", "--cpus", "2"}},
+	} {
+		if err := validateServiceOptions(test.options); (err != nil) != test.wantErr {
+			t.Errorf("validateServiceOptions(%q) = %v", test.options, err)
+		}
+	}
+}
+
+func TestRunServiceContainerCompleteArguments(t *testing.T) {
+	f := newJobDocker(t, "")
+	w, tmp := t.TempDir(), t.TempDir()
+	service := plan.Container{
+		Image: "postgres:16", Env: map[string]string{"POSTGRES_PASSWORD": "test"}, Ports: []string{"5432"},
+		Volumes: []string{"database:/var/lib/postgresql/data:ro"},
+		Options: `--health-cmd "pg_isready -U postgres" --health-retries 5`,
+		Command: `postgres -c "fsync = off"`, Entrypoint: "docker-entrypoint.sh",
+	}
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), w, tmp, plan.Container{}, map[string]plan.Container{"database": service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls(t) {
+		if len(call.Args) == 0 || call.Args[0] != "create" {
+			continue
+		}
+		want := []string{"--health-cmd", "pg_isready -U postgres", "--health-retries", "5", "--env", "POSTGRES_PASSWORD=test", "--volume", "database:/var/lib/postgresql/data:ro", "--entrypoint", "docker-entrypoint.sh", "postgres:16", "postgres", "-c", "fsync = off"}
+		joined := strings.Join(call.Args, "\x00")
+		if !strings.Contains(joined, strings.Join(want, "\x00")) {
+			t.Fatalf("service create argv = %#v; missing ordered %#v", call.Args, want)
+		}
+		if err := b.cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		removed, err := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+		if err != nil || strings.TrimSpace(string(removed)) != "database" {
+			t.Fatalf("removed volumes = %q, %v", removed, err)
+		}
+		return
+	}
+	t.Fatal("service create call not found")
+}
+
+func TestRunServiceContainersUseDeclaredOrderAndEmitSuccessfulLogs(t *testing.T) {
+	f := newJobDocker(t, "service-log-command")
+	var output bytes.Buffer
+	processor := newCommandProcessor(&output, &output)
+	b, err := (Runner{Docker: f.path}).startJobContainerOrdered(
+		context.Background(), processor, t.TempDir(), t.TempDir(), plan.Container{},
+		map[string]plan.Container{"alpha": {Image: "one"}, "zed": {Image: "two"}}, []string{"zed", "alpha"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	var aliases, removed []string
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "create" {
+			aliases = append(aliases, call.Args[slices.Index(call.Args, "--network-alias")+1])
+		}
+		if len(call.Args) != 0 && call.Args[0] == "rm" && strings.Contains(call.Args[len(call.Args)-1], "docker-id-buildkite-gha-service-") {
+			removed = append(removed, call.Args[len(call.Args)-1])
+		}
+	}
+	if !slices.Equal(aliases, []string{"zed", "alpha"}) || len(removed) != 2 || removed[0] != b.services[0].name || removed[1] != b.services[1].name {
+		t.Fatalf("aliases = %#v, removed = %#v, services = %#v", aliases, removed, b.services)
+	}
+	if calls := f.calls(t); jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[0].name) < 0 || jobDockerCallIndex(calls, "logs", "--tail", "200", b.services[1].name) < 0 {
+		t.Fatalf("successful service logs were not emitted: %#v", calls)
+	}
+	if !strings.Contains(output.String(), "::warning::not-an-annotation") || !strings.Contains(output.String(), "::add-mask::not-a-mask\nnot-a-mask") || len(processor.warnings.commands) != 0 {
+		t.Fatalf("service logs were interpreted as workflow commands: output = %q, warnings = %#v", output.String(), processor.warnings.commands)
+	}
+}
+
+func TestRunServiceContainerRegistryCredentialsUsePasswordStdin(t *testing.T) {
+	f := newJobDocker(t, "fail-login-once")
+	service := plan.Container{Image: "registry.example.test/team/postgres:16", Credentials: &plan.ContainerCredentials{Username: "registry-user", Password: "registry-password"}}
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": service})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.cleanup() })
+	calls := f.calls(t)
+	login := jobDockerCallIndex(calls, "login", "registry.example.test", "--username", "registry-user", "--password-stdin")
+	pull := jobDockerCallIndex(calls, "pull", service.Image)
+	if login < 0 || pull < login {
+		t.Fatalf("login/pull order = %#v", calls)
+	}
+	logins := 0
+	for _, call := range calls {
+		if len(call.Args) != 0 && call.Args[0] == "login" {
+			logins++
+		}
+		if slices.Contains(call.Args, "registry-password") {
+			t.Fatalf("password appeared in Docker argv: %#v", call.Args)
+		}
+	}
+	if logins != 2 {
+		t.Fatalf("login attempts = %d, calls = %#v", logins, calls)
+	}
+	status, err := os.ReadFile(filepath.Join(f.root, "login-stdin"))
+	if err != nil || string(status) != "ok" {
+		t.Fatalf("password stdin status = %q, %v", status, err)
+	}
+}
+
+func TestDockerLoginCancellationStopsRetry(t *testing.T) {
+	f := newJobDocker(t, "block-login")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := dockerLogin(ctx, map[string]string{"DOCKER_CONFIG": t.TempDir()}, f.path, "registry.example.test", "registry-user", "registry-password")
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("error = %v, elapsed = %s", err, time.Since(start))
+	}
+}
+
+func TestDockerRegistryMatchesRunnerInference(t *testing.T) {
+	for image, want := range map[string]string{
+		"alpine":                       "",
+		"library/alpine":               "",
+		"localhost/alpine":             "",
+		"localhost:5000/alpine":        "localhost:5000",
+		"registry.example/team/alpine": "registry.example",
+		"host/team/alpine":             "host",
+	} {
+		if got := dockerRegistry(image); got != want {
+			t.Errorf("dockerRegistry(%q) = %q, want %q", image, got, want)
+		}
+	}
+}
+
+func TestRunServiceContainerPullsSameImagePerCredentialIdentity(t *testing.T) {
+	f := newJobDocker(t, "")
+	image := "registry.example/team/postgres:16"
+	services := map[string]plan.Container{
+		"a": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-a", Password: "password-a"}},
+		"b": {Image: image, Credentials: &plan.ContainerCredentials{Username: "user-b", Password: "password-b"}},
+	}
+	b, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{Image: image}, services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.cleanup() })
+	logins, logouts, pulls := 0, 0, 0
+	for _, call := range f.calls(t) {
+		if len(call.Args) != 0 && call.Args[0] == "login" {
+			logins++
+		}
+		if slices.Equal(call.Args, []string{"logout", "registry.example"}) {
+			logouts++
+		}
+		if slices.Equal(call.Args, []string{"pull", image}) {
+			pulls++
+		}
+	}
+	if logins != 2 || logouts != 1 || pulls != 3 {
+		t.Fatalf("logins = %d, logouts = %d, pulls = %d, calls = %#v", logins, logouts, pulls, f.calls(t))
+	}
+}
+
+func TestRunServiceContainerPartialRegistryCredentialsDoNotLogin(t *testing.T) {
+	for _, credentials := range []*plan.ContainerCredentials{{Username: "registry-user"}, {Password: "registry-password"}} {
+		f := newJobDocker(t, "")
+		b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(io.Discard, io.Discard), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "registry.example.test/postgres:16", Credentials: credentials}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.cleanup(); err != nil {
+			t.Fatal(err)
+		}
+		if jobDockerCallIndex(f.calls(t), "login") >= 0 {
+			t.Fatalf("partial credentials triggered login: %#v", f.calls(t))
+		}
+	}
+}
+
+func TestRemoveDockerConfigReportsCleanupFailure(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parent, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeDockerConfig(filepath.Join(parent, "config")); err == nil || !strings.Contains(err.Error(), "private Docker configuration") {
+		t.Fatalf("removeDockerConfig() error = %v", err)
+	}
+}
+
+func TestEvaluateServicesResolvesNeedsAndSkipsEmptyImages(t *testing.T) {
+	services := map[string]plan.Container{
+		"database": {
+			Image:      "postgres:${{ needs.build.outputs.version }}",
+			Env:        map[string]string{"SOURCE": "${{ needs.build.outputs.source }}"},
+			Ports:      []string{"${{ needs.build.outputs.port }}"},
+			Volumes:    []string{"data:${{ needs.build.outputs.target }}"},
+			Options:    "--label version=${{ needs.build.outputs.version }}",
+			Command:    "postgres -c ${{ needs.build.outputs.setting }}",
+			Entrypoint: "${{ needs.build.outputs.entrypoint }}",
+		},
+		"optional": {Image: "${{ needs.build.outputs.optional }}"},
+	}
+	got, err := evaluateServices(services, expression.Context{Needs: map[string]map[string]string{"build": {
+		"version": "16", "source": "runtime", "port": "5432", "target": "/data", "setting": "fsync=off", "entrypoint": "docker-entrypoint.sh", "optional": "",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := got["database"]
+	if len(got) != 1 || service.Image != "postgres:16" || service.Env["SOURCE"] != "runtime" || service.Ports[0] != "5432" || service.Volumes[0] != "data:/data" || service.Options != "--label version=16" || service.Command != "postgres -c fsync=off" || service.Entrypoint != "docker-entrypoint.sh" {
+		t.Fatalf("evaluated services = %#v", got)
+	}
+	if services["database"].Image != "postgres:${{ needs.build.outputs.version }}" {
+		t.Fatal("service evaluation mutated the plan")
+	}
+}
+
+func TestEvaluateServiceMapExpression(t *testing.T) {
+	eval := expression.Context{Needs: map[string]map[string]string{"build": {"services": `{"database":{"image":"postgres:16","env":{"MODE":"test","RETRIES":3.0,"NEGATIVE_ZERO":-0,"ENABLED":true},"ports":[5.432e3],"volumes":[2],"options":1e20,"command":1e2,"entrypoint":false},"cache":"redis:7"}`}}}
+	got, order, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", eval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := got["database"]
+	if len(got) != 2 || database.Image != "postgres:16" || database.Env["MODE"] != "test" || database.Env["RETRIES"] != "3" || database.Env["NEGATIVE_ZERO"] != "0" || database.Env["ENABLED"] != "true" || database.Ports[0] != "5432" || database.Volumes[0] != "2" || database.Options != "1E+20" || database.Command != "100" || database.Entrypoint != "false" || got["cache"].Image != "redis:7" || !slices.Equal(order, []string{"database", "cache"}) {
+		t.Fatalf("evaluated services = %#v, order = %#v", got, order)
+	}
+}
+
+func TestEvaluateServiceMapExpressionRejectsUnsafeShapes(t *testing.T) {
+	for _, test := range []struct {
+		name, value, want string
+	}{
+		{name: "array", value: `[]`, want: "want an object"},
+		{name: "null service", value: `{"db":null}`, want: "want an object"},
+		{name: "unknown field", value: `{"db":{"image":"postgres:16","privileged":true}}`, want: "unknown field"},
+		{name: "uppercase field", value: `{"db":{"Image":"postgres:16"}}`, want: "unknown field"},
+		{name: "null environment", value: `{"db":{"image":"postgres:16","env":null}}`, want: "want an object"},
+		{name: "null ports", value: `{"db":{"image":"postgres:16","ports":null}}`, want: "want an array"},
+		{name: "null volumes", value: `{"db":{"image":"postgres:16","volumes":null}}`, want: "want an array"},
+		{name: "invalid service name", value: `{"UPPER":"postgres:16"}`, want: "service name"},
+		{name: "invalid image", value: `{"db":"BAD IMAGE"}`, want: "invalid image"},
+		{name: "credentials", value: `{"db":{"image":"postgres:16","credentials":{"username":"user","password":"secret"}}}`, want: "cannot introduce registry credentials"},
+		{name: "null credentials", value: `{"db":{"image":"postgres:16","credentials":null}}`, want: "cannot introduce registry credentials"},
+		{name: "nested expression", value: `{"db":{"image":"redis:7","options":"--label token=${{ secrets.TOKEN }}"}}`, want: "retains a runtime template"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := evaluateServiceMap(nil, nil, "${{ fromJSON(needs.build.outputs.services) }}", expression.Context{Needs: map[string]map[string]string{"build": {"services": test.value}}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateServicesDoesNotHideErrorsBehindEmptyImage(t *testing.T) {
+	_, err := evaluateServices(map[string]plan.Container{"optional": {Image: "${{ needs.build.outputs.image }}", Env: map[string]string{"VALUE": "${{ needs.build.outputs.value"}}}, expression.Context{Needs: map[string]map[string]string{"build": {"image": ""}}})
+	if err == nil || !strings.Contains(err.Error(), "unterminated") {
+		t.Fatalf("error = %v, want unterminated expression error", err)
+	}
+}
+
+func TestRunServiceContainerRemovesOnlyNewNamedVolumes(t *testing.T) {
+	for _, test := range []struct {
+		name, volume, existing, wantRemoved string
+	}{
+		{name: "new named volume", volume: "database:/data", wantRemoved: "database"},
+		{name: "existing named volume", volume: "database:/data", existing: "database\n"},
+		{name: "bind mount", volume: "/srv/database:/data"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newJobDocker(t, "")
+			if test.existing != "" {
+				if err := os.WriteFile(filepath.Join(f.root, "existing-volumes"), []byte(test.existing), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Volumes: []string{test.volume}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.cleanup(); err != nil {
+				t.Fatal(err)
+			}
+			removed, err := os.ReadFile(filepath.Join(f.root, "removed-volumes"))
+			if test.wantRemoved == "" && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("unexpected volume removal %q, %v", removed, err)
+			}
+			if test.wantRemoved != "" && (err != nil || strings.TrimSpace(string(removed)) != test.wantRemoved) {
+				t.Fatalf("removed volumes = %q, %v; want %q", removed, err, test.wantRemoved)
+			}
+		})
+	}
+}
+
+func TestRunServiceContainerReportsLeftoverNamedVolume(t *testing.T) {
+	f := newJobDocker(t, "volume-leftover")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Volumes: []string{"database:/data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err == nil || !strings.Contains(err.Error(), `leftover volume "database"`) {
+		t.Fatalf("cleanup error = %v", err)
+	}
+}
+
+func TestRunServiceContainerReadsBroadDockerPortOutput(t *testing.T) {
+	f := newJobDocker(t, "broad-port")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Ports: []string{"8000-8001:80-81"}, Options: "--publish 8002:82/sctp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.cleanup() })
+	want := map[string]string{"80": "8000", "81": "8001", "82": "8002"}
+	if !maps.Equal(b.servicePorts["database"].Ports, want) {
+		t.Fatalf("service ports = %#v, want %#v", b.servicePorts["database"], want)
+	}
+}
+
+func TestRunServiceContainerOptionNameUsesCreatedReference(t *testing.T) {
+	f := newJobDocker(t, "")
+	b, err := (Runner{Docker: f.path}).startJobContainer(context.Background(), newCommandProcessor(os.Stdout, os.Stderr), t.TempDir(), t.TempDir(), plan.Container{}, map[string]plan.Container{"database": {Image: "postgres:16", Options: "--name custom-service"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.calls(t)
+	if jobDockerCallIndex(calls, "start", "docker-id-custom-service") < 0 || jobDockerCallIndex(calls, "rm", "--force", "--volumes", "docker-id-custom-service") < 0 {
+		t.Fatalf("custom service reference was not used for lifecycle: %#v", calls)
 	}
 }
 
@@ -660,6 +1213,7 @@ func TestRunJobContinueOnErrorToleratesServiceStartupFailure(t *testing.T) {
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
@@ -673,6 +1227,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateServiceStartupTimeout(t *testing.T)
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres"}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 	job.TimeoutMinutes = 0.001
 
@@ -687,6 +1242,7 @@ func TestRunJobContinueOnErrorDoesNotTolerateMalformedServicePortEvidence(t *tes
 	w := t.TempDir()
 	job := jobContainerPlan(t, w, nil)
 	job.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	job.ServiceOrder = []string{"db"}
 	job.ContinueOnError = true
 
 	result, err := (Runner{Docker: f.path, RuntimeExecutable: os.Args[0]}).RunJob(context.Background(), job, w)
@@ -723,7 +1279,7 @@ func TestRunJobContainerLaterServiceCreateFailureCleansExactServices(t *testing.
 		if c.Args[0] == "create" {
 			creates++
 		}
-		if c.Args[0] == "rm" && strings.HasPrefix(c.Args[len(c.Args)-1], "buildkite-gha-service-") {
+		if c.Args[0] == "rm" && strings.Contains(c.Args[len(c.Args)-1], "buildkite-gha-service-") {
 			removes++
 		}
 	}
@@ -744,7 +1300,7 @@ func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.
 		done <- err
 	}()
 	deadline := time.Now().Add(10 * time.Second)
-	for jobDockerCallIndex(f.calls(t), "inspect") < 0 && time.Now().Before(deadline) {
+	for jobDockerCallIndex(f.calls(t), "inspect", "--format", `{{if .State.Health}}{{.State.Health.Status}}{{end}}`) < 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -753,7 +1309,7 @@ func TestRunJobContainerServiceReadinessCancellationCleansEverything(t *testing.
 		t.Fatalf("error=%v", err)
 	}
 	joined := fmt.Sprint(f.calls(t))
-	if !strings.Contains(joined, "rm --force buildkite-gha-service-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+	if !strings.Contains(joined, "rm --force --volumes docker-id-buildkite-gha-service-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 		t.Fatalf("incomplete cancellation cleanup: %s", joined)
 	}
 }
@@ -768,7 +1324,7 @@ func TestRunHostJobServiceReadinessCancellationCleansEverything(t *testing.T) {
 		done <- err
 	}()
 	deadline := time.Now().Add(10 * time.Second)
-	for jobDockerCallIndex(f.calls(t), "inspect") < 0 && time.Now().Before(deadline) {
+	for jobDockerCallIndex(f.calls(t), "inspect", "--format", `{{if .State.Health}}{{.State.Health.Status}}{{end}}`) < 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
@@ -777,7 +1333,7 @@ func TestRunHostJobServiceReadinessCancellationCleansEverything(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 	joined := fmt.Sprint(f.calls(t))
-	if !strings.Contains(joined, "rm --force buildkite-gha-service-") || !strings.Contains(joined, "network rm buildkite-gha-network-") || strings.Contains(joined, "rm --force buildkite-gha-job-") {
+	if !strings.Contains(joined, "rm --force --volumes docker-id-buildkite-gha-service-") || !strings.Contains(joined, "network rm buildkite-gha-network-") || strings.Contains(joined, "rm --force --volumes buildkite-gha-job-") {
 		t.Fatalf("incomplete or over-broad host-service cancellation cleanup: %s", joined)
 	}
 }
@@ -794,6 +1350,7 @@ func TestRunJobHostServicesLifecycle(t *testing.T) {
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
 	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"6379"}}}
+	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 49152`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
@@ -816,6 +1373,7 @@ func TestRunHostJobServicesExposePortsAndNetworkToDockerActions(t *testing.T) {
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"redis": {Image: "redis:7", Ports: []string{"6379"}}}
+	job.ServiceOrder = []string{"redis"}
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: "actions/docker", SourceDigest: digestTree(t, filepath.Join(workspace, "actions/docker"))}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), job, workspace); err != nil {
 		t.Fatal(err)
@@ -849,6 +1407,7 @@ func TestRunJobHostServicePortProtocolCollisionIsDeterministic(t *testing.T) {
 	j := jobContainerPlan(t, w, nil)
 	j.Container = nil
 	j.Services = map[string]plan.Container{"db": {Image: "postgres", Ports: []string{"41001:6379/tcp", "41002:6379/udp"}}}
+	j.ServiceOrder = []string{"db"}
 	j.Steps = []plan.Step{{ID: "host", Kind: "run", Shell: "sh", Env: map[string]string{"SERVICE_PORT": "${{ job.services.db.ports[6379] }}"}, Command: `test "$SERVICE_PORT" = 41002`}}
 	if _, err := (Runner{Docker: f.path}).RunJob(context.Background(), j, w); err != nil {
 		t.Fatal(err)
@@ -877,7 +1436,7 @@ func TestRunJobContainerSetupFailuresCleanOwnedResources(t *testing.T) {
 				if strings.HasPrefix(joined, "rm ") && !strings.Contains(joined, "buildkite-gha-job-") {
 					t.Fatalf("unowned removal %q", joined)
 				}
-				removedContainer = removedContainer || strings.HasPrefix(joined, "rm --force buildkite-gha-job-")
+				removedContainer = removedContainer || strings.HasPrefix(joined, "rm --force --volumes buildkite-gha-job-")
 				if strings.HasPrefix(joined, "network rm") && !strings.Contains(joined, "buildkite-gha-network-") {
 					t.Fatalf("unowned removal %q", joined)
 				}
@@ -906,7 +1465,7 @@ func TestRunJobContainerCleanupQueryFailureStillRemovesExactResources(t *testing
 		t.Fatalf("error=%v", err)
 	}
 	joined := fmt.Sprint(f.calls(t))
-	if !strings.Contains(joined, "rm --force buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+	if !strings.Contains(joined, "rm --force --volumes buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 		t.Fatalf("cleanup %s", joined)
 	}
 }
@@ -1143,7 +1702,7 @@ func TestRunJobContainerNodeProbeFailureCleansOwnedResources(t *testing.T) {
 			}
 			calls := f.calls(t)
 			joined := fmt.Sprint(calls)
-			if !strings.Contains(joined, "rm --force buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+			if !strings.Contains(joined, "rm --force --volumes buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 				t.Fatalf("owned resources not cleaned: %s", joined)
 			}
 			for _, call := range calls {
@@ -1314,7 +1873,7 @@ func TestRunJobContainerReadOnlyMountProbeFailureCleansOwnedResources(t *testing
 	}
 	calls := f.calls(t)
 	joined := fmt.Sprint(calls)
-	if !strings.Contains(joined, "rm --force buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
+	if !strings.Contains(joined, "rm --force --volumes buildkite-gha-job-") || !strings.Contains(joined, "network rm buildkite-gha-network-") {
 		t.Fatalf("owned resources not cleaned: %s", joined)
 	}
 	if len(calls) == 0 {
@@ -1990,6 +2549,18 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 		if !slices.Equal(artifact.Authorization.DockerCapabilitySources, wantSources) {
 			t.Fatalf("compiled %s Docker provenance = %#v, want %#v", job.Workflow.LogicalJobID, artifact.Authorization.DockerCapabilitySources, wantSources)
 		}
+		if job.Workflow.LogicalJobID == "container-runtime" {
+			reader, exists := job.Services["reader"]
+			if len(job.Services) != 3 || !exists || job.Services["writer"].Command == "" || !slices.Equal(reader.Volumes, []string{"parity-data:/shared:ro"}) {
+				t.Fatalf("compiled service parity fixture = %#v", job.Services)
+			}
+		}
+		if job.Workflow.LogicalJobID == "host-runtime" {
+			_, optionalExists := job.Services["optional"]
+			if len(job.Services) != 1 || optionalExists {
+				t.Fatalf("compiled conditional services = %#v", job.Services)
+			}
+		}
 	}
 	docker := requireDocker(t)
 	node24 := requireNode24(t)
@@ -2030,6 +2601,73 @@ func TestLiveCompiledContainerRuntime(t *testing.T) {
 	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
 		t.Fatalf("container runtime leaked owned Docker resources: before=%#v after=%#v", before, after)
 	}
+}
+
+func TestLiveAuthenticatedServiceRegistry(t *testing.T) {
+	docker := requireDocker(t)
+	registryName := "buildkite-gha-test-registry-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	registryID := strings.TrimSpace(runLiveDocker(t, docker, "run", "--detach", "--name", registryName, "--publish", "127.0.0.1::5000", "registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"))
+	t.Cleanup(func() { _ = exec.Command(docker, "rm", "--force", registryID).Run() })
+	registryAddress := strings.TrimSpace(runLiveDocker(t, docker, "port", registryID, "5000/tcp"))
+	registryURL, err := url.Parse("http://" + registryAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(registryURL)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		username, password, ok := request.BasicAuth()
+		if !ok || username != "service-user" || password != "service-password" {
+			response.Header().Set("WWW-Authenticate", `Basic realm="buildkite-gha-test"`)
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		proxy.ServeHTTP(response, request)
+	}))
+	defer server.Close()
+	privateRegistry := strings.TrimPrefix(server.URL, "http://")
+	privateImage := privateRegistry + "/private/busybox:parity"
+	runLiveDocker(t, docker, "pull", "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028")
+	runLiveDocker(t, docker, "tag", "busybox@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028", privateImage)
+	t.Cleanup(func() { _ = exec.Command(docker, "image", "rm", "--force", privateImage).Run() })
+	config := t.TempDir()
+	login := exec.Command(docker, "--config", config, "login", privateRegistry, "--username", "service-user", "--password-stdin")
+	login.Stdin = strings.NewReader("service-password\n")
+	if output, loginErr := login.CombinedOutput(); loginErr != nil {
+		t.Fatalf("login to temporary registry: %v: %s", loginErr, output)
+	}
+	runLiveDocker(t, docker, "--config", config, "push", privateImage)
+
+	workspace := t.TempDir()
+	writeFixtureFile(t, workspace, ".github/workflows/authenticated.yml", "name: authenticated service\n")
+	job := runtimePlan(t, workspace, ".github/workflows/authenticated.yml", []plan.Step{{ID: "verify", Kind: "run", Shell: "sh", Command: "true"}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"docker", "network"}
+	job.Services = map[string]plan.Container{"private": {Image: privateImage, Credentials: &plan.ContainerCredentials{Username: "service-user", Password: "service-password"}, Command: "sleep 300"}}
+	job.ServiceOrder = []string{"private"}
+	before := liveDockerOwnedResources(t, docker)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	result, runErr := (Runner{Docker: docker}).RunJob(ctx, job, workspace)
+	if runErr != nil || result.Conclusion != "success" {
+		t.Fatalf("authenticated service result = %#v, error = %v", result, runErr)
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("authenticated service leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
+func runLiveDocker(t *testing.T, docker string, args ...string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, docker, args...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("docker %s: %v: %s", strings.Join(args, " "), err, stderr.Bytes())
+	}
+	return string(output)
 }
 
 func TestLiveManifestContainerFixtures(t *testing.T) {
@@ -2076,6 +2714,39 @@ func TestLiveManifestContainerFixtures(t *testing.T) {
 	}
 }
 
+func TestLiveServiceDifferentialFixture(t *testing.T) {
+	docker := requireDocker(t)
+	sourcePath := fixturePath(t, "..", ".github", "workflows", "service-container-oracle.yml")
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	workflowPath := filepath.Join(workspace, ".github", "workflows", "service-container-oracle.yml")
+	writeFixtureFile(t, workspace, ".github/workflows/service-container-oracle.yml", string(source))
+	eventSource, err := os.ReadFile(fixturePath(t, "smoke", "events", "workflow_dispatch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := compiler.CompileBundle(workflowPath, source, eventSource, "service-differential-live", "sha256:"+strings.Repeat("3", 64), "service-differential-importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Plans) != 1 || !slices.Equal(bundle.Plans[0].Job.ServiceOrder, []string{"z-writer", "a-reader", "postgres", "redis"}) {
+		t.Fatalf("differential service plans = %#v", bundle.Plans)
+	}
+	before := liveDockerOwnedResources(t, docker)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	result, runErr := (Runner{Docker: docker}).RunJob(ctx, bundle.Plans[0].Job, workspace)
+	if runErr != nil || result.Conclusion != "success" || result.Outputs["observation"] != "selection,context,ports,command-entrypoint,health,volume,postgres,redis" {
+		t.Fatalf("differential service result = %#v, error = %v", result, runErr)
+	}
+	if after := liveDockerOwnedResources(t, docker); !slices.Equal(after, before) {
+		t.Fatalf("differential service fixture leaked owned Docker resources: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestLiveUnhealthyServiceDiagnostics(t *testing.T) {
 	docker := requireDocker(t)
 	contextDir := t.TempDir()
@@ -2105,6 +2776,7 @@ CMD ["sh", "-c", "echo container-runtime-health-diagnostic >&2; sleep 300"]
 	job.Schema = plan.Schema
 	job.RequiredCapabilities = []string{"docker", "network"}
 	job.Services = map[string]plan.Container{"unhealthy": {Image: image}}
+	job.ServiceOrder = []string{"unhealthy"}
 	var logs bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
