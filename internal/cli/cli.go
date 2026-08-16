@@ -1328,6 +1328,10 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 }
 
 func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
+	return validateOneSource(out, workflowPath, nil, eventPath, eventName, profile, version, actionCacheDir, runtime, stderr)
+}
+
+func validateOneSource(out processingOutput, workflowPath string, workflowSource []byte, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1339,7 +1343,13 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 		event, eventErr := generatedEventSnapshot(eventName)
 		loadEvent = func() ([]byte, error) { return event, eventErr }
 	}
-	source, event, ok := loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
+	var source, event []byte
+	var ok bool
+	if workflowSource == nil {
+		source, event, ok = loadProcessingInputs(out, workflowPath, profile, "event input could not be read", loadEvent)
+	} else {
+		source, event, ok = loadProcessingInputsSource(out, workflowPath, profile, workflowSource, "event input could not be read", loadEvent)
+	}
 	if !ok {
 		return 1
 	}
@@ -1498,7 +1508,7 @@ func validateAllEventsSource(out processingOutput, workflowPath string, source [
 			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
 			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
 		}
-		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
+		if code := validateOneSource(eventOut, workflowPath, source, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
 			failed = true
 		}
 		if eventReport == nil {

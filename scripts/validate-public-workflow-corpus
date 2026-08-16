@@ -178,6 +178,9 @@ action_resolution_snapshot="$workdir/action-resolution-snapshot"
 reports="$workdir/reports/$record_id/$validator_digest"
 readonly action_cache action_resolution_snapshot reports
 mkdir -p "$action_cache"
+if [[ "${REFRESH_ACTION_RESOLUTIONS:-0}" == 1 ]]; then
+  rm -rf "$reports"
+fi
 mkdir -p "$reports"
 export reports validator_commit validator_version validator_digest
 batch_args=(

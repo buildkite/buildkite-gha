@@ -114,6 +114,32 @@ func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {
 	}
 }
 
+func TestBatchValidationUsesCapturedWorkflowForEveryEvent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "workflow.yml")
+	if err := os.WriteFile(path, []byte("on: pull_request\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captured := []byte("on: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo captured\n")
+	_, _, distributionDigest, err := executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reports bytes.Buffer
+	out := processingOutput{command: "validate-batch", format: "json", reports: &reports, stderr: io.Discard}
+	runtime := &profileValidationRuntime{distributionDigest: distributionDigest}
+	if code := validateAllEventsSource(out, path, captured, "dev", "", runtime, io.Discard); code != 0 {
+		t.Fatalf("validateAllEventsSource() = %d", code)
+	}
+	var report compatibility.ProcessingReportV3
+	if err := json.Unmarshal(reports.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Evaluations) != 1 || report.Evaluations[0].Event != "push" {
+		t.Fatalf("evaluations = %#v, want captured push workflow", report.Evaluations)
+	}
+}
+
 func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "source.yml")
