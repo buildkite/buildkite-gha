@@ -416,6 +416,12 @@ func SubstituteCompileInputs(template string, inputs map[string]any) (string, er
 			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") || tokens[i+1].Kind != actionlint.TokenKindDot || tokens[i+2].Kind != actionlint.TokenKindIdent {
 				continue
 			}
+			// A preceding '.' means this is a property named "inputs" on
+			// another receiver, such as github.event.inputs.<name>, not the
+			// workflow-call inputs context.
+			if i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot {
+				continue
+			}
 			value, ok := findCompileInput(inputs, tokens[i+2].Value)
 			if !ok {
 				continue

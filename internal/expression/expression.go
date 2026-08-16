@@ -336,7 +336,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
+					return nil, false, fmt.Errorf("object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -352,7 +352,7 @@ func objectValue(value any, name string) (any, bool, error) {
 		for candidate, item := range value {
 			if strings.EqualFold(candidate, name) {
 				if matchedKey != "" {
-					return nil, false, fmt.Errorf("compile-time object contains ambiguous properties")
+					return nil, false, fmt.Errorf("object contains ambiguous properties")
 				}
 				found, matchedKey = item, candidate
 			}
@@ -367,14 +367,71 @@ func objectValue(value any, name string) (any, bool, error) {
 func decodeJSONValue(source string) (any, error) {
 	decoder := json.NewDecoder(strings.NewReader(source))
 	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := decodeJSONToken(decoder)
+	if err != nil {
 		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+	if _, err := decoder.Token(); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
 	}
 	return normalizeJSONNumbers(value)
+}
+
+// decodeJSONToken decodes one JSON value token by token so object keys retain
+// document order. GitHub stores fromJSON objects in case-insensitive
+// dictionaries: a key that matches an earlier key case-insensitively replaces
+// its value while the earlier spelling survives, so {"a":1,"A":2} yields one
+// property a with value 2. A plain map decode loses key order and cannot
+// reproduce that.
+func decodeJSONToken(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := make(map[string]any)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+			}
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			for existing := range object {
+				if strings.EqualFold(existing, key) {
+					key = existing
+					break
+				}
+			}
+			object[key] = value
+		}
+		_, err = decoder.Token()
+		return object, err
+	case '[':
+		values := make([]any, 0, 1)
+		for decoder.More() {
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		_, err = decoder.Token()
+		return values, err
+	default:
+		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
+	}
 }
 
 func normalizeJSONNumbers(value any) (any, error) {
