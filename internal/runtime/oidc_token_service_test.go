@@ -129,7 +129,7 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = service.Close() }()
-	env, revoke, err := service.actionEnvironment(context.Background())
+	env, revoke, err := service.actionEnvironment(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,13 +220,15 @@ const fs = require("node:fs");
 const core = require("@actions/core");
 const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
 if (!endpoint.search) throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL must already contain a query string");
+if (process.env.NO_PROXY !== "upper.example,127.0.0.1") throw new Error("NO_PROXY does not preserve the proxy bypass list");
+if (process.env.no_proxy !== "lower.example,127.0.0.1") throw new Error("no_proxy does not preserve the proxy bypass list");
 (async () => fs.writeFileSync(process.env.MARKER, await core.getIDToken("sts.amazonaws.com")))().catch(error => { console.error(error); process.exitCode = 1; });
 `)
 	marker := filepath.Join(workspace, "token")
 	lockID := "a-0123456789abcdef"
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
 		ID: "oidc", Kind: "uses", Uses: "./" + actionPath,
-		Env: map[string]string{"MARKER": marker}, Action: &plan.ActionSelector{Lock: lockID},
+		Env: map[string]string{"MARKER": marker, "NO_PROXY": "upper.example", "no_proxy": "lower.example"}, Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.IDTokenPermission = "write"
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}

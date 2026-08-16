@@ -189,7 +189,7 @@ func (s *idTokenService) Close() error {
 	return s.server.Shutdown(ctx)
 }
 
-func (s *idTokenService) actionEnvironment(ctx context.Context) (map[string]string, func(), error) {
+func (s *idTokenService) actionEnvironment(ctx context.Context, baseEnv map[string]string) (map[string]string, func(), error) {
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
 		return nil, nil, fmt.Errorf("create actions ID-token request credential: %w", err)
@@ -208,10 +208,22 @@ func (s *idTokenService) actionEnvironment(ctx context.Context) (map[string]stri
 		delete(s.authHashes, hash)
 		s.mu.Unlock()
 	}
-	return map[string]string{
+	env := map[string]string{
 		"ACTIONS_ID_TOKEN_REQUEST_URL":   "http://" + s.listener.Addr().String() + "/idtoken?api-version=2",
 		"ACTIONS_ID_TOKEN_REQUEST_TOKEN": token,
-	}, revoke, nil
+	}
+	host, _, err := net.SplitHostPort(s.listener.Addr().String())
+	if err != nil {
+		revoke()
+		return nil, nil, fmt.Errorf("parse actions ID-token listener: %w", err)
+	}
+	for _, name := range []string{"NO_PROXY", "no_proxy"} {
+		env[name] = host
+		if baseEnv[name] != "" {
+			env[name] = baseEnv[name] + "," + host
+		}
+	}
+	return env, revoke, nil
 }
 
 func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request) {

@@ -664,7 +664,7 @@ func (r Runner) runJavaScriptPhase(ctx context.Context, processor *commandProces
 		cacheToken = cacheEnv["ACTIONS_RUNTIME_TOKEN"]
 	}
 	if r.idTokenService != nil && r.jobContainer == nil {
-		idTokenEnv, revoke, err := r.idTokenService.actionEnvironment(ctx)
+		idTokenEnv, revoke, err := r.idTokenService.actionEnvironment(ctx, env)
 		if err != nil {
 			return fmt.Errorf("configure actions ID-token service: %w", err)
 		}
