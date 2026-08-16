@@ -61,7 +61,7 @@ type Materialized struct {
 }
 
 // Release marks the materialized tree as no longer in use. Callers must
-// release bounded persistent-cache entries after reading them.
+// release persistent-cache entries after reading them.
 func (m Materialized) Release() {
 	if m.lease != nil {
 		m.lease.release()
@@ -538,9 +538,12 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 	if err := ctx.Err(); err != nil {
 		return Materialized{}, err
 	}
-	entryLock, err = lockActionCache(ctx, base+".lock", actionCacheLockExclusive, false)
+	entryLock, cached, err := s.lockMissingEntry(ctx, base, tree, parsed.Path, resolved)
 	if err != nil {
 		return Materialized{}, err
+	}
+	if cached != nil {
+		return *cached, nil
 	}
 	defer func() {
 		if entryLock != nil {
@@ -548,13 +551,9 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 		}
 	}()
 	if m, verifyErr = s.verify(base, resolved); verifyErr == nil {
-		if err := entryLock.shared(); err != nil {
-			return Materialized{}, err
-		}
-		s.touch(base)
-		lease, err := s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
+		exclusive := entryLock
 		entryLock = nil
-		return lease, err
+		return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, parsed.Path)
 	}
 	tmp, partialLock, err := s.createPartial(ctx, parent)
 	if err != nil {
@@ -585,14 +584,53 @@ func (s *Store) Materialize(ctx context.Context, resolved Resolved) (Materialize
 			return Materialized{}, fmt.Errorf("publish cache: %w (existing cache invalid: %v)", err, verifyErr)
 		}
 	}
-	if err := entryLock.shared(); err != nil {
+	exclusive := entryLock
+	entryLock = nil
+	return s.reacquireMaterializedLease(ctx, exclusive, resolved, base, tree, parsed.Path)
+}
+
+func (s *Store) lockMissingEntry(ctx context.Context, base, tree, actionPath string, resolved Resolved) (*actionCacheLock, *Materialized, error) {
+	for {
+		exclusive, err := lockActionCache(ctx, base+".lock", actionCacheLockExclusive, true)
+		if err == nil {
+			return exclusive, nil, nil
+		}
+		if !errors.Is(err, errActionCacheLockUnavailable) {
+			return nil, nil, err
+		}
+		shared, sharedErr := lockActionCache(ctx, base+".lock", actionCacheLockShared, true)
+		if sharedErr == nil {
+			m, verifyErr := s.verify(base, resolved)
+			if verifyErr == nil {
+				s.touch(base)
+				materialized, leaseErr := s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
+				return nil, &materialized, leaseErr
+			}
+			shared.unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Store) reacquireMaterializedLease(ctx context.Context, exclusive *actionCacheLock, resolved Resolved, base, tree, actionPath string) (Materialized, error) {
+	exclusive.unlock()
+	shared, err := lockActionCache(ctx, base+".lock", actionCacheLockShared, false)
+	if err != nil {
 		return Materialized{}, err
 	}
+	m, err := s.verify(base, resolved)
+	if err != nil {
+		shared.unlock()
+		return s.Materialize(ctx, resolved)
+	}
 	s.touch(base)
-	lease, err := s.materializedLease(entryLock, resolved, tree, parsed.Path, m.Digest)
-	entryLock = nil
-	return lease, err
+	return s.materializedLease(shared, resolved, tree, actionPath, m.Digest)
 }
+
 func materialized(tree, p, digest string) (Materialized, error) {
 	action, err := selected(tree, p)
 	if err != nil {

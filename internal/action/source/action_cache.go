@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -33,14 +34,13 @@ func (s *Store) materializedLease(lock *actionCacheLock, resolved Resolved, tree
 		lock.unlock()
 		return Materialized{}, err
 	}
-	if s.cfg.cacheMaxBytes == 0 {
-		lock.unlock()
-		return m, nil
-	}
 	lease := &materializedLease{}
 	lease.release = func() {
 		lease.once.Do(func() {
 			lock.unlock()
+			if s.cfg.cacheMaxBytes == 0 {
+				return
+			}
 			total, _ := s.readCacheSize()
 			if s.pressure.Load() || total > s.cfg.cacheMaxBytes {
 				_ = s.maintain(context.Background())
@@ -148,6 +148,11 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 		if lockErr != nil {
 			continue
 		}
+		manifest, statErr := os.Stat(filepath.Join(entry.path, manifestName))
+		if statErr != nil || manifest.ModTime().After(entry.lastUse) {
+			lock.unlock()
+			continue
+		}
 		if err := os.RemoveAll(entry.path); err != nil {
 			lock.unlock()
 			return err
@@ -160,9 +165,6 @@ func (s *Store) maintainLocked(ctx context.Context) error {
 }
 
 func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string) error {
-	if s.cfg.cacheMaxBytes == 0 {
-		return os.Rename(temporary, base)
-	}
 	maintenance, err := lockActionCache(ctx, filepath.Join(s.root, ".maintenance.lock"), actionCacheLockExclusive, false)
 	if err != nil {
 		return err
@@ -182,12 +184,24 @@ func (s *Store) publishCacheEntry(ctx context.Context, temporary, base string) e
 		return err
 	}
 	total, err := s.readCacheSize()
+	if s.cfg.cacheMaxBytes == 0 && errors.Is(err, os.ErrNotExist) {
+		published = false
+		return nil
+	}
 	if err != nil {
+		if s.cfg.cacheMaxBytes == 0 {
+			return err
+		}
 		err = s.maintainLocked(ctx)
 		published = err != nil
 		return err
 	}
 	total += size
+	if s.cfg.cacheMaxBytes == 0 {
+		err = s.writeCacheSize(total)
+		published = err != nil
+		return err
+	}
 	if total > s.cfg.cacheMaxBytes {
 		err = s.maintainLocked(ctx)
 		published = err != nil

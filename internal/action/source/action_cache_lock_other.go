@@ -66,15 +66,6 @@ func lockActionCache(ctx context.Context, path string, mode actionCacheLockMode,
 	return &actionCacheLock{mu: mu, exclusive: mode == actionCacheLockExclusive, file: file}, nil
 }
 
-func (l *actionCacheLock) shared() error {
-	if l.exclusive {
-		l.mu.Unlock()
-		l.mu.RLock()
-		l.exclusive = false
-	}
-	return nil
-}
-
 func (l *actionCacheLock) unlock() {
 	if l == nil || l.file == nil {
 		return

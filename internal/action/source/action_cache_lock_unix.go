@@ -53,10 +53,6 @@ func lockActionCache(ctx context.Context, path string, mode actionCacheLockMode,
 	}
 }
 
-func (l *actionCacheLock) shared() error {
-	return unix.Flock(int(l.file.Fd()), unix.LOCK_SH)
-}
-
 func (l *actionCacheLock) unlock() {
 	if l == nil || l.file == nil {
 		return

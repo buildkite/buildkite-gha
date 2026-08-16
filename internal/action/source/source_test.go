@@ -609,9 +609,11 @@ func TestStoreExactCommitAtomicHitAndSubpath(t *testing.T) {
 		t.Fatalf("materialized identity = %#v", first)
 	}
 	second, err := store.Materialize(context.Background(), resolved)
-	if err != nil || second != first || requests.Load() != 1 {
+	if err != nil || second.RepositoryRoot != first.RepositoryRoot || second.ActionRoot != first.ActionRoot || second.SourceDigest != first.SourceDigest || requests.Load() != 1 {
 		t.Fatalf("second = %v, %v; requests=%d", second, err, requests.Load())
 	}
+	first.Release()
+	second.Release()
 }
 
 func TestStoreCanonicalizesAliasedAncestorAndRejectsSymlinkRoot(t *testing.T) {
@@ -843,6 +845,7 @@ func TestStoreConcurrentMaterialize(t *testing.T) {
 			t.Fatalf("digests differ: %q and %q", digest, got.SourceDigest)
 		}
 		digest = got.SourceDigest
+		got.Release()
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("archive requests = %d, want 1", requests.Load())
@@ -989,5 +992,36 @@ func TestStoreConcurrentBoundedEviction(t *testing.T) {
 	entries, _, err := stores[0].cacheEntries()
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("bounded entries = %d, error %v", len(entries), err)
+	}
+}
+
+func TestStoreBoundedEvictionProtectsUnboundedReader(t *testing.T) {
+	archive := tgz(t, []tar.Header{{Name: "root/", Typeflag: tar.TypeDir}, {Name: "root/action.yml", Typeflag: tar.TypeReg, Size: 1}})
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) }))
+	defer ts.Close()
+	root := t.TempDir()
+	unbounded, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("o/r@v1")
+	active, err := unbounded.Materialize(context.Background(), Resolved{Reference: ref, Commit: strings.Repeat("a", 40)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Release()
+	bounded, err := NewStore(root, ts.Client(), WithTestEndpoints(ts.URL, ts.URL), WithCacheMaxBytes(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.ActionRoot); err != nil {
+		t.Fatalf("bounded maintenance evicted an unbounded reader: %v", err)
+	}
+	active.Release()
+	if err := bounded.maintain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active.ActionRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released entry still exists: %v", err)
 	}
 }
