@@ -23,6 +23,15 @@ type stepExecution struct {
 	conclusion string
 }
 
+type backgroundTaskState uint8
+
+const (
+	backgroundTaskQueued backgroundTaskState = iota
+	backgroundTaskRunning
+	backgroundTaskFinished
+	backgroundTaskCommitted
+)
+
 type backgroundTask struct {
 	id     string
 	ctx    context.Context
@@ -32,9 +41,18 @@ type backgroundTask struct {
 	// cancelled may run while the supervisor mutex is held and must not block.
 	cancelled func(context.Context) stepExecution
 	execution stepExecution
-	started   bool
-	finished  bool
-	committed bool
+	// state is protected by the supervisor mutex.
+	state backgroundTaskState
+}
+
+func (task *backgroundTask) transitionLocked(next backgroundTaskState) {
+	valid := task.state == backgroundTaskQueued && (next == backgroundTaskRunning || next == backgroundTaskFinished) ||
+		task.state == backgroundTaskRunning && next == backgroundTaskFinished ||
+		task.state == backgroundTaskFinished && next == backgroundTaskCommitted
+	if !valid {
+		panic(fmt.Sprintf("invalid background task transition %d -> %d", task.state, next))
+	}
+	task.state = next
 }
 
 // backgroundSupervisor owns private task admission and completion state. It
@@ -72,7 +90,7 @@ func (s *backgroundSupervisor) dispatchLocked() {
 			s.finishLocked(task, task.cancelled(task.ctx))
 			continue
 		}
-		task.started = true
+		task.transitionLocked(backgroundTaskRunning)
 		s.active++
 		go func() {
 			execution := task.run(task.ctx)
@@ -87,7 +105,7 @@ func (s *backgroundSupervisor) dispatchLocked() {
 
 func (s *backgroundSupervisor) finishLocked(task *backgroundTask, execution stepExecution) {
 	task.execution = execution
-	task.finished = true
+	task.transitionLocked(backgroundTaskFinished)
 	task.cancel(nil)
 	close(task.done)
 }
@@ -95,12 +113,12 @@ func (s *backgroundSupervisor) finishLocked(task *backgroundTask, execution step
 func (s *backgroundSupervisor) cancel(target string) []stepExecution {
 	s.mu.Lock()
 	task := s.tasks[strings.ToLower(target)]
-	if task == nil || task.committed {
+	if task == nil || task.state == backgroundTaskCommitted {
 		s.mu.Unlock()
 		return nil
 	}
 	task.cancel(errExplicitBackgroundCancel)
-	if !task.started && !task.finished {
+	if task.state == backgroundTaskQueued {
 		for i, queued := range s.queue {
 			if queued == task {
 				s.queue = append(s.queue[:i], s.queue[i+1:]...)
@@ -118,7 +136,7 @@ func (s *backgroundSupervisor) wait(targets []string) []stepExecution {
 	tasks := make([]*backgroundTask, 0, len(targets))
 	for _, target := range targets {
 		task := s.tasks[strings.ToLower(target)]
-		if task != nil && !task.committed {
+		if task != nil && task.state != backgroundTaskCommitted {
 			tasks = append(tasks, task)
 		}
 	}
@@ -130,7 +148,7 @@ func (s *backgroundSupervisor) waitAll() []stepExecution {
 	s.mu.Lock()
 	tasks := make([]*backgroundTask, 0, len(s.order))
 	for _, task := range s.order {
-		if !task.committed {
+		if task.state != backgroundTaskCommitted {
 			tasks = append(tasks, task)
 		}
 	}
@@ -146,10 +164,10 @@ func (s *backgroundSupervisor) commitCompleted(tasks []*backgroundTask) []stepEx
 	defer s.mu.Unlock()
 	executions := make([]stepExecution, 0, len(tasks))
 	for _, task := range tasks {
-		if task.committed {
+		if task.state == backgroundTaskCommitted {
 			continue
 		}
-		task.committed = true
+		task.transitionLocked(backgroundTaskCommitted)
 		executions = append(executions, task.execution)
 	}
 	return executions
