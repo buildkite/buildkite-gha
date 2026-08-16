@@ -99,6 +99,48 @@ The [compatibility reference](docs/compatibility.md) is the source of truth. Use
 
 Some features support a limited subset or behave differently on Buildkite. Check the matrix before migrating a workflow.
 
+## Use OIDC with AWS
+
+Imported workflows receive Buildkite-issued OIDC tokens, not GitHub-issued
+tokens. An AWS role that trusts only GitHub's issuer or matches GitHub's `sub`
+claim rejects them. To use an existing role from both systems:
+
+1. Register `https://agent.buildkite.com` as another IAM OIDC provider with
+   audience `sts.amazonaws.com`.
+1. Add a separate trust-policy statement for the provider ARN
+   `arn:aws:iam::AWS_ACCOUNT_ID:oidc-provider/agent.buildkite.com`.
+1. Match `agent.buildkite.com:aud` and `agent.buildkite.com:sub` instead of the
+   equivalent `token.actions.githubusercontent.com` condition keys. Scope the
+   Buildkite subject to the intended organization and pipeline.
+1. Keep the existing GitHub provider statement while workflows run in both
+   systems. Remove it only when nothing still uses GitHub-issued tokens.
+
+For example, the Buildkite statement can use these conditions:
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Federated": "arn:aws:iam::AWS_ACCOUNT_ID:oidc-provider/agent.buildkite.com"
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "agent.buildkite.com:aud": "sts.amazonaws.com"
+    },
+    "StringLike": {
+      "agent.buildkite.com:sub": "organization:ORGANIZATION_SLUG:pipeline:PIPELINE_SLUG:*"
+    }
+  }
+}
+```
+
+The workflow must grant `id-token: write`. The endpoint is available to host
+JavaScript and composite actions, including `aws-actions/configure-aws-credentials`.
+See Buildkite's [AWS setup guide](https://buildkite.com/docs/pipelines/security/oidc/aws)
+for the complete IAM configuration and [OIDC claims reference](https://buildkite.com/docs/agent/cli/reference/oidc#claims)
+for the full subject format and available claims.
+
 ## Validate a workflow
 
 Check syntax, the static job graph, and every declared trigger without contacting Buildkite or executing workflow code:
