@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,20 @@ type fakeActionSource struct {
 }
 
 type contextActionSource struct{}
+
+type blockingActionSource struct {
+	calls   atomic.Int32
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingActionSource) Fetch(_ context.Context, ref source.Reference) (source.Resolved, source.Materialized, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.started)
+	}
+	<-s.release
+	return source.Resolved{Reference: ref, Commit: strings.Repeat("a", 40)}, source.Materialized{}, nil
+}
 
 func (contextActionSource) Fetch(ctx context.Context, _ source.Reference) (source.Resolved, source.Materialized, error) {
 	<-ctx.Done()
@@ -430,6 +446,38 @@ runs:
 	}
 	if fake.calls["owner/action@v1"] != 1 {
 		t.Fatalf("remote action resolutions = %d, want one shared resolution", fake.calls["owner/action@v1"])
+	}
+}
+
+func TestMemoizeActionSourceCoalescesConcurrentResolution(t *testing.T) {
+	fake := &blockingActionSource{started: make(chan struct{}), release: make(chan struct{})}
+	shared := MemoizeActionSource(fake)
+	ref, err := source.Parse("owner/action@v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 20
+	var wait sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, _, err := shared.Fetch(context.Background(), ref)
+			errs <- err
+		}()
+	}
+	<-fake.started
+	close(fake.release)
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fake.calls.Load() != 1 {
+		t.Fatalf("underlying resolutions = %d, want 1", fake.calls.Load())
 	}
 }
 

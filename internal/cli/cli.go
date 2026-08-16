@@ -47,6 +47,7 @@ const usage = `Usage:
 
 Commands:
   validate  Validate the supported static workflow subset
+  validate-batch  Validate a workflow manifest for corpus analysis
   compile   Compile a workflow to deterministic Buildkite pipeline YAML
   upload    Compile and upload a Buildkite pipeline
   run-job   Run a compiled job plan
@@ -55,10 +56,11 @@ Run "buildkite-gha help <command>" for command help.
 `
 
 var commandUsage = map[string]string{
-	"validate": "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
-	"compile":  "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
-	"upload":   "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
-	"run-job":  "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
+	"validate":       "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
+	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> [--action-cache-dir <path>] [--jobs <count>]\n",
+	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
+	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
+	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
 }
 
 func writeCommandHelp(stdout io.Writer, command string) {
@@ -66,6 +68,8 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	switch command {
 	case "validate":
 		_, _ = fmt.Fprint(stdout, "\nWithout --profile, validate checks event-independent syntax, the static graph, and every declared trigger; it does not evaluate hosted admission. The hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility. Use --event-path for an exact snapshot, --event to generate one minimal compatibility snapshot, or --all-events to evaluate every declared supported event separately. Generated snapshots are test inputs, not substitutes for real payloads.\n")
+	case "validate-batch":
+		_, _ = fmt.Fprint(stdout, "\nThe manifest is newline-delimited JSON. Each record requires id, repository, path, hash, and source fields. Results are atomic processing-report/v3 JSON files keyed by the corpus ID, record identity, content hash, and validator executable. Existing valid results resume the batch.\n")
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
@@ -151,6 +155,8 @@ func run(args []string, stdout, stderr io.Writer, clientVersion string, agentRun
 			switch args[0] {
 			case "validate":
 				return validate(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
+			case "validate-batch":
+				return validateBatch(args[1:], stderr, version)
 			case "compile":
 				return compile(args[1:], stdout, stderr, version, transport.Agent{Runner: agentRunner})
 			case "upload":
@@ -1316,12 +1322,12 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	}
 	out := newProcessingOutput("validate", format, stdout, stderr, agent)
 	if allEvents {
-		return validateAllEvents(out, workflowPath, version, actionCacheDir, stderr)
+		return validateAllEvents(out, workflowPath, version, actionCacheDir, nil, stderr)
 	}
 	return validateOne(out, workflowPath, eventPath, eventName, profile, version, actionCacheDir, nil, stderr)
 }
 
-func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, sharedActionSource compiler.ActionSource, stderr io.Writer) int {
+func validateOne(out processingOutput, workflowPath, eventPath, eventName, profile, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	var loadEvent func() ([]byte, error)
 	if eventPath != "" {
 		event, eventErr := os.ReadFile(eventPath)
@@ -1369,7 +1375,13 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 		return 1
 	}
 	if profile != "" {
-		_, _, distributionDigest, executableErr := executable()
+		distributionDigest := ""
+		var executableErr error
+		if runtime != nil {
+			distributionDigest, executableErr = runtime.distributionDigest, runtime.executableErr
+		} else {
+			_, _, distributionDigest, executableErr = executable()
+		}
 		if executableErr != nil {
 			processingReport.AddEnvironmentFailure("compiler executable could not be inspected")
 			processingReport.Result = "indeterminate"
@@ -1384,7 +1396,11 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 			compiler.PlatformLinuxAMD64:  distributionDigest,
 			compiler.PlatformDarwinARM64: distributionDigest,
 		}
-		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, sharedActionSource, nil)
+		var actionSource compiler.ActionSource
+		if runtime != nil {
+			actionSource = runtime.actionSource
+		}
+		preflight, profileErr := compileHostedWithActionCache(ctx, workflowPath, source, event, version, distributionDigest, "buildkite-gha-profile-importer", "", nil, runtimeDistributions, actionCacheDir, actionSource, nil)
 		applyHostedPreflight(&processingReport, preflight)
 		if profileErr != nil {
 			if ctx.Err() != nil || errors.Is(profileErr, context.Canceled) {
@@ -1416,7 +1432,13 @@ func validateOne(out processingOutput, workflowPath, eventPath, eventName, profi
 	return 0
 }
 
-func validateAllEvents(out processingOutput, workflowPath, version, actionCacheDir string, stderr io.Writer) int {
+type profileValidationRuntime struct {
+	actionSource       compiler.ActionSource
+	distributionDigest string
+	executableErr      error
+}
+
+func validateAllEvents(out processingOutput, workflowPath, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	source, err := os.ReadFile(workflowPath)
 	if err != nil {
 		validation := compatibility.EnvironmentProcessingReport(workflowPath, "", "workflow input could not be read")
@@ -1445,14 +1467,21 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 	for _, trigger := range parsed.Triggers {
 		declared[trigger.Event] = true
 	}
-	sharedActionSource, cleanup, err := newHostedActionSource(actionCacheDir, nil)
-	if err != nil {
-		validationReport.AddEnvironmentFailure("public action source could not be configured")
-		validationReport.Result = "indeterminate"
-		report.Validation = validationReport
-		_ = out.writeV3(report)
-		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
-		return 1
+	cleanup := func() {}
+	if runtime == nil {
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil)
+		cleanup = sourceCleanup
+		if sourceErr != nil {
+			validationReport.AddEnvironmentFailure("public action source could not be configured")
+			validationReport.Result = "indeterminate"
+			report.Validation = validationReport
+			_ = out.writeV3(report)
+			_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", sourceErr)
+			cleanup()
+			return 1
+		}
+		_, _, distributionDigest, executableErr := executable()
+		runtime = &profileValidationRuntime{actionSource: actionSource, distributionDigest: distributionDigest, executableErr: executableErr}
 	}
 	defer cleanup()
 	failed := false
@@ -1465,7 +1494,7 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 			command: "validate", format: "json", reports: io.Discard, stderr: stderr,
 			observe: func(observed compatibility.ProcessingReport) { eventReport = &observed },
 		}
-		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, sharedActionSource, stderr); code != 0 {
+		if code := validateOne(eventOut, workflowPath, "", event, hostedProfile, version, actionCacheDir, runtime, stderr); code != 0 {
 			failed = true
 		}
 		if eventReport == nil {
