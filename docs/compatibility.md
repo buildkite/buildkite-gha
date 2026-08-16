@@ -39,7 +39,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | [Other workflow secrets](#other-secrets-and-oidc) | 🟡 Supported subset | Static names in direct jobs resolve through the destination job's Buildkite secret authority. |
 | [Job and service containers](#containers-and-services) | 🟡 Supported subset | Linux job containers and broadly compatible service definitions, including explicit registry credentials. |
 | [Environments and snapshots](#job-configuration) | 🟡 Supported subset | Environments are rejected. Snapshots are accepted with no effect. |
-| [OIDC](#other-secrets-and-oidc) | ❌ Unsupported | GitHub-compatible OIDC is outside the initial release. |
+| [OIDC](#other-secrets-and-oidc) | 🟡 Supported subset | Host JavaScript and composite actions can request Buildkite OIDC tokens in jobs with `id-token: write`. |
 | [Other platforms](#job-configuration) and [providers](#repositories) | ❌ Unsupported | Windows, Linux arm64, macOS x86-64, GitHub Enterprise Server, and unlisted providers are outside the initial release. |
 | [Other GitHub services](#github-services) | ❌ Unsupported | No general emulation for Releases, Packages, Checks, deployments, or GitHub artifact APIs. |
 
@@ -213,11 +213,11 @@ permissions:
   pull-requests: write
 ```
 
-Supported values are `read`, `write`, and `none`. Supported names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `packages`, `pages`, `pull-requests`, `security-events`, and `statuses`.
+Supported values are `read`, `write`, and `none`. Supported repository permission names are `actions`, `artifact-metadata`, `attestations`, `checks`, `contents`, `deployments`, `discussions`, `issues`, `packages`, `pages`, `pull-requests`, `security-events`, and `statuses`. The separate `id-token` permission is also supported.
 
 An omitted map defaults to exactly `contents: read` when a token is needed. This deterministic default does not inherit GitHub repository or organization settings. A job map replaces the workflow map; it does not merge with it. A called workflow may only narrow its caller's permissions. These forms remain compilable when no job needs a token. Hosted token issuance accepts the omitted default or an explicit, non-empty top-level map. It rejects job-level maps and reusable-workflow jobs. Write access therefore requires an explicit top-level map.
 
-The `read-all` and `write-all` values, the `id-token` permission, and noncanonical names are unsupported. An empty map, or a map containing only `none`, creates no token.
+The `read-all` and `write-all` values and noncanonical names are unsupported. An empty map, or a map containing only `none`, creates no token.
 
 ### Environment and defaults
 
@@ -794,11 +794,13 @@ These are Buildkite secrets available to the destination job, not GitHub reposit
 
 `GITHUB_TOKEN` always uses the separate scoped workflow-token contract described above and cannot be replaced by an ordinary Buildkite secret. Dynamic names, secret use in conditions or other compile-time expressions, GitHub environments and environment secrets, `secrets: inherit`, and reusable-workflow secret forwarding are unsupported. Action metadata defaults cannot add a secret to the plan; such defaults fail compilation rather than becoming an authority source. A secret referenced only by a declared optional action input does not add a job secret requirement and resolves to an empty value unless the same secret is required elsewhere.
 
-**❌ Unsupported.** GitHub-compatible OIDC and `id-token` are not implemented.
+Jobs with `id-token: write` expose the GitHub Actions `getIDToken()` endpoint contract to host JavaScript actions, including JavaScript actions called by composite actions. The endpoint mints a Buildkite OIDC token for the requested audience. Cloud identity providers must trust Buildkite's issuer and claims, not GitHub's. `id-token: read`, `id-token: none`, and omitted permission maps do not expose the endpoint.
+
+The endpoint variables are scoped to each host action lifecycle invocation. Shell steps, Docker container actions, and actions running in job containers do not receive them. Container actions that call `getIDToken()` fail with its missing endpoint variable diagnostic.
 
 ### GitHub services
 
-**❌ Unsupported beyond the integrations listed above.** An action's runtime may still require unsupported GitHub services. Buildkite provides no GitHub Artifact, OIDC, Packages, Releases, Checks, or deployment service emulation beyond the documented integrations.
+**❌ Unsupported beyond the integrations listed above.** An action's runtime may still require unsupported GitHub services. Buildkite provides no GitHub Packages, Releases, Checks, or deployment service emulation beyond the documented integrations.
 
 ## Runtime behavior and limits
 

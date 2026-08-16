@@ -120,13 +120,32 @@ jobs:
 	}
 }
 
+func TestParseAcceptsIDTokenPermissions(t *testing.T) {
+	for _, access := range []string{"read", "write", "none"} {
+		t.Run(access, func(t *testing.T) {
+			source := []byte("on: push\npermissions:\n  id-token: " + access + "\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n")
+			parsed, err := Parse("permissions.yml", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, present := parsed.Permissions.Scopes["id-token"]
+			if access == "none" {
+				if present {
+					t.Fatalf("none permission was retained: %#v", parsed.Permissions.Scopes)
+				}
+			} else if !present || value != access {
+				t.Fatalf("id-token permission = %q, %t, want %q", value, present, access)
+			}
+		})
+	}
+}
+
 func TestParseRejectsUnsupportedPermissionFormsWithLocation(t *testing.T) {
 	for _, test := range []struct {
 		name, declaration, want string
 	}{
 		{name: "read all", declaration: "permissions: read-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
 		{name: "write all", declaration: "permissions: write-all\n", want: "permissions.yml:2:14: job \"permissions\": permission aliases are unsupported"},
-		{name: "OIDC", declaration: "permissions:\n  id-token: write\n", want: "permissions.yml:3:3: job \"permissions\": id-token permission requires GitHub-compatible OIDC"},
 		{name: "non-canonical name", declaration: "permissions:\n  pull_requests: write\n", want: "permissions.yml:3:3: job \"permissions\": unsupported permission \"pull_requests\""},
 	} {
 		t.Run(test.name, func(t *testing.T) {

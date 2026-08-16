@@ -296,7 +296,11 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	if job.HasCapability("provider-token-write") && r.WorkflowToken == nil {
 		return JobResult{}, fmt.Errorf("provider-token-write capability requires the GitHub workflow token provider")
 	}
+	if job.IDTokenPermission == "write" && r.OIDCToken == nil {
+		return JobResult{}, fmt.Errorf("id-token write permission requires the OIDC token provider")
+	}
 	providerTokenRequired := job.HasCapability("provider-token-write")
+	oidcTokenRequired := job.IDTokenPermission == "write"
 	secretsRequired := job.HasCapability("secrets")
 	if secretsRequired {
 		if r.Secrets == nil {
@@ -315,10 +319,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			break
 		}
 	}
-	if providerTokenRequired || secretsRequired || r.Cache != nil {
+	if providerTokenRequired || oidcTokenRequired || secretsRequired || r.Cache != nil {
 		if r.Redactor == nil {
 			if providerTokenRequired {
 				return JobResult{}, fmt.Errorf("provider token capability requires the Buildkite Agent redactor")
+			}
+			if oidcTokenRequired {
+				return JobResult{}, fmt.Errorf("id-token write permission requires the Buildkite Agent redactor")
 			}
 			if secretsRequired {
 				return JobResult{}, fmt.Errorf("secrets capability requires the Buildkite Agent redactor")
@@ -330,7 +337,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		} else {
 			resolved, err := resolveAgentRedactorBeforeWorkflow(r.Redactor)
 			if err != nil {
-				if providerTokenRequired || secretsRequired || cacheRequired {
+				if providerTokenRequired || oidcTokenRequired || secretsRequired || cacheRequired {
 					return JobResult{}, err
 				}
 				r.Cache = nil
@@ -388,6 +395,13 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 		runCtx, cancelJob = context.WithTimeout(ctx, durationMinutes(job.TimeoutMinutes))
 	}
 	defer cancelJob()
+	if oidcTokenRequired {
+		r.idTokenService, err = startIDTokenService(runCtx, r.OIDCToken, r.Redactor, processor)
+		if err != nil {
+			return jobResult, err
+		}
+		defer func() { runJobErr = errors.Join(runJobErr, r.idTokenService.Close()) }()
+	}
 	if r.Mise == "" && r.ResolveMise != nil {
 		r.Mise, err = r.ResolveMise(runCtx)
 		if err != nil {

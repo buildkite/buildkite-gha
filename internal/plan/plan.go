@@ -234,6 +234,7 @@ type Job struct {
 	RequiredCapabilities []string                `json:"required_capabilities"`
 	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
 	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
+	IDTokenPermission    string                  `json:"id_token_permission,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
 	Inputs               map[string]any          `json:"inputs,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
@@ -557,6 +558,9 @@ func (job Job) Validate() error {
 		if err := validateGitHubTokenPermissions(job.GitHubToken.Permissions); err != nil {
 			return err
 		}
+	}
+	if job.IDTokenPermission != "" && job.IDTokenPermission != "read" && job.IDTokenPermission != "write" {
+		return fmt.Errorf("job plan contains invalid id-token permission %q", job.IDTokenPermission)
 	}
 	if !sort.StringsAreSorted(job.Dependencies) {
 		return fmt.Errorf("job plan dependencies must be sorted")
