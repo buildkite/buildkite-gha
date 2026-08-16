@@ -250,14 +250,14 @@ The hosted preset accepts runner labels case-insensitively, so aliases such as
 `ubuntu-latest` and `ubuntu-24.04` default to the Noble hosted-toolchains image;
 `ubuntu-22.04` defaults to Jammy. Use `--runner-image` with an immutable digest
 to override the default for a configured profile. Linux labels keep default
-agent targeting with the matching image. `macos-latest` targets the hosted
-`macos-medium` queue provisioned at signup; a mapping overrides it, and the
-queue must exist and allow macOS capacity. Version-specific `macos-14` and
-`macos-15` labels require an organization-provided queue and are not part of
-the hosted preset. Linux ARM, macOS x86-64, Windows, and other labels are
-unsupported. Every macOS label rejects images. Runtime distribution paths must be absolute executables. The
-importer's platform defaults to its running executable; the other platform has
-no direct-upload default.
+agent targeting with the matching image when unmapped. `macos-latest` targets
+the hosted `macos-medium` queue provisioned at signup; a mapping overrides it,
+and the queue must exist and allow macOS capacity. Version-specific `macos-14`
+and `macos-15` labels require an organization-provided queue and are not part
+of the hosted preset. Linux ARM, macOS x86-64, Windows, and other labels are
+unsupported. Every macOS label rejects images. Runtime distribution paths must
+be absolute executables. The importer's platform defaults to its running
+executable; the other platform has no direct-upload default.
 `BUILDKITE_GHA_TARGET_QUEUE` and `BUILDKITE_GHA_RUNTIME_IMAGE` are no longer
 supported.
 

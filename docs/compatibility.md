@@ -342,7 +342,8 @@ Runner labels are case-insensitive. Runner aliases such as `macOS-latest` use
 the same target as `macos-latest`. Linux labels default to the corresponding
 Noble or Jammy hosted-toolchains image; an explicit immutable image overrides
 it for a configured profile. Linux labels use default Buildkite agent targeting
-with that image. `macos-latest` targets the hosted `macos-medium` queue.
+with that image when unmapped. `macos-latest` targets the hosted `macos-medium`
+queue.
 Version-specific `macos-14` and `macos-15` labels require an organization
 runner profile with a native queue and are not admitted by `validate --profile
 hosted`. macOS labels reject images. They select Darwin/arm64, not a GitHub
