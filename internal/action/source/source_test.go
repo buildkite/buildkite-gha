@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/buildkite/buildkite-gha/internal/action/metadata"
 )
@@ -188,6 +189,103 @@ func TestResolverOnlyTreatsLowercaseFullSHAAsResolved(t *testing.T) {
 	resolved, err := resolver.Resolve(context.Background(), ref)
 	if err != nil || resolved.Commit != testSHA || !slices.Equal(calls, []string{"/repos/o/r/git/ref/tags/" + upperSHA, "/repos/o/r/git/ref/heads/" + upperSHA, "/repos/o/r/commits/" + upperSHA}) {
 		t.Fatalf("Resolve() = %#v, %v; calls = %v", resolved, err, calls)
+	}
+}
+
+func TestResolverCachesMutableRefsWithBoundedFreshness(t *testing.T) {
+	cache := t.TempDir()
+	var calls atomic.Int32
+	commit := testSHA
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, commit)
+	}))
+	defer server.Close()
+	ref, _ := Parse("owner/repo@v1")
+
+	resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.cfg.mutableRefs, err = newMutableRefCache(cache, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ref); err != nil {
+		t.Fatal(err)
+	}
+	commit = strings.Repeat("a", 40)
+	resolver, err = NewResolver(server.Client(), WithTestEndpoints(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.cfg.mutableRefs, err = newMutableRefCache(cache, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != testSHA || calls.Load() != 1 {
+		t.Fatalf("cached Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
+	}
+	time.Sleep(60 * time.Millisecond)
+	resolved, err = resolver.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != commit || calls.Load() != 2 {
+		t.Fatalf("revalidated Resolve() = %#v, %v; calls = %d", resolved, err, calls.Load())
+	}
+}
+
+func TestResolverMutableRefCacheCoalescesConcurrentProcesses(t *testing.T) {
+	cache := t.TempDir()
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, testSHA)
+	}))
+	defer server.Close()
+	ref, _ := Parse("owner/repo@v1")
+	const workers = 12
+	errors := make(chan error, workers)
+	for range workers {
+		go func() {
+			resolver, err := NewResolver(server.Client(), WithTestEndpoints(server.URL))
+			if err == nil {
+				resolver.cfg.mutableRefs, err = newMutableRefCache(cache, time.Hour)
+			}
+			if err == nil {
+				_, err = resolver.Resolve(context.Background(), ref)
+			}
+			errors <- err
+		}()
+	}
+	<-started
+	close(release)
+	for range workers {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("GitHub requests = %d, want 1", calls.Load())
+	}
+}
+
+func TestResolverUsesPlatformMutableRefCache(t *testing.T) {
+	root, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewResolver(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "buildkite-gha", "action-ref-resolutions", "v1")
+	if resolver.cfg.mutableRefs == nil || resolver.cfg.mutableRefs.root != want || resolver.cfg.mutableRefs.freshness != time.Hour {
+		t.Fatalf("mutable ref cache = %#v, want root %q with one-hour freshness", resolver.cfg.mutableRefs, want)
 	}
 }
 

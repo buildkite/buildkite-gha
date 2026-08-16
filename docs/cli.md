@@ -70,7 +70,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--action-cache-dir` is available only with `--profile hosted`. The cache stores verified action source by immutable commit. Mutable refs still resolve through GitHub on every run, so a moved tag or branch selects its current commit. Do not share one writable cache between mutually untrusted validation jobs.
+`--action-cache-dir` is available only with `--profile hosted`. The cache stores verified action source by immutable commit. Mutable ref resolutions are cached for up to one hour under `$XDG_CACHE_HOME/buildkite-gha/action-ref-resolutions/v1` (or the platform user cache directory). Concurrent validation processes can share this resolution cache. A moved tag or branch can therefore use its previous commit for up to one hour. Do not share either writable cache between mutually untrusted validation jobs.
 
 Inspect the aggregate result and each event outcome:
 
