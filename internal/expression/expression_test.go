@@ -1578,6 +1578,8 @@ func TestFromJSONCollapsesCaseInsensitiveDuplicateKeys(t *testing.T) {
 		`${{ fromJSON('{"a":1,"A":2}').A }}`:       "2",
 		`${{ fromJSON('{"a":1,"A":2}')['A'] }}`:    "2",
 		`${{ fromJSON('{"A":2,"a":1}').a }}`:       "1",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['Σ'] }}`:    "2",
+		`${{ fromJSON('{"Σ":1,"ς":2}')['σ'] }}`:    "2",
 		`${{ toJSON(fromJSON('{"a":1,"A":2}')) }}`: "{\n  \"a\": 2\n}",
 	} {
 		got, err := EvaluateCompileTemplate(template, CompileContext{})

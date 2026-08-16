@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/rhysd/actionlint"
 )
@@ -409,11 +410,11 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			lower := strings.ToLower(key)
-			if first, ok := spellings[lower]; ok {
+			folded := foldedKey(key)
+			if first, ok := spellings[folded]; ok {
 				key = first
 			} else {
-				spellings[lower] = key
+				spellings[folded] = key
 			}
 			object[key] = value
 		}
@@ -433,6 +434,22 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 	default:
 		return nil, fmt.Errorf("fromJSON argument is invalid JSON")
 	}
+}
+
+// foldedKey canonicalizes a key under the same case-fold equivalence
+// strings.EqualFold uses for object lookup: every rune maps to the smallest
+// rune in its unicode.SimpleFold orbit, so keys collapse exactly when
+// EqualFold considers them equal.
+func foldedKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		minimum := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < minimum {
+				minimum = folded
+			}
+		}
+		return minimum
+	}, key)
 }
 
 func normalizeJSONNumbers(value any) (any, error) {
