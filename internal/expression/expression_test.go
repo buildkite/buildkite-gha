@@ -1064,6 +1064,7 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 		"needs == needs",
 		"steps == steps",
 		"matrix <= matrix && matrix >= matrix",
+		"fromJSON('[]') != fromJSON('[]')",
 	} {
 		if err := ValidateCondition(condition, StepCondition); err != nil {
 			t.Errorf("ValidateCondition(%q) error = %v", condition, err)

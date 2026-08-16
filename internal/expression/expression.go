@@ -386,6 +386,9 @@ func normalizeJSONNumbers(value any) (any, error) {
 		}
 		return parsed, nil
 	case []any:
+		if len(value) == 0 {
+			return make([]any, 0, 1), nil
+		}
 		for i, item := range value {
 			normalized, err := normalizeJSONNumbers(item)
 			if err != nil {
