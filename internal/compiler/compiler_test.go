@@ -1237,8 +1237,26 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "${{ inputs['label'] }}" || plans[0].Outputs["label"] != "${{ inputs['label'] }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" {
 		t.Fatalf("reusable condition = %#v", plans)
+	}
+}
+
+func TestApplyStaticInputsSubstitutesIndexedInputsInStepFields(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
+		Span: span,
+		Run:  "echo ${{ inputs['target'] }}",
+		Env:  map[string]string{"TARGET": "${{ inputs['target'] }}"},
+		With: map[string]string{"target": "prefix-${{ inputs['target'] }}"},
+	}}}
+	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"target": "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := resolved.Steps[0]
+	if step.Run != "echo production" || step.Env["TARGET"] != "production" || step.With["target"] != "prefix-production" {
+		t.Fatalf("resolved indexed inputs = %#v", step)
 	}
 }
 
@@ -1327,6 +1345,9 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
 		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
 		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
+		{name: "command", job: workflow.Job{Steps: []workflow.Step{{Run: "echo ${{ inputs['target'] }}", Span: span}}}},
+		{name: "environment", job: workflow.Job{Steps: []workflow.Step{{Env: map[string]string{"TARGET": "${{ inputs['target'] }}"}, Span: span}}}},
+		{name: "action input", job: workflow.Job{Steps: []workflow.Step{{With: map[string]string{"target": "${{ inputs['target'] }}"}, Span: span}}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.job.ID = "test"
@@ -3049,7 +3070,7 @@ jobs:
 		t.Fatalf("compiled plans = %d, want 1", len(plans))
 	}
 	job := plans[0]
-	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "${{ inputs['label'] }}" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }

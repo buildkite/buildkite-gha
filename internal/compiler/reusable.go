@@ -829,7 +829,9 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
-	jobValues := []string{job.Name}
+	jobValues := []string{job.Name, job.If, job.DefaultShell, job.DefaultWorkingDirectory}
+	jobValues = appendMapValues(jobValues, job.Env)
+	jobValues = appendMapValues(jobValues, job.Outputs)
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
@@ -879,6 +881,14 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 	for _, step := range job.Steps {
 		if hasInputExpression(step.Uses) {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
+		}
+		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.If, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
+		stepValues = appendMapValues(stepValues, step.Env)
+		stepValues = appendMapValues(stepValues, step.With)
+		for _, value := range stepValues {
+			if hasInputExpression(value) {
+				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+			}
 		}
 	}
 	return nil

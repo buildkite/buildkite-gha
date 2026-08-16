@@ -1451,7 +1451,7 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 }
 
 func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs.label }}"
+	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
 	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
 	if err != nil {
 		t.Fatal(err)
