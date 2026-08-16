@@ -21,8 +21,8 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\])\s*\}\}|inputs(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\]))\s*$`)
-var staticValueExpression = regexp.MustCompile(`(?i)^\s*\$\{\{\s*(inputs|matrix)(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\])\s*\}\}\s*$`)
+var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}|inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\]))\s*$`)
+var staticValueExpression = regexp.MustCompile(`(?i)^\s*\$\{\{\s*(inputs|matrix)\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}\s*$`)
 var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {

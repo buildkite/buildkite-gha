@@ -1233,7 +1233,7 @@ jobs:
       - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
       - if: inputs['enabled']
         run: echo implicit
-      - if: ${{ inputs['label'] }}
+      - if: ${{ inputs [ 'label' ] }}
         run: echo string
 `)
 
@@ -1263,7 +1263,7 @@ jobs:
   call:
     uses: ./.github/workflows/leaf.yml
     with:
-      target: ${{ inputs['target'] }}
+      target: ${{ inputs [ 'target' ] }}
 `)
 	writeWorkflow(t, repository, "leaf.yml", `on:
   workflow_call:
