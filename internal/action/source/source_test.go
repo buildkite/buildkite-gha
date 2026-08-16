@@ -77,9 +77,11 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 		visibility      string
 		wantAuth        string
 		wantNotPublic   bool
+		localToken      bool
 	}{
 		{name: "anonymous", visibility: "public"},
 		{name: "authenticated public", token: "test-token", tokenRepository: "pipeline/repo", visibility: "public", wantAuth: "Bearer test-token"},
+		{name: "local authenticated public", token: "test-token", visibility: "public", wantAuth: "Bearer test-token", localToken: true},
 		{name: "authenticated private", token: "test-token", tokenRepository: "pipeline/repo", private: true, visibility: "private", wantAuth: "Bearer test-token", wantNotPublic: true},
 		{name: "authenticated internal", token: "test-token", tokenRepository: "pipeline/repo", visibility: "internal", wantAuth: "Bearer test-token", wantNotPublic: true},
 		{name: "credential-scoping repository remains anonymous", token: "test-token", tokenRepository: "o/r", visibility: "public"},
@@ -103,9 +105,12 @@ func TestResolverOptionalAuthenticationAndVisibility(t *testing.T) {
 			defer ts.Close()
 			opts := []Option{WithTestEndpoints(ts.URL)}
 			if tt.token != "" {
-				opts = append(opts, WithGitHubActionSourceTokenProvider(tt.tokenRepository, func(context.Context) (string, error) {
-					return tt.token, nil
-				}))
+				provider := func(context.Context) (string, error) { return tt.token, nil }
+				if tt.localToken {
+					opts = append(opts, WithGitHubAPITokenProvider(provider))
+				} else {
+					opts = append(opts, WithGitHubActionSourceTokenProvider(tt.tokenRepository, provider))
+				}
 			}
 			resolver, err := NewResolver(ts.Client(), opts...)
 			if err != nil {
@@ -1023,5 +1028,161 @@ func TestStoreBoundedEvictionProtectsUnboundedReader(t *testing.T) {
 	}
 	if _, err := os.Stat(active.ActionRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("released entry still exists: %v", err)
+	}
+}
+
+func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
+	const nextSHA = "1123456789abcdef0123456789abcdef01234567"
+	var requests atomic.Int32
+	var refreshed atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if !strings.Contains(r.URL.Path, "/git/ref/tags/") {
+			http.NotFound(w, r)
+			return
+		}
+		commit := testSHA
+		if refreshed.Load() {
+			commit = nextSHA
+		}
+		_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, commit)
+	}))
+	defer ts.Close()
+	root := t.TempDir()
+	newResolver := func(refresh bool) *Resolver {
+		resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL), WithActionResolutionSnapshot(root, refresh))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resolver
+	}
+	ref, _ := Parse("owner/repo@v1")
+	first := newResolver(false)
+	resolved, err := first.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 {
+		t.Fatalf("first resolution = %#v, %v; requests %d", resolved, err, requests.Load())
+	}
+	firstGeneration := first.ResolutionSnapshotID()
+	refreshed.Store(true)
+	second := newResolver(false)
+	resolved, err = second.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 || second.ResolutionSnapshotID() != firstGeneration {
+		t.Fatalf("reused resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), second.ResolutionSnapshotID())
+	}
+	third := newResolver(true)
+	resolved, err = third.Resolve(context.Background(), ref)
+	if err != nil || resolved.Commit != nextSHA || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {
+		t.Fatalf("refreshed resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), third.ResolutionSnapshotID())
+	}
+}
+
+func TestActionResolutionSnapshotPersistsOnlyDefinitiveMissingRefs(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		var requests atomic.Int32
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			http.NotFound(w, r)
+		}))
+		defer ts.Close()
+		resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL), WithActionResolutionSnapshot(t.TempDir(), false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _ := Parse("owner/repo@missing")
+		for range 2 {
+			_, err := resolver.Resolve(context.Background(), ref)
+			var notPublic *NotPublicError
+			if !errors.As(err, &notPublic) {
+				t.Fatalf("resolution error = %v", err)
+			}
+		}
+		if requests.Load() != 3 {
+			t.Fatalf("missing ref requests = %d, want 3", requests.Load())
+		}
+	})
+
+	t.Run("server failure", func(t *testing.T) {
+		var requests atomic.Int32
+		var failed atomic.Bool
+		failed.Store(true)
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			if failed.Load() {
+				http.Error(w, "temporary", http.StatusInternalServerError)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
+		}))
+		defer ts.Close()
+		resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL), WithActionResolutionSnapshot(t.TempDir(), false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, _ := Parse("owner/repo@v1")
+		if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+			t.Fatalf("transient resolution error = %v", err)
+		}
+		failed.Store(false)
+		resolved, err := resolver.Resolve(context.Background(), ref)
+		if err != nil || resolved.Commit != testSHA || requests.Load() != 2 {
+			t.Fatalf("retried resolution = %#v, %v; requests %d", resolved, err, requests.Load())
+		}
+	})
+}
+
+func TestActionResolutionSnapshotCoalescesConcurrentResolution(t *testing.T) {
+	var requests atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		_, _ = fmt.Fprintf(w, `{"object":{"type":"commit","sha":"%s"}}`, testSHA)
+	}))
+	defer ts.Close()
+	resolver, err := NewResolver(ts.Client(), WithTestEndpoints(ts.URL), WithActionResolutionSnapshot(t.TempDir(), false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("owner/repo@v1")
+	errs := make(chan error, 8)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			resolved, err := resolver.Resolve(context.Background(), ref)
+			if err == nil && resolved.Commit != testSHA {
+				err = fmt.Errorf("commit = %s", resolved.Commit)
+			}
+			errs <- err
+		}()
+	}
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("concurrent resolution requests = %d, want 1", requests.Load())
+	}
+}
+
+func TestActionResolutionSnapshotRejectsCorruptEntry(t *testing.T) {
+	root := t.TempDir()
+	resolver, err := NewResolver(nil, WithTestEndpoints("https://example.com"), WithActionResolutionSnapshot(root, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := Parse("owner/repo@v1")
+	path := resolver.cfg.resolutionSnapshot.entryPath(ref)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolver.Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is invalid") {
+		t.Fatalf("corrupt snapshot error = %v", err)
 	}
 }

@@ -80,12 +80,29 @@ buildkite-gha validate-batch \
   --output-dir reports \
   --corpus-id zenodo:20340547 \
   --action-cache-dir .buildkite-gha-action-cache \
-  --action-cache-max-bytes 21474836480
+  --action-cache-max-bytes 21474836480 \
+  --action-resolution-snapshot .buildkite-gha-action-resolutions
 ```
 
-Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, content hash, and validator executable digest.
+Each JSON Lines manifest record requires `id`, `repository`, `path`, `hash`, and `source` fields. Batch validation applies the hosted profile to all declared supported events and writes one `processing-report/v3` JSON file per workflow. It uses one worker per CPU by default; set `--jobs` to override the worker count. It publishes each report atomically and resumes valid reports keyed by the corpus ID, record identity, actual workflow content, validator executable digest, and action-resolution snapshot generation.
 
 `--action-cache-max-bytes` requires `--action-cache-dir`. It evicts the least recently used immutable action trees until the cache is within the byte budget. Concurrent validators protect entries while reading or publishing them. Maintenance also removes abandoned partial entries; active partial entries remain locked. The public corpus script defaults to 20 GiB, leaving headroom on a 64 GB orb.
+
+The required `--action-resolution-snapshot` pins each mutable `owner/repository@ref` to its first resolved commit. The snapshot is durable across validator versions, so comparisons that reuse its generation resolve the same recorded refs. Exact commit references bypass it. Definitively missing public refs are also recorded; network, cancellation, TLS, rate-limit, and server failures are retried rather than recorded. Use `--refresh-action-resolution-snapshot` to start a new generation and resolve refs again. The snapshot controls action revisions only; it does not make the complete corpus run reproducible.
+
+For authenticated GitHub API resolution, keep the token in an environment variable and name that variable without exposing its value:
+
+```sh
+GITHUB_TOKEN="$(your-secure-token-command)" \
+  buildkite-gha validate-batch \
+  --manifest workflows.jsonl \
+  --output-dir reports \
+  --corpus-id example \
+  --action-resolution-snapshot .buildkite-gha-action-resolutions \
+  --github-token-env GITHUB_TOKEN
+```
+
+The token authenticates GitHub API metadata requests only. It is not written to arguments, logs, reports, snapshots, or action source caches, and validation does not execute action subprocesses. Authenticated resolution still verifies that every action repository is public. Ordinary `validate` continues to use the one-hour mutable-ref cache in the platform user cache directory.
 
 Inspect the aggregate result and each event outcome:
 

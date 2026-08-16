@@ -57,7 +57,7 @@ Run "buildkite-gha help <command>" for command help.
 
 var commandUsage = map[string]string{
 	"validate":       "Usage: buildkite-gha validate [--profile hosted] [--event <name> | --event-path <path> | --all-events] [--action-cache-dir <path>] [--format text|json] <workflow>\n",
-	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> [--action-cache-dir <path> --action-cache-max-bytes <bytes>] [--jobs <count>]\n",
+	"validate-batch": "Usage: buildkite-gha validate-batch --manifest <path> --output-dir <path> --corpus-id <id> --action-resolution-snapshot <path> [--refresh-action-resolution-snapshot] [--action-cache-dir <path> --action-cache-max-bytes <bytes>] [--github-token-env <name>] [--jobs <count>]\n",
 	"compile":        "Usage: buildkite-gha compile --event-path <path> [--format pipeline|ir-json] <workflow>\n",
 	"upload":         "Usage: buildkite-gha upload [--event-path <path>] [--runner-queue <runs-on>=<queue>]... [--runner-image <runs-on>=<immutable-image>]... [--runtime-distribution <platform>=<absolute-path>]... [--experimental-runner-user] [--runtime-queue hosted] [--] <workflow-path> [<workflow-path>...]\n",
 	"run-job":        "Usage: buildkite-gha run-job (--plan <path> | --plan-digest <digest> --plan-producer <step>) [--result <path>] [--hosted-tool-cache]\n",
@@ -69,7 +69,7 @@ func writeCommandHelp(stdout io.Writer, command string) {
 	case "validate":
 		_, _ = fmt.Fprint(stdout, "\nWithout --profile, validate checks event-independent syntax, the static graph, and every declared trigger; it does not evaluate hosted admission. The hosted profile resolves actions and applies production upload policy without executing jobs or proving arbitrary action runtime compatibility. Use --event-path for an exact snapshot, --event to generate one minimal compatibility snapshot, or --all-events to evaluate every declared supported event separately. Generated snapshots are test inputs, not substitutes for real payloads.\n")
 	case "validate-batch":
-		_, _ = fmt.Fprint(stdout, "\nThe manifest is newline-delimited JSON. Each record requires id, repository, path, hash, and source fields. Results are atomic processing-report/v3 JSON files keyed by the corpus ID, record identity, content hash, and validator executable. Existing valid results resume the batch.\n")
+		_, _ = fmt.Fprint(stdout, "\nThe manifest is newline-delimited JSON. Each record requires id, repository, path, hash, and source fields. Results are atomic processing-report/v3 JSON files keyed by the corpus ID, record identity, workflow content, validator executable, and action-resolution snapshot generation. Existing valid results resume the batch. A snapshot pins each mutable public action ref on first use; refresh starts a new generation. --github-token-env reads a GitHub token from the named environment variable without placing it in arguments or reports.\n")
 	case "compile":
 		_, _ = fmt.Fprint(stdout, "\nPipeline output references content-addressed plans; compile does not materialize or upload those artifacts.\n")
 	case "upload":
@@ -1447,6 +1447,10 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate: %v\n", err)
 		return 1
 	}
+	return validateAllEventsSource(out, workflowPath, source, version, actionCacheDir, runtime, stderr)
+}
+
+func validateAllEventsSource(out processingOutput, workflowPath string, source []byte, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) int {
 	validation, validationErr := compiler.Validate(workflowPath, source)
 	validationReport := compatibility.InitialProcessingReport(workflowPath, "", false, validation, validationErr)
 	if validationErr != nil {
@@ -1469,7 +1473,7 @@ func validateAllEvents(out processingOutput, workflowPath, version, actionCacheD
 	}
 	cleanup := func() {}
 	if runtime == nil {
-		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil)
+		actionSource, sourceCleanup, sourceErr := newHostedActionSource(actionCacheDir, nil, nil)
 		cleanup = sourceCleanup
 		if sourceErr != nil {
 			validationReport.AddEnvironmentFailure("public action source could not be configured")
@@ -2641,7 +2645,7 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 					sourceOptions = append(sourceOptions, authenticationOption)
 				}
 			}
-			actionSource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions)
+			actionSource, cleanup, err = newHostedActionSource(actionCacheDir, sourceOptions, nil)
 			if err != nil {
 				return hostedCompilation{}, hostedError(hostedEnvironmentFailure, err)
 			}
@@ -2667,28 +2671,33 @@ func compileHostedNamespacedWithActionCache(ctx context.Context, workflowPath st
 	return hostedCompilation{Bundle: bundle, HasActions: hasActions, Admitted: true}, nil
 }
 
-func newHostedActionSource(actionCacheDir string, sourceOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+func newHostedActionSource(actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), error) {
+	actionSource, cleanup, _, err := newHostedActionSourceWithSnapshot(actionCacheDir, resolverOptions, storeOptions)
+	return actionSource, cleanup, err
+}
+
+func newHostedActionSourceWithSnapshot(actionCacheDir string, resolverOptions, storeOptions []actionsource.Option) (compiler.ActionSource, func(), string, error) {
 	actionRoot := actionCacheDir
 	cleanup := func() {}
 	if actionRoot == "" {
 		var err error
 		actionRoot, err = os.MkdirTemp("", "buildkite-gha-action-source-")
 		if err != nil {
-			return nil, cleanup, fmt.Errorf("create action source store: %w", err)
+			return nil, cleanup, "", fmt.Errorf("create action source store: %w", err)
 		}
 		cleanup = func() { _ = os.RemoveAll(actionRoot) }
 	}
-	resolver, err := actionsource.NewResolver(nil, sourceOptions...)
+	resolver, err := actionsource.NewResolver(nil, resolverOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, fmt.Errorf("configure public action resolver: %w", err)
+		return nil, func() {}, "", fmt.Errorf("configure public action resolver: %w", err)
 	}
-	store, err := actionsource.NewStore(actionRoot, nil, sourceOptions...)
+	store, err := actionsource.NewStore(actionRoot, nil, storeOptions...)
 	if err != nil {
 		cleanup()
-		return nil, func() {}, fmt.Errorf("configure public action source store: %w", err)
+		return nil, func() {}, "", fmt.Errorf("configure public action source store: %w", err)
 	}
-	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, nil
+	return compiler.MemoizeActionSource(compiler.PublicActionSource{Resolver: resolver, Store: store}), cleanup, resolver.ResolutionSnapshotID(), nil
 }
 
 func validateUnprivilegedBundle(bundle compiler.Bundle) error {

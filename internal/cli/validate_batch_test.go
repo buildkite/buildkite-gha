@@ -28,6 +28,8 @@ func (s *batchCountingActionSource) Fetch(_ context.Context, ref actionsource.Re
 }
 
 func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
+	const token = "batch-secret-token"
+	t.Setenv("BATCH_GITHUB_TOKEN", token)
 	root := t.TempDir()
 	output := filepath.Join(root, "reports")
 	records := []batchValidationRecord{
@@ -41,10 +43,13 @@ func TestValidateBatchWritesAndResumesAtomicReports(t *testing.T) {
 		}
 	}
 	manifest := writeBatchManifest(t, root, records)
-	args := []string{"validate-batch", "--manifest", manifest, "--output-dir", output, "--corpus-id", "test-corpus"}
+	args := []string{"validate-batch", "--manifest", manifest, "--output-dir", output, "--corpus-id", "test-corpus", "--action-resolution-snapshot", filepath.Join(root, "action-resolutions"), "--github-token-env", "BATCH_GITHUB_TOKEN"}
 	var stdout, stderr bytes.Buffer
 	if code := Run(args, &stdout, &stderr, "dev"); code != 0 || stdout.Len() != 0 {
 		t.Fatalf("Run() = %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stderr.String(), token) {
+		t.Fatal("validate-batch wrote the GitHub token to stderr")
 	}
 	reports := batchReports(t, output)
 	if len(reports) != len(records) {
@@ -111,15 +116,32 @@ func TestBatchValidationReusesActionResolutionAcrossWorkflows(t *testing.T) {
 
 func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	root := t.TempDir()
-	valid := batchValidationRecord{ID: "one", Repository: "owner/repo", Path: "ci.yml", Hash: "hash", Source: "source.yml"}
+	sourcePath := filepath.Join(root, "source.yml")
+	if err := os.WriteFile(sourcePath, []byte("on: push\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := batchValidationRecord{ID: "one", Repository: "owner/repo", Path: "ci.yml", Hash: "hash", Source: sourcePath, contentID: "content-one"}
 	manifest := writeBatchManifest(t, root, []batchValidationRecord{valid, valid})
 	if _, err := loadBatchValidationManifest(manifest); err == nil || !strings.Contains(err.Error(), "repeats id") {
 		t.Fatalf("duplicate manifest error = %v", err)
 	}
+	manifest = writeBatchManifest(t, root, []batchValidationRecord{valid})
+	loaded, err := loadBatchValidationManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstContentID := loaded[0].contentID
+	if err := os.WriteFile(sourcePath, []byte("on: pull_request\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = loadBatchValidationManifest(manifest)
+	if err != nil || loaded[0].contentID == firstContentID {
+		t.Fatalf("changed workflow content identity = %q, %v", loaded[0].contentID, err)
+	}
 	if _, err := parseBatchValidationArgs([]string{"--manifest", "manifest"}); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("missing options error = %v", err)
 	}
-	baseArgs := []string{"--manifest", "manifest", "--output-dir", "reports", "--corpus-id", "corpus"}
+	baseArgs := []string{"--manifest", "manifest", "--output-dir", "reports", "--corpus-id", "corpus", "--action-resolution-snapshot", "snapshot"}
 	if _, err := parseBatchValidationArgs(append(append([]string{}, baseArgs...), "--action-cache-max-bytes", "1024")); err == nil || !strings.Contains(err.Error(), "requires --action-cache-dir") {
 		t.Fatalf("cache budget without directory error = %v", err)
 	}
@@ -130,13 +152,26 @@ func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	if _, err := parseBatchValidationArgs(append(append([]string{}, baseArgs...), "--action-cache-dir", "cache", "--action-cache-max-bytes", "0")); err == nil || !strings.Contains(err.Error(), "positive integer") {
 		t.Fatalf("invalid cache budget error = %v", err)
 	}
+	resolutionArgs := append(append([]string{}, baseArgs...), "--refresh-action-resolution-snapshot", "--github-token-env", "GITHUB_TOKEN")
+	if options, err := parseBatchValidationArgs(resolutionArgs); err != nil || !options.refreshActionResolutionSnapshot || options.githubTokenEnv != "GITHUB_TOKEN" {
+		t.Fatalf("resolution options = %#v, %v", options, err)
+	}
+	withoutSnapshot := []string{"--manifest", "manifest", "--output-dir", "reports", "--corpus-id", "corpus", "--refresh-action-resolution-snapshot"}
+	if _, err := parseBatchValidationArgs(withoutSnapshot); err == nil || !strings.Contains(err.Error(), "action-resolution-snapshot") {
+		t.Fatalf("refresh without snapshot error = %v", err)
+	}
+	if _, err := parseBatchValidationArgs(append(append([]string{}, baseArgs...), "--github-token-env", "not-valid!")); err == nil || !strings.Contains(err.Error(), "environment variable name") {
+		t.Fatalf("invalid token environment error = %v", err)
+	}
 	options := batchValidationArgs{outputDir: root, corpusID: "record-one"}
-	base := batchValidationResultPath(options, valid, "validator-one")
+	base := batchValidationResultPath(options, valid, "validator-one", "snapshot-one")
 	variants := []string{
-		batchValidationResultPath(batchValidationArgs{outputDir: root, corpusID: "record-two"}, valid, "validator-one"),
-		batchValidationResultPath(options, valid, "validator-two"),
-		batchValidationResultPath(options, batchValidationRecord{ID: "two", Repository: valid.Repository, Path: valid.Path, Hash: valid.Hash}, "validator-one"),
-		batchValidationResultPath(options, batchValidationRecord{ID: valid.ID, Repository: valid.Repository, Path: valid.Path, Hash: "other"}, "validator-one"),
+		batchValidationResultPath(batchValidationArgs{outputDir: root, corpusID: "record-two"}, valid, "validator-one", "snapshot-one"),
+		batchValidationResultPath(options, valid, "validator-two", "snapshot-one"),
+		batchValidationResultPath(options, valid, "validator-one", "snapshot-two"),
+		batchValidationResultPath(options, batchValidationRecord{ID: "two", Repository: valid.Repository, Path: valid.Path, Hash: valid.Hash, contentID: valid.contentID}, "validator-one", "snapshot-one"),
+		batchValidationResultPath(options, batchValidationRecord{ID: valid.ID, Repository: valid.Repository, Path: valid.Path, Hash: "other", contentID: valid.contentID}, "validator-one", "snapshot-one"),
+		batchValidationResultPath(options, batchValidationRecord{ID: valid.ID, Repository: valid.Repository, Path: valid.Path, Hash: valid.Hash, contentID: "content-two"}, "validator-one", "snapshot-one"),
 	}
 	for _, variant := range variants {
 		if variant == base {

@@ -25,9 +25,10 @@ import (
 const batchResultIdentity = "buildkite-gha-corpus-result/v1"
 
 type batchValidationArgs struct {
-	manifest, outputDir, corpusID, actionCacheDir string
-	jobs                                          int
-	actionCacheMaxBytes                           int64
+	manifest, outputDir, corpusID, actionCacheDir, actionResolutionSnapshot, githubTokenEnv string
+	jobs                                                                                    int
+	actionCacheMaxBytes                                                                     int64
+	refreshActionResolutionSnapshot                                                         bool
 }
 
 type batchValidationRecord struct {
@@ -36,6 +37,8 @@ type batchValidationRecord struct {
 	Path       string `json:"path"`
 	Hash       string `json:"hash"`
 	Source     string `json:"source"`
+	contentID  string
+	content    []byte
 }
 
 type synchronizedWriter struct {
@@ -58,11 +61,21 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 	if err != nil {
 		return usageError(stderr, "validate-batch: %v", err)
 	}
-	var sourceOptions []actionsource.Option
+	var resolverOptions, storeOptions []actionsource.Option
 	if options.actionCacheMaxBytes > 0 {
-		sourceOptions = append(sourceOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
+		storeOptions = append(storeOptions, actionsource.WithCacheMaxBytes(options.actionCacheMaxBytes))
 	}
-	actionSource, cleanup, err := newHostedActionSource(options.actionCacheDir, sourceOptions)
+	if options.actionResolutionSnapshot != "" {
+		resolverOptions = append(resolverOptions, actionsource.WithActionResolutionSnapshot(options.actionResolutionSnapshot, options.refreshActionResolutionSnapshot))
+	}
+	if options.githubTokenEnv != "" {
+		token, ok := os.LookupEnv(options.githubTokenEnv)
+		if !ok || token == "" {
+			return usageError(stderr, "validate-batch: --github-token-env names an unset or empty environment variable")
+		}
+		resolverOptions = append(resolverOptions, actionsource.WithGitHubAPITokenProvider(func(context.Context) (string, error) { return token, nil }))
+	}
+	actionSource, cleanup, resolutionSnapshotID, err := newHostedActionSourceWithSnapshot(options.actionCacheDir, resolverOptions, storeOptions)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "buildkite-gha: validate-batch: %v\n", err)
 		return 1
@@ -92,7 +105,7 @@ func validateBatch(args []string, stderr io.Writer, version string) int {
 				if ctx.Err() != nil {
 					return
 				}
-				resultPath := batchValidationResultPath(options, record, distributionDigest)
+				resultPath := batchValidationResultPath(options, record, distributionDigest, resolutionSnapshotID)
 				if validBatchValidationResult(resultPath, record.Source) {
 					resumed.Add(1)
 					continue
@@ -138,13 +151,17 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 	seen := map[string]bool{}
 	for i := 0; i < len(args); i++ {
 		name := args[i]
-		if name != "--manifest" && name != "--output-dir" && name != "--corpus-id" && name != "--action-cache-dir" && name != "--action-cache-max-bytes" && name != "--jobs" {
+		if name != "--manifest" && name != "--output-dir" && name != "--corpus-id" && name != "--action-cache-dir" && name != "--action-cache-max-bytes" && name != "--action-resolution-snapshot" && name != "--refresh-action-resolution-snapshot" && name != "--github-token-env" && name != "--jobs" {
 			return options, fmt.Errorf("unknown option %q", name)
 		}
 		if seen[name] {
 			return options, fmt.Errorf("%s may only be specified once", name)
 		}
 		seen[name] = true
+		if name == "--refresh-action-resolution-snapshot" {
+			options.refreshActionResolutionSnapshot = true
+			continue
+		}
 		i++
 		if i == len(args) || strings.TrimSpace(args[i]) == "" {
 			return options, fmt.Errorf("%s requires a value", name)
@@ -164,6 +181,13 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 				return options, fmt.Errorf("--action-cache-max-bytes must be a positive integer")
 			}
 			options.actionCacheMaxBytes = maxBytes
+		case "--action-resolution-snapshot":
+			options.actionResolutionSnapshot = args[i]
+		case "--github-token-env":
+			if !validEnvironmentName(args[i]) {
+				return options, fmt.Errorf("--github-token-env requires an environment variable name")
+			}
+			options.githubTokenEnv = args[i]
 		case "--jobs":
 			jobs, parseErr := strconv.Atoi(args[i])
 			if parseErr != nil || jobs <= 0 {
@@ -172,13 +196,22 @@ func parseBatchValidationArgs(args []string) (batchValidationArgs, error) {
 			options.jobs = jobs
 		}
 	}
-	if options.manifest == "" || options.outputDir == "" || options.corpusID == "" {
-		return options, fmt.Errorf("--manifest, --output-dir, and --corpus-id are required")
+	if options.manifest == "" || options.outputDir == "" || options.corpusID == "" || options.actionResolutionSnapshot == "" {
+		return options, fmt.Errorf("--manifest, --output-dir, --corpus-id, and --action-resolution-snapshot are required")
 	}
 	if options.actionCacheMaxBytes > 0 && options.actionCacheDir == "" {
 		return options, fmt.Errorf("--action-cache-max-bytes requires --action-cache-dir")
 	}
 	return options, nil
+}
+
+func validEnvironmentName(name string) bool {
+	for i, value := range name {
+		if value != '_' && (value < 'A' || value > 'Z') && (value < 'a' || value > 'z') && (i == 0 || value < '0' || value > '9') {
+			return false
+		}
+	}
+	return name != ""
 }
 
 func loadBatchValidationManifest(path string) ([]batchValidationRecord, error) {
@@ -211,6 +244,13 @@ func loadBatchValidationManifest(path string) ([]batchValidationRecord, error) {
 			return nil, fmt.Errorf("manifest line %d repeats id %q", line, record.ID)
 		}
 		seen[record.ID] = true
+		contents, err := os.ReadFile(record.Source)
+		if err != nil {
+			return nil, fmt.Errorf("manifest line %d source: %w", line, err)
+		}
+		contentDigest := sha256.Sum256(contents)
+		record.contentID = hex.EncodeToString(contentDigest[:])
+		record.content = contents
 		records = append(records, record)
 	}
 	if err := scanner.Err(); err != nil {
@@ -222,8 +262,8 @@ func loadBatchValidationManifest(path string) ([]batchValidationRecord, error) {
 	return records, nil
 }
 
-func batchValidationResultPath(options batchValidationArgs, record batchValidationRecord, validatorDigest string) string {
-	identity := strings.Join([]string{batchResultIdentity, options.corpusID, validatorDigest, record.ID, record.Repository, record.Path, record.Hash}, "\x00")
+func batchValidationResultPath(options batchValidationArgs, record batchValidationRecord, validatorDigest, resolutionSnapshotID string) string {
+	identity := strings.Join([]string{batchResultIdentity, options.corpusID, validatorDigest, resolutionSnapshotID, record.ID, record.Repository, record.Path, record.Hash, record.contentID}, "\x00")
 	digest := sha256.Sum256([]byte(identity))
 	key := hex.EncodeToString(digest[:])
 	return filepath.Join(options.outputDir, key[:2], key+".json")
@@ -284,7 +324,7 @@ func writeBatchValidationResult(path string, record batchValidationRecord, versi
 	temporaryPath := temporary.Name()
 	defer func() { _ = os.Remove(temporaryPath) }()
 	out := processingOutput{command: "validate-batch", format: "json", reports: temporary, stderr: stderr}
-	_ = validateAllEvents(out, record.Source, version, actionCacheDir, runtime, stderr)
+	_ = validateAllEventsSource(out, record.Source, record.content, version, actionCacheDir, runtime, stderr)
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("sync report: %w", err)

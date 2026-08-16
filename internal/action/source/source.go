@@ -131,6 +131,7 @@ type config struct {
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
 	mutableRefs                         *mutableRefCache
+	resolutionSnapshot                  *actionResolutionSnapshot
 	cacheMaxBytes                       int64
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
@@ -157,6 +158,18 @@ func WithGitHubActionSourceTokenProvider(repository string, provider func(contex
 			return fmt.Errorf("invalid GitHub action source credential provider")
 		}
 		c.credential = &actionSourceCredential{repository: strings.ToLower(repository), provider: provider}
+		return nil
+	}
+}
+
+// WithGitHubAPITokenProvider authenticates public action resolution without a
+// repository-scoped token exception. It is intended for explicit local tools.
+func WithGitHubAPITokenProvider(provider func(context.Context) (string, error)) Option {
+	return func(c *config) error {
+		if provider == nil {
+			return fmt.Errorf("invalid GitHub API credential provider")
+		}
+		c.credential = &actionSourceCredential{provider: provider}
 		return nil
 	}
 }
@@ -245,7 +258,7 @@ func NewResolver(client *http.Client, opts ...Option) (*Resolver, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	if c.mutableRefs == nil && c.api.String() == defaultAPI {
+	if c.mutableRefs == nil && c.resolutionSnapshot == nil && c.api.String() == defaultAPI {
 		if root, cacheErr := os.UserCacheDir(); cacheErr == nil {
 			c.mutableRefs, _ = newMutableRefCache(filepath.Join(root, "buildkite-gha", "action-ref-resolutions", "v1"), mutableRefTTL)
 		}
@@ -272,10 +285,21 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if shaRE.MatchString(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
+	if r.cfg.resolutionSnapshot != nil {
+		return r.cfg.resolutionSnapshot.resolve(ctx, ref, r.resolveMutable)
+	}
 	if r.cfg.mutableRefs != nil {
 		return r.cfg.mutableRefs.resolve(ctx, ref, r.resolveMutable)
 	}
 	return r.resolveMutable(ctx, ref)
+}
+
+// ResolutionSnapshotID identifies the immutable mutable-ref generation.
+func (r *Resolver) ResolutionSnapshotID() string {
+	if r == nil || r.cfg.resolutionSnapshot == nil {
+		return ""
+	}
+	return r.cfg.resolutionSnapshot.generation
 }
 
 func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved, error) {
