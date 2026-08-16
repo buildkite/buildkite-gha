@@ -59,6 +59,19 @@ buildkite-gha validate \
 
 `--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload.
 
+Reuse downloaded immutable action source across profile validation runs:
+
+```sh
+mkdir -p .buildkite-gha-action-cache
+buildkite-gha validate \
+  --profile hosted \
+  --all-events \
+  --action-cache-dir .buildkite-gha-action-cache \
+  .github/workflows/ci.yml
+```
+
+`--action-cache-dir` is available only with `--profile hosted`. The cache stores verified action source by immutable commit. Mutable refs still resolve through GitHub on every run, so a moved tag or branch selects its current commit. Do not share one writable cache between mutually untrusted validation jobs.
+
 Inspect the aggregate result and each event outcome:
 
 ```sh

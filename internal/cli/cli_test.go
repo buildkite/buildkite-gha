@@ -7619,6 +7619,15 @@ func TestVerifyBuildkiteTargetFailsClosed(t *testing.T) {
 }
 
 func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
+	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", "one", "--action-cache-dir", "two", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
+		t.Fatalf("validateActionCacheArgs() error = %v, want duplicate cache directory error", err)
+	}
+	if _, _, err := validateActionCacheArgs([]string{"--action-cache-dir", ""}); err == nil || !strings.Contains(err.Error(), "requires a path") {
+		t.Fatalf("validateActionCacheArgs() error = %v, want empty cache directory error", err)
+	}
+	if args, cacheDir, err := validateActionCacheArgs([]string{"--profile", "hosted", "--action-cache-dir", "cache", "--all-events", "workflow.yml"}); err != nil || cacheDir != "cache" || !slices.Equal(args, []string{"--profile", "hosted", "--all-events", "workflow.yml"}) {
+		t.Fatalf("validateActionCacheArgs() = %q, %q, %v", args, cacheDir, err)
+	}
 	if _, err := runJobArgs([]string{"--plan", "one", "--plan", "two"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("runJobArgs() error = %v, want duplicate option error", err)
 	}
@@ -7766,6 +7775,18 @@ func TestUploadArgsParsesPlatformRuntimeDistributions(t *testing.T) {
 		if _, err := parseUploadArgs(test.args); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("parseUploadArgs(%#v) error = %v, want %q", test.args, err, test.want)
 		}
+	}
+}
+
+func TestValidateActionCacheRequiresHostedProfile(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"validate", "--action-cache-dir", t.TempDir(), "workflow.yml"}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "requires --profile hosted") {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	stderr.Reset()
+	missing := filepath.Join(t.TempDir(), "missing")
+	if code := Run([]string{"validate", "--profile", "hosted", "--event", "push", "--action-cache-dir", missing, "workflow.yml"}, &stdout, &stderr, "dev"); code != 2 || !strings.Contains(stderr.String(), "cache root is not a non-symlink directory") {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
 }
 
