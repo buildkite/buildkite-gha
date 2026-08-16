@@ -1076,6 +1076,28 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	}
 }
 
+func TestActionResolutionSnapshotRejectsMissingCurrentGeneration(t *testing.T) {
+	root := t.TempDir()
+	resolver, err := NewResolver(nil, WithActionResolutionSnapshot(root, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstGeneration := resolver.ResolutionSnapshotID()
+	if err := os.Remove(filepath.Join(root, "current.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(nil, WithActionResolutionSnapshot(root, false)); err == nil || !strings.Contains(err.Error(), "current generation is missing") {
+		t.Fatalf("missing current generation error = %v", err)
+	}
+	refreshed, err := NewResolver(nil, WithActionResolutionSnapshot(root, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshed.ResolutionSnapshotID() == firstGeneration {
+		t.Fatal("refresh reused generation after the current pointer was removed")
+	}
+}
+
 func TestActionResolutionSnapshotPersistsOnlyDefinitiveMissingRefs(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		var requests atomic.Int32

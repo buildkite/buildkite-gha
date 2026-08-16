@@ -88,6 +88,15 @@ func newActionResolutionSnapshot(root string, refresh bool) (*actionResolutionSn
 	if !refresh && currentErr != nil && !errors.Is(currentErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("read action resolution snapshot current generation: %w", currentErr)
 	}
+	if !refresh && errors.Is(currentErr, os.ErrNotExist) {
+		generations, err := os.ReadDir(filepath.Join(absolute, "generations"))
+		if err == nil && len(generations) > 0 {
+			return nil, fmt.Errorf("action resolution snapshot current generation is missing")
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read action resolution snapshot generations: %w", err)
+		}
+	}
 	if refresh || errors.Is(currentErr, os.ErrNotExist) {
 		generation, err := newActionResolutionGeneration()
 		if err != nil {
