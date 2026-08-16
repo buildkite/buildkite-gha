@@ -221,29 +221,47 @@ func batchValidationResultPath(options batchValidationArgs, record batchValidati
 }
 
 func validBatchValidationResult(path, workflow string) bool {
+	report, valid := loadBatchValidationResult(path, workflow)
+	if !valid || report.Validation.Result == "indeterminate" {
+		return false
+	}
+	for _, evaluation := range report.Evaluations {
+		if evaluation.Report.Result == "indeterminate" {
+			return false
+		}
+	}
+	return true
+}
+
+func validBatchProcessingReport(path, workflow string) bool {
+	_, valid := loadBatchValidationResult(path, workflow)
+	return valid
+}
+
+func loadBatchValidationResult(path, workflow string) (compatibility.ProcessingReportV3, bool) {
 	file, err := os.Open(path)
 	if err != nil {
-		return false
+		return compatibility.ProcessingReportV3{}, false
 	}
 	defer func() { _ = file.Close() }()
 	var report compatibility.ProcessingReportV3
 	decoder := json.NewDecoder(file)
 	if decoder.Decode(&report) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return false
+		return compatibility.ProcessingReportV3{}, false
 	}
 	if report.Schema != compatibility.ProcessingSchemaV3 || report.Profile != hostedProfile || report.Workflow != workflow ||
-		report.Validation.Schema != compatibility.ProcessingSchema || report.Validation.Result == "indeterminate" {
-		return false
+		report.Validation.Schema != compatibility.ProcessingSchema {
+		return compatibility.ProcessingReportV3{}, false
 	}
 	seen := make(map[string]bool, len(report.Evaluations))
 	for _, evaluation := range report.Evaluations {
-		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema || evaluation.Report.Result == "indeterminate" ||
+		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema ||
 			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
-			return false
+			return compatibility.ProcessingReportV3{}, false
 		}
 		seen[evaluation.Event] = true
 	}
-	return true
+	return report, true
 }
 
 func writeBatchValidationResult(path string, record batchValidationRecord, version, actionCacheDir string, runtime *profileValidationRuntime, stderr io.Writer) error {
@@ -265,7 +283,7 @@ func writeBatchValidationResult(path string, record batchValidationRecord, versi
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close report: %w", err)
 	}
-	if !validBatchValidationResult(temporaryPath, record.Source) {
+	if !validBatchProcessingReport(temporaryPath, record.Source) {
 		return fmt.Errorf("validation did not produce a valid processing report")
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
