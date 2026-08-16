@@ -289,8 +289,13 @@ func TestEvaluateActionInputDefaultMatchesGitHubEqualityAndTemplateBoundaries(t 
 		{name: "missing member is null", template: "${{ matrix.missing == null && 'yes' || 'no' }}", context: Context{Matrix: map[string]any{}}, want: "yes"},
 		{name: "primitive string conversion", template: "${{ startsWith(123, '12') }}", want: "true"},
 		{name: "format", template: "${{ format('{0}-{1}', 'release', 2) }}", want: "release-2"},
+		{name: "JSON number formatting", template: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
+		{name: "JSON exponent formatting", template: "${{ format('{0}', fromJSON('1e20')) }}", want: "1E+20"},
+		{name: "JSON negative zero formatting", template: "${{ format('{0}', fromJSON('-0')) }}", want: "0"},
 		{name: "array membership", template: "${{ contains(fromJSON('[\"push\",2]'), 2) }}", want: "true"},
 		{name: "join", template: "${{ join(fromJSON('[\"one\",2]'), '-') }}", want: "one-2"},
+		{name: "lazy empty join separator", template: "${{ join(fromJSON('[]'), fromJSON('bad')) }}", want: ""},
+		{name: "lazy single join separator", template: "${{ join(fromJSON('[\"one\"]'), fromJSON('bad')) }}", want: "one"},
 		{name: "lazy case", template: "${{ case(true, 'selected', github.missing) }}", want: "selected"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -320,7 +325,7 @@ func TestEvaluateIsSinglePass(t *testing.T) {
 		"${{ steps.Producer.conclusion }}":    "success",
 		"${{ needs.Producer.outputs.value }}": literal,
 		"${{ needs.Producer.result }}":        "success",
-		"${{ matrix.number }}":                "1e3",
+		"${{ matrix.number }}":                "1000",
 		"before ${{ inputs.value }} after":    "before " + literal + " after",
 	}
 	for template, want := range tests {
@@ -586,6 +591,9 @@ func TestEvaluateStepSupportsCompoundRuntimeExpressions(t *testing.T) {
 	}
 	if _, err := EvaluateStep("${{ github.token || '' }}", context); err == nil || !strings.Contains(err.Error(), `unavailable github value "token"`) {
 		t.Fatalf("EvaluateStep() github.token error = %v", err)
+	}
+	if _, err := EvaluateStep("${{ steps['missing'].outputs.value }}", context); err == nil || !strings.Contains(err.Error(), `unavailable step "missing"`) {
+		t.Fatalf("EvaluateStep() indexed missing step error = %v", err)
 	}
 	if _, err := Evaluate("${{ contains('abc', 'a') }}", context); err == nil {
 		t.Fatal("Evaluate() broadened general runtime interpolation")
@@ -1113,7 +1121,9 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ endsWith('ref', true) }}", want: false},
 		{expression: "${{ contains(fromJSON('[\"push\",\"pull_request\"]'), 'PUSH') }}", want: true},
 		{expression: "${{ format('{0}-{1}', github.event_name, 2) }}", want: "push-2"},
+		{expression: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
+		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
 		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
 	}

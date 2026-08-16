@@ -3,6 +3,7 @@ package expression
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -142,7 +143,7 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 			return joined, true, nil
 		}
 		separator := ","
-		if argc == 2 {
+		if argc == 2 && len(items) > 1 {
 			value, err := evaluator.evaluate(node.Args[1])
 			if err != nil {
 				return nil, true, err
@@ -213,7 +214,11 @@ func expressionString(value any) (string, bool) {
 	case string:
 		return value, true
 	case json.Number:
-		return value.String(), true
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil && !math.IsInf(parsed, 0) {
+			return "", false
+		}
+		return expressionNumberString(parsed), true
 	}
 	reflected := reflect.ValueOf(value)
 	if !reflected.IsValid() {
@@ -221,13 +226,28 @@ func expressionString(value any) (string, bool) {
 	}
 	switch reflected.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return strconv.FormatInt(reflected.Int(), 10), true
+		return expressionNumberString(float64(reflected.Int())), true
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return strconv.FormatUint(reflected.Uint(), 10), true
+		return expressionNumberString(float64(reflected.Uint())), true
 	case reflect.Float32, reflect.Float64:
-		return strconv.FormatFloat(reflected.Float(), 'g', -1, reflected.Type().Bits()), true
+		return expressionNumberString(reflected.Float()), true
 	default:
 		return "", false
+	}
+}
+
+func expressionNumberString(value float64) string {
+	switch {
+	case value == 0:
+		return "0"
+	case math.IsNaN(value):
+		return "NaN"
+	case math.IsInf(value, 1):
+		return "Infinity"
+	case math.IsInf(value, -1):
+		return "-Infinity"
+	default:
+		return strconv.FormatFloat(value, 'G', 15, 64)
 	}
 }
 

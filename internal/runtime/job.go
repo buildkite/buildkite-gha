@@ -139,6 +139,33 @@ type remotePreparationStatus struct {
 	unsuccessful bool
 }
 
+type remotePreparationTimeout struct {
+	ctx      context.Context
+	step     plan.Step
+	eval     expression.Context
+	resolved bool
+	bounded  context.Context
+	cancel   context.CancelFunc
+}
+
+func (t *remotePreparationTimeout) context() (context.Context, error) {
+	if !t.resolved {
+		step, err := evaluateStepTimeout(t.step, t.eval)
+		if err != nil {
+			return nil, fmt.Errorf("controls: %w", err)
+		}
+		t.bounded, t.cancel = stepContext(t.ctx, step.TimeoutMinutes)
+		t.resolved = true
+	}
+	return t.bounded, nil
+}
+
+func (t *remotePreparationTimeout) close() {
+	if t != nil && t.cancel != nil {
+		t.cancel()
+	}
+}
+
 const node16DeprecationMessage = "Node.js 16 actions are deprecated. Please update the following actions to use Node.js 20: %s. For more information see: https://github.blog/changelog/2023-09-22-github-actions-transitioning-from-node-16-to-node-20/."
 
 type node16DeprecationWarnings struct {
@@ -612,7 +639,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			preCtx, cancelPre := stepContext(runCtx, step.TimeoutMinutes)
 			bindHashFilesContext(preCtx, &preEval)
 			wasUnsuccessful := preStatus.unsuccessful
-			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil)
+			preResult, preErr := r.prepareRemoteAction(preCtx, processor, workspace, step, strconv.Itoa(stepIndex), preEnv, preEval, &posts, actions, prepared, &preStatus, true, nil, nil)
 			commitResultEnvironment(jobResult.Env, preResult)
 			mergeInto(jobResult.State, preResult.State)
 			appendJobSummary(&jobResult.Summary, &jobResult.summaryTruncated, preResult.Summary, preResult.summaryTruncated)
@@ -1585,7 +1612,7 @@ func (r *Runner) actionContainerMounts(ctx context.Context, actions *actionLockR
 	return out, nil
 }
 
-func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error) (Result, error) {
+func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProcessor, workspace string, step plan.Step, invocationID string, jobEnv map[string]string, eval expression.Context, posts *postRegistry, actions *actionLockResolver, prepared remotePreparations, status *remotePreparationStatus, workflowStep bool, inheritedEvalErr error, inheritedTimeout *remotePreparationTimeout) (Result, error) {
 	result := newResult()
 	eval.JobStatus = jobStatusValue(status.unsuccessful, ctx.Err() != nil)
 	evaluate := evaluateMap
@@ -1657,6 +1684,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 					return result, fmt.Errorf("controls: %w", err)
 				}
 				phaseCtx, cancelPhase = stepContext(ctx, resolvedStep.TimeoutMinutes)
+			} else if inheritedTimeout != nil {
+				phaseCtx, err = inheritedTimeout.context()
+				if err != nil {
+					return result, err
+				}
 			}
 			defer cancelPhase()
 			inputs, err := evaluate(step.With, eval)
@@ -1696,6 +1728,11 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 		if compositeEvalErr == nil {
 			inputs, compositeEvalErr = resolveActionInputs(action, inputs, eval)
 		}
+		preparationTimeout := inheritedTimeout
+		if workflowStep && compositeEvalErr == nil {
+			preparationTimeout = &remotePreparationTimeout{ctx: ctx, step: step, eval: eval}
+			defer preparationTimeout.close()
+		}
 		eval.Inputs = inputs
 		compositeProcessEnv := mergeStepEnvironment(jobEnv, stepEnv)
 		compositeExpressionEnv := mergeStringMaps(eval.Env, stepEnv)
@@ -1710,7 +1747,7 @@ func (r Runner) prepareRemoteAction(ctx context.Context, processor *commandProce
 			child := plan.Step{ID: childStep.ID, Name: childStep.Name, Kind: "uses", Uses: childStep.Uses, With: childStep.With, Env: childStep.Env, Action: &plan.ActionSelector{Lock: selector.Lock}}
 			childProcessEnv := mergeStepEnvironment(compositeProcessEnv, result.Env)
 			eval.Env = mergeStringMaps(compositeExpressionEnv, result.Env)
-			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr)
+			childResult, childErr := r.prepareRemoteAction(ctx, processor, workspace, child, fmt.Sprintf("%s/%d", invocationID, i), childProcessEnv, eval, posts, actions, prepared, status, false, compositeEvalErr, preparationTimeout)
 			mergeInto(result.Env, childResult.Env)
 			if childResult.pathBaseSet {
 				result.pathBase = childResult.pathBase

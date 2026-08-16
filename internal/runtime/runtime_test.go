@@ -4525,6 +4525,67 @@ printf '%s\n' 'result=nested-ok' >> "$GITHUB_OUTPUT"
 	}
 }
 
+func TestExpressionTimeoutBoundsNestedCompositePre(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: nested pre timeout\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - uses: "+remoteLifecycleUses("child")+"\n")
+	writeFixtureFile(t, remote, "child/action.yml", "name: child\nruns:\n  using: node24\n  pre: pre.js\n  main: main.js\n")
+	writeFixtureFile(t, remote, "child/pre.js", "")
+	writeFixtureFile(t, remote, "child/main.js", "")
+	fakeNode := filepath.Join(workspace, "node24")
+	writeFixtureFile(t, workspace, "node24", `#!/bin/sh
+set -eu
+if [ "${1:-}" = --version ]; then echo v24.0.0; exit 0; fi
+if [ "$(basename "$(dirname "$1")")/$(basename "$1")" = child/pre.js ]; then sleep 5; fi
+`)
+	if err := os.Chmod(fakeNode, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := digestTree(t, remote)
+	rootID, childID := remoteLifecycleLockID(1), remoteLifecycleLockID(2)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, TimeoutMinutesExpression: "${{ matrix.timeout }}",
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Matrix = map[string]any{"timeout": 0.001}
+	job.Actions = []plan.ActionLock{
+		remoteLifecycleLock(rootID, "root", digest, map[string]plan.ActionSelector{remoteLifecycleUses("child"): {Lock: childID}}),
+		remoteLifecycleLock(childID, "child", digest, nil),
+	}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	started := time.Now()
+	_, err := (Runner{Node24: fakeNode, Actions: materializer}).RunJob(context.Background(), job, workspace)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunJob() nested pre timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("RunJob() nested pre took %s after expression timeout", elapsed)
+	}
+}
+
+func TestSkippedRemoteCompositeWithoutPreDoesNotEvaluateTimeout(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/test.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: skipped composite timeout\n")
+	remote := t.TempDir()
+	writeFixtureFile(t, remote, "root/action.yml", "name: root\nruns:\n  using: composite\n  steps:\n    - shell: sh\n      run: true\n")
+	digest := digestTree(t, remote)
+	rootID := remoteLifecycleLockID(1)
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "root", Kind: "uses", Uses: remoteLifecycleUses("root"), Action: &plan.ActionSelector{Lock: rootID}, Condition: "false", TimeoutMinutesExpression: "${{ fromJSON('invalid') }}",
+	}})
+	job.Schema = plan.Schema
+	job.RequiredCapabilities = []string{"network"}
+	job.Actions = []plan.ActionLock{remoteLifecycleLock(rootID, "root", digest, nil)}
+	materializer := &fakeActionMaterializer{result: source.Materialized{RepositoryRoot: remote, SourceDigest: digest}}
+	if result, err := (Runner{Actions: materializer}).RunJob(context.Background(), job, workspace); err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() skipped composite result = %#v, error = %v", result, err)
+	}
+}
+
 func TestNestedCompositePreservesInheritedJobStatus(t *testing.T) {
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/test.yml"

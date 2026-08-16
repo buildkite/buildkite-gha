@@ -36,12 +36,13 @@ const (
 )
 
 type evaluationPolicy struct {
-	allowLiterals bool
-	allowNot      bool
-	allowLogical  bool
-	allowCompare  bool
-	allowFunction bool
-	logicalBool   bool
+	allowLiterals                 bool
+	allowNot                      bool
+	allowLogical                  bool
+	allowCompare                  bool
+	allowFunction                 bool
+	logicalBool                   bool
+	resolveStaticIndexedReference bool
 }
 
 func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
@@ -54,7 +55,7 @@ func newSemanticEvaluator(surface evaluationSurface) semanticEvaluator {
 	case actionInputDefaultSurface:
 		policy = evaluationPolicy{allowLiterals: true, allowLogical: true, allowCompare: true, allowFunction: true}
 	case stepRuntimeSurface:
-		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true}
+		policy = evaluationPolicy{allowLiterals: true, allowNot: true, allowLogical: true, allowCompare: true, allowFunction: true, resolveStaticIndexedReference: true}
 	case runtimeReferenceSurface:
 	}
 	return semanticEvaluator{policy: policy}
@@ -168,7 +169,7 @@ func (e *semanticEvaluator) evaluate(node actionlint.ExprNode) (any, error) {
 	case *actionlint.VariableNode, *actionlint.ObjectDerefNode:
 		root, path, err := referencePath(node)
 		if err == nil {
-			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) {
+			if _, object := node.(*actionlint.ObjectDerefNode); object && e.resolveRoot != nil && expressionReferenceUsesIndex(node) && !e.policy.resolveStaticIndexedReference {
 				return e.evaluateAccess(node)
 			}
 			if _, whole := node.(*actionlint.VariableNode); whole && e.resolveRoot != nil {
