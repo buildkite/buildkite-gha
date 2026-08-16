@@ -101,6 +101,7 @@ type JobInstance struct {
 	Platform                Platform                `json:"-"`
 	RuntimeImage            string                  `json:"runtime_image,omitempty"`
 	Matrix                  map[string]any          `json:"matrix,omitempty"`
+	Inputs                  map[string]any          `json:"inputs,omitempty"`
 	FailFast                *bool                   `json:"fail_fast,omitempty"`
 	MaxParallel             *int                    `json:"max_parallel,omitempty"`
 	ConcurrencyGroup        string                  `json:"concurrency_group,omitempty"`
@@ -564,6 +565,7 @@ instances:
 				RequiredSecrets:         secrets,
 				GitHubToken:             githubToken,
 				Matrix:                  instance.Matrix,
+				Inputs:                  cloneAnyMap(instance.Inputs),
 				Vars:                    cloneMap(ir.Vars),
 				Dependencies:            append([]string(nil), instance.Needs...),
 				NeedSources:             needSources,
@@ -1020,6 +1022,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 	sourceRoots := make(map[string]string, len(resolved))
 	secretAuthorities := make(map[string]bool, len(resolved))
 	needBindings := make(map[string]map[string]needBinding, len(resolved))
+	inputs := make(map[string]map[string]any, len(resolved))
 	var diagnostics []error
 	failedJobs := make(map[string]bool, len(resolved))
 	for _, sourced := range resolved {
@@ -1034,6 +1037,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 		sourceRoots[job.ID] = sourced.root
 		secretAuthorities[job.ID] = sourced.secretAuthority
 		needBindings[job.ID] = sourced.needBindings
+		inputs[job.ID] = sourced.inputs
 		if err := supported(sourced.path, job); err != nil {
 			diagnostics = append(diagnostics, err)
 			failedJobs[job.ID] = true
@@ -1145,6 +1149,7 @@ func expand(path string, source []byte, parsed *workflow.Workflow, context expre
 				Key:                     key,
 				LogicalJobID:            job.ID,
 				Matrix:                  matrix,
+				Inputs:                  cloneAnyMap(inputs[id]),
 				FailFast:                job.FailFast,
 				MaxParallel:             job.MaxParallel,
 				Steps:                   append([]workflow.Step(nil), instanceJob.Steps...),

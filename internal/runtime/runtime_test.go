@@ -774,6 +774,23 @@ func TestRunJobUnresolvedDockerActionUsesFakeBackend(t *testing.T) {
 	}
 }
 
+func TestRunJobEvaluatesIndexedWorkflowInputs(t *testing.T) {
+	workspace := t.TempDir()
+	workflowPath := ".github/workflows/inputs.yml"
+	writeFixtureFile(t, workspace, workflowPath, "name: inputs\n")
+	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
+		ID: "check", Kind: "run", Command: `test "$VALUE" = dispatched`,
+		Env: map[string]string{"VALUE": "${{ inputs[env.KEY] }}"},
+	}})
+	job.Inputs = map[string]any{"label": "dispatched"}
+	job.Env = map[string]string{"KEY": "label"}
+	var logs bytes.Buffer
+	result, err := (Runner{Stdout: &logs, Stderr: &logs}).RunJob(context.Background(), job, workspace)
+	if err != nil || result.Conclusion != "success" {
+		t.Fatalf("RunJob() result = %#v, error = %v, logs = %q", result, err, logs.String())
+	}
+}
+
 func TestRunJobDoesNotTolerateDockerActionCleanupFailure(t *testing.T) {
 	requireLinuxAMD64(t)
 	fake := newFakeDocker(t, "leftover")

@@ -260,7 +260,9 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 			return fmt.Errorf("whole condition context %q is unsupported", root)
 		}
 	case "inputs":
-		return fmt.Errorf("computed or whole inputs access is unsupported")
+		if _, whole := node.(*actionlint.VariableNode); whole {
+			return fmt.Errorf("whole condition context %q is unsupported", root)
+		}
 	case "steps":
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)

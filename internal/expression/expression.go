@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -207,18 +208,7 @@ func githubNumber(value any) (float64, bool) {
 		parsed, err := strconv.ParseFloat(value.String(), 64)
 		return parsed, err == nil || math.IsInf(parsed, 0)
 	case string:
-		if strings.TrimSpace(value) == "" {
-			return 0, true
-		}
-		decoded, err := decodeJSONValue(value)
-		if err != nil {
-			return math.NaN(), true
-		}
-		number, ok := decoded.(float64)
-		if !ok {
-			return math.NaN(), true
-		}
-		return number, true
+		return parseExpressionNumber(value), true
 	default:
 		reflected := reflect.ValueOf(value)
 		switch reflected.Kind() {
@@ -232,6 +222,43 @@ func githubNumber(value any) (float64, bool) {
 			return math.NaN(), false
 		}
 	}
+}
+
+var decimalExpressionNumber = regexp.MustCompile(`^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$`)
+
+func parseExpressionNumber(source string) float64 {
+	value := strings.TrimSpace(source)
+	if value == "" {
+		return 0
+	}
+	if strings.HasPrefix(value, "0x") {
+		parsed, err := strconv.ParseUint(value[2:], 16, 32)
+		if err == nil {
+			return float64(int32(parsed))
+		}
+		return math.NaN()
+	}
+	if strings.HasPrefix(value, "0o") {
+		parsed, err := strconv.ParseInt(value[2:], 8, 32)
+		if err == nil {
+			return float64(parsed)
+		}
+		return math.NaN()
+	}
+	switch value {
+	case "Infinity":
+		return math.Inf(1)
+	case "-Infinity":
+		return math.Inf(-1)
+	}
+	if !decimalExpressionNumber.MatchString(value) {
+		return math.NaN()
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil && !math.IsInf(parsed, 0) {
+		return math.NaN()
+	}
+	return parsed
 }
 
 func containsStatusFunction(node actionlint.ExprNode) bool {

@@ -422,3 +422,25 @@ func ConditionUsesContext(source, contextName string) (bool, error) {
 	})
 	return found, nil
 }
+
+// TemplateUsesContext reports whether any expression in a template references
+// a named context.
+func TemplateUsesContext(source, contextName string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		actionlint.VisitExprNode(expression, func(node, _ actionlint.ExprNode, entering bool) {
+			if !entering || found {
+				return
+			}
+			switch node.(type) {
+			case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.IndexAccessNode:
+			default:
+				return
+			}
+			root, _, _ := referencePath(node)
+			found = strings.EqualFold(root, contextName)
+		})
+		return nil
+	})
+	return found, err
+}

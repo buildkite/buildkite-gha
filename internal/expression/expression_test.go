@@ -474,6 +474,19 @@ func TestConditionUsesContextSupportsOptionalDelimiters(t *testing.T) {
 	}
 }
 
+func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
+	for _, template := range []string{"${{ inputs.enabled }}", "prefix-${{ inputs['enabled'] }}", "${{ inputs[env.KEY] }}"} {
+		usesInputs, err := TemplateUsesContext(template, "inputs")
+		if err != nil || !usesInputs {
+			t.Fatalf("TemplateUsesContext(%q) = %v, %v, want true", template, usesInputs, err)
+		}
+	}
+	usesInputs, err := TemplateUsesContext("${{ github.ref }}", "inputs")
+	if err != nil || usesInputs {
+		t.Fatalf("TemplateUsesContext(github.ref) = %v, %v, want false", usesInputs, err)
+	}
+}
+
 func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1012,7 +1025,8 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 
 func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	context := ConditionContext{
-		Vars: map[string]string{"KEY": "target"},
+		Vars:   map[string]string{"KEY": "target"},
+		Inputs: map[string]any{"target": "selected"},
 		Matrix: map[string]any{
 			"target": "selected",
 			"array":  []any{"zero", "one", "two"},
@@ -1029,6 +1043,7 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	}
 	for _, condition := range []string{
 		"matrix[vars.KEY] == 'selected'",
+		"inputs[vars.KEY] == 'selected'",
 		"fromJSON('[\"zero\",\"one\"]')[1] == 'one'",
 		"fromJSON('[1]')[4] == null",
 		"matrix.array['1'] == 'one'",
@@ -1060,7 +1075,7 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 	if err := ValidateCondition("steps.*.outcome", JobCondition); err == nil {
 		t.Fatal("ValidateCondition() allowed step projection in a job condition")
 	}
-	for _, condition := range []string{"inputs[vars.KEY]", "toJSON(vars)", "toJSON(env)"} {
+	for _, condition := range []string{"toJSON(vars)", "toJSON(env)"} {
 		if err := ValidateCondition(condition, StepCondition); err == nil {
 			t.Errorf("ValidateCondition(%q) allowed an unavailable whole or computed context", condition)
 		}
@@ -1125,9 +1140,12 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
 		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
 		{expression: "${{ toJSON(fromJSON('1e2')) }}", want: "100"},
+		{expression: "${{ toJSON(fromJSON('1e20')) }}", want: "1E+20"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
 		{expression: "${{ toJSON('<&>') }}", want: `"<&>"`},
 		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
+		{expression: "${{ '0xff' == 255 && '0o10' == 8 && 'Infinity' > 1e308 }}", want: true},
+		{expression: "${{ '0xffffffff' == -1 }}", want: true},
 	}
 	context.GitHub["ref"] = "refs/pull/42/merge"
 	context.GitHub["event"] = map[string]any{"action": "opened", "number": json.Number("0")}
@@ -1156,6 +1174,19 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 	runners, ok := got.([]any)
 	if !ok || len(runners) != 2 || runners[0] != "ubuntu-24.04" {
 		t.Fatalf("fromJSON runners = %#v", got)
+	}
+}
+
+func TestEncodeExpressionJSONSupportsNonFiniteNumbers(t *testing.T) {
+	got, err := encodeExpressionJSON(map[string]any{
+		"values": []any{math.Inf(1), math.Inf(-1), math.NaN()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "{\n  \"values\": [\n    Infinity,\n    -Infinity,\n    NaN\n  ]\n}"
+	if got != want {
+		t.Fatalf("encodeExpressionJSON() = %q, want %q", got, want)
 	}
 }
 
@@ -1189,6 +1220,26 @@ func TestEvaluateCompileSupportsIndexesAndFilters(t *testing.T) {
 		got, err := EvaluateCompile(expr, context)
 		if err != nil || !reflect.DeepEqual(got, test.want) {
 			t.Errorf("EvaluateCompile(%q) = %#v, %v, want %#v", test.expression, got, err, test.want)
+		}
+	}
+}
+
+func TestEvaluateStepSupportsIndexedWorkflowInputs(t *testing.T) {
+	context := Context{
+		WorkflowInputs: map[string]any{"label": "dispatched", "enabled": true},
+		Env:            map[string]string{"KEY": "label"},
+	}
+	for _, test := range []struct {
+		template string
+		want     string
+	}{
+		{template: "${{ inputs['label'] }}", want: "dispatched"},
+		{template: "${{ inputs[env.KEY] }}", want: "dispatched"},
+		{template: "${{ inputs.enabled }}", want: "true"},
+	} {
+		got, err := EvaluateStep(test.template, context)
+		if err != nil || got != test.want {
+			t.Errorf("EvaluateStep(%q) = %q, %v; want %q", test.template, got, err, test.want)
 		}
 	}
 }

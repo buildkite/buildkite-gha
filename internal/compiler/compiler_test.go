@@ -1202,7 +1202,7 @@ jobs:
 	}
 }
 
-func TestCompileSubstitutesStaticInputsInReusableConditions(t *testing.T) {
+func TestCompileSupportsStaticAndIndexedInputsInReusableConditions(t *testing.T) {
 	repository := t.TempDir()
 	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
 jobs:
@@ -1219,17 +1219,17 @@ jobs:
         required: true
 jobs:
   gated:
-    if: ${{ inputs.enabled && github.ref }}
+    if: ${{ inputs['enabled'] && github.ref }}
     runs-on: ubuntu-latest
     steps:
-      - run: echo ${{ inputs.enabled }} ${{ github.ref }}
+      - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
 `)
 
 	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
@@ -1289,6 +1289,26 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, test.inputs)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("applyStaticInputs() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	for _, test := range []struct {
+		name string
+		job  workflow.Job
+	}{
+		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
+		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
+		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.job.ID = "test"
+			test.job.Span = span
+			if err := rejectUnresolvedInputExpressions("workflow.yml", test.job); err == nil || !strings.Contains(err.Error(), "not statically resolvable") {
+				t.Fatalf("rejectUnresolvedInputExpressions() error = %v", err)
 			}
 		})
 	}
@@ -2977,6 +2997,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LABEL: ${{ inputs.label }}
+      INDEXED_LABEL: ${{ inputs['label'] }}
     defaults:
       run:
         shell: ${{ inputs.label }}
@@ -3004,7 +3025,7 @@ jobs:
 		t.Fatalf("compiled plans = %d, want 1", len(plans))
 	}
 	job := plans[0]
-	if job.Env["LABEL"] != "bash" || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "${{ inputs['label'] }}" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }

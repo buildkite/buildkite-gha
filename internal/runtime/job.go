@@ -345,15 +345,16 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 	processor := newCommandProcessor(r.stdout(), r.stderr())
 	r.node16Warnings = &node16DeprecationWarnings{}
 	eval := expression.Context{
-		Matrix:       job.Matrix,
-		Steps:        make(map[string]map[string]string, len(job.Steps)),
-		StepStatuses: make(map[string]expression.StepStatus, len(job.Steps)),
-		Needs:        needOutputs(job.Needs),
-		NeedResults:  needResults(job.Needs),
-		Vars:         job.Vars,
-		GitHub:       githubContext(job),
-		JobStatus:    "success",
-		Runner:       runnerContext,
+		WorkflowInputs: job.Inputs,
+		Matrix:         job.Matrix,
+		Steps:          make(map[string]map[string]string, len(job.Steps)),
+		StepStatuses:   make(map[string]expression.StepStatus, len(job.Steps)),
+		Needs:          needOutputs(job.Needs),
+		NeedResults:    needResults(job.Needs),
+		Vars:           job.Vars,
+		GitHub:         githubContext(job),
+		JobStatus:      "success",
+		Runner:         runnerContext,
 	}
 	jobResult := JobResult{Conclusion: "failure", Outputs: map[string]string{}, Env: map[string]string{}, State: map[string]string{}, Artifacts: []transport.ResultArtifact{}}
 	for _, name := range sortedKeys(job.Needs) {
@@ -367,7 +368,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			return jobResult, fmt.Errorf("prerequisite %q has invalid result %q", name, need.Result)
 		}
 	}
-	jobCondition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
+	jobCondition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Matrix: job.Matrix, Vars: job.Vars, GitHub: eval.GitHub, Runner: eval.Runner}
 	for _, need := range job.Needs {
 		jobCondition.Failure = jobCondition.Failure || need.Result == "failure"
 		jobCondition.Cancelled = jobCondition.Cancelled || need.Result == "cancelled"
@@ -725,7 +726,7 @@ func (r Runner) RunJob(ctx context.Context, job plan.Job, workspace string) (fin
 			continue
 		}
 		stepEval.Env = mergeStringMaps(stepEval.Env, stepEnv)
-		condition := expression.ConditionContext{Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
+		condition := expression.ConditionContext{Inputs: job.Inputs, Needs: eval.Needs, NeedResults: eval.NeedResults, Steps: statuses, Env: stepEval.Env, Vars: job.Vars, Matrix: job.Matrix, GitHub: eval.GitHub, Runner: eval.Runner, Services: eval.Services, Failure: runErr != nil && runCtx.Err() == nil, Unsuccessful: runErr != nil, Cancelled: evaluationCtx.Err() != nil, HashFiles: stepEval.HashFiles}
 		run, err := expression.EvaluateCondition(step.Condition, condition)
 		if err != nil {
 			execution := classifyStepExecutionWithControls(ctx, evaluationCtx, step, newResult(), fmt.Errorf("condition: %w", err), stepEval)

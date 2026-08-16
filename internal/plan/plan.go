@@ -235,6 +235,7 @@ type Job struct {
 	RequiredSecrets      []string                `json:"required_secrets,omitempty"`
 	GitHubToken          *GitHubToken            `json:"github_token,omitempty"`
 	Matrix               map[string]any          `json:"matrix,omitempty"`
+	Inputs               map[string]any          `json:"inputs,omitempty"`
 	Vars                 map[string]string       `json:"vars,omitempty"`
 	Dependencies         []string                `json:"dependencies,omitempty"`
 	NeedSources          map[string][]NeedSource `json:"need_sources,omitempty"`
@@ -448,6 +449,23 @@ func (job Job) Validate() error {
 	}
 	if len(job.Condition) > 65536 || len(job.RequiredSecrets) > 128 {
 		return fmt.Errorf("job plan condition or required secrets exceed their size limit")
+	}
+	if len(job.Inputs) > 25 {
+		return fmt.Errorf("job plan inputs exceed their size limit")
+	}
+	for name, value := range job.Inputs {
+		if name == "" || len(name) > 255 {
+			return fmt.Errorf("job plan has invalid input name")
+		}
+		switch value := value.(type) {
+		case string:
+			if len(value) > 65536 {
+				return fmt.Errorf("job plan input %q exceeds its size limit", name)
+			}
+		case bool, json.Number, int, int64, uint64, float64:
+		default:
+			return fmt.Errorf("job plan input %q has unsupported type %T", name, value)
+		}
 	}
 	capabilities := make(map[string]struct{}, len(job.RequiredCapabilities))
 	if !sort.StringsAreSorted(job.RequiredCapabilities) {

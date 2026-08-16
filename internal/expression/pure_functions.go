@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -195,14 +196,150 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 }
 
 func encodeExpressionJSON(value any) (string, error) {
+	value = expressionJSONNumbers(value)
+	var encoded strings.Builder
+	if err := writeExpressionJSON(&encoded, value, 0); err != nil {
+		return "", err
+	}
+	return encoded.String(), nil
+}
+
+func writeExpressionJSON(encoded *strings.Builder, value any, depth int) error {
+	indent := func(level int) { encoded.WriteString(strings.Repeat("  ", level)) }
+	switch value := value.(type) {
+	case json.Number:
+		encoded.WriteString(value.String())
+		return nil
+	case []any:
+		if len(value) == 0 {
+			encoded.WriteString("[]")
+			return nil
+		}
+		encoded.WriteString("[\n")
+		for i, item := range value {
+			indent(depth + 1)
+			if err := writeExpressionJSON(encoded, item, depth+1); err != nil {
+				return err
+			}
+			if i < len(value)-1 {
+				encoded.WriteByte(',')
+			}
+			encoded.WriteByte('\n')
+		}
+		indent(depth)
+		encoded.WriteByte(']')
+		return nil
+	case map[string]any:
+		if len(value) == 0 {
+			encoded.WriteString("{}")
+			return nil
+		}
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		encoded.WriteString("{\n")
+		for i, key := range keys {
+			indent(depth + 1)
+			keyJSON, err := encodeExpressionJSONScalar(key)
+			if err != nil {
+				return err
+			}
+			encoded.WriteString(keyJSON)
+			encoded.WriteString(": ")
+			if err := writeExpressionJSON(encoded, value[key], depth+1); err != nil {
+				return err
+			}
+			if i < len(keys)-1 {
+				encoded.WriteByte(',')
+			}
+			encoded.WriteByte('\n')
+		}
+		indent(depth)
+		encoded.WriteByte('}')
+		return nil
+	default:
+		scalar, err := encodeExpressionJSONScalar(value)
+		if err != nil {
+			return err
+		}
+		encoded.WriteString(scalar)
+		return nil
+	}
+}
+
+func encodeExpressionJSONScalar(value any) (string, error) {
 	var encoded bytes.Buffer
 	encoder := json.NewEncoder(&encoded)
 	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(value); err != nil {
 		return "", err
 	}
 	return strings.TrimSuffix(encoded.String(), "\n"), nil
+}
+
+func expressionJSONNumbers(value any) any {
+	switch value := value.(type) {
+	case float64:
+		return json.Number(expressionNumberString(value))
+	case float32:
+		return json.Number(expressionNumberString(float64(value)))
+	case int:
+		return json.Number(expressionNumberString(float64(value)))
+	case int64:
+		return json.Number(expressionNumberString(float64(value)))
+	case uint64:
+		return json.Number(expressionNumberString(float64(value)))
+	case json.Number:
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err == nil || math.IsInf(parsed, 0) {
+			return json.Number(expressionNumberString(parsed))
+		}
+		return value
+	case []any:
+		result := make([]any, len(value))
+		for i, item := range value {
+			result[i] = expressionJSONNumbers(item)
+		}
+		return result
+	case map[string]any:
+		result := make(map[string]any, len(value))
+		for name, item := range value {
+			result[name] = expressionJSONNumbers(item)
+		}
+		return result
+	default:
+		reflected := reflect.ValueOf(value)
+		if !reflected.IsValid() {
+			return value
+		}
+		switch reflected.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return json.Number(expressionNumberString(float64(reflected.Int())))
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return json.Number(expressionNumberString(float64(reflected.Uint())))
+		case reflect.Float32, reflect.Float64:
+			return json.Number(expressionNumberString(reflected.Float()))
+		case reflect.Array, reflect.Slice:
+			result := make([]any, reflected.Len())
+			for i := range result {
+				result[i] = expressionJSONNumbers(reflected.Index(i).Interface())
+			}
+			return result
+		case reflect.Map:
+			if reflected.Type().Key().Kind() != reflect.String {
+				return value
+			}
+			result := make(map[string]any, reflected.Len())
+			iterator := reflected.MapRange()
+			for iterator.Next() {
+				result[iterator.Key().String()] = expressionJSONNumbers(iterator.Value().Interface())
+			}
+			return result
+		}
+		return value
+	}
 }
 
 func expressionCollection(value any) ([]any, bool) {

@@ -16,6 +16,7 @@
     "required_secrets": {"type": "array", "uniqueItems": true, "maxItems": 128, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$", "not": {"const": "GITHUB_TOKEN"}}},
     "github_token": {"$ref": "#/$defs/githubToken"},
     "matrix": {"type": "object"},
+    "inputs": {"type": "object", "maxProperties": 25, "propertyNames": {"minLength": 1, "maxLength": 255}, "additionalProperties": {"type": ["string", "number", "boolean"], "maxLength": 65536}},
     "vars": {"$ref": "#/$defs/stringMap"},
     "dependencies": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/buildkiteName"}},
     "need_sources": {"type": "object", "additionalProperties": {"type": "array", "minItems": 1, "maxItems": 1024, "uniqueItems": true, "items": {"$ref": "#/$defs/needSource"}}},

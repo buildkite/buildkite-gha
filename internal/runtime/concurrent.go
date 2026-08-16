@@ -246,8 +246,13 @@ func commitResultEnvironment(env map[string]string, result Result) {
 }
 
 func cloneExpressionContext(in expression.Context) expression.Context {
+	var inputs map[string]string
+	if in.Inputs != nil {
+		inputs = cloneStrings(in.Inputs)
+	}
 	return expression.Context{
-		Inputs:           cloneStrings(in.Inputs),
+		Inputs:           inputs,
+		WorkflowInputs:   cloneAnyMap(in.WorkflowInputs),
 		Matrix:           cloneAnyMap(in.Matrix),
 		Steps:            cloneNestedStrings(in.Steps),
 		StepStatuses:     cloneStepStatuses(in.StepStatuses),

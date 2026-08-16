@@ -15,6 +15,7 @@ import (
 // Context contains the compile-time values available while evaluating a template.
 type Context struct {
 	Inputs           map[string]string
+	WorkflowInputs   map[string]any
 	Matrix           map[string]any
 	Steps            map[string]map[string]string
 	StepStatuses     map[string]StepStatus
@@ -421,7 +422,10 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 	case "vars":
 		return context.Vars, nil
 	case "inputs":
-		return context.Inputs, nil
+		if context.Inputs != nil {
+			return context.Inputs, nil
+		}
+		return context.WorkflowInputs, nil
 	case "env":
 		return context.Env, nil
 	case "runner":
@@ -519,7 +523,11 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 		}
 		return value, nil
 	case runtimeReferenceInput:
-		return findString(context.Inputs, path[0]), nil
+		if context.Inputs != nil {
+			return findString(context.Inputs, path[0]), nil
+		}
+		value, _, err := objectValue(context.WorkflowInputs, path[0])
+		return value, err
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
