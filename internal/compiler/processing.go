@@ -29,6 +29,7 @@ const (
 	CodeActionResolution   = "E_ACTION_RESOLUTION"
 	CodePlanConstruction   = "E_PLAN_CONSTRUCTION"
 	CodePipelineGeneration = "E_PIPELINE_GENERATION"
+	CodeContextRequired    = "E_CONTEXT_REQUIRED"
 	CodeEnvironment        = "E_ENVIRONMENT"
 )
 

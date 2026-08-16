@@ -867,13 +867,14 @@ buildkite-gha validate \
 
 Use `--event push`, `--event pull_request`, `--event merge_group`, `--event workflow_dispatch`, or `--event schedule` instead of `--event-path` to evaluate the hosted profile with a generated minimal snapshot. Generated snapshots are compatibility test inputs, not equivalents to real payloads. The options are mutually exclusive.
 
-Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes.
+Use `--all-events` to evaluate every declared supported event separately. Its `processing-report/v3` output preserves the event-independent result and each generated event's v2 report. Aggregate admission means every generated snapshot was admitted; it does not cover other payload shapes. A `context-required` result means compilation and hosted-policy checks passed, but generated inputs cannot measure a supported admission path, such as pull-request path filters without linked webhook and local diff evidence. It does not claim admission.
 
 The results mean:
 
 - **Compilable**: Syntax, declared triggers, and the static job graph can be translated.
 - **Not applicable**: The workflow does not declare the selected event, so upload would skip it without compiling it.
 - **Admitted**: Resolved actions and generated plans pass production policy.
+- **Context required**: A supported admission path needs evidence that this validation input does not provide.
 - **Runtime-proven**: Repository tests or hosted evidence have executed the behavior.
 
 Admission does not execute arbitrary action code. An admitted action may still depend on an unsupported GitHub service.

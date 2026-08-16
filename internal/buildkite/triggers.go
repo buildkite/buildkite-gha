@@ -1,6 +1,7 @@
 package buildkite
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -84,12 +85,17 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 // ValidateTriggerConditions validates every trigger using the same translation
 // rules as pipeline generation without selecting an effective event.
 func ValidateTriggerConditions(triggers []workflow.Trigger) error {
+	var findings []error
 	for _, trigger := range triggers {
 		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), true); err != nil {
-			return err
+			var pathFilters *UnsupportedPathFiltersError
+			if errors.As(err, &pathFilters) && pathFilters.Event == "pull_request" && pathFilters.Reason == "" {
+				continue
+			}
+			findings = append(findings, err)
 		}
 	}
-	return nil
+	return errors.Join(findings...)
 }
 
 // TranslateEventTriggerCondition validates every trigger but emits a

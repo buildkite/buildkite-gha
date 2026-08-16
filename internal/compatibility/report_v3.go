@@ -41,10 +41,12 @@ func NewProcessingReportV3(workflow, profile string, validation ProcessingReport
 
 // Finalize derives the aggregate outcome without merging event-specific
 // evidence. Admission means every generated event evaluation was admitted.
+// Context-required means the generated inputs could not measure a supported
+// admission path that requires repository evidence.
 func (r *ProcessingReportV3) Finalize() {
 	r.Validation.Finalize()
 	r.Status = r.Validation.Status
-	if r.Validation.Result != "compilable" {
+	if r.Validation.Result != "compilable" && r.Validation.Result != "context-required" {
 		r.Result = r.Validation.Result
 		return
 	}
@@ -65,8 +67,12 @@ func (r *ProcessingReportV3) Finalize() {
 			if r.Result != "indeterminate" {
 				r.Result = "incompatible"
 			}
-		case "not-admitted":
+		case "context-required":
 			if r.Result == "admitted" {
+				r.Result = "context-required"
+			}
+		case "not-admitted":
+			if r.Result == "admitted" || r.Result == "context-required" {
 				r.Result = "not-admitted"
 			}
 		case "admitted":

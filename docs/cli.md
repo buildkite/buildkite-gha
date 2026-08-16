@@ -26,7 +26,7 @@ Validate syntax, the static graph, and every declared trigger without an event:
 buildkite-gha validate .github/workflows/ci.yml
 ```
 
-This event-independent check rejects unsupported events, path filters, branch and tag filter combinations, and pull request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
+This event-independent check accepts syntactically valid pull-request path filters because linked-webhook admission can evaluate them with a verified local git diff. It rejects push path filters, malformed path filters, unsupported events, unsupported branch and tag filter combinations, and unsupported pull-request activity types. It does not resolve actions, evaluate event payload expressions, or claim hosted admission.
 
 Resolve actions and apply production policy:
 
@@ -57,7 +57,7 @@ buildkite-gha validate \
   .github/workflows/ci.yml
 ```
 
-`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload.
+`--all-events` is mutually exclusive with `--event` and `--event-path`. It does not evaluate `workflow_call` as a standalone event. Admission applies separately to each generated snapshot, not to every possible real payload. A `context-required` result means every available compilation and hosted-policy check passed, but a supported admission path needs evidence that generated snapshots do not contain. For example, pull-request path filters need linked webhook data and a verified local git diff.
 
 Reuse downloaded immutable action source across profile validation runs:
 
@@ -130,7 +130,7 @@ buildkite-gha validate \
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 Hosted validation uses the same runner preset as production upload.
 
-Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted.
+Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted. It is `context-required` when generated inputs cannot measure an otherwise supported path, unless another finding makes the workflow incompatible, not admitted, or indeterminate.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 
