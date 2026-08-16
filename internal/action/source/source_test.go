@@ -1069,6 +1069,15 @@ func TestActionResolutionSnapshotPinsAndRefreshesMutableRefs(t *testing.T) {
 	if err != nil || resolved.Commit != testSHA || requests.Load() != 1 || second.ResolutionSnapshotID() != firstGeneration {
 		t.Fatalf("reused resolution = %#v, %v; requests %d; generation %q", resolved, err, requests.Load(), second.ResolutionSnapshotID())
 	}
+	if err := os.Remove(second.cfg.resolutionSnapshot.entryPath(ref)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newResolver(false).Resolve(context.Background(), ref); err == nil || !strings.Contains(err.Error(), "snapshot entry is missing") {
+		t.Fatalf("missing snapshot entry error = %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("missing snapshot entry caused %d requests, want 1", requests.Load())
+	}
 	third := newResolver(true)
 	resolved, err = third.Resolve(context.Background(), ref)
 	if err != nil || resolved.Commit != nextSHA || requests.Load() != 2 || third.ResolutionSnapshotID() == firstGeneration {

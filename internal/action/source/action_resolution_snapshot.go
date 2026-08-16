@@ -146,9 +146,6 @@ func loadActionResolutionSnapshotCurrent(path string) (actionResolutionSnapshotC
 
 func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, resolve func(context.Context, Reference) (Resolved, error)) (Resolved, error) {
 	path := s.entryPath(ref)
-	if resolved, err, ok := loadActionResolutionSnapshotEntry(path, ref); ok {
-		return resolved, err
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return Resolved{}, err
 	}
@@ -158,7 +155,28 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 	}
 	defer unlock()
 	if resolved, err, ok := loadActionResolutionSnapshotEntry(path, ref); ok {
+		if err == nil || errors.As(err, new(*NotPublicError)) {
+			claimed, claimErr := actionResolutionSnapshotClaimExists(path + ".claimed")
+			if claimErr != nil {
+				return Resolved{}, claimErr
+			}
+			if !claimed {
+				if claimErr := storeActionResolutionSnapshotClaim(path + ".claimed"); claimErr != nil {
+					return Resolved{}, claimErr
+				}
+			}
+		}
 		return resolved, err
+	}
+	claimed, err := actionResolutionSnapshotClaimExists(path + ".claimed")
+	if err != nil {
+		return Resolved{}, err
+	}
+	if claimed {
+		return Resolved{}, fmt.Errorf("action resolution snapshot entry is missing")
+	}
+	if err := storeActionResolutionSnapshotClaim(path + ".claimed"); err != nil {
+		return Resolved{}, err
 	}
 	resolved, err := resolve(ctx, ref)
 	entry := actionResolutionSnapshotEntry{
@@ -170,6 +188,9 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 	} else {
 		var notPublic *NotPublicError
 		if !errors.As(err, &notPublic) {
+			if removeErr := os.Remove(path + ".claimed"); removeErr != nil {
+				return Resolved{}, errors.Join(err, fmt.Errorf("remove unresolved action resolution snapshot claim: %w", removeErr))
+			}
 			return Resolved{}, err
 		}
 		entry.Missing = true
@@ -178,6 +199,31 @@ func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, r
 		return Resolved{}, storeErr
 	}
 	return resolved, err
+}
+
+func actionResolutionSnapshotClaimExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read action resolution snapshot claim: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("action resolution snapshot claim is invalid")
+	}
+	return true, nil
+}
+
+func storeActionResolutionSnapshotClaim(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("store action resolution snapshot claim: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("store action resolution snapshot claim: %w", err)
+	}
+	return nil
 }
 
 func (s *actionResolutionSnapshot) entryPath(ref Reference) string {
