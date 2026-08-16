@@ -70,10 +70,12 @@ plugins:
           queue: macos-sonoma-arm64
 ```
 
-Linux labels use the matching Noble or Jammy hosted-toolchains image, with or
-without a configured queue. Without a mapping, `macos-latest` targets the
-hosted `macos-medium` queue; `macos-14` and `macos-15` require one. A macOS
-label selects native Darwin/arm64, not a GitHub image or Xcode inventory.
+Hosted runner labels are case-insensitive. Linux labels use the matching Noble
+or Jammy hosted-toolchains image, with or without a configured queue.
+`macos-latest` targets the hosted `macos-medium` queue. Version-specific
+`macos-14` and `macos-15` labels require an organization-provided queue and are
+not part of the hosted preset. A macOS label selects native Darwin/arm64, not a
+GitHub image or Xcode inventory.
 
 The imported workflows are a dynamic part of the Buildkite pipeline. The plugin creates one aggregate group per successfully compiled, explicitly listed workflow in a single transaction. Workflows that do not declare the selected event become top-level skipped steps. Groups and replacement steps depend on the importer. Each runnable job publishes a provider check named `<workflow> / <job> (<event>)`: a GitHub check for GitHub events or an Origin check for Origin events. This approach lets you keep existing workflows while moving jobs to native Buildkite steps over time.
 

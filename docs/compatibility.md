@@ -27,7 +27,7 @@ Looking for something else? [Browse open compatibility issues](https://github.co
 | --- | --- | --- |
 | [Workflow and job names](#workflow-syntax) | 🟡 Supported subset | `name` and job names are retained. `run-name` has no effect. |
 | [Triggers and filters under `on`](#names-and-triggers) | 🟡 Supported subset | Buildkite creates builds; upload selects aggregate workflow groups for one effective event. Local `workflow_call` is supported for composition. |
-| [Platforms](#job-configuration) | 🟡 Supported subset | Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`; native macOS arm64 with `macos-latest`, `macos-14`, or `macos-15`. Labels do not provide GitHub image, toolchain, or Xcode parity. |
+| [Platforms](#job-configuration) | 🟡 Supported subset | The hosted preset provides Linux x86-64 with `ubuntu-latest`, `ubuntu-24.04`, or `ubuntu-22.04`, and native macOS arm64 with `macos-latest`. Organization-provided queues can map `macos-14` or `macos-15`. Labels do not provide GitHub image, toolchain, or Xcode parity. |
 | [Jobs and dependencies](#job-configuration) | ✅ Supported | Static dependencies, matrix fan-out and fan-in, results, and bounded outputs. |
 | [Matrix strategies](#matrix-strategies) | 🟡 Supported subset | Static matrices, `include`, `exclude`, and literal `max-parallel`. Maximum 256 instances per job. `fail-fast` has no effect. |
 | [Shell steps](#commands-and-actions) | 🟡 Supported subset | Linux and macOS `bash` and `sh`. |
@@ -278,7 +278,7 @@ Cancel the whole Buildkite build rather than one job when a workflow-level concu
 | --- | --- | --- |
 | `name` | ✅ Supported | Labels may use static `github`, `vars`, reusable-workflow `inputs`, and matrix values. |
 | `needs` | ✅ Supported | Accepts a string or list of static job IDs. Matrix fan-out and fan-in are automatic. |
-| `runs-on` | 🟡 Supported subset | Accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, `macos-latest`, `macos-15`, and `macos-14`. Static expressions may resolve to an accepted label or list whose labels map to the same complete queue, platform, and image target. |
+| `runs-on` | 🟡 Supported subset | The hosted preset accepts `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`, and `macos-latest`. Labels are case-insensitive. Organization runner profiles can also map `macos-14` and `macos-15`. Static expressions may resolve to an accepted label or list whose labels map to the same complete queue, platform, and image target. |
 | `if` | 🟡 Supported subset | Runs before the job starts. See [Conditions](#conditions). |
 | `outputs` | 🟡 Supported subset | Maps step outputs for consumption through `needs`. A job may publish 64 outputs of up to 1 KiB each. Ambiguous matrix output values fail closed. |
 | `env`, `defaults.run` | 🟡 Supported subset | Uses the [workflow-level behavior](#environment-and-defaults). |
@@ -340,13 +340,17 @@ Results and outputs come from verified producer manifests. Retrying one producer
 
 A job with `continue-on-error: true` stops ordinary steps after a failure, runs eligible failure and always steps plus post-actions, publishes its outputs, and reports `success` through `needs.<job>.result`. The generated Buildkite job returns reserved status `78` for the tolerated workflow failure and soft-fails only that status, so the failure remains visible without blocking dependent jobs. Job timeout expiry remains `cancelled` and is never tolerated.
 
-Runner labels do not select GitHub images. Linux labels default to the
-corresponding Noble or Jammy hosted-toolchains image; an explicit immutable
-image overrides it for a configured profile. Unmapped Linux labels use default
-Buildkite agent targeting with that image. Through the upload path,
-unmapped `macos-latest` targets the hosted `macos-medium` queue; `macos-14`
-and `macos-15` require a runner profile with a native queue. macOS labels
-reject images. They select Darwin/arm64, not a GitHub image or Xcode inventory.
+Runner labels are case-insensitive. Runner aliases such as `macOS-latest` use
+the same target as `macos-latest`. Linux labels default to the corresponding
+Noble or Jammy hosted-toolchains image; an explicit immutable image overrides
+it for a configured profile. Linux labels use default Buildkite agent targeting
+with that image when unmapped. `macos-latest` targets the hosted `macos-medium`
+queue.
+Version-specific `macos-14` and `macos-15` labels require an organization
+runner profile with a native queue and are not admitted by `validate --profile
+hosted`. macOS labels reject images. They select Darwin/arm64, not a GitHub
+image or Xcode inventory. Linux ARM, macOS x86-64, Windows, and other labels
+are unsupported.
 
 ### Matrix strategies
 

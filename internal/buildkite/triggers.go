@@ -79,7 +79,7 @@ func TranslateTriggerCondition(triggers []workflow.Trigger) (string, error) {
 // rules as pipeline generation without selecting an effective event.
 func ValidateTriggerConditions(triggers []workflow.Trigger) error {
 	for _, trigger := range triggers {
-		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), false); err != nil {
+		if _, _, err := translateTrigger(trigger, liveTriggerContext(trigger.Event), true); err != nil {
 			return err
 		}
 	}
