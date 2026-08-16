@@ -151,6 +151,9 @@ func TestBatchValidationDoesNotResumeIndeterminateReports(t *testing.T) {
 	if validBatchValidationResult(path, "workflow.yml") {
 		t.Fatal("indeterminate validation report was resumable")
 	}
+	if !validBatchProcessingReport(path, "workflow.yml") {
+		t.Fatal("indeterminate validation report was not persistable")
+	}
 
 	report.Validation.Result = "compilable"
 	report.Evaluations = []compatibility.EventEvaluation{{
@@ -167,6 +170,9 @@ func TestBatchValidationDoesNotResumeIndeterminateReports(t *testing.T) {
 	}
 	if validBatchValidationResult(path, "workflow.yml") {
 		t.Fatal("indeterminate event report was resumable")
+	}
+	if !validBatchProcessingReport(path, "workflow.yml") {
+		t.Fatal("indeterminate event report was not persistable")
 	}
 }
 
