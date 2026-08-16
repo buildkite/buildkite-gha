@@ -48,6 +48,40 @@ mise run smoke:profile
 
 The profile task uses the network to resolve selected public actions and apply the production `hosted` policy. Admission still does not execute action code. See [`testdata/smoke/README.md`](../testdata/smoke/README.md) for the inventory and result meanings.
 
+## Benchmark public workflow compatibility
+
+[`scripts/validate-public-workflow-corpus`](../scripts/validate-public-workflow-corpus) downloads the [GitHub Actions workflow histories dataset](https://doi.org/10.5281/zenodo.20340547), selects the latest valid non-deleted version of each workflow, and validates every declared supported event with the hosted profile. The first run downloads and extracts the corpus.
+
+Use a stable sample while developing:
+
+```sh
+export GITHUB_TOKEN="$(gh auth token)"
+SAMPLE_SIZE=1000 SAMPLE_SEED=default JOBS=32 \
+  scripts/validate-public-workflow-corpus
+```
+
+Sampling ranks `repository`, workflow path, and content hash with the seed. The same corpus, size, and seed select the same workflows. Sample manifests, reports, and tallies use a key containing the size, seed digest, and selected-manifest digest, so they do not mix with full-corpus results.
+
+Use 100 workflows for a smoke check, 1,000 while iterating, 10,000 for broader confidence, then omit `SAMPLE_SIZE` for the complete benchmark. Keep `SAMPLE_SEED` unchanged when comparing validator versions.
+
+The script stores data under `WORKDIR`, which defaults to `~/gha-corpus`. It reuses a 20 GiB bounded action cache and one durable action-resolution snapshot across validator versions. Set `GITHUB_TOKEN` to a public-repository token to avoid anonymous GitHub API limits; the token is used only for API resolution and is not written to arguments, reports, caches, or snapshots.
+
+Useful environment variables are:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SAMPLE_SIZE` | Full corpus | Select a deterministic subset. |
+| `SAMPLE_SEED` | `default` | Select another reproducible subset. |
+| `JOBS` | CPU count | Set concurrent validation workers. |
+| `WORKDIR` | `~/gha-corpus` | Store downloads, extracted workflows, caches, snapshots, reports, and tallies. |
+| `RECORD_ID` | `20340547` | Select a Zenodo dataset record. |
+| `ACTION_CACHE_MAX_BYTES` | `21474836480` | Bound extracted immutable action trees. |
+| `REFRESH_ACTION_RESOLUTIONS` | `0` | Set to `1` to start a new action-resolution generation. This removes existing report sets for the record. |
+
+The script prints a repository-level diagnostic tally. Sample metadata is also written to `records/<record-id>/samples/<sample-key>/validate-tally.json`; per-workflow v3 reports are under `reports/<record-id>/samples/<sample-key>/<validator-digest>/`. Full-corpus tallies and reports retain their existing paths.
+
+Admission covers generated event snapshots, not arbitrary real payloads or action execution. The action-resolution snapshot pins action revisions only. Preserve the snapshot, corpus record, sample seed, and sample size when comparing compatibility across commits.
+
 ## Verify runtime behavior
 
 Every normal Buildkite build runs repository checks, Test Engine-split Go tests, native macOS tests, the starter workflow compatibility report, and the shell smoke workflow against the build's exact CLI source. Test Engine records the Linux test results; the repository checks retain the race-enabled suite. GitHub Actions differential oracles run only when manually dispatched.
