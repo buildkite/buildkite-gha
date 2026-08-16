@@ -120,7 +120,7 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		if err != nil {
 			return nil, true, err
 		}
-		format, ok := expressionString(value)
+		format, ok := expressionAggregateString(value)
 		if !ok {
 			return nil, true, fmt.Errorf("function %q cannot convert %T to a format string", node.Callee, value)
 		}

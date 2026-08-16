@@ -1001,6 +1001,7 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 		"contains(fromJSON('[1,\"Deploy\"]'), 'deploy')",
 		"format('{0}-{1}', 'release', 2) == 'release-2'",
 		"format('{0}-{1}', fromJSON('{}'), fromJSON('[]')) == 'Object-Array'",
+		"format(fromJSON('{}')) == 'Object' && format(fromJSON('[]')) == 'Array'",
 		"join(fromJSON('[\"one\",2]'), '-') == 'one-2'",
 		"fromJSON(toJSON(true))",
 		"fromJSON(true)",
