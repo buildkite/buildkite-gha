@@ -1320,7 +1320,7 @@ func validate(args []string, stdout, stderr io.Writer, version string, agent tra
 	if profile != "" && eventPath == "" && eventName == "" && !allEvents {
 		return usageError(stderr, "validate: --profile hosted requires --event, --event-path, or --all-events; use bare validate <workflow> for event-independent syntax and trigger compatibility validation")
 	}
-	out := newProcessingOutput("validate", format, stdout, stderr, agent)
+	out := newProcessingOutput(context.Background(), "validate", format, stdout, stderr, agent)
 	if allEvents {
 		return validateAllEvents(out, workflowPath, version, actionCacheDir, nil, stderr)
 	}
@@ -1682,7 +1682,7 @@ func compile(args []string, stdout, stderr io.Writer, version string, agent tran
 	if eventPath == "" {
 		return usageError(stderr, "compile: --event-path is required")
 	}
-	out := newProcessingOutput("compile", "text", stderr, stderr, agent)
+	out := newProcessingOutput(context.Background(), "compile", "text", stderr, stderr, agent)
 	event, eventErr := os.ReadFile(eventPath)
 	if parsedEvent, parseErr := compiler.ParseEvent(event); eventErr == nil && parseErr == nil {
 		out.sourceLinks = sourceLinksForEvent(parsedEvent)
@@ -1778,7 +1778,7 @@ func uploadParsedContext(ctx context.Context, uploadArguments parsedUploadArgs, 
 			return usageError(stderr, "upload: %s is no longer supported; configure runner profiles with --runner-queue and --runner-image, or with the plugin runners array", retired)
 		}
 	}
-	out := newProcessingOutput("upload", "text", stderr, stderr, agent)
+	out := newProcessingOutput(ctx, "upload", "text", stderr, stderr, agent)
 	out.plugin = uploadArguments.pluginAcquisition != nil
 	if uploadArguments.telemetry != nil {
 		out.observe = uploadArguments.telemetry.observe

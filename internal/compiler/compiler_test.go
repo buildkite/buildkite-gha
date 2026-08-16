@@ -1223,7 +1223,7 @@ jobs:
         required: true
 jobs:
   gated:
-    if: ${{ inputs['enabled'] && github.ref }}
+    if: inputs.enabled && github.ref
     runs-on: ubuntu-latest
     env:
       LABEL: ${{ inputs['label'] }}
@@ -1231,14 +1231,115 @@ jobs:
       label: ${{ inputs['label'] }}
     steps:
       - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
+      - if: inputs['enabled'] && github.ref
+        run: echo implicit
+      - if: ${{ inputs [ 'label' ] }}
+        run: echo string
 `)
 
 	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ inputs['enabled'] && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "${{ inputs['label'] }}" || plans[0].Outputs["label"] != "${{ inputs['label'] }}" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo ${{ inputs['enabled'] }} ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "${{ true && github.ref }}" || plans[0].Steps[2].Condition != "'release'" {
 		t.Fatalf("reusable condition = %#v", plans)
+	}
+}
+
+func TestCompileForwardsIndexedStringInputToNestedReusableWorkflow(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: release
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ inputs [ 'target' ] }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo release" {
+		t.Fatalf("forwarded indexed input = %#v", ir.Jobs)
+	}
+}
+
+func TestCompilePreservesComputedReusableInputIndexesForRuntime(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      key: target
+      target: release
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      key: {type: string, required: true}
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      KEY: target
+    steps:
+      - run: echo "$VALUE"
+        env:
+          VALUE_ENV: ${{ inputs[env.KEY] }}
+          VALUE_INPUT: ${{ inputs[inputs.key] }}
+`)
+
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || plans[0].Steps[0].Env["VALUE_INPUT"] != "release" {
+		t.Fatalf("computed reusable input plan = %#v", plans)
+	}
+}
+
+func TestApplyStaticInputsSubstitutesIndexedInputsInStepFields(t *testing.T) {
+	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
+	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
+		Span: span,
+		Run:  "echo ${{ inputs['target'] }}",
+		Env:  map[string]string{"TARGET": "${{ inputs['target'] }}"},
+		With: map[string]string{"target": "prefix-${{ inputs['target'] }}"},
+	}}}
+	resolved, err := applyStaticInputs("workflow.yml", job, map[string]any{"target": "production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := resolved.Steps[0]
+	if step.Run != "echo production" || step.Env["TARGET"] != "production" || step.With["target"] != "prefix-production" {
+		t.Fatalf("resolved indexed inputs = %#v", step)
 	}
 }
 
@@ -1327,6 +1428,9 @@ func TestRejectUnresolvedIndexedInputsInCompileTimeFields(t *testing.T) {
 		{name: "job name", job: workflow.Job{Name: "${{ inputs['label'] }}"}},
 		{name: "runner label", job: workflow.Job{RunsOn: []string{"${{ inputs['runner'] }}"}}},
 		{name: "action reference", job: workflow.Job{Steps: []workflow.Step{{Uses: "${{ inputs['action'] }}", Span: span}}}},
+		{name: "command", job: workflow.Job{Steps: []workflow.Step{{Run: "echo ${{ inputs['target'] }}", Span: span}}}},
+		{name: "environment", job: workflow.Job{Steps: []workflow.Step{{Env: map[string]string{"TARGET": "${{ inputs['target'] }}"}, Span: span}}}},
+		{name: "action input", job: workflow.Job{Steps: []workflow.Step{{With: map[string]string{"target": "${{ inputs['target'] }}"}, Span: span}}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.job.ID = "test"
@@ -3075,7 +3179,7 @@ jobs:
 		t.Fatalf("compiled plans = %d, want 1", len(plans))
 	}
 	job := plans[0]
-	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "${{ inputs['label'] }}" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
+	if job.Env["LABEL"] != "bash" || job.Env["INDEXED_LABEL"] != "bash" || job.Inputs["label"] != "bash" || job.Inputs["timeout"] != json.Number("7") || job.DefaultShell != "bash" || job.Outputs["label"] != "bash" || job.Steps[0].TimeoutMinutes != 7 || job.Steps[0].TimeoutMinutesExpression != "" {
 		t.Fatalf("compiled dispatch input surfaces = %#v", job)
 	}
 }

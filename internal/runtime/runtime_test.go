@@ -3429,6 +3429,25 @@ func TestJobSummarySecretScrubbingIsOrderIndependent(t *testing.T) {
 	}
 }
 
+func TestLiveLogMaskingPrefersLongestMatchInEitherRegistrationOrder(t *testing.T) {
+	for _, masks := range [][]string{
+		{"credential", "credential-with-suffix\nsecond-line"},
+		{"credential-with-suffix\nsecond-line", "credential"},
+	} {
+		var logs bytes.Buffer
+		processor := newCommandProcessor(&logs, &logs)
+		for _, mask := range masks {
+			processor.addMask(mask)
+		}
+		processor.addMask("credential-with-suffix")
+
+		processor.writeLiteral(&logs, "credential-with-suffix second-line")
+		if got := logs.String(); got != "*** ***\n" {
+			t.Fatalf("masks %q produced logs %q, want longest overlapping masks without fragments", masks, got)
+		}
+	}
+}
+
 func TestExpressionEvaluationIsSinglePass(t *testing.T) {
 	literal := "literal ${{ matrix.secret }} and ${{"
 	values, err := evaluateMap(map[string]string{
@@ -3521,6 +3540,47 @@ printf '%s\n' environment-ok
 		if strings.HasPrefix(entry, "BUILDKITE_") {
 			t.Fatalf("processEnv() inherited agent variable %q", entry)
 		}
+	}
+}
+
+func TestRunStreamingRejectsInvalidEnvironmentNamesBeforeExecution(t *testing.T) {
+	for _, name := range []string{"", "ALIAS=OTHER", "NUL\x00NAME"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			err := (Runner{}).runStreaming(context.Background(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{name: "value"}, "sh", "-c", `touch "$1"`, "sh", marker)
+			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("runStreaming() error = %v, want invalid environment name", err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("host process ran with invalid environment name: %v", statErr)
+			}
+		})
+	}
+
+	if err := (Runner{}).runStreaming(context.Background(), newCommandProcessor(io.Discard, io.Discard), "", map[string]string{"GITHUB-ACTIONS_NAME.1": "valid"}, "true"); err != nil {
+		t.Fatalf("valid GitHub Actions environment name was rejected: %v", err)
+	}
+}
+
+func TestRunDockerRejectsInvalidEnvironmentNamesBeforeDocker(t *testing.T) {
+	for _, name := range []string{"", "GITHUB_SHA=ALIAS", "NUL\x00NAME"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "docker-ran")
+			docker := filepath.Join(t.TempDir(), "docker")
+			if err := os.WriteFile(docker, []byte("#!/bin/sh\ntouch "+shellTestQuote(marker)+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			action := fakeDockerAction(t)
+			action.runnerTemp = t.TempDir()
+			action.Env = map[string]string{name: "value"}
+			_, err := (Runner{Docker: docker}).runDocker(context.Background(), newCommandProcessor(io.Discard, io.Discard), action)
+			if err == nil || !strings.Contains(err.Error(), "invalid environment variable name") {
+				t.Fatalf("runDocker() error = %v, want invalid environment name", err)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Docker was invoked with invalid environment name: %v", statErr)
+			}
+		})
 	}
 }
 

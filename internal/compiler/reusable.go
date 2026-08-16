@@ -21,8 +21,8 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}|inputs\.([A-Za-z_][A-Za-z0-9_-]*))\s*$`)
-var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
+var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}|inputs\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\]))\s*$`)
+var staticValueExpression = regexp.MustCompile(`(?i)^\s*\$\{\{\s*(inputs|matrix)\s*(?:\.\s*([A-Za-z_][A-Za-z0-9_-]*)|\[\s*'([A-Za-z0-9_-]{1,255})'\s*\])\s*\}\}\s*$`)
 var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
@@ -599,18 +599,22 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
 	if match := staticValueExpression.FindStringSubmatch(value); match != nil {
 		values := inputs
-		if match[1] == "matrix" {
+		if strings.EqualFold(match[1], "matrix") {
 			values = matrix
 		}
+		valueName := match[2]
+		if valueName == "" {
+			valueName = match[3]
+		}
 		for name, value := range values {
-			if strings.EqualFold(name, match[2]) {
+			if strings.EqualFold(name, valueName) {
 				if containsExpression(value) {
-					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], match[2])
+					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], valueName)
 				}
 				return value, nil
 			}
 		}
-		return nil, fmt.Errorf("expression references unavailable %s value %q", match[1], match[2])
+		return nil, fmt.Errorf("expression references unavailable %s value %q", match[1], valueName)
 	}
 	resolved := replaceStaticInputs(value, inputs)
 	if hasInputExpression(resolved) {
@@ -830,6 +834,9 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 	jobValues := []string{job.Name}
+	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
+	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
+	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Outputs)
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
@@ -876,9 +883,28 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 		}
 	}
+	if hasStaticInputCondition(job.If) {
+		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+	}
+	for _, value := range jobRuntimeValues {
+		if hasStaticInputExpression(value) {
+			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+		}
+	}
 	for _, step := range job.Steps {
 		if hasInputExpression(step.Uses) {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
+		}
+		if hasStaticInputCondition(step.If) {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+		}
+		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
+		stepValues = appendMapValues(stepValues, step.Env)
+		stepValues = appendMapValues(stepValues, step.With)
+		for _, value := range stepValues {
+			if hasStaticInputExpression(value) {
+				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+			}
 		}
 	}
 	return nil
@@ -945,6 +971,16 @@ func hasInputExpression(value string) bool {
 	return err != nil || usesInputs
 }
 
+func hasStaticInputExpression(value string) bool {
+	usesInputs, err := expression.TemplateUsesStaticContextReference(value, "inputs")
+	return err != nil || usesInputs
+}
+
+func hasStaticInputCondition(value string) bool {
+	usesInputs, err := expression.ConditionUsesStaticContextReference(value, "inputs")
+	return err != nil || usesInputs
+}
+
 func cloneMatrixWithInputs(matrix *workflow.Matrix, inputs map[string]any) *workflow.Matrix {
 	out := *matrix
 	out.Rows = append([]workflow.MatrixRow(nil), matrix.Rows...)
@@ -990,11 +1026,20 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
+		if !strings.Contains(value, "${{") {
+			usesInputs, err := expression.ConditionUsesContext(value, "inputs")
+			if err == nil && usesInputs {
+				return replaceStaticInputs("${{ "+value+" }}", inputs)
+			}
+		}
 		return replaceStaticInputs(value, inputs)
 	}
-	inputName := match[1]
-	if inputName == "" {
-		inputName = match[2]
+	inputName := ""
+	for _, candidate := range match[1:] {
+		if candidate != "" {
+			inputName = candidate
+			break
+		}
 	}
 	for name, input := range inputs {
 		if strings.EqualFold(name, inputName) {

@@ -487,6 +487,27 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 	}
 }
 
+func TestStaticContextReferencesExcludeRuntimeComputedAccess(t *testing.T) {
+	for _, source := range []string{"${{ inputs.enabled }}", "${{ inputs['enabled'] }}", "inputs.enabled"} {
+		var usesInputs bool
+		var err error
+		if strings.HasPrefix(source, "inputs") {
+			usesInputs, err = ConditionUsesStaticContextReference(source, "inputs")
+		} else {
+			usesInputs, err = TemplateUsesStaticContextReference(source, "inputs")
+		}
+		if err != nil || !usesInputs {
+			t.Fatalf("static context reference %q = %v, %v, want true", source, usesInputs, err)
+		}
+	}
+	for _, source := range []string{"${{ inputs[env.KEY] }}", "${{ inputs.* }}"} {
+		usesInputs, err := TemplateUsesStaticContextReference(source, "inputs")
+		if err != nil || usesInputs {
+			t.Fatalf("runtime context reference %q = %v, %v, want false", source, usesInputs, err)
+		}
+	}
+}
+
 func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1451,13 +1472,23 @@ func TestCompileInputLiteralRepresentations(t *testing.T) {
 }
 
 func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
-	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs.label }}"
+	template := "${{ !inputs.enabled && matrix.run-new && 'inputs.enabled' || inputs['label'] }}"
 	got, err := SubstituteCompileInputs(template, map[string]any{"enabled": false, "label": "it''s ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := "${{ !false && matrix.run-new && 'inputs.enabled' || 'it''''s ready' }}"
 	if got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
+func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
+	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "${{ 'release' }}"; got != want {
 		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
 	}
 }

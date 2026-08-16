@@ -390,10 +390,25 @@ func introducesExpressionSyntax(before, replacement, after string) bool {
 	return false
 }
 
-// SubstituteCompileInputs replaces static inputs.<name> references inside
-// expression regions with equivalent GitHub expression literals. Text and
-// string literals outside those references are preserved byte-for-byte.
+// SubstituteCompileInputs replaces static inputs.<name> and inputs['name']
+// references inside expression regions with equivalent GitHub expression
+// literals. Text and string literals outside those references are preserved
+// byte-for-byte.
 func SubstituteCompileInputs(template string, inputs map[string]any) (string, error) {
+	resolved := template
+	for {
+		next, err := substituteCompileInputsOnce(resolved, inputs)
+		if err != nil {
+			return "", err
+		}
+		if next == resolved {
+			return next, nil
+		}
+		resolved = next
+	}
+}
+
+func substituteCompileInputsOnce(template string, inputs map[string]any) (string, error) {
 	const open = "${{"
 	var substituted strings.Builder
 	remaining := template
@@ -415,8 +430,8 @@ func SubstituteCompileInputs(template string, inputs map[string]any) (string, er
 			value      string
 		}
 		var replacements []replacement
-		for i := 0; i+2 < len(tokens); i++ {
-			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") || tokens[i+1].Kind != actionlint.TokenKindDot || tokens[i+2].Kind != actionlint.TokenKindIdent {
+		for i := 0; i < len(tokens); i++ {
+			if tokens[i].Kind != actionlint.TokenKindIdent || !strings.EqualFold(tokens[i].Value, "inputs") {
 				continue
 			}
 			// A preceding '.' means this is a property named "inputs" on
@@ -425,7 +440,21 @@ func SubstituteCompileInputs(template string, inputs map[string]any) (string, er
 			if i > 0 && tokens[i-1].Kind == actionlint.TokenKindDot {
 				continue
 			}
-			value, ok := findCompileInput(inputs, tokens[i+2].Value)
+			var name string
+			var end, consumedTokens int
+			switch {
+			case i+2 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindDot && tokens[i+2].Kind == actionlint.TokenKindIdent:
+				name = tokens[i+2].Value
+				end = tokens[i+2].Offset + len(tokens[i+2].Value)
+				consumedTokens = 2
+			case i+3 < len(tokens) && tokens[i+1].Kind == actionlint.TokenKindLeftBracket && tokens[i+2].Kind == actionlint.TokenKindString && tokens[i+3].Kind == actionlint.TokenKindRightBracket:
+				name = strings.ReplaceAll(strings.Trim(tokens[i+2].Value, "'"), "''", "'")
+				end = tokens[i+3].Offset + 1
+				consumedTokens = 3
+			default:
+				continue
+			}
+			value, ok := findCompileInput(inputs, name)
 			if !ok {
 				continue
 			}
@@ -435,10 +464,10 @@ func SubstituteCompileInputs(template string, inputs map[string]any) (string, er
 			}
 			replacements = append(replacements, replacement{
 				start: tokens[i].Offset,
-				end:   tokens[i+2].Offset + len(tokens[i+2].Value),
+				end:   end,
 				value: literal,
 			})
-			i += 2
+			i += consumedTokens
 		}
 		for i := len(replacements) - 1; i >= 0; i-- {
 			replacement := replacements[i]

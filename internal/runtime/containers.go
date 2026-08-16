@@ -84,6 +84,14 @@ func (r Runner) startJobContainer(ctx context.Context, processor *commandProcess
 }
 
 func (r Runner) startJobContainerOrdered(ctx context.Context, processor *commandProcessor, workspace, temp string, spec plan.Container, services map[string]plan.Container, serviceOrder []string, extra ...containerMount) (_ *jobContainerBackend, err error) {
+	if err := validateEnvironmentNames(spec.Env); err != nil {
+		return nil, fmt.Errorf("job container environment: %w", err)
+	}
+	for serviceID, service := range services {
+		if err := validateEnvironmentNames(service.Env); err != nil {
+			return nil, fmt.Errorf("service %q environment: %w", serviceID, err)
+		}
+	}
 	docker, config, env, err := privateDocker(r)
 	if err != nil {
 		return nil, err
@@ -628,6 +636,9 @@ func (b *jobContainerBackend) containerPath(path string) string {
 }
 
 func (b *jobContainerBackend) exec(ctx context.Context, r Runner, processor *commandProcessor, dir string, env map[string]string, name string, argv ...string) error {
+	if err := validateEnvironmentNames(env); err != nil {
+		return err
+	}
 	nonce, err := randomHex()
 	if err != nil {
 		return fmt.Errorf("create container exec identity: %w", err)
