@@ -14,13 +14,13 @@
     "validation": {"$ref": "processing-report-v2.schema.json"},
     "evaluations": {
       "type": "array",
-      "maxItems": 4,
+      "maxItems": 5,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["event", "event_source", "report"],
         "properties": {
-          "event": {"enum": ["push", "pull_request", "workflow_dispatch", "schedule"]},
+          "event": {"enum": ["push", "pull_request", "merge_group", "workflow_dispatch", "schedule"]},
           "event_source": {"const": "generated"},
           "report": {"$ref": "processing-report-v2.schema.json"}
         }

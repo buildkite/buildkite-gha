@@ -161,11 +161,50 @@ func buildkiteWebhookEventSource(getenv func(string) string, webhook []byte) ([]
 			snapshot["actor"] = login
 		}
 	}
+	if snapshot["event"] == "merge_group" {
+		if err := validateBuildkiteMergeGroup(snapshot, getenv); err != nil {
+			return nil, err
+		}
+	}
 	result, err := json.Marshal(snapshot)
 	if err != nil {
 		return nil, fmt.Errorf("encode Buildkite webhook snapshot: %w", err)
 	}
 	return result, nil
+}
+
+func validateBuildkiteMergeGroup(snapshot map[string]any, getenv func(string) string) error {
+	payload := snapshot["payload"].(map[string]any)
+	mergeGroup, ok := payload["merge_group"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("merge_group webhook requires payload.merge_group")
+	}
+	if action, _ := payload["action"].(string); action != "checks_requested" {
+		return fmt.Errorf("merge_group webhook action must be checks_requested")
+	}
+	ref, _ := snapshot["ref"].(string)
+	sha, _ := snapshot["sha"].(string)
+	if headRef, _ := mergeGroup["head_ref"].(string); headRef != ref {
+		return fmt.Errorf("merge_group webhook head_ref does not match the Buildkite build branch")
+	}
+	if headSHA, _ := mergeGroup["head_sha"].(string); headSHA != sha {
+		return fmt.Errorf("merge_group webhook head_sha does not match BUILDKITE_COMMIT")
+	}
+	baseBranch := strings.TrimSpace(getenv("BUILDKITE_MERGE_QUEUE_BASE_BRANCH"))
+	if baseBranch == "" {
+		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_BRANCH is required for a merge_group webhook")
+	}
+	if baseRef, _ := mergeGroup["base_ref"].(string); baseRef != "refs/heads/"+baseBranch {
+		return fmt.Errorf("merge_group webhook base_ref does not match BUILDKITE_MERGE_QUEUE_BASE_BRANCH")
+	}
+	baseCommit := getenv("BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
+	if !validBuildkiteCommit(baseCommit) {
+		return fmt.Errorf("BUILDKITE_MERGE_QUEUE_BASE_COMMIT must be a full lowercase 40-hex commit")
+	}
+	if baseSHA, _ := mergeGroup["base_sha"].(string); baseSHA != baseCommit {
+		return fmt.Errorf("merge_group webhook base_sha does not match BUILDKITE_MERGE_QUEUE_BASE_COMMIT")
+	}
+	return nil
 }
 
 func parseWebhookPayload(source []byte) (map[string]any, error) {

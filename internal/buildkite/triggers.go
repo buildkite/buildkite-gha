@@ -20,6 +20,8 @@ type TriggerConditionContext struct {
 	Tag                    string
 	PullRequestBaseBranch  string
 	PullRequestAction      string
+	MergeGroupBaseBranch   string
+	MergeGroupAction       string
 	ChangedPaths           []string
 	ChangedPathsKnown      bool
 	ChangedPathsError      string
@@ -27,6 +29,8 @@ type TriggerConditionContext struct {
 	TagValue               *string
 	PullRequestBaseValue   *string
 	PullRequestActionValue *string
+	MergeGroupBaseValue    *string
+	MergeGroupActionValue  *string
 }
 
 // UnsupportedPathFiltersError reports a trigger that cannot be translated
@@ -52,6 +56,8 @@ func LiveTriggerConditionContext(eventPredicate string) TriggerConditionContext 
 		Tag:                   "build.tag",
 		PullRequestBaseBranch: "build.pull_request.base_branch",
 		PullRequestAction:     "build.source_action",
+		MergeGroupBaseBranch:  "build.merge_queue.base_branch",
+		MergeGroupAction:      "build.source_action",
 	}
 }
 
@@ -198,6 +204,19 @@ func TriggerFilterMismatchReason(triggers []workflow.Trigger, event string, cont
 					return fmt.Sprintf("Pull request activity %q does not match this workflow's pull_request activity filters.", *context.PullRequestActionValue), nil
 				}
 			}
+		case "merge_group":
+			if context.MergeGroupBaseValue != nil {
+				matches, err := refFilterMatches(*context.MergeGroupBaseValue, trigger.Branches, trigger.BranchesIgnore)
+				if err != nil {
+					return "", fmt.Errorf("merge_group branches: %w", err)
+				}
+				if !matches {
+					return fmt.Sprintf("Base branch %q does not match this workflow's merge_group branch filters.", *context.MergeGroupBaseValue), nil
+				}
+			}
+			if context.MergeGroupActionValue != nil && *context.MergeGroupActionValue != "checks_requested" {
+				return fmt.Sprintf("Merge group activity %q does not match this workflow's merge_group activity filters.", *context.MergeGroupActionValue), nil
+			}
 		}
 		return "", nil
 	}
@@ -218,7 +237,7 @@ func liveTriggerContext(event string) TriggerConditionContext {
 		predicate = `(build.source == "ui" || build.source == "api")`
 	case "schedule":
 		predicate = `build.source == "schedule"`
-	case "push", "pull_request":
+	case "push", "pull_request", "merge_group":
 		predicate = `build.source_event == ` + yamlScalar(event)
 	}
 	return LiveTriggerConditionContext(predicate)
@@ -338,6 +357,42 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext, selec
 				return "", false, &UnsupportedPathFiltersError{
 					Event:  t.Event,
 					Reason: "local changed paths do not match, and GitHub's diff-timeout outcome is unavailable",
+				}
+			}
+		}
+		return strings.Join(parts, " && "), true, nil
+	case "merge_group":
+		if t.Tags != nil || t.TagsIgnore != nil || t.Paths != nil || t.PathsIgnore != nil || t.Workflows != nil {
+			return "", false, fmt.Errorf("merge_group has unsupported filters")
+		}
+		if context.EventPredicate == "" || context.MergeGroupAction == "" {
+			return "", false, fmt.Errorf("merge_group requires effective event and action expressions")
+		}
+		if context.MergeGroupAction == "null" {
+			return "", false, fmt.Errorf("merge_group event snapshot requires payload.action")
+		}
+		if context.MergeGroupActionValue != nil && *context.MergeGroupActionValue != "checks_requested" {
+			return "", false, fmt.Errorf("merge_group activity must be checks_requested")
+		}
+		parts := []string{context.EventPredicate, context.MergeGroupAction + ` == "checks_requested"`}
+		hasBranchFilter := t.Branches != nil || t.BranchesIgnore != nil
+		if hasBranchFilter && (context.MergeGroupBaseBranch == "" || context.MergeGroupBaseBranch == "null") {
+			return "", false, fmt.Errorf("merge_group branch filters require payload.merge_group.base_ref")
+		}
+		branch, hasBranchFilter, err := refFilters(context.MergeGroupBaseBranch, t.Branches, t.BranchesIgnore)
+		if err != nil {
+			return "", false, fmt.Errorf("merge_group branches: %w", err)
+		}
+		if hasBranchFilter {
+			parts = append(parts, branch)
+		}
+		if t.Types != nil {
+			if len(t.Types) == 0 {
+				return "", false, fmt.Errorf("merge_group types is explicitly empty")
+			}
+			for _, activity := range t.Types {
+				if activity != "checks_requested" {
+					return "", false, fmt.Errorf("merge_group activity type %q cannot be mapped exactly", activity)
 				}
 			}
 		}

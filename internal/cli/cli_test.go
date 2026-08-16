@@ -1306,10 +1306,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		for _, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		for _, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
 			t.Run(event, func(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				args := []string{"validate", "--profile", "hosted", "--event", event, "--format", "json", workflow}
@@ -1329,7 +1329,7 @@ func TestRunValidateAndCompile(t *testing.T) {
 
 	t.Run("validate hosted profile with all generated events", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
-		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+		if err := os.WriteFile(workflow, []byte("on:\n  push:\n  pull_request:\n  merge_group:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 0 * * *'\n  workflow_call:\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -1341,10 +1341,10 @@ func TestRunValidateAndCompile(t *testing.T) {
 		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 			t.Fatal(err)
 		}
-		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 4 {
+		if report.Schema != compatibility.ProcessingSchemaV3 || report.Result != "admitted" || report.Status != compatibility.Passed || report.Validation.Result != "compilable" || len(report.Evaluations) != 5 {
 			t.Fatalf("aggregate report = %#v", report)
 		}
-		for i, event := range []string{"push", "pull_request", "workflow_dispatch", "schedule"} {
+		for i, event := range []string{"push", "pull_request", "merge_group", "workflow_dispatch", "schedule"} {
 			if report.Evaluations[i].Event != event || report.Evaluations[i].Source != "generated" || report.Evaluations[i].Report.Result != "admitted" {
 				t.Fatalf("evaluation %d = %#v", i, report.Evaluations[i])
 			}
