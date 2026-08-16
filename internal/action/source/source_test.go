@@ -274,9 +274,11 @@ func TestResolverMutableRefCacheCoalescesConcurrentProcesses(t *testing.T) {
 	}
 }
 
-func TestResolverUsesXDGMutableRefCache(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", root)
+func TestResolverUsesPlatformMutableRefCache(t *testing.T) {
+	root, err := os.UserCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	resolver, err := NewResolver(nil)
 	if err != nil {
 		t.Fatal(err)
