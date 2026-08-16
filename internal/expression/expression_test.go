@@ -371,8 +371,16 @@ func TestServiceRuntimeContext(t *testing.T) {
 			t.Fatalf("Evaluate(%q) = %q, %v; want %q", reference, got, err, want)
 		}
 	}
-	if got, err := EvaluateStep("${{ format('{0}', job.services.redis.ports[6379]) }}", context); err != nil || got != "49152" {
-		t.Fatalf("EvaluateStep() service port = %q, %v", got, err)
+	for template, want := range map[string]string{
+		"${{ job.services['redis'].id }}":                      "container-id",
+		"${{ format('{0}', job.services.redis.ports[6379]) }}": "49152",
+	} {
+		if got, err := EvaluateStep(template, context); err != nil || got != want {
+			t.Fatalf("EvaluateStep(%q) = %q, %v; want %q", template, got, err, want)
+		}
+	}
+	if _, err := EvaluateStep("${{ job.services[env.NAME].id }}", context); err == nil {
+		t.Fatal("EvaluateStep() accepted dynamic service access")
 	}
 	if got, err := EvaluateCondition("job.services.Redis.ports[6379] == '49152'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service condition = %v, %v", got, err)

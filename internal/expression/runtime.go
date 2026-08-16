@@ -333,7 +333,13 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
 		case "steps", "needs":
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
-		case "matrix", "vars", "inputs", "env", "runner", "job":
+		case "job":
+			referenceRoot, path, err := referencePath(access)
+			if err != nil || classifyRuntimeReference(referenceRoot, path) == runtimeReferenceUnsupported {
+				return fmt.Errorf("unsupported runtime expression %q", referenceName(root, path))
+			}
+			return nil
+		case "matrix", "vars", "inputs", "env", "runner":
 		default:
 			return fmt.Errorf("unsupported runtime context %q", root)
 		}
@@ -420,6 +426,12 @@ func resolveStepRuntimeRoot(root string, context Context) (any, error) {
 		return context.Env, nil
 	case "runner":
 		return context.Runner, nil
+	case "job":
+		services := make(map[string]any, len(context.Services))
+		for name, service := range context.Services {
+			services[name] = map[string]any{"id": service.ID, "network": service.Network, "ports": service.Ports}
+		}
+		return map[string]any{"services": services}, nil
 	case "steps":
 		steps := make(map[string]any)
 		for name, outputs := range context.Steps {
