@@ -746,6 +746,9 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve continue-on-error expression: %v", err))
 			}
+			if err := expression.ValidateStepControl(resolved); err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate continue-on-error expression: %v", err))
+			}
 			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("parse continue-on-error expression: %v", err))
@@ -766,6 +769,9 @@ func applyStaticInputs(path string, job workflow.Job, inputs map[string]any) (wo
 			resolved, err := expression.SubstituteCompileInputs(step.TimeoutMinutesExpression, inputs)
 			if err != nil {
 				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("resolve timeout-minutes expression: %v", err))
+			}
+			if err := expression.ValidateStepControl(resolved); err != nil {
+				return job, locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, fmt.Sprintf("validate timeout-minutes expression: %v", err))
 			}
 			expr, err := expression.Parse(resolved, step.Span.Start.Line, step.Span.Start.Column)
 			if err != nil {

@@ -160,7 +160,7 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 		}
 		parts := make([]string, len(items))
 		for i, item := range items {
-			parts[i], ok = expressionJoinString(item)
+			parts[i], ok = expressionAggregateString(item)
 			if !ok {
 				return nil, true, fmt.Errorf("function %q item %d cannot convert %T to a string", node.Callee, i, item)
 			}
@@ -198,7 +198,7 @@ func evaluatePureFunction(evaluator *semanticEvaluator, node *actionlint.FuncCal
 	}
 }
 
-func expressionJoinString(value any) (string, bool) {
+func expressionAggregateString(value any) (string, bool) {
 	if text, ok := expressionString(value); ok {
 		return text, true
 	}
@@ -450,7 +450,7 @@ func expressionFormat(format string, valueCount int, value func(int) (any, error
 				}
 				values[index] = argument
 			}
-			text, ok := expressionString(argument)
+			text, ok := expressionAggregateString(argument)
 			if !ok {
 				return "", fmt.Errorf("format argument %d cannot convert %T to a string", index, argument)
 			}

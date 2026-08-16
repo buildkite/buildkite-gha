@@ -1267,6 +1267,22 @@ func TestApplyStaticInputsPreservesTypedStepControls(t *testing.T) {
 		t.Fatalf("partially resolved controls = %#v", resolved.Steps[0])
 	}
 
+	for _, field := range []string{"continue-on-error", "timeout-minutes"} {
+		t.Run("validates hidden "+field+" branch", func(t *testing.T) {
+			step := workflow.Step{Span: span}
+			source := "${{ inputs.allow || unsupported() }}"
+			if field == "continue-on-error" {
+				step.ContinueOnErrorExpression = source
+			} else {
+				step.TimeoutMinutesExpression = source
+			}
+			_, err := applyStaticInputs("workflow.yml", workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{step}}, map[string]any{"allow": true})
+			if err == nil || !strings.Contains(err.Error(), "unsupported runtime function") {
+				t.Fatalf("applyStaticInputs() error = %v, want unsupported runtime function", err)
+			}
+		})
+	}
+
 	job.Steps[0].ContinueOnErrorExpression = "${{ matrix.experimental && fromJSON(inputs.value) }}"
 	job.Steps[0].TimeoutMinutesExpression = ""
 	resolved, err = applyStaticInputs("workflow.yml", job, map[string]any{"value": "invalid"})

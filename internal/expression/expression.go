@@ -176,6 +176,10 @@ func githubCompare(kind actionlint.CompareOpNodeKind, left, right any) (bool, er
 		return githubEqual(left, right), nil
 	case actionlint.CompareOpNodeKindNotEq:
 		return !githubEqual(left, right), nil
+	case actionlint.CompareOpNodeKindLessEq, actionlint.CompareOpNodeKindGreaterEq:
+		if githubEqual(left, right) {
+			return true, nil
+		}
 	}
 	comparison, ok := githubOrderedCompare(left, right)
 	if !ok {

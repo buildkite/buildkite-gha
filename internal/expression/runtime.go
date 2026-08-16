@@ -208,6 +208,20 @@ func EvaluateStepControl(expression string, context Context) (any, error) {
 	return evaluateStepRuntimeExpression(node, context, true, true, nil)
 }
 
+// ValidateStepControl validates every branch of a typed workflow step control
+// without resolving runtime values.
+func ValidateStepControl(expression string) error {
+	body, err := expressionBody(expression)
+	if err != nil {
+		return err
+	}
+	node, parseErr := actionlint.NewExprParser().Parse(actionlint.NewExprLexer(body + "}}"))
+	if parseErr != nil {
+		return fmt.Errorf("invalid expression: %w", parseErr)
+	}
+	return validateStepRuntimeExpression(node, true, true, nil)
+}
+
 // EvaluateJobEnvironment evaluates a job-level environment template.
 func EvaluateJobEnvironment(template string, context Context) (string, error) {
 	return evaluateRuntimeTemplate(template, context, func(node actionlint.ExprNode, context Context) (any, error) {
@@ -285,6 +299,43 @@ func evaluateStepRuntimeNode(node actionlint.ExprNode, context Context) (any, er
 }
 
 func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, allowHashFiles, allowGitHubToken bool, allowedContexts map[string]bool) (any, error) {
+	if err := validateStepRuntimeExpression(node, allowHashFiles, allowGitHubToken, allowedContexts); err != nil {
+		return nil, err
+	}
+
+	evaluator := newSemanticEvaluator(stepRuntimeSurface)
+	evaluator.resolve = func(root string, path []string) (any, error) {
+		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
+	}
+	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
+	evaluator.truthy = githubTruthy
+	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
+		return githubCompare(kind, left, right)
+	}
+	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
+	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
+		return fmt.Errorf("unsupported runtime logical operator %s", kind)
+	}
+	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
+		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
+			return value, err
+		}
+		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") {
+			return nil, fmt.Errorf("unsupported runtime function %q", call.Callee)
+		}
+		if context.HashFiles == nil {
+			return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
+		}
+		patterns, err := evaluateHashFilesArguments(call.Args, evaluator.evaluate)
+		if err != nil {
+			return nil, err
+		}
+		return context.HashFiles(patterns)
+	}
+	return evaluator.evaluate(node)
+}
+
+func validateStepRuntimeExpression(node actionlint.ExprNode, allowHashFiles, allowGitHubToken bool, allowedContexts map[string]bool) error {
 	validator := newSemanticValidator(stepRuntimeSurface)
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if allowedContexts != nil && !allowedContexts[strings.ToLower(root)] {
@@ -375,40 +426,7 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 		return nil
 	}
 	validator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
-	if err := validator.validate(node); err != nil {
-		return nil, err
-	}
-
-	evaluator := newSemanticEvaluator(stepRuntimeSurface)
-	evaluator.resolve = func(root string, path []string) (any, error) {
-		return resolveRuntimeReferenceWithMissingMembers(root, path, context)
-	}
-	evaluator.resolveRoot = func(root string) (any, error) { return resolveStepRuntimeRoot(root, context) }
-	evaluator.truthy = githubTruthy
-	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {
-		return githubCompare(kind, left, right)
-	}
-	evaluator.unsupported = func(actionlint.ExprNode) error { return fmt.Errorf("unsupported runtime expression") }
-	evaluator.logicalError = func(kind actionlint.LogicalOpNodeKind) error {
-		return fmt.Errorf("unsupported runtime logical operator %s", kind)
-	}
-	evaluator.call = func(evaluator *semanticEvaluator, call *actionlint.FuncCallNode) (any, error) {
-		if value, recognized, err := evaluatePureFunction(evaluator, call); recognized {
-			return value, err
-		}
-		if !allowHashFiles || !strings.EqualFold(call.Callee, "hashFiles") {
-			return nil, fmt.Errorf("unsupported runtime function %q", call.Callee)
-		}
-		if context.HashFiles == nil {
-			return nil, fmt.Errorf("runtime function %q is unavailable", call.Callee)
-		}
-		patterns, err := evaluateHashFilesArguments(call.Args, evaluator.evaluate)
-		if err != nil {
-			return nil, err
-		}
-		return context.HashFiles(patterns)
-	}
-	return evaluator.evaluate(node)
+	return validator.validate(node)
 }
 
 func resolveStepRuntimeRoot(root string, context Context) (any, error) {

@@ -340,11 +340,20 @@ func EvaluateCondition(source string, context ConditionContext) (bool, error) {
 
 func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (any, error) {
 	evaluator := newSemanticEvaluator(conditionSurface)
+	rootValues := make(map[string]any)
 	evaluator.resolve = func(root string, path []string) (any, error) {
 		return resolveConditionReference(root, path, context)
 	}
 	evaluator.resolveRoot = func(root string) (any, error) {
-		return resolveConditionRoot(root, context)
+		key := strings.ToLower(root)
+		if value, ok := rootValues[key]; ok {
+			return value, nil
+		}
+		value, err := resolveConditionRoot(root, context)
+		if err == nil {
+			rootValues[key] = value
+		}
+		return value, err
 	}
 	evaluator.truthy = githubTruthy
 	evaluator.compare = func(kind actionlint.CompareOpNodeKind, left, right any) (any, error) {

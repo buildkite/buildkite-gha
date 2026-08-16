@@ -1000,6 +1000,7 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 		"endsWith(true, 'UE')",
 		"contains(fromJSON('[1,\"Deploy\"]'), 'deploy')",
 		"format('{0}-{1}', 'release', 2) == 'release-2'",
+		"format('{0}-{1}', fromJSON('{}'), fromJSON('[]')) == 'Object-Array'",
 		"join(fromJSON('[\"one\",2]'), '-') == 'one-2'",
 		"fromJSON(toJSON(true))",
 		"fromJSON(true)",
@@ -1059,6 +1060,9 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 		"steps['missing'].outcome == null",
 		"contains(steps.*.outcome, 'success') && contains(steps.*.outcome, 'failure')",
 		"contains(toJSON(matrix), '\"target\"')",
+		"needs == needs",
+		"steps == steps",
+		"matrix <= matrix && matrix >= matrix",
 	} {
 		if err := ValidateCondition(condition, StepCondition); err != nil {
 			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
