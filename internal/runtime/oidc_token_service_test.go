@@ -114,7 +114,7 @@ func (p *testOIDCTokenProvider) OIDCToken(_ context.Context, audience string) (s
 	return p.token, nil
 }
 
-func TestIDTokenServiceActionsCoreContract(t *testing.T) {
+func TestIDTokenServiceWireContract(t *testing.T) {
 	provider := &testOIDCTokenProvider{token: "header.payload.signature"}
 	redactor := &testRedactor{}
 	processor := newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{})
@@ -160,33 +160,60 @@ func TestIDTokenServiceActionsCoreContract(t *testing.T) {
 	}
 }
 
-func TestNodeActionCallsActionsCoreGetIDTokenThroughLoopbackService(t *testing.T) {
+func writeOIDCUtilsContractShim(t *testing.T, workspace, actionPath string) {
+	t.Helper()
+	writeFixtureFile(t, workspace, actionPath+"/node_modules/@actions/core/index.js", `
+const http = require("node:http");
+
+function requiredEnvironment(name) {
+  const value = process.env[name];
+  if (!value) throw new Error("Unable to get " + name + " env variable");
+  return value;
+}
+
+// Contract-conformant test shim mirroring actions/toolkit's oidc-utils.ts.
+exports.getIDToken = async function getIDToken(audience) {
+  let endpoint = requiredEnvironment("ACTIONS_ID_TOKEN_REQUEST_URL");
+  if (audience) endpoint += "&audience=" + encodeURIComponent(audience);
+  const bearer = requiredEnvironment("ACTIONS_ID_TOKEN_REQUEST_TOKEN");
+  return await new Promise((resolve, reject) => {
+    const request = http.get(endpoint, {headers: {Accept: "application/json", Authorization: "Bearer " + bearer}}, response => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", chunk => body += chunk);
+      response.on("end", () => {
+        if (response.statusCode < 200 || response.statusCode > 299) return reject(new Error("HTTP " + response.statusCode));
+        let parsed;
+        try {
+          parsed = JSON.parse(body);
+        } catch (error) {
+          return reject(error);
+        }
+        if (!parsed || typeof parsed.value !== "string" || parsed.value.length === 0) {
+          return reject(new Error("Response json body do not have ID Token field"));
+        }
+        resolve(parsed.value);
+      });
+    });
+    request.on("error", reject);
+  });
+};
+`)
+}
+
+func TestNodeActionUsesOIDCUtilsContractShimThroughLoopbackService(t *testing.T) {
 	node := requireNode24(t)
 	workspace := t.TempDir()
 	workflowPath := ".github/workflows/oidc.yml"
 	actionPath := ".github/actions/oidc"
 	writeFixtureFile(t, workspace, workflowPath, "name: OIDC contract\n")
 	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: OIDC\nruns:\n  using: node24\n  main: main.js\n")
-	writeFixtureFile(t, workspace, actionPath+"/node_modules/@actions/core/index.js", `
-const http = require("node:http");
-exports.getIDToken = async function getIDToken(audience) {
-  const endpoint = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
-  const bearer = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
-  if (!endpoint || !bearer) throw new Error("ID token environment is unavailable");
-  return await new Promise((resolve, reject) => {
-    const request = http.get(endpoint + "&audience=" + encodeURIComponent(audience), {headers: {Authorization: "Bearer " + bearer}}, response => {
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", chunk => body += chunk);
-      response.on("end", () => response.statusCode === 200 ? resolve(JSON.parse(body).value) : reject(new Error("HTTP " + response.statusCode)));
-    });
-    request.on("error", reject);
-  });
-};
-`)
+	writeOIDCUtilsContractShim(t, workspace, actionPath)
 	writeFixtureFile(t, workspace, actionPath+"/main.js", `
 const fs = require("node:fs");
 const core = require("@actions/core");
+const endpoint = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
+if (!endpoint.search) throw new Error("ACTIONS_ID_TOKEN_REQUEST_URL must already contain a query string");
 (async () => fs.writeFileSync(process.env.MARKER, await core.getIDToken("sts.amazonaws.com")))().catch(error => { console.error(error); process.exitCode = 1; });
 `)
 	marker := filepath.Join(workspace, "token")
@@ -219,19 +246,37 @@ func TestNodeActionIDTokenEnvironmentRequiresWritePermission(t *testing.T) {
 	actionPath := ".github/actions/no-oidc"
 	writeFixtureFile(t, workspace, workflowPath, "name: no OIDC\n")
 	writeFixtureFile(t, workspace, actionPath+"/action.yml", "name: no OIDC\nruns:\n  using: node24\n  main: main.js\n")
+	writeOIDCUtilsContractShim(t, workspace, actionPath)
 	writeFixtureFile(t, workspace, actionPath+"/main.js", `
-for (const name of ["ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
-  if (process.env[name]) throw new Error(name + " leaked without id-token: write");
+const fs = require("node:fs");
+const core = require("@actions/core");
+(async () => {
+  try {
+    await core.getIDToken("sts.amazonaws.com");
+    throw new Error("getIDToken unexpectedly succeeded");
+  } catch (error) {
+    if (error.message !== "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable") throw error;
+    fs.writeFileSync(process.env.MARKER, error.message);
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
 `)
+	marker := filepath.Join(workspace, "missing-environment")
 	lockID := "a-0123456789abcdef"
 	job := runtimePlan(t, workspace, workflowPath, []plan.Step{{
 		ID: "no-oidc", Kind: "uses", Uses: "./" + actionPath,
-		Env:    map[string]string{"ACTIONS_ID_TOKEN_REQUEST_URL": "https://attacker.invalid/?x=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "attacker"},
+		Env:    map[string]string{"ACTIONS_ID_TOKEN_REQUEST_URL": "https://attacker.invalid/?x=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "attacker", "MARKER": marker},
 		Action: &plan.ActionSelector{Lock: lockID},
 	}})
 	job.Actions = []plan.ActionLock{{ID: lockID, Source: "workspace", Path: actionPath, SourceDigest: digestTree(t, filepath.Join(workspace, actionPath))}}
 	result, err := (Runner{Node24: node}).RunJob(context.Background(), job, workspace)
 	if err != nil || result.Conclusion != "success" {
 		t.Fatalf("RunJob() = %#v, %v", result, err)
+	}
+	message, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(message) != "Unable to get ACTIONS_ID_TOKEN_REQUEST_URL env variable" {
+		t.Fatalf("getIDToken error = %q", message)
 	}
 }

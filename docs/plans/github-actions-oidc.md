@@ -147,12 +147,13 @@ Verification:
 - unit tests mirroring `github_token_service_test.go` against a fake agent
   endpoint, covering audience passthrough, auth failures, and malformed
   responses
-- a runtime test where a Node step calls `actions/core.getIDToken()` through
-  the real loopback service
+- a runtime test where a Node step uses a contract-conformant shim mirroring
+  `actions/toolkit`'s `oidc-utils.ts` against the real loopback service; this
+  verifies the wire contract, not the upstream package
 - parse tests flip the `id-token` rejection case to acceptance and gate
   variable absence without the permission
 - `mise run check` stays network-free
-- hosted runtime proof: `aws-actions/configure-aws-credentials` completes a
+- deferred hosted runtime proof: `aws-actions/configure-aws-credentials` completes a
   live `AssumeRoleWithWebIdentity` against an IAM provider trusting
   `agent.buildkite.com`
 
