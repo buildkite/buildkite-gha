@@ -28,6 +28,10 @@ func TestProcessingReportContainsEveryStableStageInTextAndJSON(t *testing.T) {
 		Stage: "action-resolution", Message: "action metadata is invalid; update the action", Detail: "unsupported runtime node12", Job: "test", Instance: "gha-test", Action: "./.github/actions/test", Step: 1,
 		Location: &SourceLocation{Path: "ci.yml", Line: 8, Column: 9},
 	})
+	report.Diagnostics = append(report.Diagnostics, Diagnostic{
+		Level: "error", Code: "E_CONTEXT_REQUIRED", Category: "context",
+		Stage: "hosted-profile-admission", Message: "linked webhook context is required",
+	})
 
 	var encoded bytes.Buffer
 	if err := WriteProcessing(&encoded, "json", report); err != nil {

@@ -130,7 +130,7 @@ buildkite-gha validate \
 The deprecated `hosted-tokenless` profile name remains an alias for `hosted`.
 Hosted validation uses the same runner preset as production upload.
 
-Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted. It is `context-required` when generated inputs cannot measure an otherwise supported path, unless another finding makes the workflow incompatible or indeterminate.
+Use `--format json` for a `buildkite-gha/processing-report/v2` report. `--all-events` emits `buildkite-gha/processing-report/v3`, which contains the event-independent v2 report and one v2 report for each generated event evaluation. The top-level result is `admitted` only when every evaluation is admitted. It is `context-required` when generated inputs cannot measure an otherwise supported path, unless another finding makes the workflow incompatible, not admitted, or indeterminate.
 
 Reports cover workflow parsing, event validation, graph construction, matrix expansion, expressions, action discovery and resolution, plan construction, profile admission, and pipeline generation. A blocked downstream stage is `not-evaluated`, not `failed`.
 
