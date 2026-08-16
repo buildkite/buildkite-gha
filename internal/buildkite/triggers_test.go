@@ -213,6 +213,13 @@ func TestTranslateEventTriggerConditionMatchesPushPaths(t *testing.T) {
 	if _, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", tagContext); err != nil || !applicable {
 		t.Fatalf("tag push path filter = %t, %v", applicable, err)
 	}
+
+	context.ChangedPathsKnown = false
+	context.ChangedPathsError = "verified push diff unavailable"
+	trigger.Branches = []string{"release"}
+	if condition, applicable, err := TranslateEventTriggerCondition([]workflow.Trigger{trigger}, "push", context); err != nil || !applicable || !strings.Contains(condition, `"main" =~ /^release$/`) {
+		t.Fatalf("branch-mismatched push path filter = %q, %t, %v", condition, applicable, err)
+	}
 }
 
 func TestPathFiltersMatchOrderedPatternsPerPath(t *testing.T) {

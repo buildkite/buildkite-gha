@@ -308,6 +308,20 @@ func translateTrigger(t workflow.Trigger, context TriggerConditionContext, selec
 			parts = append(parts, context.Tag+" != null", tag)
 		}
 		if pathFilters && selected && context.TagValue == nil {
+			if context.BranchValue != nil {
+				branchMatches := true
+				if !hasBranchFilter && hasTagFilter {
+					branchMatches = false
+				} else if hasBranchFilter {
+					branchMatches, err = refFilterMatches(*context.BranchValue, t.Branches, t.BranchesIgnore)
+					if err != nil {
+						return "", false, fmt.Errorf("push branches: %w", err)
+					}
+				}
+				if !branchMatches {
+					return strings.Join(parts, " && "), true, nil
+				}
+			}
 			if !context.ChangedPathsKnown {
 				return "", false, &UnsupportedPathFiltersError{Event: t.Event, Reason: context.ChangedPathsError}
 			}
