@@ -204,11 +204,18 @@ func validateConditionReference(root string, path []string, scope ConditionScope
 			return nil
 		}
 		return fmt.Errorf("condition reference %q is unsupported; expected needs.<job>.result or needs.<job>.outputs.<name>", reference)
-	case "vars", "matrix":
+	case "vars":
 		if len(path) == 1 {
 			return nil
 		}
-		return fmt.Errorf("condition reference %q is unsupported; expected %s.<name>", reference, strings.ToLower(root))
+		return fmt.Errorf("condition reference %q is unsupported; expected vars.<name>", reference)
+	case "matrix":
+		// Matrix values may be objects or arrays, so nested references such
+		// as matrix.config.os are valid.
+		if len(path) >= 1 {
+			return nil
+		}
+		return fmt.Errorf("condition reference %q is unsupported; expected matrix.<name>", reference)
 	case "steps":
 		if scope == JobCondition {
 			return fmt.Errorf("condition context %q is unavailable in job conditions", root)
@@ -511,9 +518,25 @@ func resolveConditionReference(root string, path []string, context ConditionCont
 		return findString(context.Env, path[0]), nil
 	case len(path) == 1 && strings.EqualFold(root, "vars"):
 		return findString(context.Vars, path[0]), nil
-	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
+				// Nested references such as matrix.config.os walk into
+				// object-valued matrix entries; a missing or non-object
+				// segment yields null, matching GitHub.
+				for _, part := range path[1:] {
+					var (
+						ok  bool
+						err error
+					)
+					value, ok, err = objectValue(value, part)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						return nil, nil
+					}
+				}
 				return value, nil
 			}
 		}

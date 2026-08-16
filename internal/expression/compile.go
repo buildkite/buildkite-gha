@@ -133,7 +133,10 @@ func validateCompileExpressionNode(node actionlint.ExprNode) error {
 		switch {
 		case strings.EqualFold(root, "vars") && len(path) == 1,
 			strings.EqualFold(root, "inputs") && len(path) == 1,
-			strings.EqualFold(root, "matrix") && len(path) == 1,
+			// Matrix values may be objects or arrays (matrix include entries
+			// and object lists), so nested references such as
+			// matrix.config.os are valid.
+			strings.EqualFold(root, "matrix") && len(path) >= 1,
 			strings.EqualFold(root, "strategy") && len(path) == 1,
 			strings.EqualFold(root, "event") && len(path) >= 1:
 			return nil

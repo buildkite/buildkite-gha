@@ -549,6 +549,22 @@ func resolveRuntimeReferenceValue(root string, path []string, context Context, a
 	case runtimeReferenceMatrix:
 		for name, value := range context.Matrix {
 			if strings.EqualFold(name, path[0]) {
+				// Nested references such as matrix.config.os walk into
+				// object-valued matrix entries; a missing or non-object
+				// segment yields null, matching GitHub.
+				for _, part := range path[1:] {
+					var (
+						ok  bool
+						err error
+					)
+					value, ok, err = objectValue(value, part)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						return nil, nil
+					}
+				}
 				return value, nil
 			}
 		}
@@ -611,7 +627,7 @@ func classifyRuntimeReference(root string, path []string) runtimeReferenceKind {
 		return runtimeReferenceGitHub
 	case len(path) == 1 && strings.EqualFold(root, "inputs"):
 		return runtimeReferenceInput
-	case len(path) == 1 && strings.EqualFold(root, "matrix"):
+	case len(path) >= 1 && strings.EqualFold(root, "matrix"):
 		return runtimeReferenceMatrix
 	case len(path) == 1 && strings.EqualFold(root, "secrets"):
 		return runtimeReferenceSecret

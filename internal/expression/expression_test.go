@@ -1025,6 +1025,50 @@ func TestEvaluateConditionSupportsPureFunctions(t *testing.T) {
 	}
 }
 
+func TestNestedMatrixReferencesAreSupported(t *testing.T) {
+	matrix := map[string]any{"config": map[string]any{"os": "ubuntu-24.04", "name": "linux"}, "os": "ubuntu-24.04"}
+
+	// Compile-time templates such as runs-on.
+	got, err := EvaluateCompileTemplate("${{ matrix.config.os }}", CompileContext{Matrix: matrix})
+	if err != nil || got != "ubuntu-24.04" {
+		t.Fatalf("EvaluateCompileTemplate() = %q, %v", got, err)
+	}
+	// Missing or scalar intermediate segments yield null, matching GitHub.
+	for _, template := range []string{"${{ matrix.config.missing }}", "${{ matrix.os.name }}"} {
+		if got, err := EvaluateCompileTemplate(template, CompileContext{Matrix: matrix}); err != nil || got != "" {
+			t.Errorf("EvaluateCompileTemplate(%q) = %q, %v, want empty", template, got, err)
+		}
+	}
+
+	// Runtime templates such as step run and env.
+	if err := ValidateRuntimeTemplate("${{ matrix.config.name }}"); err != nil {
+		t.Fatalf("ValidateRuntimeTemplate() error = %v", err)
+	}
+	if got, err := EvaluateStep("${{ matrix.config.name }}", Context{Matrix: matrix}); err != nil || got != "linux" {
+		t.Fatalf("EvaluateStep() = %q, %v", got, err)
+	}
+	if got, err := Evaluate("${{ matrix.config.missing }}", Context{Matrix: matrix}); err != nil || got != "" {
+		t.Fatalf("Evaluate() = %q, %v, want empty", got, err)
+	}
+
+	// Conditions.
+	for condition, want := range map[string]bool{
+		"matrix.config.name == 'linux'": true,
+		"matrix.config.name == 'mac'":   false,
+		"matrix.config.missing == null": true,
+		"matrix.os.name == null":        true,
+	} {
+		if err := ValidateCondition(condition, StepCondition); err != nil {
+			t.Errorf("ValidateCondition(%q) error = %v", condition, err)
+			continue
+		}
+		got, err := EvaluateCondition(condition, ConditionContext{Matrix: matrix})
+		if err != nil || got != want {
+			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
+		}
+	}
+}
+
 func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
 	for condition, want := range map[string]bool{
 		"github['event_name'] == 'push'":       true,
