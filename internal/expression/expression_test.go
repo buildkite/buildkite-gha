@@ -1091,8 +1091,15 @@ func TestEvaluateConditionSupportsBracketFormGitHubReferences(t *testing.T) {
 			t.Errorf("EvaluateCondition(%q) = %v, %v, want %v", condition, got, err, want)
 		}
 	}
-	if _, err := EvaluateCondition("github['event_name'] == 'push'", ConditionContext{}); err == nil || !strings.Contains(err.Error(), `condition context "github" is unavailable`) {
+	if _, err := EvaluateCondition("github['event_name'] == 'push'", ConditionContext{}); err == nil || !strings.Contains(err.Error(), "condition references unavailable value github.event_name") {
 		t.Fatalf("EvaluateCondition() without github context error = %v", err)
+	}
+	// Whole and dynamic github access fails closed at evaluation even
+	// without prior validation, such as composite-action if conditions.
+	for _, condition := range []string{"github", "github[vars.KEY]", "github.*"} {
+		if _, err := EvaluateCondition(condition, ConditionContext{GitHub: map[string]any{"event_name": "push"}, Vars: map[string]string{"KEY": "event_name"}}); err == nil {
+			t.Errorf("EvaluateCondition(%q) error = nil, want fail-closed error", condition)
+		}
 	}
 }
 

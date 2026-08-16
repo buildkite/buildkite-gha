@@ -415,11 +415,6 @@ func evaluateConditionNode(node actionlint.ExprNode, context ConditionContext) (
 
 func resolveConditionRoot(root string, context ConditionContext) (any, error) {
 	switch strings.ToLower(root) {
-	case "github":
-		if context.GitHub == nil {
-			return nil, fmt.Errorf("condition context %q is unavailable", root)
-		}
-		return context.GitHub, nil
 	case "matrix":
 		if context.Matrix == nil {
 			return nil, fmt.Errorf("condition context %q is unavailable", root)

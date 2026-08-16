@@ -395,6 +395,7 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 	switch delim {
 	case '{':
 		object := make(map[string]any)
+		spellings := make(map[string]string)
 		for decoder.More() {
 			keyToken, err := decoder.Token()
 			if err != nil {
@@ -408,11 +409,11 @@ func decodeJSONToken(decoder *json.Decoder) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			for existing := range object {
-				if strings.EqualFold(existing, key) {
-					key = existing
-					break
-				}
+			lower := strings.ToLower(key)
+			if first, ok := spellings[lower]; ok {
+				key = first
+			} else {
+				spellings[lower] = key
 			}
 			object[key] = value
 		}
