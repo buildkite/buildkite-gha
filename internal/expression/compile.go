@@ -182,6 +182,9 @@ func validateCompileAccessNode(validator *semanticValidator, node actionlint.Exp
 			return fmt.Errorf("unsupported compile-time context %q", node.Name)
 		}
 	case *actionlint.ObjectDerefNode:
+		if referenceRoot(node) == "" {
+			return validator.validate(node.Receiver)
+		}
 		if root, path, err := referencePath(node); err == nil && strings.EqualFold(root, "github") && len(path) >= 2 && strings.EqualFold(path[0], "event") {
 			return nil
 		}
@@ -196,6 +199,9 @@ func validateCompileAccessNode(validator *semanticValidator, node actionlint.Exp
 		}
 		return validateCompileAccessNode(validator, node.Receiver)
 	case *actionlint.ArrayDerefNode:
+		if referenceRoot(node) == "" {
+			return validator.validate(node.Receiver)
+		}
 		if root, path, err := referencePath(node.Receiver); err == nil && strings.EqualFold(root, "github") && len(path) == 1 && strings.EqualFold(path[0], "event") {
 			return fmt.Errorf("whole event projection is unsupported")
 		}

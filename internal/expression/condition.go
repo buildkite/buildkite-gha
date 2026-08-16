@@ -239,11 +239,16 @@ func validateConditionAccessNode(validator *semanticValidator, node actionlint.E
 	root := strings.ToLower(referenceRoot(node))
 	switch root {
 	case "":
-		if index, ok := node.(*actionlint.IndexAccessNode); ok {
-			if err := validator.validate(index.Operand); err != nil {
+		switch node := node.(type) {
+		case *actionlint.ObjectDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.ArrayDerefNode:
+			return validator.validate(node.Receiver)
+		case *actionlint.IndexAccessNode:
+			if err := validator.validate(node.Operand); err != nil {
 				return err
 			}
-			return validator.validate(index.Index)
+			return validator.validate(node.Index)
 		}
 		return fmt.Errorf("unsupported condition access expression")
 	case "matrix", "needs":

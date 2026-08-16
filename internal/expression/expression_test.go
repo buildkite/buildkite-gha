@@ -1019,6 +1019,7 @@ func TestEvaluateConditionSupportsIndexesFiltersAndWholeContexts(t *testing.T) {
 		"matrix.object[true] == 'boolean'",
 		"matrix.object[2] == 'number'",
 		"join(matrix.items.*[0], ',') == 'first,'",
+		"contains(fromJSON('[{\"name\":\"bug\"}]').*.name, 'bug')",
 		"contains(needs.*.result, 'FAILURE')",
 		"steps[env.STEP].outcome == 'success'",
 		"steps['missing'].outcome == null",
@@ -1363,5 +1364,16 @@ func TestEvaluateCompileFailsClosed(t *testing.T) {
 				t.Fatalf("EvaluateCompile() error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestEvaluateCompileSupportsFunctionResultProjection(t *testing.T) {
+	expr, err := Parse("${{ join(fromJSON('[{\"name\":\"bug\"}]').*.name, ',') }}", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := EvaluateCompile(expr, CompileContext{})
+	if err != nil || got != "bug" {
+		t.Fatalf("EvaluateCompile() function projection = %#v, %v", got, err)
 	}
 }
