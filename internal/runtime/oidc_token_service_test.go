@@ -110,6 +110,7 @@ type testOIDCTokenProvider struct {
 	token              string
 	requireLiveContext bool
 	audiences          []string
+	err                error
 }
 
 func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) (string, error) {
@@ -117,6 +118,9 @@ func (p *testOIDCTokenProvider) OIDCToken(ctx context.Context, audience string) 
 		return "", ctx.Err()
 	}
 	p.audiences = append(p.audiences, audience)
+	if p.err != nil {
+		return "", p.err
+	}
 	return p.token, nil
 }
 
@@ -163,6 +167,37 @@ func TestIDTokenServiceWireContract(t *testing.T) {
 	}
 	if len(redactor.values) != 2 || redactor.values[0] != env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] || redactor.values[1] != provider.token {
 		t.Fatalf("redactions = %#v", redactor.values)
+	}
+}
+
+func TestIDTokenServicePreservesPermanentMintFailureStatus(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			provider := &testOIDCTokenProvider{err: oidcTokenStatusError(status)}
+			service, err := startIDTokenService(context.Background(), provider, &testRedactor{}, newCommandProcessor(&bytes.Buffer{}, &bytes.Buffer{}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = service.Close() }()
+			env, revoke, err := service.actionEnvironment(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer revoke()
+			request, err := http.NewRequest(http.MethodGet, env["ACTIONS_ID_TOKEN_REQUEST_URL"], nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer "+env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != status || len(provider.audiences) != 1 {
+				t.Fatalf("request = HTTP %d with %d mint calls, want HTTP %d with one call", response.StatusCode, len(provider.audiences), status)
+			}
+		})
 	}
 }
 

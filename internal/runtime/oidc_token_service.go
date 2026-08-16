@@ -132,19 +132,28 @@ func agentOIDCTokenURL(endpoint, jobID string) (string, error) {
 	return u.String(), nil
 }
 
+type oidcTokenHTTPError struct {
+	status  int
+	message string
+}
+
+func (e *oidcTokenHTTPError) Error() string { return e.message }
+
 func oidcTokenStatusError(status int) error {
+	message := ""
 	switch status {
 	case http.StatusBadRequest, http.StatusUnprocessableEntity:
-		return fmt.Errorf("OIDC token request was rejected")
+		message = "OIDC token request was rejected"
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("OIDC token request was denied")
+		message = "OIDC token request was denied"
 	case http.StatusNotFound:
-		return fmt.Errorf("OIDC token service is not enabled for this organization")
+		message = "OIDC token service is not enabled for this organization"
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("OIDC token service is rate limited")
+		message = "OIDC token service is rate limited"
 	default:
-		return fmt.Errorf("OIDC token service returned HTTP %d", status)
+		message = fmt.Sprintf("OIDC token service returned HTTP %d", status)
 	}
+	return &oidcTokenHTTPError{status: status, message: message}
 }
 
 func isIDTokenEnvironment(name string) bool {
@@ -245,7 +254,15 @@ func (s *idTokenService) ServeHTTP(w http.ResponseWriter, request *http.Request)
 	}
 	token, err := s.provider.OIDCToken(request.Context(), request.URL.Query().Get("audience"))
 	if err != nil {
-		http.Error(w, "could not mint actions ID token", http.StatusBadGateway)
+		status := http.StatusBadGateway
+		var statusErr *oidcTokenHTTPError
+		if errors.As(err, &statusErr) {
+			switch statusErr.status {
+			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity:
+				status = statusErr.status
+			}
+		}
+		http.Error(w, "could not mint actions ID token", status)
 		return
 	}
 	s.processor.addMask(token)
