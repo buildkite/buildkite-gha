@@ -833,9 +833,10 @@ func replaceSliceInputs(values []string, inputs map[string]any) []string {
 }
 
 func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
-	jobValues := []string{job.Name, job.If, job.DefaultShell, job.DefaultWorkingDirectory}
-	jobValues = appendMapValues(jobValues, job.Env)
-	jobValues = appendMapValues(jobValues, job.Outputs)
+	jobValues := []string{job.Name}
+	jobRuntimeValues := []string{job.DefaultShell, job.DefaultWorkingDirectory}
+	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Env)
+	jobRuntimeValues = appendMapValues(jobRuntimeValues, job.Outputs)
 	if job.Concurrency != nil {
 		jobValues = append(jobValues, job.Concurrency.Group)
 	}
@@ -882,15 +883,26 @@ func rejectUnresolvedInputExpressions(path string, job workflow.Job) error {
 			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
 		}
 	}
+	if hasStaticInputCondition(job.If) {
+		return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+	}
+	for _, value := range jobRuntimeValues {
+		if hasStaticInputExpression(value) {
+			return jobError(path, job, "reusable-workflow input expression is not statically resolvable")
+		}
+	}
 	for _, step := range job.Steps {
 		if hasInputExpression(step.Uses) {
 			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow action reference input expression is not statically resolvable")
 		}
-		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.If, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
+		if hasStaticInputCondition(step.If) {
+			return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
+		}
+		stepValues := []string{step.Name, step.Run, step.Shell, step.WorkingDirectory, step.ContinueOnErrorExpression, step.TimeoutMinutesExpression}
 		stepValues = appendMapValues(stepValues, step.Env)
 		stepValues = appendMapValues(stepValues, step.With)
 		for _, value := range stepValues {
-			if hasInputExpression(value) {
+			if hasStaticInputExpression(value) {
 				return locatedJobError(path, job, step.Span.Start.Line, step.Span.Start.Column, "reusable-workflow input expression is not statically resolvable")
 			}
 		}
@@ -956,6 +968,16 @@ func containsInputExpression(value any) bool {
 
 func hasInputExpression(value string) bool {
 	usesInputs, err := expression.TemplateUsesContext(value, "inputs")
+	return err != nil || usesInputs
+}
+
+func hasStaticInputExpression(value string) bool {
+	usesInputs, err := expression.TemplateUsesStaticContextReference(value, "inputs")
+	return err != nil || usesInputs
+}
+
+func hasStaticInputCondition(value string) bool {
+	usesInputs, err := expression.ConditionUsesStaticContextReference(value, "inputs")
 	return err != nil || usesInputs
 }
 

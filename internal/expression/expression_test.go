@@ -487,6 +487,27 @@ func TestTemplateUsesContextSupportsIndexedAccess(t *testing.T) {
 	}
 }
 
+func TestStaticContextReferencesExcludeRuntimeComputedAccess(t *testing.T) {
+	for _, source := range []string{"${{ inputs.enabled }}", "${{ inputs['enabled'] }}", "inputs.enabled"} {
+		var usesInputs bool
+		var err error
+		if strings.HasPrefix(source, "inputs") {
+			usesInputs, err = ConditionUsesStaticContextReference(source, "inputs")
+		} else {
+			usesInputs, err = TemplateUsesStaticContextReference(source, "inputs")
+		}
+		if err != nil || !usesInputs {
+			t.Fatalf("static context reference %q = %v, %v, want true", source, usesInputs, err)
+		}
+	}
+	for _, source := range []string{"${{ inputs[env.KEY] }}", "${{ inputs.* }}"} {
+		usesInputs, err := TemplateUsesStaticContextReference(source, "inputs")
+		if err != nil || usesInputs {
+			t.Fatalf("runtime context reference %q = %v, %v, want false", source, usesInputs, err)
+		}
+	}
+}
+
 func TestValidateConditionAllowsSupportedRuntimeExpressions(t *testing.T) {
 	for _, test := range []struct {
 		name   string

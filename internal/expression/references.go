@@ -444,3 +444,43 @@ func TemplateUsesContext(source, contextName string) (bool, error) {
 	})
 	return found, err
 }
+
+// ConditionUsesStaticContextReference reports whether a condition contains a
+// direct or literal-index reference to a context. Computed indexes and
+// projections remain runtime expressions.
+func ConditionUsesStaticContextReference(source, contextName string) (bool, error) {
+	node, empty, err := parseCondition(source)
+	if err != nil || empty {
+		return false, err
+	}
+	return usesStaticContextReference(node, contextName), nil
+}
+
+// TemplateUsesStaticContextReference reports whether a template contains a
+// direct or literal-index reference to a context. Computed indexes and
+// projections remain runtime expressions.
+func TemplateUsesStaticContextReference(source, contextName string) (bool, error) {
+	found := false
+	err := visitTemplateExpressions(source, func(expression actionlint.ExprNode) error {
+		found = found || usesStaticContextReference(expression, contextName)
+		return nil
+	})
+	return found, err
+}
+
+func usesStaticContextReference(expression actionlint.ExprNode, contextName string) bool {
+	found := false
+	actionlint.VisitExprNode(expression, func(node, parent actionlint.ExprNode, entering bool) {
+		if !entering || found || referenceReceiver(node, parent) {
+			return
+		}
+		switch node.(type) {
+		case *actionlint.VariableNode, *actionlint.ObjectDerefNode, *actionlint.ArrayDerefNode, *actionlint.IndexAccessNode:
+		default:
+			return
+		}
+		root, _, err := referencePath(node)
+		found = err == nil && strings.EqualFold(root, contextName)
+	})
+	return found
+}

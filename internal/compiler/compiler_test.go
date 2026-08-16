@@ -1289,6 +1289,39 @@ jobs:
 	}
 }
 
+func TestCompilePreservesComputedReusableInputIndexesForRuntime(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/reusable.yml
+    with:
+      target: release
+`)
+	writeWorkflow(t, repository, "reusable.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      KEY: target
+    steps:
+      - run: echo "$VALUE"
+        env:
+          VALUE: ${{ inputs[env.KEY] }}
+`)
+
+	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE"] != "${{ inputs[env.KEY] }}" {
+		t.Fatalf("computed reusable input plan = %#v", plans)
+	}
+}
+
 func TestApplyStaticInputsSubstitutesIndexedInputsInStepFields(t *testing.T) {
 	span := workflow.Span{Start: workflow.Position{Line: 1, Column: 1}}
 	job := workflow.Job{ID: "test", Span: span, Steps: []workflow.Step{{
