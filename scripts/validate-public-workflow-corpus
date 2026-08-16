@@ -13,7 +13,7 @@ elif command -v nproc >/dev/null; then
 else
   jobs="$(sysctl -n hw.ncpu)"
 fi
-readonly workdir record_id jobs
+readonly record_id jobs
 
 for command in curl python3; do
   command -v "$command" >/dev/null || {
@@ -27,7 +27,11 @@ done
 }
 
 mkdir -p "$workdir"
-cd "$workdir"
+workdir="$(cd "$workdir" && pwd)"
+corpus_dir="$workdir/records/$record_id"
+readonly workdir corpus_dir
+mkdir -p "$corpus_dir"
+cd "$corpus_dir"
 
 download() {
   local name=$1
@@ -40,7 +44,7 @@ download() {
 download workflows.csv.gz
 download workflows.tar.gz
 
-if [[ ! -f files/.complete-v2 ]]; then
+if [[ ! -f files/.complete-v3 ]]; then
   rm -rf files reports workflows.tsv
   mkdir -p files
   python3 - <<'PY'
@@ -54,17 +58,20 @@ csv.field_size_limit(sys.maxsize)
 latest = {}
 with gzip.open("workflows.csv.gz", "rt", newline="") as source:
     for row in csv.DictReader(source):
-        if row["valid_workflow"] != "True":
-            continue
-        key = (row["repository"], row["file_path"])
+        key = row["uid"]
         committed = int(row["committed_date"])
         if key not in latest or committed > latest[key][0]:
-            latest[key] = (committed, row["file_hash"], row["git_change_type"])
+            latest[key] = (committed, row)
 
 workflows = []
-for (repository, path), (_, file_hash, change_type) in latest.items():
-    if change_type != "D" and file_hash:
-        workflows.append((repository, path, file_hash))
+for _, row in latest.values():
+    if (
+        row["valid_workflow"] == "True"
+        and row["git_change_type"] != "D"
+        and row["file_path"]
+        and row["file_hash"]
+    ):
+        workflows.append((row["repository"], row["file_path"], row["file_hash"]))
 workflows.sort()
 
 wanted = {}
@@ -105,7 +112,7 @@ if wanted:
     missing = sum(len(destinations) for destinations in wanted.values())
     raise SystemExit(f"corpus archive is missing {missing:,} selected workflows")
 print(f"extracted {extracted:,}")
-open("files/.complete-v2", "w").close()
+open("files/.complete-v3", "w").close()
 PY
 fi
 
