@@ -73,6 +73,13 @@ and validation, `Authorization: Token <job token>`, bounded response size,
 field. Request lifetime is omitted, selecting the API default of five
 minutes, which matches GitHub's exchange window.
 
+The credential is the per-job token the runtime already reads from
+`BUILDKITE_AGENT_ACCESS_TOKEN` (a job-scoped token on agents from v3.39.0).
+`buildkite-agent oidc request-token` authenticates with the same token from
+any pipeline step, so `POST /jobs/<job-id>/oidc/tokens` accepts it and the
+backend cannot distinguish this mint from step-level OIDC in an ordinary
+pipeline. No backend change is required.
+
 ### Loopback ID-token service
 
 The runtime starts one loopback HTTP listener per job, only when the plan
@@ -176,11 +183,6 @@ subjects.
 
 ## Open questions
 
-- Whether the Agent API `oidc/tokens` endpoint accepts the job token this
-  runtime already uses for `github_workflow_access_token` and cache minting,
-  and whether organization OIDC policy should gate it. Backend confirmation
-  resolves this before slice 1 merges; the endpoint shape is otherwise
-  identical to the existing minting clients.
 - Whether a future agent Job API `oidc/tokens` route should replace the
   direct Agent API call. It would not change this design: actions still
   speak `getIDToken()`, so the loopback translation layer remains either
