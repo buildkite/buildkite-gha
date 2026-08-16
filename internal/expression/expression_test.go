@@ -1483,6 +1483,16 @@ func TestSubstituteCompileInputsPreservesExpressionSyntax(t *testing.T) {
 	}
 }
 
+func TestSubstituteCompileInputsResolvesNestedComputedInputIndex(t *testing.T) {
+	got, err := SubstituteCompileInputs("${{ inputs[inputs.key] }}", map[string]any{"key": "target", "target": "release"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "${{ 'release' }}"; got != want {
+		t.Fatalf("SubstituteCompileInputs() = %q, want %q", got, want)
+	}
+}
+
 func TestSubstituteCompileInputsIgnoresNestedInputsProperties(t *testing.T) {
 	template := "${{ inputs.debug }} ${{ github.event.inputs.debug }} ${{ steps.inputs.name }} ${{ fromJSON(vars.CFG).inputs.name }}"
 	got, err := SubstituteCompileInputs(template, map[string]any{"debug": true, "name": "prod"})

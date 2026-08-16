@@ -1026,6 +1026,12 @@ func replaceMapInputs(values map[string]string, inputs map[string]any) map[strin
 func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	match := staticInputCondition.FindStringSubmatch(value)
 	if match == nil {
+		if !strings.Contains(value, "${{") {
+			usesInputs, err := expression.ConditionUsesContext(value, "inputs")
+			if err == nil && usesInputs {
+				return replaceStaticInputs("${{ "+value+" }}", inputs)
+			}
+		}
 		return replaceStaticInputs(value, inputs)
 	}
 	inputName := ""

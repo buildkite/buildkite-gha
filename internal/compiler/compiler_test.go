@@ -1223,7 +1223,7 @@ jobs:
         required: true
 jobs:
   gated:
-    if: ${{ inputs['enabled'] && github.ref }}
+    if: inputs.enabled && github.ref
     runs-on: ubuntu-latest
     env:
       LABEL: ${{ inputs['label'] }}
@@ -1231,7 +1231,7 @@ jobs:
       label: ${{ inputs['label'] }}
     steps:
       - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
-      - if: inputs['enabled']
+      - if: inputs['enabled'] && github.ref
         run: echo implicit
       - if: ${{ inputs [ 'label' ] }}
         run: echo string
@@ -1241,7 +1241,7 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "true" || plans[0].Steps[2].Condition != "'release'" {
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "${{ true && github.ref }}" || plans[0].Steps[2].Condition != "'release'" {
 		t.Fatalf("reusable condition = %#v", plans)
 	}
 }
@@ -1296,11 +1296,13 @@ jobs:
   call:
     uses: ./.github/workflows/reusable.yml
     with:
+      key: target
       target: release
 `)
 	writeWorkflow(t, repository, "reusable.yml", `on:
   workflow_call:
     inputs:
+      key: {type: string, required: true}
       target: {type: string, required: true}
 jobs:
   test:
@@ -1310,14 +1312,15 @@ jobs:
     steps:
       - run: echo "$VALUE"
         env:
-          VALUE: ${{ inputs[env.KEY] }}
+          VALUE_ENV: ${{ inputs[env.KEY] }}
+          VALUE_INPUT: ${{ inputs[inputs.key] }}
 `)
 
 	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE"] != "${{ inputs[env.KEY] }}" {
+	if len(plans) != 1 || plans[0].Inputs["target"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Env["VALUE_ENV"] != "${{ inputs[env.KEY] }}" || plans[0].Steps[0].Env["VALUE_INPUT"] != "release" {
 		t.Fatalf("computed reusable input plan = %#v", plans)
 	}
 }

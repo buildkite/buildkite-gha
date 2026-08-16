@@ -395,6 +395,20 @@ func introducesExpressionSyntax(before, replacement, after string) bool {
 // literals. Text and string literals outside those references are preserved
 // byte-for-byte.
 func SubstituteCompileInputs(template string, inputs map[string]any) (string, error) {
+	resolved := template
+	for {
+		next, err := substituteCompileInputsOnce(resolved, inputs)
+		if err != nil {
+			return "", err
+		}
+		if next == resolved {
+			return next, nil
+		}
+		resolved = next
+	}
+}
+
+func substituteCompileInputsOnce(template string, inputs map[string]any) (string, error) {
 	const open = "${{"
 	var substituted strings.Builder
 	remaining := template
