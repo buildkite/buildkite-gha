@@ -1436,6 +1436,30 @@ func TestRunValidateAndCompile(t *testing.T) {
 		}
 	})
 
+	t.Run("validate generated pull request still finds unsupported triggers", func(t *testing.T) {
+		for _, triggers := range []string{
+			"  pull_request:\n    paths: [src/**]\n  push:\n    paths: [docs/**]\n",
+			"  push:\n    paths: [docs/**]\n  pull_request:\n    paths: [src/**]\n",
+		} {
+			workflow := filepath.Join(t.TempDir(), "events.yml")
+			if err := os.WriteFile(workflow, []byte("on:\n"+triggers+"jobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := []string{"validate", "--profile", "hosted", "--event", "pull_request", "--format", "json", workflow}
+			if code := Run(args, &stdout, &stderr, "dev"); code != 1 {
+				t.Fatalf("Run() code = %d, want 1; stderr = %q", code, stderr.String())
+			}
+			var report compatibility.ProcessingReport
+			if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Result != "incompatible" || len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != compiler.CodePipelineGeneration || !strings.Contains(report.Diagnostics[0].Message, "Push trigger path filters cannot be translated safely") {
+				t.Fatalf("processing report = %#v", report)
+			}
+		}
+	})
+
 	t.Run("validate generated pull request still finds body incompatibility", func(t *testing.T) {
 		workflow := filepath.Join(t.TempDir(), "events.yml")
 		if err := os.WriteFile(workflow, []byte("on:\n  pull_request:\n    paths: [src/**]\njobs:\n  test:\n    runs-on: windows-latest\n    steps: [{run: true}]\n"), 0o600); err != nil {

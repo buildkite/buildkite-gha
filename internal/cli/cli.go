@@ -1361,6 +1361,10 @@ func validateOneSource(out processingOutput, workflowPath string, workflowSource
 			selection, triggerErr := selectWorkflowTrigger(parsed.Triggers, effectiveEvent)
 			if triggerErr != nil {
 				contextRequired = pullRequestPathContextRequired(triggerErr)
+				if contextRequired {
+					triggerErr = buildkitepipeline.ValidateTriggerConditions(parsed.Triggers)
+					contextRequired = triggerErr == nil
+				}
 				if !contextRequired {
 					report := triggerFailureProcessingReport(workflowInput{Path: workflowPath, Source: source}, triggerErr)
 					_ = out.write(report)
