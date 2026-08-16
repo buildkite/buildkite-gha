@@ -5,6 +5,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/buildkite-gha-corpus.XXXXXXXX")"
 trap 'rm -rf -- "$work"' EXIT
 
+if [[ -n "${WORKDIR:-}" && "$WORKDIR" != /* ]]; then
+  WORKDIR="$(pwd)/$WORKDIR"
+  export WORKDIR
+fi
+
 cd "$root"
 mise exec -- go build -trimpath -o "$work/validate-public-workflow-corpus" ./cmd/validate-public-workflow-corpus
 mise exec -- "$work/validate-public-workflow-corpus"
