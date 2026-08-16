@@ -214,12 +214,11 @@ func githubNumber(value any) (float64, bool) {
 		if err != nil {
 			return math.NaN(), true
 		}
-		number, ok := decoded.(json.Number)
+		number, ok := decoded.(float64)
 		if !ok {
 			return math.NaN(), true
 		}
-		parsed, err := strconv.ParseFloat(number.String(), 64)
-		return parsed, err == nil || math.IsInf(parsed, 0)
+		return number, true
 	default:
 		reflected := reflect.ValueOf(value)
 		switch reflected.Kind() {
@@ -343,6 +342,34 @@ func decodeJSONValue(source string) (any, error) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("fromJSON argument contains multiple JSON values")
+	}
+	return normalizeJSONNumbers(value)
+}
+
+func normalizeJSONNumbers(value any) (any, error) {
+	switch value := value.(type) {
+	case json.Number:
+		parsed, err := strconv.ParseFloat(value.String(), 64)
+		if err != nil && !math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf("fromJSON argument contains an invalid number")
+		}
+		return parsed, nil
+	case []any:
+		for i, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[i] = normalized
+		}
+	case map[string]any:
+		for name, item := range value {
+			normalized, err := normalizeJSONNumbers(item)
+			if err != nil {
+				return nil, err
+			}
+			value[name] = normalized
+		}
 	}
 	return value, nil
 }

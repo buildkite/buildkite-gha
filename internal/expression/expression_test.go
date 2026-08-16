@@ -739,7 +739,7 @@ func TestEvaluateReusableInputDefaultUsesOnlyGraphTimeValues(t *testing.T) {
 	}{
 		{template: "${{ format('{0}-{1}', github.event_name, vars.SUFFIX) }}", want: "push-release"},
 		{template: "${{ github.ref == 'refs/heads/main' }}", want: true},
-		{template: "${{ fromJSON(vars.COUNT) }}", want: json.Number("3")},
+		{template: "${{ fromJSON(vars.COUNT) }}", want: float64(3)},
 		{template: "deploy-${{ vars.SUFFIX }}", want: "deploy-release"},
 		{template: "pre-${{ format('{{{0}}}', vars.SUFFIX) }}", want: "pre-{release}"},
 	} {
@@ -1124,6 +1124,7 @@ func TestEvaluateCompileSupportsGraphContextsAndFromJSON(t *testing.T) {
 		{expression: "${{ format('{0}', fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ join(fromJSON('[\"one\",2,true,null]'), '-') }}", want: "one-2-true-"},
 		{expression: "${{ join(fromJSON('[1e2]')) }}", want: "100"},
+		{expression: "${{ toJSON(fromJSON('1e2')) }}", want: "100"},
 		{expression: "${{ toJSON(github.event_name) }}", want: `"push"`},
 		{expression: "${{ case(false, vars.missing, true, 'selected', vars.missing) }}", want: "selected"},
 	}
@@ -1266,6 +1267,9 @@ func TestCompileConditionValidationSupportsStringPredicates(t *testing.T) {
 	}
 	if resolved, err := EvaluateCompileCondition(source, context); err != nil || !resolved {
 		t.Fatalf("EvaluateCompileCondition() = %v, %v, want true", resolved, err)
+	}
+	if err := ValidateCompileConditionWithMatrix("contains(toJSON(github.event), needs.build.outputs.marker)", JobCondition, context, nil); err == nil || !strings.Contains(err.Error(), "whole github.event access is unsupported") {
+		t.Fatalf("ValidateCompileConditionWithMatrix() whole event error = %v", err)
 	}
 }
 

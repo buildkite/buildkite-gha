@@ -121,6 +121,9 @@ func validateCompileConditionNode(node actionlint.ExprNode, scope ConditionScope
 	validator.validateReference = func(_ actionlint.ExprNode, root string, path []string) error {
 		if strings.EqualFold(root, "github") && len(path) != 0 {
 			if strings.EqualFold(path[0], "event") {
+				if len(path) == 1 {
+					return fmt.Errorf("whole github.event access is unsupported")
+				}
 				return nil
 			}
 			switch strings.ToLower(path[0]) {
