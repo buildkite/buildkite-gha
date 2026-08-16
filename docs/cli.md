@@ -205,7 +205,7 @@ fields are mutually exclusive. Every path must identify a regular, tracked
 `.yml` or `.yaml` file inside the repository; directories and glob patterns are
 rejected. It also accepts the plugin-owned `version`, `source-ref`, and
 `minimum-release-age` fields, plus the boolean `experimental-runner-user` field.
-Unknown fields and non-boolean experiment values are rejected before upload.
+Unknown fields and non-boolean values are rejected before upload.
 The importer uses its verified executable for jobs on the same platform and
 fetches the other platform's distribution from the same release only when a
 workflow requires it. Custom importers can use the public flags below. Runner
@@ -283,38 +283,34 @@ supported.
 
 The deprecated `--runtime-queue hosted` argument is accepted as a no-op for compatibility with plugin releases that pass it. Other values are rejected.
 
-### Experiment with a non-root runner user
+### Run Linux jobs as a non-root user
 
-`upload --experimental-runner-user` enables the removable PB-2731 Linux
-experiment. Generated jobs must start as root. Their bootstrap creates a
-`runner` user, grants passwordless `sudo` and Docker socket access when the
-socket exists, prepares the runner home, temp, mise, and tool-cache paths, then
-runs `buildkite-gha run-job` as `runner`. The verified executable and compiled
-plan remain root-owned and read-only to `runner`. The option does not infer
-behavior from a queue name and does not affect macOS jobs.
+Generated Linux jobs use a dedicated `runner` user by default. This behavior
+requires buildkite-gha v0.13.7 or newer. Generated jobs must start as root. The
+bootstrap creates the `runner` user, grants passwordless `sudo` and Docker
+socket access when the socket exists, prepares the runner home, temp, mise, and
+tool-cache paths, then runs `buildkite-gha run-job` as `runner`. The verified
+executable and compiled plan remain root-owned and read-only to `runner`.
+Generated jobs skip the Buildkite checkout. When a workflow uses
+`actions/checkout`, the native adapter clones as `runner`, so the runtime does
+not recursively change workspace ownership. This behavior does not depend on a
+queue name and does not affect macOS jobs.
 
-The existing plugin can run this experiment without a plugin release. Its
-`source-ref` field builds the CLI at the pinned commit and passes the boolean
-configuration to the zero-argument `plugin` entry point:
+During the transition, set the plugin field to `false` to restore root
+execution:
 
 ```yaml
 steps:
-  - label: ":github: PB-2731 runner user proof"
-    key: "pb-2731-runner-user"
-    agents:
-      queue: "hosted"
+  - label: ":github: CI"
     plugins:
-      - github-actions#v0.9.3:
-          workflow: .github/workflows/experimental-runner-user.yml
-          source-ref: 65209ba627e45a9c0ad124c6ca0334e4ba9e24f5
-          experimental-runner-user: true
-          runners:
-            - runs-on: ubuntu-latest
-              queue: hosted
+      - github-actions#latest:
+          workflow: .github/workflows/ci.yml
+          experimental-runner-user: false
 ```
 
-`experimental-runner-user` must be a YAML boolean, not a quoted string. Do not
-set `version` with `source-ref`.
+For a custom importer, pass `upload --experimental-runner-user=false`. The bare
+`--experimental-runner-user` form and a plugin value of `true` remain accepted.
+The plugin value must be a YAML boolean, not a quoted string.
 
 ## Disable telemetry
 

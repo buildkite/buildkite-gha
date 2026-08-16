@@ -23,6 +23,7 @@ jobs:
           test "$(id -u)" -ne 0
           test "$HOME" = /home/runner
           test "$GITHUB_WORKSPACE" = "$PWD"
+          test "$(stat -c '%U' "$GITHUB_WORKSPACE/.git")" = runner
           test "$RUNNER_TEMP" != "$GITHUB_WORKSPACE"
           test "$RUNNER_TOOL_CACHE" != "$GITHUB_WORKSPACE"
           for directory in "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$RUNNER_TOOL_CACHE"; do

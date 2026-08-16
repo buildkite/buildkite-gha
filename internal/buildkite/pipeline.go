@@ -43,14 +43,14 @@ type Pipeline struct {
 	CompilerStep string
 	// DistributionDigest and RuntimeImage retain the single-platform emitter
 	// contract for direct callers. Mixed-platform bundles set these per Job.
-	DistributionDigest     string
-	RuntimeImage           string
-	GroupLabel             string
-	EventProvider          string
-	ConcurrencyGate        *ConcurrencyGate
-	ExperimentalRunnerUser bool
-	Jobs                   []Job
-	Workflows              []Workflow
+	DistributionDigest string
+	RuntimeImage       string
+	GroupLabel         string
+	EventProvider      string
+	ConcurrencyGate    *ConcurrencyGate
+	DisableRunnerUser  bool
+	Jobs               []Job
+	Workflows          []Workflow
 }
 
 // Workflow is one independently conditioned workflow group in an aggregate
@@ -366,7 +366,7 @@ func emitWorkflow(out *bytes.Buffer, pipeline Pipeline, workflow preparedWorkflo
 			"test \"$actual_distribution_digest\" = " + shellQuote(distributionDigest),
 			`chmod 0500 "$distribution"`,
 		}
-		experimentalRunnerUser := pipeline.ExperimentalRunnerUser && platform == "linux/amd64"
+		experimentalRunnerUser := !pipeline.DisableRunnerUser && platform == "linux/amd64"
 		runJob := `"$distribution" run-job --plan-digest ` + shellQuote(job.PlanDigest) + " --plan-producer " + shellQuote(pipeline.CompilerStep)
 		if experimentalRunnerUser {
 			planPath, err := PlanPath(job.PlanDigest)

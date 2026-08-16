@@ -8,6 +8,9 @@ The released plugin path supports Linux x86-64 and native macOS arm64 importers
 and generated jobs, including the matching `runner.os` and `runner.arch` values.
 Importer agent targeting is independent of generated-job runner mappings.
 Platform labels do not provide GitHub image or toolchain parity.
+Generated Linux jobs use a dedicated `runner` user and require buildkite-gha
+v0.13.7 or newer. Set `experimental-runner-user: false` temporarily if the
+runner image cannot meet the root bootstrap requirements.
 
 GitHub Actions syntax changes over time. If a feature is not listed here, treat it as unsupported. GitHub's [workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax) describes the original syntax; this page describes the subset that runs on Buildkite.
 

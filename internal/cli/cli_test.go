@@ -473,9 +473,13 @@ func TestParsePluginConfiguration(t *testing.T) {
 	if got := configuration.runnerTargets["macos-14"]; got != (compiler.RunnerTarget{Queue: "macos-sonoma-arm64", Platform: compiler.PlatformDarwinARM64}) {
 		t.Fatalf("Darwin target = %#v", got)
 	}
-	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
-	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
+	minimal, err := parsePluginConfiguration(`{"workflow":"workflow.yml"}`)
+	if err != nil || !slices.Equal(minimal.Workflows, []string{"workflow.yml"}) || !minimal.ExperimentalRunnerUser || len(minimal.runnerTargets) != 0 {
 		t.Fatalf("minimal configuration = %#v, %v", minimal, err)
+	}
+	disabled, err := parsePluginConfiguration(`{"workflow":"workflow.yml","experimental-runner-user":false}`)
+	if err != nil || disabled.ExperimentalRunnerUser {
+		t.Fatalf("disabled runner user configuration = %#v, %v", disabled, err)
 	}
 
 	for _, test := range []struct {
@@ -3522,8 +3526,9 @@ func TestRunUploadCompilesArtifactsAndUploadsSelfContainedPipeline(t *testing.T)
 			!strings.Contains(step.Command, `bootstrap_dir="$(mktemp -d `) ||
 			!strings.Contains(step.Command, `--step 'shell-upload-importer'`) ||
 			!strings.Contains(step.Command, `sha256sum "$distribution"`) ||
-			!strings.Contains(step.Command, `run-job --plan-digest `) ||
-			!strings.Contains(step.Command, `--plan-producer 'shell-upload-importer'`) {
+			!strings.Contains(step.Command, `sha256sum "$plan"`) ||
+			!strings.Contains(step.Command, `sudo -n --preserve-env --user runner`) ||
+			!strings.Contains(step.Command, `run-job --plan "$plan"`) {
 			t.Fatalf("step %q command is not self-contained:\n%s", step.Key, step.Command)
 		}
 	}
@@ -4694,7 +4699,7 @@ func TestRunUploadContinuesAfterWorkflowCompilationFailures(t *testing.T) {
 	if !strings.Contains(actionFailureAnnotation, `Resolve local action &#34;missing-action&#34;`) || !strings.Contains(actionFailureAnnotation, "no such file or directory") {
 		t.Fatalf("action failure annotation = %q", actionFailureAnnotation)
 	}
-	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "run-job --plan-digest") {
+	if pipeline.Steps[2].Group != ":github: Success" || len(pipeline.Steps[2].Steps) != 1 || pipeline.Steps[2].Steps[0].Key == "" || !strings.Contains(pipeline.Steps[2].Steps[0].Command, `run-job --plan "$plan"`) || !strings.Contains(pipeline.Steps[2].Steps[0].Command, "--user runner") {
 		t.Fatalf("successful workflow group = %#v", pipeline.Steps[2])
 	}
 }
@@ -5574,7 +5579,7 @@ func TestJobScopedActionSourceAuthenticationIgnoresAmbientGitHubTokens(t *testin
 	}
 }
 
-func TestRunUploadUsesExplicitTargetQueueAndRunnerUserExperiment(t *testing.T) {
+func TestRunUploadUsesExplicitTargetQueueAndRunnerUserDefault(t *testing.T) {
 	requireImporterHost(t)
 	workflowPath := filepath.Join("..", "..", "testdata", "smoke", ".github", "workflows", "shell.yml")
 	eventPath := filepath.Join("..", "..", "testdata", "smoke", "events", "push.json")
@@ -5582,7 +5587,7 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserExperiment(t *testing.T) {
 	t.Setenv("BUILDKITE_STEP_KEY", "explicit-queue-importer")
 	runner := &cliCaptureRunner{}
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--experimental-runner-user", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", workflowPath}, &stdout, &stderr, "dev", runner); code != 0 {
 		t.Fatalf("run() code = %d, stderr = %q", code, stderr.String())
 	}
 
@@ -5627,6 +5632,28 @@ func TestRunUploadUsesExplicitTargetQueueAndRunnerUserExperiment(t *testing.T) {
 	}
 	if planCount != 3 {
 		t.Fatalf("uploaded plan count = %d, want 3", planCount)
+	}
+
+	disabledRunner := &cliCaptureRunner{}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"upload", "--event-path", eventPath, "--runner-queue", "ubuntu-latest=hosted", "--experimental-runner-user=false", workflowPath}, &stdout, &stderr, "dev", disabledRunner); code != 0 {
+		t.Fatalf("opt-out run() code = %d, stderr = %q", code, stderr.String())
+	}
+	var disabledPipeline struct {
+		Steps []struct {
+			Steps []struct {
+				Command string `yaml:"command"`
+			} `yaml:"steps"`
+		} `yaml:"steps"`
+	}
+	if err := yaml.Unmarshal(disabledRunner.commands[len(disabledRunner.commands)-1].stdin, &disabledPipeline); err != nil {
+		t.Fatalf("opt-out pipeline YAML: %v", err)
+	}
+	for _, step := range disabledPipeline.Steps[0].Steps {
+		if strings.Contains(step.Command, "useradd") || strings.Contains(step.Command, "--user runner") || !strings.Contains(step.Command, "run-job --plan-digest") {
+			t.Fatalf("opt-out step still uses runner user: %q", step.Command)
+		}
 	}
 }
 
@@ -7823,6 +7850,12 @@ func TestArgumentParsersRejectRepeatedOptions(t *testing.T) {
 	}
 	if _, err := parseUploadArgs([]string{"--experimental-runner-user", "--experimental-runner-user", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "only be specified once") {
 		t.Fatalf("parseUploadArgs() error = %v, want duplicate experimental runner user error", err)
+	}
+	if parsed, err := parseUploadArgs([]string{"--experimental-runner-user=false", "workflow.yml"}); err != nil || parsed.experimentalRunnerUser {
+		t.Fatalf("parseUploadArgs() opt-out = %#v, %v", parsed, err)
+	}
+	if _, err := parseUploadArgs([]string{"--experimental-runner-user=maybe", "workflow.yml"}); err == nil || !strings.Contains(err.Error(), "must be true or false") {
+		t.Fatalf("parseUploadArgs() error = %v, want boolean runner user error", err)
 	}
 	workflows, event, err := uploadArgs([]string{"workflow.yml"})
 	if err != nil || !slices.Equal(workflows, []string{"workflow.yml"}) || event != "" {
