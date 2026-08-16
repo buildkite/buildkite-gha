@@ -32,6 +32,7 @@ const (
 	defaultAPI      = "https://api.github.com"
 	defaultCodeload = "https://codeload.github.com"
 	manifestName    = "manifest-v1.json"
+	mutableRefTTL   = time.Hour
 )
 
 var (
@@ -111,6 +112,7 @@ type config struct {
 	codeload                            *url.URL
 	finalHosts                          map[string]bool
 	credential                          *actionSourceCredential
+	mutableRefs                         *mutableRefCache
 	maxCompressed, maxExpanded, maxFile int64
 	maxEntries                          int
 	maxPath, maxSegment                 int
@@ -212,6 +214,11 @@ func NewResolver(client *http.Client, opts ...Option) (*Resolver, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	if c.mutableRefs == nil && c.api.String() == defaultAPI {
+		if root, cacheErr := os.UserCacheDir(); cacheErr == nil {
+			c.mutableRefs, _ = newMutableRefCache(filepath.Join(root, "buildkite-gha", "action-ref-resolutions", "v1"), mutableRefTTL)
+		}
+	}
 	return &Resolver{client, c}, nil
 }
 func makeConfig(opts []Option) (config, error) {
@@ -234,6 +241,13 @@ func (r *Resolver) Resolve(ctx context.Context, ref Reference) (Resolved, error)
 	if shaRE.MatchString(ref.Ref) {
 		return Resolved{Reference: ref, Commit: ref.Ref}, nil
 	}
+	if r.cfg.mutableRefs != nil {
+		return r.cfg.mutableRefs.resolve(ctx, ref, r.resolveMutable)
+	}
+	return r.resolveMutable(ctx, ref)
+}
+
+func (r *Resolver) resolveMutable(ctx context.Context, ref Reference) (Resolved, error) {
 	if err := r.cfg.credential.provision(ctx); err != nil {
 		return Resolved{}, err
 	}
