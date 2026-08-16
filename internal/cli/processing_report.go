@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -25,11 +26,13 @@ const (
 	skippedWorkflowsContext       = "buildkite-gha-skipped-workflows"
 	processingAnnotationBodyLimit = 1024 * 1024
 	processingAnnotationNotice    = "\n_Additional diagnostics omitted at the Buildkite annotation size limit._\n"
+	processingAnnotationTimeout   = 5 * time.Second
 )
 
 // processingOutput owns where one command writes processing reports and
 // command diagnostics.
 type processingOutput struct {
+	context       context.Context
 	command       string
 	format        string
 	reports       io.Writer
@@ -73,8 +76,8 @@ func (c sourceLinkContext) link(path string, line int) string {
 	return link
 }
 
-func newProcessingOutput(command, format string, reports, stderr io.Writer, agent transport.Agent) processingOutput {
-	out := processingOutput{command: command, format: format, reports: reports, stderr: stderr}
+func newProcessingOutput(ctx context.Context, command, format string, reports, stderr io.Writer, agent transport.Agent) processingOutput {
+	out := processingOutput{context: ctx, command: command, format: format, reports: reports, stderr: stderr}
 	if os.Getenv("BUILDKITE") == "true" && os.Getenv("BUILDKITE_JOB_ID") != "" {
 		out.annotationJob = os.Getenv("BUILDKITE_JOB_ID")
 		out.buildURL = os.Getenv("BUILDKITE_BUILD_URL")
@@ -177,7 +180,9 @@ func (o processingOutput) annotate(report compatibility.ProcessingReport) {
 	}
 	digest := sha256.Sum256([]byte(report.Workflow))
 	annotationContext := fmt.Sprintf("%s-%x", processingAnnotationContext, digest[:6])
-	if err := o.agent.AnnotateJob(context.Background(), o.annotationJob, annotationContext, style, body); err != nil {
+	ctx, cancel := context.WithTimeout(o.context, processingAnnotationTimeout)
+	defer cancel()
+	if err := o.agent.AnnotateJob(ctx, o.annotationJob, annotationContext, style, body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: processing annotation: %v\n", o.command, err)
 	}
 }
@@ -193,7 +198,9 @@ func (o processingOutput) annotateSkippedWorkflows(event string, workflows []ski
 	if o.annotationJob == "" || body == "" {
 		return
 	}
-	if err := o.agent.AnnotateJob(context.Background(), o.annotationJob, skippedWorkflowsContext, "info", body); err != nil {
+	ctx, cancel := context.WithTimeout(o.context, processingAnnotationTimeout)
+	defer cancel()
+	if err := o.agent.AnnotateJob(ctx, o.annotationJob, skippedWorkflowsContext, "info", body); err != nil {
 		_, _ = fmt.Fprintf(o.stderr, "buildkite-gha: %s: warning: skipped workflows annotation: %v\n", o.command, err)
 	}
 }

@@ -2751,6 +2751,57 @@ func TestValidatePublishesProcessingDiagnosticsInBuildkite(t *testing.T) {
 	})
 }
 
+type annotationContextRunner struct {
+	contexts []context.Context
+}
+
+func (r *annotationContextRunner) Run(ctx context.Context, _ string, _ string, _ []string, _ []byte) ([]byte, error) {
+	r.contexts = append(r.contexts, ctx)
+	return nil, nil
+}
+
+func TestProcessingAnnotationsUseActiveBoundedContext(t *testing.T) {
+	for _, path := range []struct {
+		name    string
+		publish func(processingOutput)
+	}{
+		{
+			name: "processing",
+			publish: func(out processingOutput) {
+				report := compatibility.NewProcessingReport("ci.yml", "")
+				report.Diagnostics = append(report.Diagnostics, compatibility.Diagnostic{Level: "warning", Message: "test warning"})
+				out.annotate(report)
+			},
+		},
+		{
+			name: "skipped workflow",
+			publish: func(out processingOutput) {
+				out.annotateSkippedWorkflows("push", []skippedWorkflow{{label: "CI", key: "ci", reason: "not applicable"}})
+			},
+		},
+	} {
+		t.Run(path.name, func(t *testing.T) {
+			active, cancel := context.WithCancel(context.Background())
+			cancel()
+			t.Setenv("BUILDKITE", "true")
+			t.Setenv("BUILDKITE_JOB_ID", cliTestJobID)
+			t.Setenv("BUILDKITE_BUILD_URL", "https://buildkite.com/acme/widgets/builds/42")
+			runner := &annotationContextRunner{}
+			out := newProcessingOutput(active, "test", "text", io.Discard, io.Discard, transport.Agent{Runner: runner})
+			path.publish(out)
+			if len(runner.contexts) != 1 {
+				t.Fatalf("annotation calls = %d, want 1", len(runner.contexts))
+			}
+			if err := runner.contexts[0].Err(); !errors.Is(err, context.Canceled) {
+				t.Errorf("annotation context error = %v, want context canceled", err)
+			}
+			if _, ok := runner.contexts[0].Deadline(); !ok {
+				t.Error("annotation context has no deadline")
+			}
+		})
+	}
+}
+
 func TestEventBackedCommandsLinkEarlyWorkflowDiagnostics(t *testing.T) {
 	repository := t.TempDir()
 	workflowPath := filepath.Join(repository, ".github", "workflows", "broken.yml")
