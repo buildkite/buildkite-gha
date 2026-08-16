@@ -146,8 +146,24 @@ func loadActionResolutionSnapshotCurrent(path string) (actionResolutionSnapshotC
 
 func (s *actionResolutionSnapshot) resolve(ctx context.Context, ref Reference, resolve func(context.Context, Reference) (Resolved, error)) (Resolved, error) {
 	path := s.entryPath(ref)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return Resolved{}, err
+	generationPath := filepath.Join(s.root, "generations", s.generation)
+	generationInfo, err := os.Lstat(generationPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Resolved{}, fmt.Errorf("action resolution snapshot current generation is missing")
+	}
+	if err != nil {
+		return Resolved{}, fmt.Errorf("read action resolution snapshot current generation: %w", err)
+	}
+	if !generationInfo.IsDir() || generationInfo.Mode()&os.ModeSymlink != 0 {
+		return Resolved{}, fmt.Errorf("action resolution snapshot current generation is invalid")
+	}
+	shardPath := filepath.Dir(path)
+	if err := os.Mkdir(shardPath, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return Resolved{}, fmt.Errorf("create action resolution snapshot shard: %w", err)
+	}
+	shardInfo, err := os.Lstat(shardPath)
+	if err != nil || !shardInfo.IsDir() || shardInfo.Mode()&os.ModeSymlink != 0 {
+		return Resolved{}, fmt.Errorf("action resolution snapshot shard is invalid")
 	}
 	unlock, err := lockMutableRefCache(ctx, path+".lock")
 	if err != nil {

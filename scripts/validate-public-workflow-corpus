@@ -175,11 +175,12 @@ printf 'validator: %s (%s, sha256:%s)\n' "$validator_version" "$validator_commit
 
 action_cache="$workdir/action-cache"
 action_resolution_snapshot="$workdir/action-resolution-snapshot"
-reports="$workdir/reports/$record_id/$validator_digest"
-readonly action_cache action_resolution_snapshot reports
+report_root="$workdir/reports/$record_id"
+reports="$report_root/$validator_digest"
+readonly action_cache action_resolution_snapshot report_root reports
 mkdir -p "$action_cache"
 if [[ "${REFRESH_ACTION_RESOLUTIONS:-0}" == 1 ]]; then
-  rm -rf "$reports"
+  rm -rf "$report_root"
 fi
 mkdir -p "$reports"
 export reports validator_commit validator_version validator_digest

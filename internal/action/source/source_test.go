@@ -1108,6 +1108,15 @@ func TestActionResolutionSnapshotRejectsMissingCurrentGeneration(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "generations", refreshed.ResolutionSnapshotID())); err != nil {
 		t.Fatal(err)
 	}
+	ref, _ := Parse("owner/repo@v1")
+	called := false
+	_, err = refreshed.cfg.resolutionSnapshot.resolve(context.Background(), ref, func(context.Context, Reference) (Resolved, error) {
+		called = true
+		return Resolved{}, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "current generation is missing") || called {
+		t.Fatalf("running resolver after missing generation = %v; called resolver = %t", err, called)
+	}
 	if _, err := NewResolver(nil, WithActionResolutionSnapshot(root, false)); err == nil || !strings.Contains(err.Error(), "current generation is missing") {
 		t.Fatalf("missing generation directory error = %v", err)
 	}
