@@ -21,8 +21,8 @@ const (
 	maxFlattenedJobs         = 1024
 )
 
-var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}|inputs\.([A-Za-z_][A-Za-z0-9_-]*))\s*$`)
-var staticValueExpression = regexp.MustCompile(`^\s*\$\{\{\s*(inputs|matrix)\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}\s*$`)
+var staticInputCondition = regexp.MustCompile(`(?i)^\s*(?:\$\{\{\s*inputs(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\])\s*\}\}|inputs(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\]))\s*$`)
+var staticValueExpression = regexp.MustCompile(`(?i)^\s*\$\{\{\s*(inputs|matrix)(?:\.([A-Za-z_][A-Za-z0-9_-]*)|\['([A-Za-z0-9_-]{1,255})'\])\s*\}\}\s*$`)
 var callOutputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 
 type sourcedJob struct {
@@ -599,18 +599,22 @@ func resolveCallInputs(path string, job workflow.Job, call *workflow.ReusableWor
 func evaluateStaticCallValue(value string, inputs, matrix map[string]any, context expression.CompileContext) (any, error) {
 	if match := staticValueExpression.FindStringSubmatch(value); match != nil {
 		values := inputs
-		if match[1] == "matrix" {
+		if strings.EqualFold(match[1], "matrix") {
 			values = matrix
 		}
+		valueName := match[2]
+		if valueName == "" {
+			valueName = match[3]
+		}
 		for name, value := range values {
-			if strings.EqualFold(name, match[2]) {
+			if strings.EqualFold(name, valueName) {
 				if containsExpression(value) {
-					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], match[2])
+					return nil, fmt.Errorf("expression references runtime-dependent %s value %q", match[1], valueName)
 				}
 				return value, nil
 			}
 		}
-		return nil, fmt.Errorf("expression references unavailable %s value %q", match[1], match[2])
+		return nil, fmt.Errorf("expression references unavailable %s value %q", match[1], valueName)
 	}
 	resolved := replaceStaticInputs(value, inputs)
 	if hasInputExpression(resolved) {
@@ -1002,9 +1006,12 @@ func replaceStaticInputCondition(value string, inputs map[string]any) string {
 	if match == nil {
 		return replaceStaticInputs(value, inputs)
 	}
-	inputName := match[1]
-	if inputName == "" {
-		inputName = match[2]
+	inputName := ""
+	for _, candidate := range match[1:] {
+		if candidate != "" {
+			inputName = candidate
+			break
+		}
 	}
 	for name, input := range inputs {
 		if strings.EqualFold(name, inputName) {

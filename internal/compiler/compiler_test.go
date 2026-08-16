@@ -1231,14 +1231,61 @@ jobs:
       label: ${{ inputs['label'] }}
     steps:
       - run: echo ${{ inputs['enabled'] }} ${{ github.ref }}
+      - if: inputs['enabled']
+        run: echo implicit
+      - if: ${{ inputs['label'] }}
+        run: echo string
 `)
 
 	plans, err := compileUntrustedPlans(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")), "0.0.0-test", testDistributionDigest, "gha-untrusted")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 1 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" {
+	if len(plans) != 1 || plans[0].Condition != "${{ true && github.ref }}" || plans[0].Inputs["enabled"] != true || plans[0].Inputs["label"] != "release" || plans[0].Env["LABEL"] != "release" || plans[0].Outputs["label"] != "release" || len(plans[0].Steps) != 3 || plans[0].Steps[0].Command != "echo true ${{ github.ref }}" || plans[0].Steps[1].Condition != "true" || plans[0].Steps[2].Condition != "'release'" {
 		t.Fatalf("reusable condition = %#v", plans)
+	}
+}
+
+func TestCompileForwardsIndexedStringInputToNestedReusableWorkflow(t *testing.T) {
+	repository := t.TempDir()
+	callerPath := writeWorkflow(t, repository, "caller.yml", `on: push
+jobs:
+  call:
+    uses: ./.github/workflows/middle.yml
+    with:
+      target: release
+`)
+	writeWorkflow(t, repository, "middle.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  call:
+    uses: ./.github/workflows/leaf.yml
+    with:
+      target: ${{ inputs['target'] }}
+`)
+	writeWorkflow(t, repository, "leaf.yml", `on:
+  workflow_call:
+    inputs:
+      target: {type: string, required: true}
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ${{ inputs.target }}
+`)
+
+	result, err := Compile(callerPath, readFile(t, callerPath), readFile(t, smokePath("events", "push.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ir IR
+	if err := json.Unmarshal(result, &ir); err != nil {
+		t.Fatal(err)
+	}
+	if len(ir.Jobs) != 1 || len(ir.Jobs[0].Steps) != 1 || ir.Jobs[0].Steps[0].Run != "echo release" {
+		t.Fatalf("forwarded indexed input = %#v", ir.Jobs)
 	}
 }
 
