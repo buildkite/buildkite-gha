@@ -231,12 +231,13 @@ func validBatchValidationResult(path, workflow string) bool {
 	if decoder.Decode(&report) != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return false
 	}
-	if report.Schema != compatibility.ProcessingSchemaV3 || report.Profile != hostedProfile || report.Workflow != workflow || report.Validation.Schema != compatibility.ProcessingSchema {
+	if report.Schema != compatibility.ProcessingSchemaV3 || report.Profile != hostedProfile || report.Workflow != workflow ||
+		report.Validation.Schema != compatibility.ProcessingSchema || report.Validation.Result == "indeterminate" {
 		return false
 	}
 	seen := make(map[string]bool, len(report.Evaluations))
 	for _, evaluation := range report.Evaluations {
-		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema ||
+		if seen[evaluation.Event] || evaluation.Source != "generated" || evaluation.Report.Schema != compatibility.ProcessingSchema || evaluation.Report.Result == "indeterminate" ||
 			(evaluation.Event != "push" && evaluation.Event != "pull_request" && evaluation.Event != "workflow_dispatch" && evaluation.Event != "schedule") {
 			return false
 		}

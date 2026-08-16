@@ -134,6 +134,42 @@ func TestBatchValidationManifestAndIdentity(t *testing.T) {
 	}
 }
 
+func TestBatchValidationDoesNotResumeIndeterminateReports(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "report.json")
+	report := compatibility.NewProcessingReportV3("workflow.yml", hostedProfile, compatibility.ProcessingReport{
+		Schema: compatibility.ProcessingSchema,
+		Result: "indeterminate",
+	})
+	contents, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if validBatchValidationResult(path, "workflow.yml") {
+		t.Fatal("indeterminate validation report was resumable")
+	}
+
+	report.Validation.Result = "compilable"
+	report.Evaluations = []compatibility.EventEvaluation{{
+		Event:  "push",
+		Source: "generated",
+		Report: compatibility.ProcessingReport{Schema: compatibility.ProcessingSchema, Result: "indeterminate"},
+	}}
+	contents, err = json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if validBatchValidationResult(path, "workflow.yml") {
+		t.Fatal("indeterminate event report was resumable")
+	}
+}
+
 func writeBatchManifest(t *testing.T, root string, records []batchValidationRecord) string {
 	t.Helper()
 	path := filepath.Join(root, "manifest.jsonl")
