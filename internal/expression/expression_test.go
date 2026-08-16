@@ -371,6 +371,9 @@ func TestServiceRuntimeContext(t *testing.T) {
 			t.Fatalf("Evaluate(%q) = %q, %v; want %q", reference, got, err, want)
 		}
 	}
+	if got, err := EvaluateStep("${{ format('{0}', job.services.redis.ports[6379]) }}", context); err != nil || got != "49152" {
+		t.Fatalf("EvaluateStep() service port = %q, %v", got, err)
+	}
 	if got, err := EvaluateCondition("job.services.Redis.ports[6379] == '49152'", ConditionContext{Services: services}); err != nil || !got {
 		t.Fatalf("service condition = %v, %v", got, err)
 	}

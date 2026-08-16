@@ -333,7 +333,7 @@ func evaluateStepRuntimeExpression(node actionlint.ExprNode, context Context, al
 			return fmt.Errorf("dynamic or whole %s access is unsupported", root)
 		case "steps", "needs":
 			return fmt.Errorf("computed or aggregate %s access is unsupported", root)
-		case "matrix", "vars", "inputs", "env", "runner":
+		case "matrix", "vars", "inputs", "env", "runner", "job":
 		default:
 			return fmt.Errorf("unsupported runtime context %q", root)
 		}
